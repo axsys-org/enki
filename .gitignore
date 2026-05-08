@@ -1,0 +1,11 @@
+build/
+compile_commands.json
+compile_commands.bear.json
+result
+result-*
+.direnv/
+.cache/
+*.gcda
+*.gcno
+*.profraw
+*.profdata

@@ -1,0 +1,52 @@
+---
+Checks: >
+  bugprone-*,
+  cert-*,
+  clang-analyzer-*,
+  performance-*,
+  portability-*,
+  readability-*,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-implicit-widening-of-multiplication-result,
+  -cert-err33-c,
+  -cert-msc30-c,
+  -cert-msc32-c,
+  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,
+  -performance-no-int-to-ptr,
+  -readability-function-cognitive-complexity,
+  -readability-identifier-length,
+  -readability-inconsistent-declaration-parameter-name,
+  -readability-magic-numbers,
+  -readability-named-parameter,
+  -readability-qualified-auto,
+  -readability-uppercase-literal-suffix
+WarningsAsErrors: '*'
+HeaderFilterRegex: '^(src|include|tests)/(?!property/vendor/theft).*'
+FormatStyle: file
+CheckOptions:
+  - key: readability-function-size.LineThreshold
+    value: '120'
+...
+
+# Disabled checks:
+# - bugprone-easily-swappable-parameters: allocator and test callbacks intentionally use adjacent
+#   pointer/size parameters matching C library conventions.
+# - bugprone-implicit-widening-of-multiplication-result: property generators use small bounded
+#   compile-time constants where widening is explicit in the receiving API.
+# - cert-err33-c: tests deliberately assert behavior around allocator failures and do not need to
+#   branch on every printf-like helper in failure-message paths.
+# - cert-msc30-c/cert-msc32-c: the vendored theft runner uses an explicit deterministic RNG instead
+#   of rand; the check is noisy around env-seeded property tests.
+# - clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling: diagnostics point at
+#   fprintf/snprintf in test failure messages, not production buffer handling.
+# - performance-no-int-to-ptr: vector tests intentionally use integer-shaped opaque pointer values
+#   without dereferencing them.
+# - readability-function-cognitive-complexity/readability-function-size: fuzz and property tests are
+#   intentionally branch-heavy to cover operation streams.
+# - readability-identifier-length: C APIs and tests use conventional short names such as ctx and i.
+# - readability-inconsistent-declaration-parameter-name: Criterion's Test macro expands to generated
+#   function declarations that look inconsistent to clang-tidy.
+# - readability-magic-numbers: test data and fuzz operation tags are clearer inline.
+# - readability-named-parameter: public typedef docs describe callback arguments.
+# - readability-qualified-auto: not relevant to C.
+# - readability-uppercase-literal-suffix: the codebase uses the conventional lowercase C suffix style.
