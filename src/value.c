@@ -80,8 +80,8 @@ enki_value make_pin(enki_gc* gc, enki_value inner) {
    // size_t n_subpins; 
    /// enki_value* subpins = collect_subpins(inner, &n_subpins);
     size_t total = sizeof(enki_pin); // + n_subpins * sizeof(enki_value)
-    new = enki_gc_alloc(gc, total);
-    memcpy(new->hash, 0, 32);
+    enki_pin* new = enki_gc_alloc(gc, total);
+    memset(new->hash, 0, 32);
 //    memcpy(new->subpins, subpins, sizeof(enki_value) * n_subpins);
     new->inner = inner;
     new->h.size = total;
