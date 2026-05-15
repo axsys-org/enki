@@ -1,117 +1,106 @@
-#ifndef ENKI_VALUE_H
-#define ENKI_VALUE_H
-
+#pragma once
 #include <stddef.h>
 #include <stdint.h>
-
 #include <gmp.h>
-
 #include "enki/allocator.h"
-
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-#define STACK_MAX 8192
-
-/* ── Tagged value handle ────────────────────────────────────────────────── */
 
 typedef uint64_t enki_value;
 
-/* Low bit:  0 → heap pointer (heap allocations are 2-byte aligned)
-            1 → immediate nat (value in bits 1..63)                       */
 
-#define IS_PTR(v)   (((v) & 1) == 0)
-#define IS_IMM(v)   (((v) & 1) == 1)
-#define AS_PTR(v)   ((void*)(uintptr_t)(v))
-#define AS_IMM(v)   ((uint64_t)((v) >> 1))
-#define MAKE_PTR(p) ((enki_value)(uintptr_t)(p))
-#define MAKE_IMM(n) ((((enki_value)(n)) << 1) | 1)
-#define IMM_MAX     ((uint64_t)1 << 63)
-
-/* ── Kinds ──────────────────────────────────────────────────────────────── */
-
-enum {
-    PIN,
-    LAW,
-    APP,
-    INTERP,
-    NAT,
-    FORWARDED,
-};
-
-/* ── Forward decl of GC (defined in gc.h) ──────────────────────────────── */
-
-typedef struct enki_gc enki_gc;
-
-/* ── Common header shared by every heap value ──────────────────────────── */
+// check if highest bit of v is set 
+#define IS_PTR(v) (v & (1ULL << 63)) 
+ // turn a real pointer into enki_value - set the higest bit
+#define PTR_TO_ENKI(v) (enki_value)((uintptr_t)v | (1ULL << 63))
+// turn an enki value into a real pointer - unset highest bit
+#define ENKI_TO_PTR(v) (void*)((uintptr_t)v & ~(1ULL << 63))
+#define GET_PAYLOAD(v) (sizeof(enki_value_header) + (char*)ENKI_TO_PTR(v))
+typedef enum {
+    ENKI_PIN,
+    ENKI_LAW,
+    ENKI_APP,
+    ENKI_BIG_NAT,
+    ENKI_FWD
+} TAGS;
 
 typedef struct {
-    uint8_t  kind;
-    uint32_t size;
-} enki_value_header;
-
-/* ── Subtype structs (FAM is always the last field) ────────────────────── */
+    uint8_t kind;
+    size_t size;
+} obj_header;
 
 typedef struct {
-    enki_value_header h;
-    uint8_t           hash[32];
-    enki_value        inner;
+    obj_header h; 
+    uint8_t hash[32];
+    enki_value inner;
 } enki_pin;
 
 typedef struct {
-    enki_value_header h;
-    uint32_t          arity;
-    enki_value        name;
-    enki_value        body;
-    uint32_t          bc_len;
-    uint8_t           bc[];        /* FAM */
+    obj_header h; 
+    uint32_t arity;
+    enki_value name;
+    enki_value body;
+    size_t bc_len;
+    uint8_t  bc[];
 } enki_law;
 
 typedef struct {
-    enki_value_header h;
-    enki_value        fn;
-    uint32_t          n_args;
-    enki_value        args[];      /* FAM */
-} enki_app;
-
-typedef struct {
-    enki_value_header h;
-    uint32_t          n_limbs;
-    mp_limb_t         limbs[];     /* FAM */
+    obj_header h; 
+    size_t n_limbs; 
+    mp_limb_t limbs[];
 } enki_nat;
 
 typedef struct {
-    enki_value_header h;
-    uint32_t          pc;
-    uint32_t          sp;
-    enki_value        stack[STACK_MAX];
-    uint32_t          bc_len;
-    uint8_t           bc[];        /* FAM */
-} enki_interp;
+    obj_header h;
+    enki_value fn; 
+    size_t n_args;
+    enki_value args[];
+}  enki_app; 
 
-/* ── Forwarding tombstone (overlays any value's first bytes) ───────────── */
+void enki_trace_value(enki_gc* gc, void* obj);
 
-typedef struct {
-    enki_value_header h;            /* h.kind = FORWARDED */
-    void*             fwd;          /* new address (in to-space) */
-} enki_fwd;
+enki_value enki_alloc_nat(enki_gc* gc, size_t n_bytes, uint8_t bytes[]);
+enki_value enki_alloc_law(enki_gc* gc, uint32_t arity, enki_value name, enki_value body, uint32_t bc_len, const uint8_t bc[]);
+enki_value enki_alloc_pin(enki_gc* gc, const uint8_t hash[32], enki_value inner, size_t n_subpins, enki_value subpins[]); 
+enki_value enki_alloc_app(enki_gc* gc, enki_value fn, size_t n_args);
 
-/* ── Trace + constructors ──────────────────────────────────────────────── */
 
-void       enki_value_trace(enki_gc* gc, void* obj);
+/*
 
-enki_value make_pin   (enki_gc* gc, enki_value inner);
-enki_value make_law   (enki_gc* gc, uint32_t arity, enki_value name,
-                                    enki_value body,
-                                    const uint8_t* bc, size_t bc_len);
-enki_value make_app   (enki_gc* gc, enki_value fn,
-                                    const enki_value* args, uint32_t n_args);
-enki_value make_nat   (enki_gc* gc, const mp_limb_t* limbs, uint32_t n_limbs);
-enki_value make_interp(enki_gc* gc, const uint8_t* bc, size_t bc_len);
+(uint64_t)value & (1ULL << N) - is bit N set?
+(uint64_t)value | (1ULL << N) - set bit N 
+(uint64_t)value & ~(1ULL << N) - clear bit N 
 
-#ifdef __cplusplus
-}
-#endif
+enki_value: [0 | 63 bit nat data ]
 
-#endif
+eg. 
+[0 | 0] = nat 0
+[0 | 42 ] = nat 42
+[0 | u63max ] = biggest unboxed nat 
+
+[1 | 63-but pointer ]
+[ NAT tag 0x8200 ][ size ][ n_limbs ][ limb0 ][ limb1 ] ... [ limbN ]
+[ PIN tag 0xC40x ][ size ][ hash/crc fields ][ inner: enki_value ][ subpins... maybe ]
+[ LAW tag 0xC800 ][ size ][ arity ][ name: enki_value ][ body: enki_value ][ bytecode... ]
+[ FWD tag ][ new_ptr ]
+
+
+to interpret :
+
+IS_NAT -
+    input: enki_value 
+    output: true/false
+    is the high bit 0 
+IS_PTR -
+    input: enki_value 
+    output: bool/int 
+    is the high bit 1 
+MAKE_PTR -
+    input: void* a real heap pointer 
+    uintptr_t
+    output: enki_value - cast needed 
+    given a void* return a int64 with the lowest bit set 
+AS_PTR 
+    input: enki_value
+    uintptr_t
+    output: void* - cast needed 
+    return without lowest bit set 
+*/
