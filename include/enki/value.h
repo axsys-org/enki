@@ -14,12 +14,15 @@ typedef uint64_t enki_value;
 // turn an enki value into a real pointer - unset highest bit
 #define ENKI_TO_PTR(v) (void*)((uintptr_t)v & ~(1ULL << 63))
 #define GET_PAYLOAD(v) (sizeof(enki_value_header) + (char*)ENKI_TO_PTR(v))
+#define ENKI_LAW_CONSTS(l)   ((enki_value*)((l)->data))
+#define ENKI_LAW_BC(l)  ((l)->data + ((l)->n_const * sizeof(enki_value)))
 typedef enum {
     ENKI_PIN,
     ENKI_LAW,
     ENKI_APP,
     ENKI_BIG_NAT,
-    ENKI_FWD
+    ENKI_FWD,
+    ENKI_CONT,
 } TAGS;
 
 typedef struct {
@@ -39,7 +42,8 @@ typedef struct {
     enki_value name;
     enki_value body;
     size_t bc_len;
-    uint8_t  bc[];
+    size_t n_const;
+    uint8_t data[];
 } enki_law;
 
 typedef struct {
@@ -55,52 +59,18 @@ typedef struct {
     enki_value args[];
 }  enki_app; 
 
+typedef struct {
+    obj_header h;
+    size_t n_args;
+    enki_value args[];
+} enki_cont;
+
+
 void enki_trace_value(enki_gc* gc, void* obj);
 
 enki_value enki_alloc_nat(enki_gc* gc, size_t n_bytes, uint8_t bytes[]);
-enki_value enki_alloc_law(enki_gc* gc, uint32_t arity, enki_value name, enki_value body, uint32_t bc_len, const uint8_t bc[]);
+enki_value enki_alloc_law(enki_gc* gc, size_t arity, enki_value name, enki_value body, 
+    size_t bc_len, size_t n_const, uint8_t* bc, enki_value* const_table);
 enki_value enki_alloc_pin(enki_gc* gc, const uint8_t hash[32], enki_value inner, size_t n_subpins, enki_value subpins[]); 
 enki_value enki_alloc_app(enki_gc* gc, enki_value fn, size_t n_args);
-
-
-/*
-
-(uint64_t)value & (1ULL << N) - is bit N set?
-(uint64_t)value | (1ULL << N) - set bit N 
-(uint64_t)value & ~(1ULL << N) - clear bit N 
-
-enki_value: [0 | 63 bit nat data ]
-
-eg. 
-[0 | 0] = nat 0
-[0 | 42 ] = nat 42
-[0 | u63max ] = biggest unboxed nat 
-
-[1 | 63-but pointer ]
-[ NAT tag 0x8200 ][ size ][ n_limbs ][ limb0 ][ limb1 ] ... [ limbN ]
-[ PIN tag 0xC40x ][ size ][ hash/crc fields ][ inner: enki_value ][ subpins... maybe ]
-[ LAW tag 0xC800 ][ size ][ arity ][ name: enki_value ][ body: enki_value ][ bytecode... ]
-[ FWD tag ][ new_ptr ]
-
-
-to interpret :
-
-IS_NAT -
-    input: enki_value 
-    output: true/false
-    is the high bit 0 
-IS_PTR -
-    input: enki_value 
-    output: bool/int 
-    is the high bit 1 
-MAKE_PTR -
-    input: void* a real heap pointer 
-    uintptr_t
-    output: enki_value - cast needed 
-    given a void* return a int64 with the lowest bit set 
-AS_PTR 
-    input: enki_value
-    uintptr_t
-    output: void* - cast needed 
-    return without lowest bit set 
-*/
+enki_value enki_alloc_cont(enki_gc* gc, size_t n_args, enki_value* bas);
