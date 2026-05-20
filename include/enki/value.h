@@ -68,7 +68,7 @@ typedef struct {
 
 void enki_trace_value(enki_gc* gc, void* obj);
 
-enki_value enki_alloc_nat(enki_gc* gc, size_t n_bytes, uint8_t bytes[]);
+enki_value enki_alloc_nat(enki_gc* gc, size_t n_limbs, mp_limb_t limbs[]);
 enki_value enki_alloc_law(enki_gc* gc, size_t arity, enki_value name, enki_value body, 
     size_t bc_len, size_t n_const, uint8_t* bc, enki_value* const_table);
 enki_value enki_alloc_pin(enki_gc* gc, const uint8_t hash[32], enki_value inner, size_t n_subpins, enki_value subpins[]); 

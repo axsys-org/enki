@@ -31,18 +31,20 @@ void enki_trace_value(enki_gc* gc, void* obj) {
             cont->args[k] = gc->copy(gc, cont->args[k]);
           }
           break;
-        case ENKI_FRWD:
-          return;
-        case ENKI_BIG_NAT:
-          return;
         default:
           return;
     }
 }
 
-enki_value enki_alloc_nat(enki_gc* gc, size_t n_bytes, uint8_t bytes[]) {
-    // TODO 
-    return 0;
+enki_value enki_alloc_big_nat(enki_gc* gc, size_t n_limbs, mp_limb_t limbs[]) {
+    size_t n = sizeof(enki_value) + (n_limbs * sizeof(mp_limb_t));
+    enki_nat* new = (enki_nat*)gc->alloc(gc, n);
+    if(!new) return 0;
+    new->h.size = n;
+    new->h.kind = ENKI_BIG_NAT;
+    new->n_limbs = n_limbs;
+    memcpy(new->limbs, limbs, (n_limbs * sizeof(mp_limb_t)));
+    return PTR_TO_ENKI(new);
 }
 enki_value enki_alloc_law(enki_gc* gc, size_t arity, enki_value name, enki_value body, 
     size_t bc_len, size_t n_const, uint8_t* bc, enki_value* const_table) {
