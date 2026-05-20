@@ -1,11 +1,17 @@
+/*
+IMPORTANT:
+WILL PORT BACK GC FOR ENKI VALUE ALLOCATION LATER, use enki_allocator temporarily now
+enki_alloc_nat owns/frees p_limbs
+all returned heap values are caller/arena-owned
+enki_alloc_app copies p_args if present
+*/
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
-#include <gmp.h>
 #include "enki/allocator.h"
 
 typedef uint64_t enki_value;
-
+typedef uint64_t mp_limb_t;
 
 // check if highest bit of v is set 
 #define IS_PTR(v) (v & (1ULL << 63)) 
@@ -20,9 +26,7 @@ typedef enum {
     ENKI_PIN,
     ENKI_LAW,
     ENKI_APP,
-    ENKI_BIG_NAT,
-    ENKI_FWD,
-    ENKI_CONT,
+    ENKI_NAT,
 } TAGS;
 
 typedef struct {
@@ -34,6 +38,9 @@ typedef struct {
     obj_header h; 
     uint8_t hash[32];
     enki_value inner;
+    // port back
+    size_t n_subpins;
+    enki_value subpins[];
 } enki_pin;
 
 typedef struct {
@@ -59,18 +66,18 @@ typedef struct {
     enki_value args[];
 }  enki_app; 
 
-typedef struct {
-    obj_header h;
-    size_t n_args;
-    enki_value args[];
-} enki_cont;
-
-
-void enki_trace_value(enki_gc* gc, void* obj);
-
-enki_value enki_alloc_nat(enki_gc* gc, size_t n_limbs, mp_limb_t limbs[]);
-enki_value enki_alloc_law(enki_gc* gc, size_t arity, enki_value name, enki_value body, 
-    size_t bc_len, size_t n_const, uint8_t* bc, enki_value* const_table);
-enki_value enki_alloc_pin(enki_gc* gc, const uint8_t hash[32], enki_value inner, size_t n_subpins, enki_value subpins[]); 
-enki_value enki_alloc_app(enki_gc* gc, enki_value fn, size_t n_args);
-enki_value enki_alloc_cont(enki_gc* gc, size_t n_args, enki_value* bas);
+// owns p_limbs
+// caller owns result
+enki_value enki_alloc_nat(enki_allocator a_alloc, mp_limb_t* p_limbs, size_t n_limbs);
+// p_bc optional if cb_bc is 0
+// p_const_table optional if n_const is 0
+// caller owns result
+enki_value enki_alloc_law(enki_allocator a_alloc, size_t n_arity, enki_value v_name, enki_value v_body, 
+    size_t cb_bc, size_t n_const, uint8_t* p_bc, enki_value* p_const_table);
+// p_hash required
+// p_subpins optional if n_subpins is 0
+// caller owns result
+enki_value enki_alloc_pin(enki_allocator a_alloc, const uint8_t p_hash[32], enki_value v_inner, size_t n_subpins, enki_value p_subpins[]); 
+// p_args optional
+// caller owns result
+enki_value enki_alloc_app(enki_allocator a_alloc, enki_value v_fn, size_t n_args, enki_value* p_args);
