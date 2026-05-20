@@ -9,3 +9,5 @@ result-*
 *.gcno
 *.profraw
 *.profdata
+.DS_Store
+*.d
