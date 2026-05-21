@@ -1,7 +1,18 @@
+#include <stddef.h>
+#include <stdint.h>
+#include <string.h>
+
+#include "enki/apply.h"
+#include "enki/compiler.h"
+#include "enki/interp.h"
+#include "enki/primops.h"
+#include "enki/value.h"
+#include "enki/vector.h"
+
 void primop_mkpin(enki_interpreter* i) {
     enki_value inner = i->stack[i->sp - 1];
     /* TODO: TEMPORARY */
-    const enki_value* subpins = NULL; 
+    enki_value* subpins = NULL; 
     size_t n_subpins = 0;
     uint8_t hash[32];
     memset(hash, 0, 32); 
@@ -51,14 +62,15 @@ void primop_match(enki_interpreter* i) {
     }
     enki_value_header* h = (enki_value_header*)ENKI_TO_PTR(o); 
     switch(h->kind) {
-        case ENKI_PIN:
+        case ENKI_PIN: {
             enki_pin* pin = ENKI_TO_PTR(o);
             i->sp -= 3;
             i->stack[i->sp - 1] = pin->inner;
             i->stack[i->sp - 2] = p;
             enki_apply(i, 1);
             return;
-        case ENKI_APP:
+        }
+        case ENKI_APP: {
             enki_app* app = ENKI_TO_PTR(o);
             i->sp -= 5;
             i->stack[i->sp++] = a;
@@ -69,7 +81,8 @@ void primop_match(enki_interpreter* i) {
             }
             enki_apply(i, app->n_args + 1);
             return;
-        case ENKI_LAW:
+        }
+        case ENKI_LAW: {
             enki_law* law = ENKI_TO_PTR(o);
             i->sp -= 5;
             i->stack[i->sp - 1] = law->body;
@@ -78,6 +91,7 @@ void primop_match(enki_interpreter* i) {
             i->stack[i->sp - 4] = l;
             enki_apply(i, 3);
             return;
+        }
         default: 
             return;
     }

@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "enki/gc.h"
+#include "enki/interp.h"
 #include "enki/value.h"
 
 enki_gc* enki_gc_create(enki_allocator sys, size_t cap, enki_interpreter* root) {
@@ -21,6 +22,7 @@ enki_gc* enki_gc_create(enki_allocator sys, size_t cap, enki_interpreter* root) 
     }
     return gc;
 }
+
 
 void enki_gc_destroy(enki_gc* gc) {
     if (!gc) return;

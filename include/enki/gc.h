@@ -5,8 +5,10 @@
 #include "enki/arena.h"
 #include "enki/value.h"
 
+typedef struct enki_interpreter enki_interpreter;
+
 void* enki_gc_alloc (enki_gc* gc, size_t size);
-enki_value enki_gc_mark (enki_gc* gc, enki_value val);
+enki_value enki_gc_copy (enki_gc* gc, enki_value val);
 
 struct enki_gc {
     enki_arena* active;

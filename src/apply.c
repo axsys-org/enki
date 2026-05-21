@@ -1,5 +1,13 @@
 
-void enki_complete_app(size_t arity, uint8_t n_args, 
+#include <stddef.h>
+#include <stdint.h>
+#include <string.h>
+
+#include "enki/apply.h"
+#include "enki/interp.h"
+#include "enki/value.h"
+
+static void enki_complete_app(size_t arity, size_t n_args, 
     size_t fn_index, enki_app* app, enki_interpreter* i) {
     i->stack[fn_index] = app->fn;
     size_t off = fn_index + 1;
@@ -31,14 +39,16 @@ size_t enki_arity(enki_value val) {
     if(!IS_PTR(val)) return 0; 
     enki_value_header* h = ENKI_TO_PTR(val);
     switch(h->kind) {
-        case LAW: 
+        case LAW: {
             enki_law* law = ENKI_TO_PTR(val);
             return law->arity;
-        case APP: 
+        }
+        case APP: {
             enki_app* app = ENKI_TO_PTR(val);
             size_t fn_arity = enki_arity(app->fn);
             if(fn_arity <= app->n_args) return 0;
             return fn_arity - app->n_args;
+        }
         case PIN:
             return 0; // pins are not transparent
         case NAT:
@@ -48,7 +58,7 @@ size_t enki_arity(enki_value val) {
     }
 }
 
-void enki_make_cont(size_t fn_index, size_t needed,
+static void enki_make_cont(size_t fn_index, size_t needed,
     size_t n_args, enki_interpreter* i) {
     size_t xt_args_c = n_args - needed;
     enki_value* bas = &i->stack[fn_index + 1 + needed];
@@ -64,7 +74,7 @@ void enki_make_cont(size_t fn_index, size_t needed,
     i->frame[i->fp] = f;
 }
 
-void enki_make_partial_apply(enki_interpreter* i, size_t fn_index, enki_value fn,
+static void enki_make_partial_apply(enki_interpreter* i, size_t fn_index, enki_value fn,
     const enki_value* old_args, size_t n_old_args, size_t n_new_args) {
     enki_value app = enki_alloc_app(i->gc, fn, n_old_args + n_new_args);
     enki_app* ptr = (enki_app*)ENKI_TO_PTR(app);
@@ -78,13 +88,13 @@ void enki_make_partial_apply(enki_interpreter* i, size_t fn_index, enki_value fn
     i->sp = fn_index + 1; 
 }
 
-void enki_apply(enki_interpreter* i, uint8_t n_args) {
+void enki_apply(enki_interpreter* i, size_t n_args) {
     size_t fn_index = i->sp - ((size_t)n_args + 1);
     enki_value head = i->stack[fn_index];
     if(!IS_PTR(head)) return; // TODO error out 
     enki_value_header* h = (enki_value_header*)ENKI_TO_PTR(head);
     switch(h->kind) {
-        case LAW:
+        case LAW: {
             enki_law* law = (enki_law*)ENKI_TO_PTR(head);  
             if(law->arity == n_args) {
                 enki_enter_law(n_args, head, i);
@@ -97,15 +107,16 @@ void enki_apply(enki_interpreter* i, uint8_t n_args) {
                 enki_enter_law(law->arity, head, i);
             }
             return;
-        case APP:
+        }
+        case APP: {
              enki_app* app = (enki_app*)ENKI_TO_PTR(head);
              size_t arity = enki_arity(app->fn);
              size_t new_arg_c = app->n_args + (size_t)n_args;
-             enki_value_header* h = ENKI_TO_PTR(app->fn);
+             enki_value_header* fn_h = ENKI_TO_PTR(app->fn);
              if(new_arg_c == arity) {
-                switch(h->kind) {
+                switch(fn_h->kind) {
                     case LAW:
-                        enki_complete_app(arity, (size_t)n_args, fn_index, app, i);
+                        enki_complete_app(arity, n_args, fn_index, app, i);
                         break;
                     default:
                         break;
@@ -116,17 +127,19 @@ void enki_apply(enki_interpreter* i, uint8_t n_args) {
                 return;
             }
              else {
-                switch(h->kind) {
-                    case LAW:
+                switch(fn_h->kind) {
+                    case LAW: {
                         size_t needed = arity - app->n_args;
                         enki_make_cont(fn_index, needed, n_args, i);
                         enki_complete_app(arity, needed, fn_index, app, i);
                         break;
+                    }
                     default:
                         break;
                 }
              }
              return;
+        }
 
         default: 
             return;

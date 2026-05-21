@@ -1,4 +1,5 @@
 #pragma once
+#include <stdbool.h>
 #include "enki/gc.h"
 
 #define STACK_MAX 8096
@@ -148,7 +149,7 @@ typedef struct {
     enki_value cont;
 } enki_frame;
 
-typedef struct {
+typedef struct enki_interpreter {
     size_t sp;
     enki_value stack[STACK_MAX];
     size_t fp;
@@ -159,5 +160,10 @@ typedef struct {
 } enki_interpreter;
 
 void enki_trace_interp(enki_interpreter* i);
-void enki_run_interpreter(enki_interpreter* i);
+void enki_run(enki_interpreter* i);
+void enki_step(enki_interpreter* i);
+void enki_halt(enki_interpreter* i);
+void enki_destroy(enki_interpreter* i);
+enki_value enki_eval_whnf(enki_interpreter* i, enki_value x);
+enki_value enki_eval_nf(enki_interpreter* i, enki_value x);
 enki_interpreter* enki_create_interp(enki_allocator sys, size_t heap, enki_value law);

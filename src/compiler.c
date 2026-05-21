@@ -1,4 +1,4 @@
-#include "compiler.h"
+#include "enki/compiler.h"
 
 static const enki_prim_spec* enki_lookup_prim(enki_value id) {
     size_t n = sizeof(ENKI_PRIMS) / sizeof(ENKI_PRIMS[0]);
@@ -23,7 +23,7 @@ static void enki_emit_prim(const enki_prim_spec* prim, enki_vector* bc) {
     enki_vector_push_u8(bc, prim->subop);
 }
 
-void enki_compile_value(enki_value body, uint32_t depth, enki_vector* bc, enki_vector* const_table) {
+void enki_compile_value(enki_value body, size_t depth, enki_vector* bc, enki_vector* const_table) {
   if(!IS_PTR(body) && body <= depth) {
     enki_vector_push_u8(bc, OP_PICK);
     enki_vector_push_u8(bc, (uint8_t)(depth - body)); // cant exceed 255 yet

@@ -9,7 +9,7 @@ enki_arena* enki_arena_create(enki_allocator sys, size_t cap){
     }
     a->off = sizeof(enki_arena);
     a->ptr = (unsigned char*)a; 
-    a->siz = siz;
+    a->cap = siz;
     a->sys = sys;
     return a;
 }
@@ -18,9 +18,9 @@ void enki_arena_destroy(enki_arena* a) {
     a->sys.free(a->sys.ctx, a);
 }   
 void* enki_arena_alloc(void* ctx, size_t size) {
-    if(!a) return NULL; 
     enki_arena* a = ctx;
-    if((a->off + size) > a->siz) {
+    if(!a) return NULL; 
+    if((a->off + size) > a->cap) {
         return NULL;
     }
     size_t old = a->off;
@@ -29,6 +29,8 @@ void* enki_arena_alloc(void* ctx, size_t size) {
 }
 
 void enki_arena_free(void* ctx, void* ptr) {
+    (void)ctx;
+    (void)ptr;
     return;
 }
 
@@ -42,7 +44,7 @@ enki_allocator enki_arena_as_allocator(enki_arena* a) {
     if(!a) return (enki_allocator){0};
     
     return (enki_allocator){ 
-        .ctx = a->ptr, 
+        .ctx = a, 
         .alloc = enki_arena_alloc, 
         .realloc = NULL, 
         .free = enki_arena_free, 
@@ -52,14 +54,13 @@ enki_allocator enki_arena_as_allocator(enki_arena* a) {
 
 void* enki_arena_start(enki_arena* a) {
     if(!a) return NULL;
-    return (void*)(a->ptr + sizeof(enki_arena))
+    return (void*)(a->ptr + sizeof(enki_arena));
 }
 
 void* enki_arena_end(enki_arena* a) {
     if(!a) return NULL;
-    return (void*)(a->ptr + a->siz);
+    return (void*)(a->ptr + a->cap);
 }
-
 
 
 

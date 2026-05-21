@@ -1,4 +1,10 @@
 
+#include <stddef.h>
+
+#include "enki/apply.h"
+#include "enki/interp.h"
+#include "enki/value.h"
+
 
 enki_value enki_eval_whnf(enki_interpreter* i, enki_value x) {
     if(!IS_PTR(x)) return x;
@@ -13,7 +19,7 @@ enki_value enki_eval_whnf(enki_interpreter* i, enki_value x) {
         case ENKI_PIN: 
             h->state = WHNF;
             return x;
-        case ENKI_APP:
+        case ENKI_APP: {
             if(h->state == NF || h->state == WHNF) return x;
             size_t base_fp = i->fp;
             size_t res_base = i->sp;
@@ -28,9 +34,11 @@ enki_value enki_eval_whnf(enki_interpreter* i, enki_value x) {
             res = enki_eval_whnf(i, res);
             i->sp = res_base; // free scratch slot to be collected by gc 
             return res;
+        }
         default:
             break;
     }
+    return x;
 }
 
 enki_value enki_eval_nf(enki_interpreter* i, enki_value x) {
@@ -42,7 +50,7 @@ enki_value enki_eval_nf(enki_interpreter* i, enki_value x) {
         case ENKI_NAT:
             h->state = NF;
             return x;
-        case ENKI_PIN:
+        case ENKI_PIN: {
             enki_pin* pin = (enki_pin*)ENKI_TO_PTR(x);
             pin->inner = enki_eval_nf(i, pin->inner);
             for(size_t k = 0; k < pin->n_subpins; k++) {
@@ -57,7 +65,8 @@ enki_value enki_eval_nf(enki_interpreter* i, enki_value x) {
             */
             h->state = NF;
             return x;
-        case ENKI_LAW:
+        }
+        case ENKI_LAW: {
             enki_law* law = (enki_law*)ENKI_TO_PTR(x);
             law->body = enki_eval_nf(i, law->body);
             law->name = enki_eval_nf(i, law->name);
@@ -66,14 +75,18 @@ enki_value enki_eval_nf(enki_interpreter* i, enki_value x) {
             }
             h->state = NF;
             return x;
-        case ENKI_APP:
+        }
+        case ENKI_APP: {
           enki_app* app = (enki_app*)ENKI_TO_PTR(x);
           app->fn = enki_eval_nf(i, app->fn);
           for (size_t k = 0; k < app->n_args; k++) {
             app->args[k] = enki_eval_nf(i, app->args[k]);
           }
-          break;
+          h->state = NF;
+          return x;
+        }
         default:
             break;
     }   
+    return x;
 }

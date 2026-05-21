@@ -1,10 +1,12 @@
 #pragma once
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <gmp.h>
 #include "enki/allocator.h"
 
 typedef uint64_t enki_value;
+typedef struct enki_gc enki_gc;
 
 
 // check if highest bit of v is set 
@@ -25,8 +27,15 @@ typedef enum {
     ENKI_CONT,
 } TAGS;
 
+#define ENKI_NAT ENKI_BIG_NAT
+#define ENKI_FRWD ENKI_FWD
+#define PIN ENKI_PIN
+#define LAW ENKI_LAW
+#define APP ENKI_APP
+#define NAT ENKI_NAT
+
 typedef enum {
-    WFNF,
+    WHNF,
     NF,
     THUNK,
 } STATES;
@@ -36,6 +45,8 @@ typedef struct {
     size_t size;
     uint8_t state;
 } obj_header;
+
+typedef obj_header enki_value_header;
 
 typedef struct {
     obj_header h; 
@@ -78,8 +89,41 @@ typedef struct {
 void enki_trace_value(enki_gc* gc, void* obj);
 
 enki_value enki_alloc_nat(enki_gc* gc, mp_limb_t* out, size_t n_limbs);
+enki_value enki_alloc_big_nat(enki_gc* gc, size_t n_limbs, mp_limb_t limbs[]);
 enki_value enki_alloc_law(enki_gc* gc, size_t arity, enki_value name, enki_value body, 
     size_t bc_len, size_t n_const, uint8_t* bc, enki_value* const_table);
 enki_value enki_alloc_pin(enki_gc* gc, const uint8_t hash[32], enki_value inner, size_t n_subpins, enki_value subpins[]); 
 enki_value enki_alloc_app(enki_gc* gc, enki_value fn, size_t n_args);
 enki_value enki_alloc_cont(enki_gc* gc, size_t n_args, enki_value* bas);
+
+bool enki_nat_is_zero(enki_value x);
+int enki_nat_cmp(enki_value a, enki_value b);
+enki_value enki_nat_eq(enki_value a, enki_value b);
+enki_value enki_nat_ne(enki_value a, enki_value b);
+enki_value enki_nat_lt(enki_value a, enki_value b);
+enki_value enki_nat_le(enki_value a, enki_value b);
+enki_value enki_nat_gt(enki_value a, enki_value b);
+enki_value enki_nat_ge(enki_value a, enki_value b);
+enki_value enki_nat_inc(enki_gc* gc, enki_value a);
+enki_value enki_nat_dec(enki_gc* gc, enki_value a);
+enki_value enki_nat_add(enki_gc* gc, enki_value a, enki_value b);
+enki_value enki_nat_sub(enki_gc* gc, enki_value a, enki_value b);
+enki_value enki_nat_mul(enki_gc* gc, enki_value a, enki_value b);
+enki_value enki_nat_div(enki_gc* gc, enki_value a, enki_value b);
+enki_value enki_nat_mod(enki_gc* gc, enki_value a, enki_value b);
+enki_value enki_nat_lsh(enki_gc* gc, enki_value a, enki_value shift);
+enki_value enki_nat_rsh(enki_gc* gc, enki_value a, enki_value shift);
+enki_value enki_nat_bex(enki_gc* gc, enki_value bit);
+enki_value enki_nat_test(enki_gc* gc, enki_value bit, enki_value a);
+enki_value enki_nat_set(enki_gc* gc, enki_value bit, enki_value a);
+enki_value enki_nat_clear(enki_gc* gc, enki_value bit, enki_value a);
+enki_value enki_nat_bits(enki_gc* gc, enki_value a);
+enki_value enki_nat_bytes(enki_gc* gc, enki_value a);
+enki_value enki_nat_trunc(enki_gc* gc, enki_value width, enki_value a);
+enki_value enki_nat_trunc8(enki_gc* gc, enki_value a);
+enki_value enki_nat_trunc16(enki_gc* gc, enki_value a);
+enki_value enki_nat_trunc32(enki_gc* gc, enki_value a);
+enki_value enki_nat_trunc64(enki_gc* gc, enki_value a);
+enki_value enki_nat_load8(enki_gc* gc, enki_value index, enki_value a);
+enki_value enki_nat_store8(enki_gc* gc, enki_value index, enki_value byte, enki_value a);
+enki_value enki_nat_nib(enki_gc* gc, enki_value index, enki_value a);

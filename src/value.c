@@ -6,14 +6,15 @@
 void enki_trace_value(enki_gc* gc, void* obj) {
     enki_value_header* h = obj;
     switch (h->kind) {
-        case ENKI_PIN:
+        case ENKI_PIN: {
           enki_pin* pin = obj;
           pin->inner = gc->copy(gc, pin->inner);
           for(size_t k = 0; k < pin->n_subpins; k++) {
             pin->subpins[k] = gc->copy(gc, pin->subpins[k]);
           }
           break;
-        case ENKI_LAW:
+        }
+        case ENKI_LAW: {
           enki_law* law = obj;
           law->body = gc->copy(gc, law->body);
           law->name = gc->copy(gc, law->name);
@@ -21,26 +22,29 @@ void enki_trace_value(enki_gc* gc, void* obj) {
             ENKI_LAW_CONSTS(law)[k] = gc->copy(gc, ENKI_LAW_CONSTS(law)[k]);
           }
           break;
-        case ENKI_APP:
+        }
+        case ENKI_APP: {
           enki_app* app = obj;
           app->fn = gc->copy(gc, app->fn);
           for (size_t k = 0; k < app->n_args; k++) {
             app->args[k] = gc->copy(gc, app->args[k]);
           }
           break;
-        case ENKI_CONT:
+        }
+        case ENKI_CONT: {
           enki_cont* cont = obj;
           for (size_t k = 0; k < cont->n_args; k++) {
             cont->args[k] = gc->copy(gc, cont->args[k]);
           }
           break;
+        }
         default:
           return;
     }
 }
 
 enki_value enki_alloc_big_nat(enki_gc* gc, size_t n_limbs, mp_limb_t limbs[]) {
-    size_t n = sizeof(enki_value) + (n_limbs * sizeof(mp_limb_t));
+    size_t n = sizeof(enki_nat) + (n_limbs * sizeof(mp_limb_t));
     enki_nat* new = (enki_nat*)gc->alloc(gc, n);
     if(!new) return 0;
     new->h.size = n;
@@ -58,7 +62,7 @@ enki_value enki_alloc_law(enki_gc* gc, size_t arity, enki_value name, enki_value
     new->h.kind = ENKI_LAW;
     new->body = body;
     new->name = name;
-    new->arity = arity;
+    new->arity = (uint32_t)arity;
     new->bc_len = bc_len;
     new->n_const = n_const;
     size_t const_off = n_const * sizeof(enki_value);
@@ -73,21 +77,17 @@ enki_value enki_alloc_nat(enki_gc* gc, mp_limb_t* out, size_t n_limbs) {
         n--;
     }
     if(n == 0) {
-      gc->sys.free(out);
+      gc->sys.free(gc->sys.ctx, out);
       return (enki_value)0;
     }
     if(n == 1 && out[n - 1] < (1ULL << 63)) {
-        size_t size = sizeof(enki_nat) + (sizeof(mp_limb_t) * n);
-        enki_nat* nat = (enki_nat*)gc->alloc(gc, size);
-        nat->h.size = size;
-        nat->h.kind = ENKI_BIG_NAT;
-        nat->n_limbs = n;
-        memcpy(nat->limbs, out, n * sizeof(mp_limb_t));
-        gc->sys.free(out);
-        return PTR_TO_ENKI(nat);
+        enki_value res = (enki_value)out[0];
+        gc->sys.free(gc->sys.ctx, out);
+        return res;
     }
-    gc->sys.free(out);
-    return (enki_value)out[0];
+    enki_value res = enki_alloc_big_nat(gc, n, out);
+    gc->sys.free(gc->sys.ctx, out);
+    return res;
 }
 
 enki_value enki_alloc_pin(enki_gc* gc, const 
@@ -105,7 +105,7 @@ enki_value enki_alloc_pin(enki_gc* gc, const
 }
 enki_value enki_alloc_app(enki_gc* gc, enki_value fn, 
     size_t n_args) {
-    size_t n = sizeof(enki_app) + (n_args * sizeof(enki_value));
+    size_t n = sizeof(enki_cont) + (n_args * sizeof(enki_value));
     enki_app* new = (enki_app*)gc->alloc(gc, n);
     if(!new) return 0;
     new->h.size = n;
@@ -122,7 +122,7 @@ enki_value enki_alloc_cont(enki_gc* gc, size_t n_args, enki_value* bas) {
     if(!new) return 0;
     new->h.size = n;
     new->h.kind = ENKI_CONT;
-    enki->n_args = n_args;
-    memcpy(new->args, bas, n);
+    new->n_args = n_args;
+    memcpy(new->args, bas, n_args * sizeof(enki_value));
     return PTR_TO_ENKI(new);
 }

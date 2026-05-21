@@ -1,0 +1,1 @@
+typedef int enki_pin_translation_unit;

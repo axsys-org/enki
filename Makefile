@@ -6,7 +6,7 @@ AR ?= ar
 
 VALID_BUILD_TYPES := debug release asan ubsan tsan coverage
 
-BASE_CPPFLAGS := -Iinclude -Itests/support -Itests/property/vendor/theft
+BASE_CPPFLAGS := -Iinclude -Itests/support -Itests/property/vendor/theft -isystem /opt/homebrew/include
 BASE_CFLAGS := -std=c11 -MMD -MP
 
 WARN_COMMON := -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wstrict-prototypes \
@@ -39,7 +39,7 @@ endif
 
 CPPFLAGS_ALL := $(BASE_CPPFLAGS) $(CPPFLAGS)
 CFLAGS_ALL := $(BASE_CFLAGS) $(WARN_CFLAGS) $(BUILD_CFLAGS_$(BUILD_TYPE)) $(CFLAGS)
-LDFLAGS_ALL := $(BUILD_LDFLAGS_$(BUILD_TYPE)) $(LDFLAGS)
+LDFLAGS_ALL := $(BUILD_LDFLAGS_$(BUILD_TYPE)) $(LDFLAGS) -L/opt/homebrew/lib -lgmp
 
 SRC_DIR := src
 INCLUDE_DIR := include
