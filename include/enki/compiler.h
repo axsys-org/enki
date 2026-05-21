@@ -5,9 +5,9 @@
 #include "enki/value.h"
 #include "enki/vector.h"
 
-void enki_compile_value(enki_value body, size_t depth, enki_vector* bc, enki_vector* const_table);
-void enki_compile_args(enki_app* app, size_t depth, enki_vector* bc, enki_vector* const_table);
-void enki_compile_law(enki_value body, size_t arity, enki_vector* bc, enki_vector* const_table);
+void enki_compile_value(enki_value body_v, size_t depth_s, enki_vector* bc_b, enki_vector* const_table_v);
+void enki_compile_args(enki_app* app, size_t depth_s, enki_vector* bc_b, enki_vector* const_table_v);
+void enki_compile_law(enki_value body_v, size_t arity_s, enki_vector* bc_b, enki_vector* const_table_v);
 
 typedef enum {
     ENKI_PRIM_GROUP_OP0,
@@ -122,8 +122,8 @@ typedef enum {
 typedef struct {
     enki_value id;
     enki_prim_group group;
-    uint8_t subop;
-    uint8_t arity;
+    uint8_t subop_b;
+    uint8_t arity_s;
 } enki_prim_spec;
 
 static const enki_prim_spec ENKI_PRIMS[] = {

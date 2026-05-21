@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 typedef struct theft_rng {
-    uint64_t state;
+    uint64_t state_b;
 } theft_rng;
 
 typedef void* (*theft_generate_fn)(theft_rng* rng, void* ctx);
@@ -15,7 +15,7 @@ typedef bool (*theft_shrink_fn)(void** generated, void* ctx);
 typedef void (*theft_free_fn)(void* generated, void* ctx);
 
 typedef struct theft_property {
-    const char* name;
+    const char* name_v;
     size_t trials;
     theft_generate_fn generate;
     theft_check_fn check;
@@ -27,7 +27,7 @@ typedef struct theft_property {
 void theft_rng_seed(theft_rng* rng, uint64_t seed);
 uint64_t theft_rng_next_u64(theft_rng* rng);
 size_t theft_rng_range(theft_rng* rng, size_t exclusive_max);
-uint64_t theft_seed_from_env(const char* name, uint64_t fallback);
+uint64_t theft_seed_from_env(const char* name_v, uint64_t fallback_v);
 int theft_run_property(const theft_property* property, uint64_t seed);
 
 #endif

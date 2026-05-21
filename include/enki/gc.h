@@ -7,19 +7,19 @@
 
 typedef struct enki_interpreter enki_interpreter;
 
-void* enki_gc_alloc (enki_gc* gc, size_t size);
-enki_value enki_gc_copy (enki_gc* gc, enki_value val);
+void* enki_gc_alloc (enki_gc* gc, size_t size_s);
+enki_value enki_gc_copy (enki_gc* gc, enki_value val_v);
 
 struct enki_gc {
-    enki_arena* active;
-    enki_arena* idle;
+    enki_arena* active_a;
+    enki_arena* idle_a;
     enki_interpreter* root;
-    size_t cap;
-    enki_allocator sys;
-    enki_value (*copy)(enki_gc* gc, enki_value val);  
-    void* (*alloc)(enki_gc* gc, size_t size);    
+    size_t cap_s;
+    enki_allocator sys_a;
+    enki_value (*copy)(enki_gc* gc, enki_value val_v);  
+    void* (*alloc)(enki_gc* gc, size_t size_s);    
 };
 
-enki_gc* enki_gc_create (enki_allocator sys, size_t cap, enki_interpreter* root);
+enki_gc* enki_gc_create (enki_allocator sys_a, size_t cap_s, enki_interpreter* root);
 void enki_gc_destroy(enki_gc* gc);
 void enki_gc_collect(enki_gc* gc);

@@ -46,16 +46,16 @@ static void reset_allocator_fakes(void)
     RESET_FAKE(fake_free);
 }
 
-static void* malloc_fake(void* ctx, size_t size)
+static void* malloc_fake(void* ctx, size_t size_s)
 {
     (void)ctx;
-    return malloc(size);
+    return malloc(size_s);
 }
 
-static void* realloc_fake(void* ctx, void* ptr, size_t size)
+static void* realloc_fake(void* ctx, void* ptr, size_t size_s)
 {
     (void)ctx;
-    return realloc(ptr, size);
+    return realloc(ptr, size_s);
 }
 
 static void free_fake(void* ctx, void* ptr)
@@ -64,22 +64,22 @@ static void free_fake(void* ctx, void* ptr)
     free(ptr);
 }
 
-static void* fail_second_alloc(void* ctx, size_t size)
+static void* fail_second_alloc(void* ctx, size_t size_s)
 {
     (void)ctx;
     if (fake_alloc_fake.call_count >= 2u) {
-        (void)size;
+        (void)size_s;
         return NULL;
     }
 
-    return malloc(size);
+    return malloc(size_s);
 }
 
-static void* always_fail_realloc(void* ctx, void* ptr, size_t size)
+static void* always_fail_realloc(void* ctx, void* ptr, size_t size_s)
 {
     (void)ctx;
     (void)ptr;
-    (void)size;
+    (void)size_s;
     return NULL;
 }
 
@@ -151,12 +151,12 @@ Test(vector, allocator_realloc_failure_keeps_existing_storage)
     cr_assert_eq(enki_vector_reserve(vector, 8), ENKI_OK);
     cr_assert_eq(enki_vector_push(vector, (void*)(uintptr_t)1u), ENKI_OK);
 
-    size_t capacity = enki_vector_capacity(vector);
+    size_t capacity_s = enki_vector_capacity(vector);
     fake_realloc_fake.custom_fake = always_fail_realloc;
 
     cr_assert_eq(enki_vector_shrink(vector), ENKI_ERR_ALLOC);
     cr_assert_eq(enki_vector_len(vector), 1);
-    cr_assert_eq(enki_vector_capacity(vector), capacity);
+    cr_assert_eq(enki_vector_capacity(vector), capacity_s);
     cr_assert_eq(enki_vector_get(vector, 0), (void*)(uintptr_t)1u);
 
     fake_realloc_fake.custom_fake = realloc_fake;

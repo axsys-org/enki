@@ -11,15 +11,15 @@ extern "C" {
 
 typedef struct enki_arena {
     unsigned char* ptr;
-    size_t         cap;
-    size_t         off;
-    enki_allocator sys;
+    size_t         cap_s;
+    size_t         off_o;
+    enki_allocator sys_a;
 } enki_arena;
 
-enki_arena*    enki_arena_create(enki_allocator parent, size_t cap);
+enki_arena*    enki_arena_create(enki_allocator parent_a, size_t cap_s);
 void           enki_arena_destroy(enki_arena* a);
-void*          enki_arena_alloc(void* ctx, size_t size);
-void           enki_arena_free(void* ctx, void* ptr);   // no-op
+void*          enki_arena_alloc(void* ctx, size_t size_s);
+void           enki_arena_free(void* ctx, void* ptr);   // no-op_b
 void           enki_arena_reset(enki_arena* a);
 
 enki_allocator enki_arena_as_allocator(enki_arena* a);

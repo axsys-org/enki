@@ -6,23 +6,23 @@
 #include <string.h>
 
 struct enki_vector {
-    enki_allocator allocator;
-    uint8_t* data;
-    size_t elem_size;
-    size_t len;
-    size_t capacity;
+    enki_allocator allocator_a;
+    uint8_t* data_b;
+    size_t elem_size_s;
+    size_t len_s;
+    size_t capacity_s;
 };
 
-static void* system_alloc(void* ctx, size_t size)
+static void* system_alloc(void* ctx, size_t size_s)
 {
     (void)ctx;
-    return malloc(size);
+    return malloc(size_s);
 }
 
-static void* system_realloc(void* ctx, void* ptr, size_t size)
+static void* system_realloc(void* ctx, void* ptr, size_t size_s)
 {
     (void)ctx;
-    return realloc(ptr, size);
+    return realloc(ptr, size_s);
 }
 
 static void system_free(void* ctx, void* ptr)
@@ -31,53 +31,53 @@ static void system_free(void* ctx, void* ptr)
     free(ptr);
 }
 
-static bool allocator_is_valid(enki_allocator allocator)
+static bool allocator_is_valid(enki_allocator allocator_a)
 {
-    return allocator.alloc != NULL && allocator.free != NULL;
+    return allocator_a.alloc != NULL && allocator_a.free != NULL;
 }
 
-static bool item_bytes(size_t capacity, size_t elem_size, size_t* bytes)
+static bool item_bytes(size_t capacity_s, size_t elem_size_s, size_t* bytes_s)
 {
-    if (elem_size == 0 || capacity > (SIZE_MAX / elem_size)) {
+    if (elem_size_s == 0 || capacity_s > (SIZE_MAX / elem_size_s)) {
         return false;
     }
 
-    *bytes = capacity * elem_size;
+    *bytes_s = capacity_s * elem_size_s;
     return true;
 }
 
-static enki_status resize_storage(enki_vector* vector, size_t capacity)
+static enki_status resize_storage(enki_vector* vector, size_t capacity_s)
 {
-    size_t bytes = 0;
+    size_t bytes_s = 0;
 
-    if (!item_bytes(capacity, vector->elem_size, &bytes)) {
+    if (!item_bytes(capacity_s, vector->elem_size_s, &bytes_s)) {
         return ENKI_ERR_ALLOC;
     }
 
-    if (vector->allocator.realloc != NULL) {
+    if (vector->allocator_a.realloc != NULL) {
         void* resized =
-            vector->allocator.realloc(vector->allocator.ctx, (void*)vector->data, bytes);
+            vector->allocator_a.realloc(vector->allocator_a.ctx, (void*)vector->data_b, bytes_s);
         if (resized == NULL) {
             return ENKI_ERR_ALLOC;
         }
 
-        vector->data = (uint8_t*)resized;
-        vector->capacity = capacity;
+        vector->data_b = (uint8_t*)resized;
+        vector->capacity_s = capacity_s;
         return ENKI_OK;
     }
 
-    uint8_t* next = (uint8_t*)vector->allocator.alloc(vector->allocator.ctx, bytes);
+    uint8_t* next = (uint8_t*)vector->allocator_a.alloc(vector->allocator_a.ctx, bytes_s);
     if (next == NULL) {
         return ENKI_ERR_ALLOC;
     }
 
-    if (vector->data != NULL && vector->len > 0) {
-        memcpy((void*)next, (const void*)vector->data, vector->len * vector->elem_size);
+    if (vector->data_b != NULL && vector->len_s > 0) {
+        memcpy((void*)next, (const void*)vector->data_b, vector->len_s * vector->elem_size_s);
     }
 
-    vector->allocator.free(vector->allocator.ctx, (void*)vector->data);
-    vector->data = next;
-    vector->capacity = capacity;
+    vector->allocator_a.free(vector->allocator_a.ctx, (void*)vector->data_b);
+    vector->data_b = next;
+    vector->capacity_s = capacity_s;
     return ENKI_OK;
 }
 
@@ -91,30 +91,30 @@ enki_allocator enki_allocator_system(void)
     };
 }
 
-enki_vector* enki_vector_create(enki_allocator allocator)
+enki_vector* enki_vector_create(enki_allocator allocator_a)
 {
-    return enki_vector_create_sized(allocator, sizeof(void*));
+    return enki_vector_create_sized(allocator_a, sizeof(void*));
 }
 
-enki_vector* enki_vector_create_sized(enki_allocator allocator, size_t elem_size)
+enki_vector* enki_vector_create_sized(enki_allocator allocator_a, size_t elem_size_s)
 {
-    if (!allocator_is_valid(allocator)) {
+    if (!allocator_is_valid(allocator_a)) {
         return NULL;
     }
-    if (elem_size == 0) {
+    if (elem_size_s == 0) {
         return NULL;
     }
 
-    enki_vector* vector = allocator.alloc(allocator.ctx, sizeof(*vector));
+    enki_vector* vector = allocator_a.alloc(allocator_a.ctx, sizeof(*vector));
     if (vector == NULL) {
         return NULL;
     }
 
-    vector->allocator = allocator;
-    vector->data = NULL;
-    vector->elem_size = elem_size;
-    vector->len = 0;
-    vector->capacity = 0;
+    vector->allocator_a = allocator_a;
+    vector->data_b = NULL;
+    vector->elem_size_s = elem_size_s;
+    vector->len_s = 0;
+    vector->capacity_s = 0;
 
     return vector;
 }
@@ -125,9 +125,9 @@ void enki_vector_destroy(enki_vector* vector)
         return;
     }
 
-    enki_allocator allocator = vector->allocator;
-    allocator.free(allocator.ctx, (void*)vector->data);
-    allocator.free(allocator.ctx, vector);
+    enki_allocator allocator_a = vector->allocator_a;
+    allocator_a.free(allocator_a.ctx, (void*)vector->data_b);
+    allocator_a.free(allocator_a.ctx, vector);
 }
 
 static enki_status ensure_push_capacity(enki_vector* vector)
@@ -136,16 +136,16 @@ static enki_status ensure_push_capacity(enki_vector* vector)
         return ENKI_ERR_INVALID;
     }
 
-    if (vector->len == vector->capacity) {
-        size_t next_capacity = 4;
-        if (vector->capacity > 0) {
-            if (vector->capacity > (SIZE_MAX / 2)) {
+    if (vector->len_s == vector->capacity_s) {
+        size_t next_capacity_s = 4;
+        if (vector->capacity_s > 0) {
+            if (vector->capacity_s > (SIZE_MAX / 2)) {
                 return ENKI_ERR_ALLOC;
             }
-            next_capacity = vector->capacity * 2;
+            next_capacity_s = vector->capacity_s * 2;
         }
 
-        enki_status status = enki_vector_reserve(vector, next_capacity);
+        enki_status status = enki_vector_reserve(vector, next_capacity_s);
         if (status != ENKI_OK) {
             return status;
         }
@@ -154,9 +154,9 @@ static enki_status ensure_push_capacity(enki_vector* vector)
     return ENKI_OK;
 }
 
-enki_status enki_vector_push(enki_vector* vector, void* item)
+enki_status enki_vector_push(enki_vector* vector, void* item_v)
 {
-    if (vector == NULL || vector->elem_size != sizeof(void*)) {
+    if (vector == NULL || vector->elem_size_s != sizeof(void*)) {
         return ENKI_ERR_INVALID;
     }
 
@@ -165,14 +165,14 @@ enki_status enki_vector_push(enki_vector* vector, void* item)
         return status;
     }
 
-    memcpy((void*)(vector->data + vector->len * vector->elem_size), &item, sizeof(item));
-    vector->len += 1;
+    memcpy((void*)(vector->data_b + vector->len_s * vector->elem_size_s), &item_v, sizeof(item_v));
+    vector->len_s += 1;
     return ENKI_OK;
 }
 
-enki_status enki_vector_push_copy(enki_vector* vector, const void* item)
+enki_status enki_vector_push_copy(enki_vector* vector, const void* item_v)
 {
-    if (item == NULL) {
+    if (item_v == NULL) {
         return ENKI_ERR_INVALID;
     }
 
@@ -181,87 +181,87 @@ enki_status enki_vector_push_copy(enki_vector* vector, const void* item)
         return status;
     }
 
-    memcpy((void*)(vector->data + vector->len * vector->elem_size), item, vector->elem_size);
-    vector->len += 1;
+    memcpy((void*)(vector->data_b + vector->len_s * vector->elem_size_s), item_v, vector->elem_size_s);
+    vector->len_s += 1;
     return ENKI_OK;
 }
 
-enki_status enki_vector_push_u8(enki_vector* vector, uint8_t item)
+enki_status enki_vector_push_u8(enki_vector* vector, uint8_t item_v)
 {
-    if (vector == NULL || vector->elem_size != sizeof(uint8_t)) {
+    if (vector == NULL || vector->elem_size_s != sizeof(uint8_t)) {
         return ENKI_ERR_INVALID;
     }
 
-    return enki_vector_push_copy(vector, &item);
+    return enki_vector_push_copy(vector, &item_v);
 }
 
-static void* slot_at(const enki_vector* vector, size_t index)
+static void* slot_at(const enki_vector* vector, size_t index_i)
 {
-    return (void*)(vector->data + index * vector->elem_size);
+    return (void*)(vector->data_b + index_i * vector->elem_size_s);
 }
 
 void* enki_vector_pop(enki_vector* vector)
 {
-    if (vector == NULL || vector->len == 0 || vector->elem_size != sizeof(void*)) {
+    if (vector == NULL || vector->len_s == 0 || vector->elem_size_s != sizeof(void*)) {
         return NULL;
     }
 
-    vector->len -= 1;
-    void* item = NULL;
-    memcpy(&item, slot_at(vector, vector->len), sizeof(item));
-    memset(slot_at(vector, vector->len), 0, sizeof(item));
-    return item;
+    vector->len_s -= 1;
+    void* item_v = NULL;
+    memcpy(&item_v, slot_at(vector, vector->len_s), sizeof(item_v));
+    memset(slot_at(vector, vector->len_s), 0, sizeof(item_v));
+    return item_v;
 }
 
-void* enki_vector_get(const enki_vector* vector, size_t index)
+void* enki_vector_get(const enki_vector* vector, size_t index_i)
 {
-    if (vector == NULL || index >= vector->len || vector->elem_size != sizeof(void*)) {
+    if (vector == NULL || index_i >= vector->len_s || vector->elem_size_s != sizeof(void*)) {
         return NULL;
     }
 
-    void* item = NULL;
-    memcpy(&item, slot_at(vector, index), sizeof(item));
-    return item;
+    void* item_v = NULL;
+    memcpy(&item_v, slot_at(vector, index_i), sizeof(item_v));
+    return item_v;
 }
 
-void* enki_vector_get_slot(const enki_vector* vector, size_t index)
+void* enki_vector_get_slot(const enki_vector* vector, size_t index_i)
 {
-    if (vector == NULL || index >= vector->len) {
+    if (vector == NULL || index_i >= vector->len_s) {
         return NULL;
     }
 
-    return slot_at(vector, index);
+    return slot_at(vector, index_i);
 }
 
-enki_status enki_vector_set(enki_vector* vector, size_t index, void* item)
+enki_status enki_vector_set(enki_vector* vector, size_t index_i, void* item_v)
 {
     if (vector == NULL) {
         return ENKI_ERR_INVALID;
     }
 
-    if (index >= vector->len) {
+    if (index_i >= vector->len_s) {
         return ENKI_ERR_BOUNDS;
     }
 
-    if (vector->elem_size != sizeof(void*)) {
+    if (vector->elem_size_s != sizeof(void*)) {
         return ENKI_ERR_INVALID;
     }
 
-    memcpy(slot_at(vector, index), &item, sizeof(item));
+    memcpy(slot_at(vector, index_i), &item_v, sizeof(item_v));
     return ENKI_OK;
 }
 
-enki_status enki_vector_set_copy(enki_vector* vector, size_t index, const void* item)
+enki_status enki_vector_set_copy(enki_vector* vector, size_t index_i, const void* item_v)
 {
-    if (vector == NULL || item == NULL) {
+    if (vector == NULL || item_v == NULL) {
         return ENKI_ERR_INVALID;
     }
 
-    if (index >= vector->len) {
+    if (index_i >= vector->len_s) {
         return ENKI_ERR_BOUNDS;
     }
 
-    memcpy(slot_at(vector, index), item, vector->elem_size);
+    memcpy(slot_at(vector, index_i), item_v, vector->elem_size_s);
     return ENKI_OK;
 }
 
@@ -271,7 +271,7 @@ void* enki_vector_data(const enki_vector* vector)
         return NULL;
     }
 
-    return vector->data;
+    return vector->data_b;
 }
 
 size_t enki_vector_elem_size(const enki_vector* vector)
@@ -280,7 +280,7 @@ size_t enki_vector_elem_size(const enki_vector* vector)
         return 0;
     }
 
-    return vector->elem_size;
+    return vector->elem_size_s;
 }
 
 size_t enki_vector_len(const enki_vector* vector)
@@ -289,7 +289,7 @@ size_t enki_vector_len(const enki_vector* vector)
         return 0;
     }
 
-    return vector->len;
+    return vector->len_s;
 }
 
 size_t enki_vector_capacity(const enki_vector* vector)
@@ -298,20 +298,20 @@ size_t enki_vector_capacity(const enki_vector* vector)
         return 0;
     }
 
-    return vector->capacity;
+    return vector->capacity_s;
 }
 
-enki_status enki_vector_reserve(enki_vector* vector, size_t capacity)
+enki_status enki_vector_reserve(enki_vector* vector, size_t capacity_s)
 {
     if (vector == NULL) {
         return ENKI_ERR_INVALID;
     }
 
-    if (capacity <= vector->capacity) {
+    if (capacity_s <= vector->capacity_s) {
         return ENKI_OK;
     }
 
-    return resize_storage(vector, capacity);
+    return resize_storage(vector, capacity_s);
 }
 
 enki_status enki_vector_shrink(enki_vector* vector)
@@ -320,16 +320,16 @@ enki_status enki_vector_shrink(enki_vector* vector)
         return ENKI_ERR_INVALID;
     }
 
-    if (vector->len == vector->capacity) {
+    if (vector->len_s == vector->capacity_s) {
         return ENKI_OK;
     }
 
-    if (vector->len == 0) {
-        vector->allocator.free(vector->allocator.ctx, (void*)vector->data);
-        vector->data = NULL;
-        vector->capacity = 0;
+    if (vector->len_s == 0) {
+        vector->allocator_a.free(vector->allocator_a.ctx, (void*)vector->data_b);
+        vector->data_b = NULL;
+        vector->capacity_s = 0;
         return ENKI_OK;
     }
 
-    return resize_storage(vector, vector->len);
+    return resize_storage(vector, vector->len_s);
 }

@@ -26,9 +26,9 @@ static int run_vector_unit_checks(void)
     EXPECT(enki_vector_set(vector, 1, (void*)(uintptr_t)3u) == ENKI_OK);
     EXPECT(enki_vector_get(vector, 1) == (void*)(uintptr_t)3u);
 
-    size_t capacity = enki_vector_capacity(vector);
+    size_t capacity_s = enki_vector_capacity(vector);
     EXPECT(enki_vector_reserve(vector, 1) == ENKI_OK);
-    EXPECT(enki_vector_capacity(vector) == capacity);
+    EXPECT(enki_vector_capacity(vector) == capacity_s);
     EXPECT(enki_vector_shrink(vector) == ENKI_OK);
     EXPECT(enki_vector_capacity(vector) == enki_vector_len(vector));
 

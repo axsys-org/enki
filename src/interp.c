@@ -5,18 +5,18 @@
 #include "enki/op66.h"
 #include "enki/primops.h"
 
-enki_interpreter* enki_create_interp(enki_allocator sys, size_t heap, 
+enki_interpreter* enki_create_interp(enki_allocator sys_a, size_t heap, 
    enki_value law) {
-    enki_interpreter* i = (enki_interpreter*)sys.alloc(sys.ctx, sizeof(enki_interpreter));
+    enki_interpreter* i = (enki_interpreter*)sys_a.alloc(sys_a.ctx, sizeof(enki_interpreter));
     enki_frame f; 
     f.pc = 0;
-    f.res_base = 0;
-    f.arg_base = 0;
-    f.cont = 0;
+    f.res_base_s = 0;
+    f.arg_base_s = 0;
+    f.cont_v = 0;
     f.law = law;
     i->frame[0] = f;
-    i->gc = enki_gc_create(sys, heap, i);
-    i->sys = sys;
+    i->gc = enki_gc_create(sys_a, heap, i);
+    i->sys_a = sys_a;
     i->halted = false;
     i->fp = 0;
     i->sp = 0;
@@ -24,17 +24,17 @@ enki_interpreter* enki_create_interp(enki_allocator sys, size_t heap,
 }
 void enki_trace_interp(enki_interpreter* i) {
     for(size_t k = 0; k < i->sp; k++) {
-        i->stack[k] = i->gc->copy(i->gc, i->stack[k]);
+        i->stack_v[k] = i->gc->copy(i->gc, i->stack_v[k]);
     } 
     for(size_t k = 0; k <= i->fp; k++) {
         enki_frame* f = &i->frame[k];
-        if(f->cont != 0) f->cont = i->gc->copy(i->gc, f->cont);
+        if(f->cont_v != 0) f->cont_v = i->gc->copy(i->gc, f->cont_v);
         if(f->law != 0) f->law = i->gc->copy(i->gc, f->law);
     }  
 }
 void enki_destroy(enki_interpreter* i) {
     enki_gc_destroy(i->gc);
-    i->sys.free(i->sys.ctx, i);
+    i->sys_a.free(i->sys_a.ctx, i);
 }
 void enki_halt(enki_interpreter* i) {
     i->halted = true;
@@ -47,39 +47,39 @@ void enki_run(enki_interpreter* i) {
 
 void enki_step(enki_interpreter* i) {
     enki_frame* f = &i->frame[i->fp];
-    if(f->cont != 0) {
-        enki_cont* cont = (enki_cont*)ENKI_TO_PTR(f->cont);
-        i->sp = f->res_base + 1;
-        for(size_t k = 0; k < cont->n_args; k++) {
-            i->stack[i->sp] = cont->args[k];
+    if(f->cont_v != 0) {
+        enki_cont* cont_v = (enki_cont*)ENKI_TO_PTR(f->cont_v);
+        i->sp = f->res_base_s + 1;
+        for(size_t k = 0; k < cont_v->n_args_s; k++) {
+            i->stack_v[i->sp] = cont_v->args_v[k];
             i->sp++;
         }
         i->fp--;
-        enki_apply(i, cont->n_args);
+        enki_apply(i, cont_v->n_args_s);
         return;
     }
     enki_law* law = (enki_law*)ENKI_TO_PTR(f->law);
-    uint8_t op = ENKI_LAW_BC(law)[f->pc++];
-    switch (op) {
+    uint8_t op_b = ENKI_LAW_BC(law)[f->pc++];
+    switch (op_b) {
         case OP_APPLY: {
             uint8_t arg_c = ENKI_LAW_BC(law)[f->pc++];
             enki_apply(i, arg_c); 
             break;
         }
         case OP_PICK: { 
-            size_t idx = f->arg_base + (size_t)ENKI_LAW_BC(law)[f->pc++];
-            i->stack[i->sp] = i->stack[idx];
+            size_t idx_i = f->arg_base_s + (size_t)ENKI_LAW_BC(law)[f->pc++];
+            i->stack_v[i->sp] = i->stack_v[idx_i];
             i->sp++;
             break;
         }
         case OP_RETURN: {
-            enki_value ret_val = i->stack[i->sp - 1];
+            enki_value ret_val_v = i->stack_v[i->sp - 1];
             if (i->fp == 0) {
                 i->halted = true;
                 return;
             }
-            i->sp = f->res_base;
-            i->stack[i->sp] = ret_val; 
+            i->sp = f->res_base_s;
+            i->stack_v[i->sp] = ret_val_v; 
             i->sp++;
             i->fp--;                
             break;
@@ -87,8 +87,8 @@ void enki_step(enki_interpreter* i) {
         case NO_OP:
             break;
         case OP_PUSH_CONST: {
-            uint8_t idx = ENKI_LAW_BC(law)[f->pc++];
-            i->stack[i->sp] = ENKI_LAW_CONSTS(law)[idx];
+            uint8_t idx_i = ENKI_LAW_BC(law)[f->pc++];
+            i->stack_v[i->sp] = ENKI_LAW_CONSTS(law)[idx_i];
             i->sp++;
             break;
         }
@@ -96,13 +96,13 @@ void enki_step(enki_interpreter* i) {
             i->sp--;
             break;
         case OP_DUP:
-            if(i->sp == 0) return; // stack underflow 
-            i->stack[i->sp] = i->stack[i->sp - 1];
+            if(i->sp == 0) return; // stack_v underflow 
+            i->stack_v[i->sp] = i->stack_v[i->sp - 1];
             i->sp++;
             break;
         case OP_OP0: {
-            uint8_t sub = ENKI_LAW_BC(law)[f->pc++];
-            switch (sub) {
+            uint8_t sub_b = ENKI_LAW_BC(law)[f->pc++];
+            switch (sub_b) {
                 case 0: primop_mkpin(i);  break;
                 case 1: primop_mklaw(i);  break;
                 case 2: primop_match(i);  break;
@@ -111,8 +111,8 @@ void enki_step(enki_interpreter* i) {
             break;
         }
         case OP_OP66: {
-            uint8_t sub = ENKI_LAW_BC(law)[f->pc++];
-            switch (sub) {
+            uint8_t sub_b = ENKI_LAW_BC(law)[f->pc++];
+            switch (sub_b) {
                 case OP66_PIN:        primop_mkpin(i);     break;
                 case OP66_LAW:        primop_mklaw(i);     break;
                 case OP66_ELIM:       primop_match(i);     break;

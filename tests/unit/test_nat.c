@@ -57,19 +57,19 @@ Test(nat, shifts_and_bits_handle_big_values)
 
 Test(nat, set_clear_test_modify_bits)
 {
-    enki_value x = enki_nat_set(fixture_interp->gc, 9, 0);
-    cr_assert_eq(enki_nat_test(fixture_interp->gc, 9, x), 1);
+    enki_value x_v = enki_nat_set(fixture_interp->gc, 9, 0);
+    cr_assert_eq(enki_nat_test(fixture_interp->gc, 9, x_v), 1);
 
-    x = enki_nat_clear(fixture_interp->gc, 9, x);
-    cr_assert_eq(enki_nat_test(fixture_interp->gc, 9, x), 0);
+    x_v = enki_nat_clear(fixture_interp->gc, 9, x_v);
+    cr_assert_eq(enki_nat_test(fixture_interp->gc, 9, x_v), 0);
 }
 
 Test(nat, byte_and_trunc_ops)
 {
-    enki_value x = enki_nat_store8(fixture_interp->gc, 1, 0xAB, 0);
+    enki_value x_v = enki_nat_store8(fixture_interp->gc, 1, 0xAB, 0);
 
-    cr_assert_eq(enki_nat_load8(fixture_interp->gc, 0, x), 0);
-    cr_assert_eq(enki_nat_load8(fixture_interp->gc, 1, x), 0xAB);
+    cr_assert_eq(enki_nat_load8(fixture_interp->gc, 0, x_v), 0);
+    cr_assert_eq(enki_nat_load8(fixture_interp->gc, 1, x_v), 0xAB);
     cr_assert_eq(enki_nat_trunc8(fixture_interp->gc, 0x123), 0x23);
     cr_assert_eq(enki_nat_nib(fixture_interp->gc, 0, 0xAB), 0xB);
     cr_assert_eq(enki_nat_nib(fixture_interp->gc, 1, 0xAB), 0xA);

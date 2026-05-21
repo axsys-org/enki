@@ -11,331 +11,331 @@
 
 typedef struct {
     const mp_limb_t* limbs;
-    size_t n_limbs;
+    size_t n_limbs_s;
     mp_limb_t small[1];
 } enki_nat_view;
-static void view_of_nat(enki_value a, enki_nat_view* v);
-static int enki_nat_cmp_v(enki_nat_view a_v, enki_nat_view b_v);
-static size_t min(size_t a, size_t b) {
-    return a < b ? a : b;
+static void view_of_nat(enki_value a_v, enki_nat_view* v);
+static int enki_nat_cmp_v(enki_nat_view a_nv, enki_nat_view b_nv);
+static size_t min_s(size_t a_v, size_t b_v) {
+    return a_v < b_v ? a_v : b_v;
 }
-bool enki_nat_is_zero(enki_value x) {
-    enki_nat_view a_v;
-    view_of_nat(x, &a_v);
-    return (a_v.n_limbs == 0);
+bool enki_nat_is_zero(enki_value x_v) {
+    enki_nat_view a_nv;
+    view_of_nat(x_v, &a_nv);
+    return (a_nv.n_limbs_s == 0);
 }
-static void view_of_nat(enki_value a, enki_nat_view* v) {
-    if(IS_PTR(a)) {
-        enki_nat* nat = (enki_nat*)ENKI_TO_PTR(a);
+static void view_of_nat(enki_value a_v, enki_nat_view* v) {
+    if(IS_PTR(a_v)) {
+        enki_nat* nat = (enki_nat*)ENKI_TO_PTR(a_v);
         v->limbs = nat->limbs;
-        v->n_limbs = nat->n_limbs;
+        v->n_limbs_s = nat->n_limbs_s;
         return;        
     }
-    if(a == 0) {
+    if(a_v == 0) {
         v->limbs = v->small;
-        v->n_limbs = 0;
+        v->n_limbs_s = 0;
         return;
     }
-    v->small[0] = (mp_limb_t)a;
+    v->small[0] = (mp_limb_t)a_v;
     v->limbs = v->small;
-    v->n_limbs = 1;
+    v->n_limbs_s = 1;
 }
-int enki_nat_cmp(enki_value a, enki_value b) {
-    enki_nat_view a_v;
-    enki_nat_view b_v;
-    view_of_nat(a, &a_v);
-    view_of_nat(b, &b_v);
-    return enki_nat_cmp_v(a_v, b_v);
+int enki_nat_cmp(enki_value a_v, enki_value b_v) {
+    enki_nat_view a_nv;
+    enki_nat_view b_nv;
+    view_of_nat(a_v, &a_nv);
+    view_of_nat(b_v, &b_nv);
+    return enki_nat_cmp_v(a_nv, b_nv);
 }
-static int enki_nat_cmp_v(enki_nat_view a_v, enki_nat_view b_v) {
-    if(a_v.n_limbs != b_v.n_limbs) {
-        return (a_v.n_limbs > b_v.n_limbs) ? 1 : -1;
+static int enki_nat_cmp_v(enki_nat_view a_nv, enki_nat_view b_nv) {
+    if(a_nv.n_limbs_s != b_nv.n_limbs_s) {
+        return (a_nv.n_limbs_s > b_nv.n_limbs_s) ? 1 : -1;
     }
-    for(size_t k = a_v.n_limbs; k > 0; k--) {
-        size_t idx = k - 1;
-        if (a_v.limbs[idx] != b_v.limbs[idx]) {
-            return (a_v.limbs[idx] > b_v.limbs[idx]) ? 1 : -1;
+    for(size_t k_i = a_nv.n_limbs_s; k_i > 0; k_i--) {
+        size_t idx_i = k_i - 1;
+        if (a_nv.limbs[idx_i] != b_nv.limbs[idx_i]) {
+            return (a_nv.limbs[idx_i] > b_nv.limbs[idx_i]) ? 1 : -1;
         }
     }
     return 0;
 }
-enki_value enki_nat_eq(enki_value a, enki_value b) {
-    return (enki_nat_cmp(a, b) == 0) ? (enki_value)1 : (enki_value)0;
+enki_value enki_nat_eq(enki_value a_v, enki_value b_v) {
+    return (enki_nat_cmp(a_v, b_v) == 0) ? (enki_value)1 : (enki_value)0;
 }
-enki_value enki_nat_ne(enki_value a, enki_value b) {
-    return (enki_nat_cmp(a, b) != 0) ? (enki_value)1 : (enki_value)0;
+enki_value enki_nat_ne(enki_value a_v, enki_value b_v) {
+    return (enki_nat_cmp(a_v, b_v) != 0) ? (enki_value)1 : (enki_value)0;
 }
-enki_value enki_nat_lt(enki_value a, enki_value b) {
-    return (enki_nat_cmp(a, b) == -1) ? (enki_value)1 : (enki_value)0;
+enki_value enki_nat_lt(enki_value a_v, enki_value b_v) {
+    return (enki_nat_cmp(a_v, b_v) == -1) ? (enki_value)1 : (enki_value)0;
 }
-enki_value enki_nat_le(enki_value a, enki_value b) {
-    return (enki_nat_lt(a, b) || (enki_nat_eq(a, b))) ? (enki_value)1 : (enki_value)0;
+enki_value enki_nat_le(enki_value a_v, enki_value b_v) {
+    return (enki_nat_lt(a_v, b_v) || (enki_nat_eq(a_v, b_v))) ? (enki_value)1 : (enki_value)0;
 }
-enki_value enki_nat_gt(enki_value a, enki_value b) {
-    return (enki_nat_cmp(a, b) == 1) ? (enki_value)1 : (enki_value)0;
+enki_value enki_nat_gt(enki_value a_v, enki_value b_v) {
+    return (enki_nat_cmp(a_v, b_v) == 1) ? (enki_value)1 : (enki_value)0;
 }
-enki_value enki_nat_ge(enki_value a, enki_value b) {
-    return (enki_nat_gt(a, b) || (enki_nat_eq(a, b))) ? (enki_value)1 : (enki_value)0;
+enki_value enki_nat_ge(enki_value a_v, enki_value b_v) {
+    return (enki_nat_gt(a_v, b_v) || (enki_nat_eq(a_v, b_v))) ? (enki_value)1 : (enki_value)0;
 }
-enki_value enki_nat_inc(enki_gc* gc, enki_value a) {
-    enki_nat_view a_v;
-    view_of_nat(a, &a_v);
-    if(a_v.n_limbs == 0) return (enki_value)1;
-    mp_limb_t* out = gc->sys.alloc(gc->sys.ctx, sizeof(mp_limb_t) * (a_v.n_limbs + 1));
-    mp_limb_t carry = mpn_add_1(out, a_v.limbs, a_v.n_limbs, 1);
-    out[a_v.n_limbs] = carry;
-    return enki_alloc_nat(gc, out, a_v.n_limbs + 1);
+enki_value enki_nat_inc(enki_gc* gc, enki_value a_v) {
+    enki_nat_view a_nv;
+    view_of_nat(a_v, &a_nv);
+    if(a_nv.n_limbs_s == 0) return (enki_value)1;
+    mp_limb_t* out = gc->sys_a.alloc(gc->sys_a.ctx, sizeof(mp_limb_t) * (a_nv.n_limbs_s + 1));
+    mp_limb_t carry_q = mpn_add_1(out, a_nv.limbs, a_nv.n_limbs_s, 1);
+    out[a_nv.n_limbs_s] = carry_q;
+    return enki_alloc_nat(gc, out, a_nv.n_limbs_s + 1);
 }
-enki_value enki_nat_dec(enki_gc* gc, enki_value a) {
-    enki_nat_view a_v;
-    view_of_nat(a, &a_v);
-    if(a_v.n_limbs == 0) return (enki_value)0;
-    mp_limb_t* out = gc->sys.alloc(gc->sys.ctx, a_v.n_limbs * sizeof(mp_limb_t));
-    mpn_sub_1(out, a_v.limbs, a_v.n_limbs, 1);
-    return enki_alloc_nat(gc, out, a_v.n_limbs);   
+enki_value enki_nat_dec(enki_gc* gc, enki_value a_v) {
+    enki_nat_view a_nv;
+    view_of_nat(a_v, &a_nv);
+    if(a_nv.n_limbs_s == 0) return (enki_value)0;
+    mp_limb_t* out = gc->sys_a.alloc(gc->sys_a.ctx, a_nv.n_limbs_s * sizeof(mp_limb_t));
+    mpn_sub_1(out, a_nv.limbs, a_nv.n_limbs_s, 1);
+    return enki_alloc_nat(gc, out, a_nv.n_limbs_s);   
 }
-enki_value enki_nat_add(enki_gc* gc, enki_value a, enki_value b) {
-    enki_nat_view a_v;
-    enki_nat_view b_v;
-    view_of_nat(a, &a_v);
-    view_of_nat(b, &b_v);
-    if(a_v.n_limbs == 0) return b;
-    if(b_v.n_limbs == 0) return a;
-    if(a_v.n_limbs < b_v.n_limbs) {  
-        enki_nat_view temp = a_v;
-        a_v = b_v;
-        b_v = temp;
+enki_value enki_nat_add(enki_gc* gc, enki_value a_v, enki_value b_v) {
+    enki_nat_view a_nv;
+    enki_nat_view b_nv;
+    view_of_nat(a_v, &a_nv);
+    view_of_nat(b_v, &b_nv);
+    if(a_nv.n_limbs_s == 0) return b_v;
+    if(b_nv.n_limbs_s == 0) return a_v;
+    if(a_nv.n_limbs_s < b_nv.n_limbs_s) {  
+        enki_nat_view temp = a_nv;
+        a_nv = b_nv;
+        b_nv = temp;
     }
-    size_t n = a_v.n_limbs > b_v.n_limbs ? a_v.n_limbs + 1 : b_v.n_limbs + 1;
-    mp_limb_t* out = gc->sys.alloc(gc->sys.ctx, sizeof(mp_limb_t) * n);
-    mp_limb_t carry = mpn_add(out, a_v.limbs, a_v.n_limbs, b_v.limbs, b_v.n_limbs);
-    out[n - 1] = carry;
-    return enki_alloc_nat(gc, out, n);
+    size_t n_s = a_nv.n_limbs_s > b_nv.n_limbs_s ? a_nv.n_limbs_s + 1 : b_nv.n_limbs_s + 1;
+    mp_limb_t* out = gc->sys_a.alloc(gc->sys_a.ctx, sizeof(mp_limb_t) * n_s);
+    mp_limb_t carry_q = mpn_add(out, a_nv.limbs, a_nv.n_limbs_s, b_nv.limbs, b_nv.n_limbs_s);
+    out[n_s - 1] = carry_q;
+    return enki_alloc_nat(gc, out, n_s);
 }
-enki_value enki_nat_sub(enki_gc* gc, enki_value a, enki_value b) {
-    enki_nat_view a_v;
-    enki_nat_view b_v;
-    view_of_nat(a, &a_v);
-    view_of_nat(b, &b_v);
-    if(a_v.n_limbs == 0) return (enki_value)0; // no negatives 
-    if(b_v.n_limbs == 0) return a;
-    if(enki_nat_cmp_v(a_v, b_v) < 0) return (enki_value)0; // a < b 
-    mp_limb_t* out = gc->sys.alloc(gc->sys.ctx, a_v.n_limbs * sizeof(mp_limb_t));
-    mpn_sub(out, a_v.limbs, a_v.n_limbs, b_v.limbs, b_v.n_limbs);
-    return enki_alloc_nat(gc, out, a_v.n_limbs);
+enki_value enki_nat_sub(enki_gc* gc, enki_value a_v, enki_value b_v) {
+    enki_nat_view a_nv;
+    enki_nat_view b_nv;
+    view_of_nat(a_v, &a_nv);
+    view_of_nat(b_v, &b_nv);
+    if(a_nv.n_limbs_s == 0) return (enki_value)0; // no negatives 
+    if(b_nv.n_limbs_s == 0) return a_v;
+    if(enki_nat_cmp_v(a_nv, b_nv) < 0) return (enki_value)0; // a_v < b_v 
+    mp_limb_t* out = gc->sys_a.alloc(gc->sys_a.ctx, a_nv.n_limbs_s * sizeof(mp_limb_t));
+    mpn_sub(out, a_nv.limbs, a_nv.n_limbs_s, b_nv.limbs, b_nv.n_limbs_s);
+    return enki_alloc_nat(gc, out, a_nv.n_limbs_s);
 }
-enki_value enki_nat_mul(enki_gc* gc, enki_value a, enki_value b) {
-    enki_nat_view a_v;
-    enki_nat_view b_v;
-    view_of_nat(a, &a_v);
-    view_of_nat(b, &b_v);
-    if(a_v.n_limbs == 0 || b_v.n_limbs == 0) return (enki_value)0;
-    size_t n = (a_v.n_limbs + b_v.n_limbs);
-    mp_limb_t* out = gc->sys.alloc(gc->sys.ctx, n * sizeof(mp_limb_t));
-    if(a_v.n_limbs > b_v.n_limbs) {
-        mpn_mul(out, a_v.limbs, a_v.n_limbs, b_v.limbs, b_v.n_limbs);
+enki_value enki_nat_mul(enki_gc* gc, enki_value a_v, enki_value b_v) {
+    enki_nat_view a_nv;
+    enki_nat_view b_nv;
+    view_of_nat(a_v, &a_nv);
+    view_of_nat(b_v, &b_nv);
+    if(a_nv.n_limbs_s == 0 || b_nv.n_limbs_s == 0) return (enki_value)0;
+    size_t n_s = (a_nv.n_limbs_s + b_nv.n_limbs_s);
+    mp_limb_t* out = gc->sys_a.alloc(gc->sys_a.ctx, n_s * sizeof(mp_limb_t));
+    if(a_nv.n_limbs_s > b_nv.n_limbs_s) {
+        mpn_mul(out, a_nv.limbs, a_nv.n_limbs_s, b_nv.limbs, b_nv.n_limbs_s);
     }
     else {
-        mpn_mul(out, b_v.limbs, b_v.n_limbs, a_v.limbs, a_v.n_limbs);
+        mpn_mul(out, b_nv.limbs, b_nv.n_limbs_s, a_nv.limbs, a_nv.n_limbs_s);
     }
-    return enki_alloc_nat(gc, out, n);
+    return enki_alloc_nat(gc, out, n_s);
 }
-enki_value enki_nat_div(enki_gc* gc, enki_value a, enki_value b) {
-    enki_nat_view a_v;
-    enki_nat_view b_v;
-    view_of_nat(a, &a_v);
-    view_of_nat(b, &b_v);
-    if(b_v.n_limbs == 0) exit(1); // TODO: temporoary until we have throw 
-    if(enki_nat_cmp_v(a_v, b_v) == -1) return (enki_value)0;
-    size_t q_len = a_v.n_limbs - b_v.n_limbs + 1;
-    mp_limb_t* Q = gc->sys.alloc(gc->sys.ctx, q_len * sizeof(mp_limb_t));
-    mp_limb_t* R = gc->sys.alloc(gc->sys.ctx, b_v.n_limbs * sizeof(mp_limb_t));
-    mpn_tdiv_qr(Q, R, 0, a_v.limbs, a_v.n_limbs, b_v.limbs, b_v.n_limbs);
-    gc->sys.free(gc->sys.ctx, R);
-    return enki_alloc_nat(gc, Q, q_len);
+enki_value enki_nat_div(enki_gc* gc, enki_value a_v, enki_value b_v) {
+    enki_nat_view a_nv;
+    enki_nat_view b_nv;
+    view_of_nat(a_v, &a_nv);
+    view_of_nat(b_v, &b_nv);
+    if(b_nv.n_limbs_s == 0) exit(1); // TODO: temporoary until we have throw 
+    if(enki_nat_cmp_v(a_nv, b_nv) == -1) return (enki_value)0;
+    size_t q_len_s = a_nv.n_limbs_s - b_nv.n_limbs_s + 1;
+    mp_limb_t* Q = gc->sys_a.alloc(gc->sys_a.ctx, q_len_s * sizeof(mp_limb_t));
+    mp_limb_t* R = gc->sys_a.alloc(gc->sys_a.ctx, b_nv.n_limbs_s * sizeof(mp_limb_t));
+    mpn_tdiv_qr(Q, R, 0, a_nv.limbs, a_nv.n_limbs_s, b_nv.limbs, b_nv.n_limbs_s);
+    gc->sys_a.free(gc->sys_a.ctx, R);
+    return enki_alloc_nat(gc, Q, q_len_s);
 }
-enki_value enki_nat_mod(enki_gc* gc, enki_value a, enki_value b) {
-    enki_nat_view a_v;
-    enki_nat_view b_v;
-    view_of_nat(a, &a_v);
-    view_of_nat(b, &b_v);
-    if(b_v.n_limbs == 0) exit(1); // TODO: temporoary until we have throw 
-    if(enki_nat_cmp_v(a_v, b_v) == -1) return a;
-    size_t q_len = a_v.n_limbs - b_v.n_limbs + 1;
-    mp_limb_t* Q = gc->sys.alloc(gc->sys.ctx, q_len * sizeof(mp_limb_t));
-    mp_limb_t* R = gc->sys.alloc(gc->sys.ctx, b_v.n_limbs * sizeof(mp_limb_t));
-    mpn_tdiv_qr(Q, R, 0, a_v.limbs, a_v.n_limbs, b_v.limbs, b_v.n_limbs);
-    gc->sys.free(gc->sys.ctx, Q);
-    return enki_alloc_nat(gc, R, b_v.n_limbs);
+enki_value enki_nat_mod(enki_gc* gc, enki_value a_v, enki_value b_v) {
+    enki_nat_view a_nv;
+    enki_nat_view b_nv;
+    view_of_nat(a_v, &a_nv);
+    view_of_nat(b_v, &b_nv);
+    if(b_nv.n_limbs_s == 0) exit(1); // TODO: temporoary until we have throw 
+    if(enki_nat_cmp_v(a_nv, b_nv) == -1) return a_v;
+    size_t q_len_s = a_nv.n_limbs_s - b_nv.n_limbs_s + 1;
+    mp_limb_t* Q = gc->sys_a.alloc(gc->sys_a.ctx, q_len_s * sizeof(mp_limb_t));
+    mp_limb_t* R = gc->sys_a.alloc(gc->sys_a.ctx, b_nv.n_limbs_s * sizeof(mp_limb_t));
+    mpn_tdiv_qr(Q, R, 0, a_nv.limbs, a_nv.n_limbs_s, b_nv.limbs, b_nv.n_limbs_s);
+    gc->sys_a.free(gc->sys_a.ctx, Q);
+    return enki_alloc_nat(gc, R, b_nv.n_limbs_s);
 }
 // lower bits to higher posistions 
-enki_value enki_nat_lsh(enki_gc* gc, enki_value a, enki_value shift) {
-    enki_nat_view a_v;
-    view_of_nat(a, &a_v);
-    if(IS_PTR(shift)) exit(1); // temp 
-    if(shift == 0) return a;
-    size_t word_shift = (size_t)shift / 64;
-    size_t bit_shift = (size_t)shift % 64;
-    size_t n = (a_v.n_limbs + word_shift + 1);
-    mp_limb_t* out = gc->sys.alloc(gc->sys.ctx, n * sizeof(mp_limb_t));
-    memset(out, 0, n * sizeof(mp_limb_t));
-    if(bit_shift == 0) {
-        memcpy(out + word_shift, a_v.limbs, a_v.n_limbs * sizeof(mp_limb_t));
-        return enki_alloc_nat(gc, out, n - 1);
+enki_value enki_nat_lsh(enki_gc* gc, enki_value a_v, enki_value shift_v) {
+    enki_nat_view a_nv;
+    view_of_nat(a_v, &a_nv);
+    if(IS_PTR(shift_v)) exit(1); // temp 
+    if(shift_v == 0) return a_v;
+    size_t word_shift_s = (size_t)shift_v / 64;
+    size_t bit_shift_s = (size_t)shift_v % 64;
+    size_t n_s = (a_nv.n_limbs_s + word_shift_s + 1);
+    mp_limb_t* out = gc->sys_a.alloc(gc->sys_a.ctx, n_s * sizeof(mp_limb_t));
+    memset(out, 0, n_s * sizeof(mp_limb_t));
+    if(bit_shift_s == 0) {
+        memcpy(out + word_shift_s, a_nv.limbs, a_nv.n_limbs_s * sizeof(mp_limb_t));
+        return enki_alloc_nat(gc, out, n_s - 1);
     }
-    mp_limb_t carry = mpn_lshift(out + word_shift, a_v.limbs, a_v.n_limbs, (unsigned int)bit_shift);
-    out[n - 1] = carry;
-    return enki_alloc_nat(gc, out, n);
+    mp_limb_t carry_q = mpn_lshift(out + word_shift_s, a_nv.limbs, a_nv.n_limbs_s, (unsigned int)bit_shift_s);
+    out[n_s - 1] = carry_q;
+    return enki_alloc_nat(gc, out, n_s);
 }
 // higher order bits to lower positions 
-enki_value enki_nat_rsh(enki_gc* gc, enki_value a, enki_value shift) {
-    enki_nat_view a_v;
-    view_of_nat(a, &a_v);
-    if(IS_PTR(shift)) exit(1); // temp 
-    if(shift == 0) return a;
-    size_t word_shift = (size_t)shift / 64;
-    size_t bit_shift = (size_t)shift % 64;
-    if(word_shift >= a_v.n_limbs) return (enki_value)0;
-    const mp_limb_t* src = a_v.limbs + word_shift;
-    size_t n_src = (a_v.n_limbs - word_shift);
-    size_t n = n_src * sizeof(mp_limb_t);
-    mp_limb_t* out = gc->sys.alloc(gc->sys.ctx, n);
-    memset(out, 0, n);
-    if(bit_shift == 0) {
-        memcpy(out, src, n);
-        return enki_alloc_nat(gc, out, n_src);
+enki_value enki_nat_rsh(enki_gc* gc, enki_value a_v, enki_value shift_v) {
+    enki_nat_view a_nv;
+    view_of_nat(a_v, &a_nv);
+    if(IS_PTR(shift_v)) exit(1); // temp 
+    if(shift_v == 0) return a_v;
+    size_t word_shift_s = (size_t)shift_v / 64;
+    size_t bit_shift_s = (size_t)shift_v % 64;
+    if(word_shift_s >= a_nv.n_limbs_s) return (enki_value)0;
+    const mp_limb_t* src = a_nv.limbs + word_shift_s;
+    size_t n_src_s = (a_nv.n_limbs_s - word_shift_s);
+    size_t n_s = n_src_s * sizeof(mp_limb_t);
+    mp_limb_t* out = gc->sys_a.alloc(gc->sys_a.ctx, n_s);
+    memset(out, 0, n_s);
+    if(bit_shift_s == 0) {
+        memcpy(out, src, n_s);
+        return enki_alloc_nat(gc, out, n_src_s);
     }
-    mpn_rshift(out, src, n_src, (unsigned int)bit_shift);
-    return enki_alloc_nat(gc, out, n_src);
+    mpn_rshift(out, src, n_src_s, (unsigned int)bit_shift_s);
+    return enki_alloc_nat(gc, out, n_src_s);
 }
-enki_value enki_nat_bex(enki_gc* gc, enki_value bit) {
-    if(IS_PTR(bit)) exit(1); // temp 
-    size_t word_off = (size_t)bit / 64;
-    size_t bit_off = (size_t)bit % 64;
-    size_t n = word_off + 1;
-    mp_limb_t* out = gc->sys.alloc(gc->sys.ctx, n * sizeof(mp_limb_t));
-    memset(out, 0, n * sizeof(mp_limb_t));
-    out[word_off] = ((mp_limb_t)1 << bit_off);
-    return enki_alloc_nat(gc, out, n);
+enki_value enki_nat_bex(enki_gc* gc, enki_value bit_v) {
+    if(IS_PTR(bit_v)) exit(1); // temp 
+    size_t word_off_o = (size_t)bit_v / 64;
+    size_t bit_off_o = (size_t)bit_v % 64;
+    size_t n_s = word_off_o + 1;
+    mp_limb_t* out = gc->sys_a.alloc(gc->sys_a.ctx, n_s * sizeof(mp_limb_t));
+    memset(out, 0, n_s * sizeof(mp_limb_t));
+    out[word_off_o] = ((mp_limb_t)1 << bit_off_o);
+    return enki_alloc_nat(gc, out, n_s);
 }
-enki_value enki_nat_test(enki_gc* gc, enki_value bit, enki_value a) {
+enki_value enki_nat_test(enki_gc* gc, enki_value bit_v, enki_value a_v) {
     (void)gc;
-    enki_nat_view a_v;
-    view_of_nat(a, &a_v);
-    if(IS_PTR(bit)) exit(1); // temp 
-    size_t word_off = (size_t)bit / 64;
-    size_t bit_off = (size_t)bit % 64; 
-    if(word_off >= a_v.n_limbs) return (enki_value)0;
-    size_t res = (a_v.limbs[word_off] & ((mp_limb_t)1 << bit_off)); 
-    return res != 0 ? (enki_value)1 : (enki_value)0;
+    enki_nat_view a_nv;
+    view_of_nat(a_v, &a_nv);
+    if(IS_PTR(bit_v)) exit(1); // temp 
+    size_t word_off_o = (size_t)bit_v / 64;
+    size_t bit_off_o = (size_t)bit_v % 64; 
+    if(word_off_o >= a_nv.n_limbs_s) return (enki_value)0;
+    size_t res_v = (a_nv.limbs[word_off_o] & ((mp_limb_t)1 << bit_off_o)); 
+    return res_v != 0 ? (enki_value)1 : (enki_value)0;
 }
-enki_value enki_nat_set(enki_gc* gc, enki_value bit, enki_value a) {
-    enki_nat_view a_v;
-    view_of_nat(a, &a_v);
-    if(IS_PTR(bit)) exit(1); // temp 
-    size_t word_off = (size_t)bit / 64;
-    size_t bit_off = (size_t)bit % 64; 
-    size_t n = word_off + 1;
-    if(n < a_v.n_limbs) n = a_v.n_limbs;
-    mp_limb_t* out = gc->sys.alloc(gc->sys.ctx, n * sizeof(mp_limb_t));
-    memset(out, 0, n * sizeof(mp_limb_t));
-    memcpy(out, a_v.limbs, a_v.n_limbs * sizeof(mp_limb_t));
-    out[word_off] = out[word_off] |= ((mp_limb_t)1 << bit_off);
-    return enki_alloc_nat(gc, out, n);
+enki_value enki_nat_set(enki_gc* gc, enki_value bit_v, enki_value a_v) {
+    enki_nat_view a_nv;
+    view_of_nat(a_v, &a_nv);
+    if(IS_PTR(bit_v)) exit(1); // temp 
+    size_t word_off_o = (size_t)bit_v / 64;
+    size_t bit_off_o = (size_t)bit_v % 64; 
+    size_t n_s = word_off_o + 1;
+    if(n_s < a_nv.n_limbs_s) n_s = a_nv.n_limbs_s;
+    mp_limb_t* out = gc->sys_a.alloc(gc->sys_a.ctx, n_s * sizeof(mp_limb_t));
+    memset(out, 0, n_s * sizeof(mp_limb_t));
+    memcpy(out, a_nv.limbs, a_nv.n_limbs_s * sizeof(mp_limb_t));
+    out[word_off_o] = out[word_off_o] |= ((mp_limb_t)1 << bit_off_o);
+    return enki_alloc_nat(gc, out, n_s);
 }
-enki_value enki_nat_clear(enki_gc* gc, enki_value bit, enki_value a) {
-    enki_nat_view a_v;
-    view_of_nat(a, &a_v);
-    if(IS_PTR(bit)) exit(1); // temp 
-    size_t word_off = (size_t)bit / 64;
-    size_t bit_off = (size_t)bit % 64; 
-    size_t n = word_off + 1;
-    if(n < a_v.n_limbs) n = a_v.n_limbs;
-    mp_limb_t* out = gc->sys.alloc(gc->sys.ctx, n * sizeof(mp_limb_t));
-    memset(out, 0, n * sizeof(mp_limb_t));
-    memcpy(out, a_v.limbs, a_v.n_limbs * sizeof(mp_limb_t));
-    out[word_off] = out[word_off] & ~((mp_limb_t)1 << bit_off);
-    return enki_alloc_nat(gc, out, n);
+enki_value enki_nat_clear(enki_gc* gc, enki_value bit_v, enki_value a_v) {
+    enki_nat_view a_nv;
+    view_of_nat(a_v, &a_nv);
+    if(IS_PTR(bit_v)) exit(1); // temp 
+    size_t word_off_o = (size_t)bit_v / 64;
+    size_t bit_off_o = (size_t)bit_v % 64; 
+    size_t n_s = word_off_o + 1;
+    if(n_s < a_nv.n_limbs_s) n_s = a_nv.n_limbs_s;
+    mp_limb_t* out = gc->sys_a.alloc(gc->sys_a.ctx, n_s * sizeof(mp_limb_t));
+    memset(out, 0, n_s * sizeof(mp_limb_t));
+    memcpy(out, a_nv.limbs, a_nv.n_limbs_s * sizeof(mp_limb_t));
+    out[word_off_o] = out[word_off_o] & ~((mp_limb_t)1 << bit_off_o);
+    return enki_alloc_nat(gc, out, n_s);
 }
-enki_value enki_nat_bits(enki_gc* gc, enki_value a) {
+enki_value enki_nat_bits(enki_gc* gc, enki_value a_v) {
     (void)gc;
-    enki_nat_view a_v;
-    view_of_nat(a, &a_v);
-    if(a_v.n_limbs == 0) return (enki_value)0;
-    mp_limb_t top_limb = a_v.limbs[a_v.n_limbs - 1];
-    size_t top = top_limb == 0 ? 0 : (64u - (size_t)__builtin_clzl(top_limb));
-    return (enki_value)(top + ((a_v.n_limbs - 1) * 64));
+    enki_nat_view a_nv;
+    view_of_nat(a_v, &a_nv);
+    if(a_nv.n_limbs_s == 0) return (enki_value)0;
+    mp_limb_t top_limb_q = a_nv.limbs[a_nv.n_limbs_s - 1];
+    size_t top_s = top_limb_q == 0 ? 0 : (64u - (size_t)__builtin_clzl(top_limb_q));
+    return (enki_value)(top_s + ((a_nv.n_limbs_s - 1) * 64));
 }
-enki_value enki_nat_bytes(enki_gc* gc, enki_value a) {
-    return (enki_value)((enki_nat_bits(gc, a) + 7)/8);
+enki_value enki_nat_bytes(enki_gc* gc, enki_value a_v) {
+    return (enki_value)((enki_nat_bits(gc, a_v) + 7)/8);
 }
-enki_value enki_nat_trunc(enki_gc* gc, enki_value width, enki_value a) {
-    if(IS_PTR(width)) exit(1); // temp 
-    enki_nat_view a_v;
-    view_of_nat(a, &a_v);
-    if(a_v.n_limbs == 0) return (enki_value)0;
-    size_t word_off = (size_t)width / 64;
-    size_t bit_off = (size_t)width % 64; 
-    size_t n = bit_off != 0 ? word_off + 1 : word_off;
-    size_t keep = min(a_v.n_limbs, n);
-    if(keep == 0) return (enki_value)0;
-    mp_limb_t* out = gc->sys.alloc(gc->sys.ctx, keep * sizeof(mp_limb_t));
-    memcpy(out, a_v.limbs, keep * sizeof(mp_limb_t));
-    if(bit_off == 0) {
-        return enki_alloc_nat(gc, out, keep);
+enki_value enki_nat_trunc(enki_gc* gc, enki_value width_v, enki_value a_v) {
+    if(IS_PTR(width_v)) exit(1); // temp 
+    enki_nat_view a_nv;
+    view_of_nat(a_v, &a_nv);
+    if(a_nv.n_limbs_s == 0) return (enki_value)0;
+    size_t word_off_o = (size_t)width_v / 64;
+    size_t bit_off_o = (size_t)width_v % 64; 
+    size_t n_s = bit_off_o != 0 ? word_off_o + 1 : word_off_o;
+    size_t keep_s = min_s(a_nv.n_limbs_s, n_s);
+    if(keep_s == 0) return (enki_value)0;
+    mp_limb_t* out = gc->sys_a.alloc(gc->sys_a.ctx, keep_s * sizeof(mp_limb_t));
+    memcpy(out, a_nv.limbs, keep_s * sizeof(mp_limb_t));
+    if(bit_off_o == 0) {
+        return enki_alloc_nat(gc, out, keep_s);
     }
-    if(keep == n) {
-        out[keep - 1] = (out[keep - 1] & (((mp_limb_t)1ULL << bit_off) - 1));
+    if(keep_s == n_s) {
+        out[keep_s - 1] = (out[keep_s - 1] & (((mp_limb_t)1ULL << bit_off_o) - 1));
     }
-    return enki_alloc_nat(gc, out, keep);
+    return enki_alloc_nat(gc, out, keep_s);
 }
-enki_value enki_nat_trunc8(enki_gc* gc, enki_value a) {
-    return enki_nat_trunc(gc, 8, a);
+enki_value enki_nat_trunc8(enki_gc* gc, enki_value a_v) {
+    return enki_nat_trunc(gc, 8, a_v);
 }
-enki_value enki_nat_trunc16(enki_gc* gc, enki_value a) {
-    return enki_nat_trunc(gc, 16, a);
+enki_value enki_nat_trunc16(enki_gc* gc, enki_value a_v) {
+    return enki_nat_trunc(gc, 16, a_v);
 }
-enki_value enki_nat_trunc32(enki_gc* gc, enki_value a) {
-    return enki_nat_trunc(gc, 32, a);
+enki_value enki_nat_trunc32(enki_gc* gc, enki_value a_v) {
+    return enki_nat_trunc(gc, 32, a_v);
 }
-enki_value enki_nat_trunc64(enki_gc* gc, enki_value a) {
-    return enki_nat_trunc(gc, 64, a);
+enki_value enki_nat_trunc64(enki_gc* gc, enki_value a_v) {
+    return enki_nat_trunc(gc, 64, a_v);
 }
-enki_value enki_nat_load8(enki_gc* gc, enki_value index, enki_value a) {
+enki_value enki_nat_load8(enki_gc* gc, enki_value index_i, enki_value a_v) {
     (void)gc;
-    if(IS_PTR(index)) exit(1); // temp 
-    enki_nat_view a_v;
-    view_of_nat(a, &a_v);
+    if(IS_PTR(index_i)) exit(1); // temp 
+    enki_nat_view a_nv;
+    view_of_nat(a_v, &a_nv);
     // sizeof(mp_limb_t) = 8 for my machine 
-    size_t limb_index = (size_t)index / sizeof(mp_limb_t);
-    size_t byte_offset = (size_t)index % sizeof(mp_limb_t);
-    if(a_v.n_limbs <= limb_index) return (enki_value)0;
-    mp_limb_t limb = a_v.limbs[limb_index];
-    return (enki_value)((limb >> (byte_offset * 8)) & ((1 << 8) - 1));
+    size_t limb_index_i = (size_t)index_i / sizeof(mp_limb_t);
+    size_t byte_offset_o = (size_t)index_i % sizeof(mp_limb_t);
+    if(a_nv.n_limbs_s <= limb_index_i) return (enki_value)0;
+    mp_limb_t limb_q = a_nv.limbs[limb_index_i];
+    return (enki_value)((limb_q >> (byte_offset_o * 8)) & ((1 << 8) - 1));
 }
-enki_value enki_nat_store8(enki_gc* gc, enki_value index, enki_value byte, enki_value a) {
-    if(IS_PTR(index)) exit(1); // temp 
-    if(IS_PTR(byte)) exit(1);
-    enki_nat_view a_v;
-    view_of_nat(a, &a_v);
-    size_t limb_index = (size_t)index / sizeof(mp_limb_t);
-    size_t byte_offset = (size_t)index % sizeof(mp_limb_t);
-    size_t n = a_v.n_limbs <= limb_index ? limb_index + 1 : a_v.n_limbs;
-    mp_limb_t* out = gc->sys.alloc(gc->sys.ctx, n * sizeof(mp_limb_t));
-    memset(out, 0, n * sizeof(mp_limb_t));
-    memcpy(out, a_v.limbs, a_v.n_limbs * sizeof(mp_limb_t));
-    mp_limb_t mask = (mp_limb_t)~(0xFFULL << (byte_offset * 8)); 
-    mp_limb_t byte_bits = (mp_limb_t)(byte & 0xFF) << (byte_offset * 8);
-    out[limb_index] = (out[limb_index] & mask) | byte_bits;
-    return enki_alloc_nat(gc, out, n);
+enki_value enki_nat_store8(enki_gc* gc, enki_value index_i, enki_value byte_b, enki_value a_v) {
+    if(IS_PTR(index_i)) exit(1); // temp 
+    if(IS_PTR(byte_b)) exit(1);
+    enki_nat_view a_nv;
+    view_of_nat(a_v, &a_nv);
+    size_t limb_index_i = (size_t)index_i / sizeof(mp_limb_t);
+    size_t byte_offset_o = (size_t)index_i % sizeof(mp_limb_t);
+    size_t n_s = a_nv.n_limbs_s <= limb_index_i ? limb_index_i + 1 : a_nv.n_limbs_s;
+    mp_limb_t* out = gc->sys_a.alloc(gc->sys_a.ctx, n_s * sizeof(mp_limb_t));
+    memset(out, 0, n_s * sizeof(mp_limb_t));
+    memcpy(out, a_nv.limbs, a_nv.n_limbs_s * sizeof(mp_limb_t));
+    mp_limb_t mask_q = (mp_limb_t)~(0xFFULL << (byte_offset_o * 8)); 
+    mp_limb_t byte_bits_q = (mp_limb_t)(byte_b & 0xFF) << (byte_offset_o * 8);
+    out[limb_index_i] = (out[limb_index_i] & mask_q) | byte_bits_q;
+    return enki_alloc_nat(gc, out, n_s);
 }
-enki_value enki_nat_nib(enki_gc* gc, enki_value index, enki_value a) {
+enki_value enki_nat_nib(enki_gc* gc, enki_value index_i, enki_value a_v) {
     (void)gc;
-    if(IS_PTR(index)) exit(1); // temp 
-    enki_nat_view a_v;
-    view_of_nat(a, &a_v);
-    size_t limb_index = index/16;
-    size_t shift = (index % 16) * 4;
-    if (limb_index >= a_v.n_limbs) return (enki_value)0;
-    return (enki_value)((a_v.limbs[limb_index] >> shift) & 0x0F);
+    if(IS_PTR(index_i)) exit(1); // temp 
+    enki_nat_view a_nv;
+    view_of_nat(a_v, &a_nv);
+    size_t limb_index_i = index_i/16;
+    size_t shift_v = (index_i % 16) * 4;
+    if (limb_index_i >= a_nv.n_limbs_s) return (enki_value)0;
+    return (enki_value)((a_nv.limbs[limb_index_i] >> shift_v) & 0x0F);
 }

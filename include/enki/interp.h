@@ -144,18 +144,18 @@ typedef enum {
 typedef struct {
     enki_value law;
     size_t pc;
-    size_t res_base;
-    size_t arg_base;
-    enki_value cont;
+    size_t res_base_s;
+    size_t arg_base_s;
+    enki_value cont_v;
 } enki_frame;
 
 typedef struct enki_interpreter {
     size_t sp;
-    enki_value stack[STACK_MAX];
+    enki_value stack_v[STACK_MAX];
     size_t fp;
     enki_frame frame[FRAME_MAX];
     enki_gc* gc;
-    enki_allocator sys;
+    enki_allocator sys_a;
     bool halted; 
 } enki_interpreter;
 
@@ -166,4 +166,4 @@ void enki_halt(enki_interpreter* i);
 void enki_destroy(enki_interpreter* i);
 enki_value enki_eval_whnf(enki_interpreter* i, enki_value x);
 enki_value enki_eval_nf(enki_interpreter* i, enki_value x);
-enki_interpreter* enki_create_interp(enki_allocator sys, size_t heap, enki_value law);
+enki_interpreter* enki_create_interp(enki_allocator sys_a, size_t heap, enki_value law);
