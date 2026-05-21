@@ -32,6 +32,7 @@ stdenv.mkDerivation {
 
   dontConfigure = true;
   enableParallelBuilding = true;
+  hardeningDisable = lib.optional (buildType == "debug") "fortify";
 
   buildPhase = ''
     runHook preBuild

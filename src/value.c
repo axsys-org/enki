@@ -9,6 +9,9 @@ void enki_trace_value(enki_gc* gc, void* obj) {
         case ENKI_PIN:
           enki_pin* pin = obj;
           pin->inner = gc->copy(gc, pin->inner);
+          for(size_t k = 0; k < pin->n_subpins; k++) {
+            pin->subpins[k] = gc->copy(gc, pin->subpins[k]);
+          }
           break;
         case ENKI_LAW:
           enki_law* law = obj;
@@ -63,6 +66,30 @@ enki_value enki_alloc_law(enki_gc* gc, size_t arity, enki_value name, enki_value
     if(bc_len > 0) memcpy(new->data + const_off, bc, bc_len);
     return PTR_TO_ENKI(new);
 }
+
+enki_value enki_alloc_nat(enki_gc* gc, mp_limb_t* out, size_t n_limbs) {
+    size_t n = n_limbs;
+    while (n > 0 && out[n - 1] == 0) {
+        n--;
+    }
+    if(n == 0) {
+      gc->sys.free(out);
+      return (enki_value)0;
+    }
+    if(n == 1 && out[n - 1] < (1ULL << 63)) {
+        size_t size = sizeof(enki_nat) + (sizeof(mp_limb_t) * n);
+        enki_nat* nat = (enki_nat*)gc->alloc(gc, size);
+        nat->h.size = size;
+        nat->h.kind = ENKI_BIG_NAT;
+        nat->n_limbs = n;
+        memcpy(nat->limbs, out, n * sizeof(mp_limb_t));
+        gc->sys.free(out);
+        return PTR_TO_ENKI(nat);
+    }
+    gc->sys.free(out);
+    return (enki_value)out[0];
+}
+
 enki_value enki_alloc_pin(enki_gc* gc, const 
     uint8_t hash[32], enki_value inner, size_t n_subpins, enki_value subpins[]) {
     size_t n = sizeof(enki_pin) + (n_subpins * sizeof(enki_value));

@@ -1,7 +1,27 @@
 #include "compiler.h"
-#define SYS_MKPIN ((OP_OP0 << 8) | 0x00)
-#define SYS_MKLAW ((OP_OP0 << 8) | 0x01)
-#define SYS_MATCH  ((OP_OP0 << 8) | 0x02)
+
+static const enki_prim_spec* enki_lookup_prim(enki_value id) {
+    size_t n = sizeof(ENKI_PRIMS) / sizeof(ENKI_PRIMS[0]);
+    for(size_t k = 0; k < n; k++) {
+        if(ENKI_PRIMS[k].id == id) {
+            return &ENKI_PRIMS[k];
+        }
+    }
+    return NULL;
+}
+
+static void enki_emit_prim(const enki_prim_spec* prim, enki_vector* bc) {
+    if(prim->group == ENKI_PRIM_GROUP_OP0) {
+        enki_vector_push_u8(bc, OP_OP0);
+    }
+    else if(prim->group == ENKI_PRIM_GROUP_OP66) {
+        enki_vector_push_u8(bc, OP_OP66);
+    }
+    else {
+        return;
+    }
+    enki_vector_push_u8(bc, prim->subop);
+}
 
 void enki_compile_value(enki_value body, uint32_t depth, enki_vector* bc, enki_vector* const_table) {
   if(!IS_PTR(body) && body <= depth) {
@@ -19,32 +39,20 @@ void enki_compile_value(enki_value body, uint32_t depth, enki_vector* bc, enki_v
   }
   else {
     enki_app* app = (enki_app*)ptr;
-    if(!IS_PTR(app->fn) && app->fn == SYS_MKLAW) {
+    const enki_prim_spec* prim = enki_lookup_prim(app->fn);
+    if(prim != NULL && app->n_args == prim->arity) {
       enki_compile_args(app, depth, bc, const_table);
-      enki_vector_push_u8(bc, OP_OP0);
-      enki_vector_push_u8(bc, 0x00);
+      enki_emit_prim(prim, bc);
+      return;
     }
-    else if(!IS_PTR(app->fn) && app->fn == SYS_MKPIN){
-      enki_compile_args(app, depth, bc, const_table);
-      enki_vector_push_u8(bc, OP_OP0);
-      enki_vector_push_u8(bc, 0x01);
-    }
-    else if(!IS_PTR(app->fn) && app->fn == SYS_MATCH) {
-      enki_compile_args(app, depth, bc, const_table);
-      enki_vector_push_u8(bc, OP_OP0);
-      enki_vector_push_u8(bc, 0x02);
-    }
-    else {
-      enki_compile_value(app->fn, depth, bc, const_table);
-      enki_compile_args(app, depth, bc, const_table);
-      enki_vector_push_u8(bc, OP_APPLY);
-      enki_vector_push_u8(bc, (uint8_t)app->n_args); // cant exceed 255 yet
-    }
+    enki_compile_value(app->fn, depth, bc, const_table);
+    enki_compile_args(app, depth, bc, const_table);
+    enki_vector_push_u8(bc, OP_APPLY);
+    enki_vector_push_u8(bc, (uint8_t)app->n_args);
   }
 }
 
-void compile_args(enki_app* app, size_t depth, enki_vector* bc, enki_vector* const_table) {
-
+void enki_compile_args(enki_app* app, size_t depth, enki_vector* bc, enki_vector* const_table) {
    for(uint8_t k = 0; k < (uint8_t)app->n_args; k++) { // cant exceed 255 yet
       enki_compile_value(app->args[k], depth, bc, const_table);
     }

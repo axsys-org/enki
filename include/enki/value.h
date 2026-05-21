@@ -25,15 +25,24 @@ typedef enum {
     ENKI_CONT,
 } TAGS;
 
+typedef enum {
+    WFNF,
+    NF,
+    THUNK,
+} STATES;
+
 typedef struct {
     uint8_t kind;
     size_t size;
+    uint8_t state;
 } obj_header;
 
 typedef struct {
     obj_header h; 
     uint8_t hash[32];
     enki_value inner;
+    size_t n_subpins;
+    enki_value subpins[];
 } enki_pin;
 
 typedef struct {
@@ -68,7 +77,7 @@ typedef struct {
 
 void enki_trace_value(enki_gc* gc, void* obj);
 
-enki_value enki_alloc_nat(enki_gc* gc, size_t n_limbs, mp_limb_t limbs[]);
+enki_value enki_alloc_nat(enki_gc* gc, mp_limb_t* out, size_t n_limbs);
 enki_value enki_alloc_law(enki_gc* gc, size_t arity, enki_value name, enki_value body, 
     size_t bc_len, size_t n_const, uint8_t* bc, enki_value* const_table);
 enki_value enki_alloc_pin(enki_gc* gc, const uint8_t hash[32], enki_value inner, size_t n_subpins, enki_value subpins[]); 

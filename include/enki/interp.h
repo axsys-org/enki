@@ -155,6 +155,7 @@ typedef struct {
     enki_frame frame[FRAME_MAX];
     enki_gc* gc;
     enki_allocator sys;
+    bool halted; 
 } enki_interpreter;
 
 void enki_trace_interp(enki_interpreter* i);

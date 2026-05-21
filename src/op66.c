@@ -1,110 +1,886 @@
+void enki_inc(enki_interpreter* i) {
+    enki_value a = i->stack[i->sp - 1];
+    i->stack[i->sp - 1] = enki_nat_inc(i->gc, a);
+}
+void enki_dec(enki_interpreter* i) {
+    enki_value a = i->stack[i->sp - 1];
+    i->stack[i->sp - 1] = enki_nat_dec(i->gc, a);
+}
+void enki_add(enki_interpreter* i) {
+    enki_value a = i->stack[i->sp - 2];
+    enki_value b = i->stack[i->sp - 1];
+    i->sp--;
+    i->stack[i->sp - 1] = enki_nat_add(i->gc, a, b);
+}
+void enki_sub(enki_interpreter* i) {
+    enki_value a = i->stack[i->sp - 2];
+    enki_value b = i->stack[i->sp - 1];
+    i->sp--;
+    i->stack[i->sp - 1] = enki_nat_sub(i->gc, a, b);
+}
+void enki_mul(enki_interpreter* i) {
+    enki_value a = i->stack[i->sp - 2];
+    enki_value b = i->stack[i->sp - 1];
+    i->sp--;
+    i->stack[i->sp - 1] = enki_nat_mul(i->gc, a, b);
+}
+void enki_div(enki_interpreter* i) {
+    enki_value a = i->stack[i->sp - 2];
+    enki_value b = i->stack[i->sp - 1];
+    i->sp--;
+    i->stack[i->sp - 1] = enki_nat_div(i->gc, a, b);
+}
+void enki_mod(enki_interpreter* i) {
+    enki_value a = i->stack[i->sp - 2];
+    enki_value b = i->stack[i->sp - 1];
+    i->sp--;
+    i->stack[i->sp - 1] = enki_nat_mod(i->gc, a, b);
+}
+enki_value enki_structural_eq(enki_value a, enki_value b) {
+    if(!IS_PTR(a) && !IS_PTR(b)) {
+        return (a == b ? (enki_value)1 : (enki_value)0);
+    }
+    enki_value_header* h_a = IS_PTR(a) ? (enki_value_header*)ENKI_TO_PTR(a) : NULL;
+    enki_value_header* h_b = IS_PTR(b) ? (enki_value_header*)ENKI_TO_PTR(b) : NULL;
 
+    if(IS_PTR(a) && !IS_PTR(b)) {
+        if(h_a->kind == ENKI_NAT) return enki_nat_eq(a, b);
+        return (enki_value)0;
+    }
+    else if(!IS_PTR(a) && IS_PTR(b)) {
+        if(h_b->kind == ENKI_NAT) return enki_nat_eq(a, b);
+        return (enki_value)0;
+    }
+    else if(IS_PTR(a) && IS_PTR(b)) {
+        if(h_a->kind == ENKI_NAT && h_b->kind == ENKI_NAT) {
+            return enki_nat_eq(a, b);
+        }
+    }
+    if(h_b->kind != h_a->kind) return (enki_value)0;
+    if(h_a->kind == ENKI_PIN) {
+        enki_pin* pin_a = (enki_pin*)ENKI_TO_PTR(a);
+        enki_pin* pin_b = (enki_pin*)ENKI_TO_PTR(b);
+        if(pin_a->n_subpins != pin_b->n_subpins) return (enki_value)0;
+        for(size_t k = 0; k < pin_a->n_subpins; k++) {
+            if(!enki_structural_eq(pin_a->subpins[k], pin_b->subpins[k])) {
+                return (enki_value)0;
+            }
+        }
+        /*
+            LATER:
+            if both pins are frozen:
+                compare hash bytes
+            else:
+                force/freeze or structural compare temporarily
+        */
+        return (enki_structural_eq(pin_a->inner, pin_b->inner)) ? (enki_value)1 : (enki_value)0;  
+    }
+    else if(h_a->kind == ENKI_LAW) {
+        enki_law* law_a = (enki_law*)ENKI_TO_PTR(a);
+        enki_law* law_b = (enki_law*)ENKI_TO_PTR(b);
+        return (enki_structural_eq(law_a->name, law_b->name) &&
+                enki_structural_eq(law_a->body, law_b->body) &&
+                (law_b->arity == law_a->arity))
+        ? (enki_value)1
+        : (enki_value)0;        
+    }
+    else if(h_a->kind == ENKI_APP) {
+        enki_app* app_a = (enki_app*)ENKI_TO_PTR(a);
+        enki_app* app_b = (enki_app*)ENKI_TO_PTR(b);
+        if(app_a->n_args != app_b->n_args) return (enki_value)0;
+        for(size_t k = 0; k < app_a->n_args; k++) {
+            if(!enki_structural_eq(app_a->args[k], app_b->args[k])) {
+                return (enki_value)0;
+            }
+        }
+        return (enki_structural_eq(app_a->fn, app_b->fn)) ? (enki_value)1 : (enki_value)0;  
+    }
+    else return (enki_value)0;
+}
+void enki_eq(enki_interpreter* i) {
+    enki_value a = i->stack[i->sp - 2];
+    enki_value b = i->stack[i->sp - 1];
+    a = enki_eval_nf(i, a);
+    b = enki_eval_nf(i, b);
+    i->sp--;
+    i->stack[i->sp - 1] = enki_structural_eq(a, b);
+}
+void enki_ne(enki_interpreter* i) {
+    enki_value a = i->stack[i->sp - 2];
+    enki_value b = i->stack[i->sp - 1];
+    i->sp--;
+    i->stack[i->sp - 1] = enki_nat_ne(i->gc, a, b);
+}
+void enki_gt(enki_interpreter* i) {
+    enki_value a = i->stack[i->sp - 2];
+    enki_value b = i->stack[i->sp - 1];
+    i->sp--;
+    i->stack[i->sp - 1] = enki_nat_gt(i->gc, a, b);
+}
+void enki_ge(enki_interpreter* i) {
+    enki_value a = i->stack[i->sp - 2];
+    enki_value b = i->stack[i->sp - 1];
+    i->sp--;
+    i->stack[i->sp - 1] = enki_nat_ge(i->gc, a, b);
+}
+void enki_lt(enki_interpreter* i) {
+    enki_value a = i->stack[i->sp - 2];
+    enki_value b = i->stack[i->sp - 1];
+    i->sp--;
+    i->stack[i->sp - 1] = enki_nat_lt(i->gc, a, b);
+}
+void enki_le(enki_interpreter* i) {
+    enki_value a = i->stack[i->sp - 2];
+    enki_value b = i->stack[i->sp - 1];
+    i->sp--;
+    i->stack[i->sp - 1] = enki_nat_le(i->gc, a, b);
+}
+void enki_cmp(enki_interpreter* i) {
+    enki_value a = i->stack[i->sp - 2];
+    enki_value b = i->stack[i->sp - 1];
+    i->sp--;
+    i->stack[i->sp - 1] = enki_nat_cmp(i->gc, a, b);
+}
+void enki_lsh(enki_interpreter* i) {
+    enki_value a = i->stack[i->sp - 2];
+    enki_value bits = i->stack[i->sp - 1];
+    i->sp--;
+    i->stack[i->sp - 1] = enki_nat_lsh(i->gc, a, bits);
+}
+void enki_rsh(enki_interpreter* i) {
+    enki_value a = i->stack[i->sp - 2];
+    enki_value bits = i->stack[i->sp - 1];
+    i->sp--;
+    i->stack[i->sp - 1] = enki_nat_rsh(i->gc, a, bits);
+}
+void enki_test(enki_interpreter* i) {
+    enki_value bit = i->stack[i->sp - 2];
+    enki_value a = i->stack[i->sp - 1];
+    i->sp--;
+    i->stack[i->sp - 1] = enki_nat_test(i->gc, bit, a);
+}
+void enki_set(enki_interpreter* i) {
+    enki_value bit = i->stack[i->sp - 2];
+    enki_value a = i->stack[i->sp - 1];
+    i->sp--;
+    i->stack[i->sp - 1] = enki_nat_set(i->gc, bit, a);
+}
+void enki_clear(enki_interpreter* i) {
+    enki_value bit = i->stack[i->sp - 2];
+    enki_value a = i->stack[i->sp - 1];
+    i->sp--;
+    i->stack[i->sp - 1] = enki_nat_clear(i->gc, bit, a);
+}
+void enki_bex(enki_interpreter* i) {
+    enki_value bit = i->stack[i->sp - 1];
+    i->stack[i->sp - 1] = enki_nat_bex(i->gc, bit);
+}
+void enki_bits(enki_interpreter* i) {
+    enki_value a = i->stack[i->sp - 1];
+    i->stack[i->sp - 1] = enki_nat_bits(i->gc, a);
+}
+void enki_bytes(enki_interpreter* i) {
+    enki_value a = i->stack[i->sp - 1];
+    i->stack[i->sp - 1] = enki_nat_bytes(i->gc, a);
+}
+void enki_nib(enki_interpreter* i) {
+    enki_value index = i->stack[i->sp - 2];
+    enki_value a = i->stack[i->sp - 1];
+    i->sp--;
+    i->stack[i->sp - 1] = enki_nat_nib(i->gc, index, a);
+}
+void enki_load8(enki_interpreter* i) {
+    enki_value index = i->stack[i->sp - 2];
+    enki_value a = i->stack[i->sp - 1];
+    i->sp--;
+    i->stack[i->sp - 1] = enki_nat_load8(i->gc, index, a);
+}
+void op66_store8(enki_interpreter* i) {
+    enki_value index = i->stack[i->sp - 3];
+    enki_value byte = i->stack[i->sp - 2];
+    enki_value a = i->stack[i->sp - 1];
+    i->sp-=2;
+    i->stack[i->sp - 1] = enki_nat_store8(i->gc, index, byte, a);
+}
+void op66_trunc(enki_interpreter* i) {
+    enki_value width = i->stack[i->sp - 2];
+    enki_value a = i->stack[i->sp - 1];
+    i->sp--;
+    i->stack[i->sp - 1] = enki_nat_trunc(i->gc, width, a);
+}
+void op66_trunc8(enki_interpreter* i) {
+    enki_value a = i->stack[i->sp - 1];
+    i->stack[i->sp - 1] = enki_nat_trunc8(i->gc, a);
+}
+void op66_trunc16(enki_interpreter* i) {
+    enki_value a = i->stack[i->sp - 1];
+    i->stack[i->sp - 1] = enki_nat_trunc16(i->gc, a);
+}
+void op66_trunc32(enki_interpreter* i) {
+    enki_value a = i->stack[i->sp - 1];
+    i->stack[i->sp - 1] = enki_nat_trunc32(i->gc, a);
+}
+void op66_trunc64(enki_interpreter* i) {
+    enki_value a = i->stack[i->sp - 1];
+    i->stack[i->sp - 1] = enki_nat_trunc64(i->gc, a);
+}
 
+void op66_type(enki_interpreter* i) {
+    enki_value x = i->stack[i->sp - 1];
+    uint8_t res = 0;
+    if(!IS_PTR(x)) {
+        res = 0;
+    }
+    else {
+        enki_value_header* h = (enki_value_header*)ENKI_TO_PTR(x);
+        switch (h->kind) {
+            case ENKI_NAT: 
+                res = 0; break;
+            case ENKI_PIN: 
+                res = 1; break;
+            case ENKI_LAW: 
+                res = 2; break;
+            case ENKI_APP:
+                res = 3; break;
+            default:
+                exit(1); break;
+        }
+    }
+    i->stack[i->sp - 1] = (enki_value)res;
+}
+void op66_is_pin(enki_interpreter* i) {
+    enki_value x = i->stack[i->sp - 1];
+    if(!IS_PTR(x)) {
+        i->stack[i->sp - 1] = (enki_value)0;
+        return;
+    }
+    enki_value_header* h = (enki_value_header*)ENKI_TO_PTR(x);
+    size_t res = 0;
+    if(h->kind == ENKI_PIN) res = 1;
+    i->stack[i->sp - 1] = (enki_value)res;
+}
+void op66_is_law(enki_interpreter* i) {
+    enki_value x = i->stack[i->sp - 1];
+    if(!IS_PTR(x)) {
+        i->stack[i->sp - 1] = (enki_value)0;
+        return;
+    }
+    enki_value_header* h = (enki_value_header*)ENKI_TO_PTR(x);
+    size_t res = 0;
+    if(h->kind == ENKI_LAW) res = 1;
+    i->stack[i->sp - 1] = (enki_value)res;
+}
+void op66_is_app(enki_interpreter* i) {
+    enki_value x = i->stack[i->sp - 1];
+    if(!IS_PTR(x)) {
+        i->stack[i->sp - 1] = (enki_value)0;
+        return;
+    }
+    enki_value_header* h = (enki_value_header*)ENKI_TO_PTR(x);
+    size_t res = 0;
+    if(h->kind == ENKI_APP) res = 1;
+    i->stack[i->sp - 1] = (enki_value)res;
+}
+void op66_is_nat(enki_interpreter* i) {
+    enki_value x = i->stack[i->sp - 1];
+    if(!IS_PTR(x)) {
+        i->stack[i->sp - 1] = (enki_value)1;
+        return;
+    }
+    enki_value_header* h = (enki_value_header*)ENKI_TO_PTR(x);
+    size_t res = 0;
+    if(h->kind == ENKI_NAT) res = 1;
+    i->stack[i->sp - 1] = (enki_value)res;
+}
+void op66_nat(enki_interpreter* i) {
+    enki_value x = i->stack[i->sp - 1];
+    if(!IS_PTR(x)) {
+        i->stack[i->sp - 1] = (enki_value)x;
+        return;
+    }
+    enki_value_header* h = (enki_value_header*)ENKI_TO_PTR(x);
+    enki_value res = 0;
+    if(h->kind == ENKI_NAT) res = x;
+    i->stack[i->sp - 1] = (enki_value)res;
+}
+void op66_unpin(enki_interpreter* i) {
+    enki_value x = i->stack[i->sp - 1];
+    if(!IS_PTR(x)) {
+        i->stack[i->sp - 1] = (enki_value)0;
+        return;
+    }
+    enki_value_header* h = (enki_value_header*)ENKI_TO_PTR(x);
+    enki_value res = 0;
+    if(h->kind == ENKI_PIN) {
+        enki_pin* pin = (enki_pin*)ENKI_TO_PTR(x);
+        res = pin->inner;
+    }
+    i->stack[i->sp - 1] = (enki_value)res;
+}
+void op66_name(enki_interpreter* i) {
+    enki_value x = i->stack[i->sp - 1];
+    if(!IS_PTR(x)) {
+        i->stack[i->sp - 1] = (enki_value)0;
+        return;
+    }
+    enki_value_header* h = (enki_value_header*)ENKI_TO_PTR(x);
+    enki_value res = 0;
+    if(h->kind == ENKI_LAW) {
+        enki_law* law = (enki_law*)ENKI_TO_PTR(x);
+        res = law->name;
+    }
+    i->stack[i->sp - 1] = res;
+}
+void op66_body(enki_interpreter* i) {
+    enki_value x = i->stack[i->sp - 1];
+    if(!IS_PTR(x)) {
+        i->stack[i->sp - 1] = (enki_value)0;
+        return;
+    }
+    enki_value_header* h = (enki_value_header*)ENKI_TO_PTR(x);
+    enki_value res = 0;
+    if(h->kind == ENKI_LAW) {
+        enki_law* law = (enki_law*)ENKI_TO_PTR(x);
+        res = law->body;
+    }
+    i->stack[i->sp - 1] = res;
+}
+void op66_arity(enki_interpreter* i) {
+    enki_value x = i->stack[i->sp - 1];
+    if(!IS_PTR(x)) {
+        i->stack[i->sp - 1] = (enki_value)0;
+        return;
+    }
+    enki_value_header* h = (enki_value_header*)ENKI_TO_PTR(x);
+    enki_value res = 0;
+    if(h->kind == ENKI_LAW) {
+        enki_law* law = (enki_law*)ENKI_TO_PTR(x);
+        res = (enki_value)law->arity;
+    }
+    i->stack[i->sp - 1] = res;
+}
+void op66_hd(enki_interpreter* i) {
+    enki_value x = i->stack[i->sp - 1];
+    if(!IS_PTR(x)) {
+        i->stack[i->sp - 1] = x;
+        return;
+    }
+    enki_value_header* h = (enki_value_header*)ENKI_TO_PTR(x);
+    enki_value res = x;
+    if(h->kind == ENKI_APP) {
+        enki_app* app = (enki_app*)ENKI_TO_PTR(x);
+        res = app->fn;
+    }
+    i->stack[i->sp - 1] = res;
+}
+void op66_last(enki_interpreter* i) {
+    enki_value x = i->stack[i->sp - 1];
+    if(!IS_PTR(x)) {
+        i->stack[i->sp - 1] = (enki_value)0;
+        return;
+    }
+    enki_value_header* h = (enki_value_header*)ENKI_TO_PTR(x);
+    enki_value res = (enki_value)0;
+    if(h->kind == ENKI_APP) {
+        enki_app* app = (enki_app*)ENKI_TO_PTR(x);
+        if(app->n_args == 0) res = 0;
+        else res = app->args[app->n_args - 1];
+    }
+    i->stack[i->sp - 1] = res;
+}
+void op66_init(enki_interpreter* i) {
+    enki_value x = i->stack[i->sp - 1];
+    if(!IS_PTR(x)) {
+        i->stack[i->sp - 1] = (enki_value)0;
+        return;
+    }
+    enki_value_header* h = (enki_value_header*)ENKI_TO_PTR(x);
+    enki_value res = (enki_value)0;
+    if(h->kind == ENKI_APP) {
+        enki_app* app = (enki_app*)ENKI_TO_PTR(x);
+        if(app->n_args == 1) {
+            res = app->fn;
+        }
+        else if(app->n_args > 1) {
+            size_t n_args = app->n_args - 1;
+            enki_value fn = app->fn;
+            enki_value new = enki_alloc_app(i->gc, fn, n_args);
+            x = i->stack[i->sp - 1];
+            app = (enki_app*)ENKI_TO_PTR(x);
+            enki_app* new_app = (enki_app*)ENKI_TO_PTR(new);
+            memcpy(new_app->args, app->args, n_args * sizeof(enki_value));
+            res = new;
+        }
+    }
+    i->stack[i->sp - 1] = res;
+}
+void op66_sz(enki_interpreter* i) {
+    enki_value x = i->stack[i->sp - 1];
+    if(!IS_PTR(x)) {
+        i->stack[i->sp - 1] = (enki_value)0;
+        return;
+    }
+    enki_value_header* h = (enki_value_header*)ENKI_TO_PTR(x);
+    enki_value res = (enki_value)0;
+    if(h->kind == ENKI_APP) {
+        enki_app* app = (enki_app*)ENKI_TO_PTR(x);
+        res = app->n_args;
+    }
+    i->stack[i->sp - 1] = res;
+}
 
+enki_value ix_at(enki_value i, enki_value x) {
+    if(!IS_PTR(x) || IS_PTR(i)) {
+        return (enki_value)0;
+    }
+    enki_value res = (enki_value)0;
+    enki_value_header* h = (enki_value_header*)ENKI_TO_PTR(x);
+    if(h->kind == ENKI_APP) {
+        enki_app* app = (enki_app*)ENKI_TO_PTR(x);
+        if(i >= app->n_args) res = 0;
+        else res = app->args[i];
+    }
+    return res;
+}
+void op66_ix(enki_interpreter* interp) {
+    enki_value idx = interp->stack[interp->sp - 2];
+    enki_value x = interp->stack[interp->sp - 1];
+    interp->sp--;
+    interp->stack[interp->sp - 1] = ix_at(idx, x);
+}
+void op66_ix0(enki_interpreter* i) {
+    enki_value x = i->stack[i->sp - 1];
+    i->stack[i->sp - 1] = ix_at((enki_value)0, x);
+}
 
-INC      a        →  finish( mpn_add_1(out, view(a), 1),  n_a + 1 )
-DEC      a        →  if a==0: 0  else finish( mpn_sub_1(out, view(a), 1), n_a )
-ADD      a b      →  longer first; finish( mpn_add(out, va, vb),  max(na,nb)+1 )
-SUB      a b      →  if a<b: throw/0  else finish( mpn_sub(out, va, vb), na )
-MUL      a b      →  finish( mpn_mul(out, va, vb),  na + nb )
-DIV      a b      →  if b==0: throw;  tdiv_qr(Q,R, va,vb);  finish(Q, na-nb+1)
-MOD      a b      →  if b==0: throw;  tdiv_qr(Q,R, va,vb);  finish(R, nb)
-BEX      n        →  out = zeroed(n/64 + 1); set bit n; finish(out, n/64+1)
-                     (BEX n  ==  2^n)
+void op66_ix1(enki_interpreter* i) {
+    enki_value x = i->stack[i->sp - 1];
+    i->stack[i->sp - 1] = ix_at((enki_value)1, x);
+}
 
+void op66_ix2(enki_interpreter* i) {
+    enki_value x = i->stack[i->sp - 1];
+    i->stack[i->sp - 1] = ix_at((enki_value)2, x);
+}
 
+void op66_ix3(enki_interpreter* i) {
+    enki_value x = i->stack[i->sp - 1];
+    i->stack[i->sp - 1] = ix_at((enki_value)3, x);
+}
 
+void op66_ix4(enki_interpreter* i) {
+    enki_value x = i->stack[i->sp - 1];
+    i->stack[i->sp - 1] = ix_at((enki_value)4, x);
+}
 
-LSH    a k   →  finish( mpn_lshift(out, va, k%64) , na + k/64 + 1 )   // Template B
-               (whole-limb part k/64 = memmove; bit part k%64 = mpn_lshift)
-RSH    a k   →  finish( mpn_rshift(out, va shifted down k/64, k%64), na - k/64 )
+void op66_ix5(enki_interpreter* i) {
+    enki_value x = i->stack[i->sp - 1];
+    i->stack[i->sp - 1] = ix_at((enki_value)5, x);
+}
 
-TEST   a i   →  (i/64 >= na) ? 0 : (limb[i/64] >> (i&63)) & 1            // Template A, returns bit
-SET    a i   →  copy a; ensure i/64 limbs;  limb[i/64] |=  (1 << (i&63)); finish
-CLEAR  a i   →  copy a;  if i/64 < na: limb[i/64] &= ~(1 << (i&63));      finish
+void op66_ix6(enki_interpreter* i) {
+    enki_value x = i->stack[i->sp - 1];
+    i->stack[i->sp - 1] = ix_at((enki_value)6, x);
+}
 
-TRUNC  a k   →  copy low k bits: keep k/64 limbs, mask top limb to k&63 bits; finish
-TRUNC8/16/32/64  a  →  TRUNC with k = 8/16/32/64
+void op66_ix7(enki_interpreter* i) {
+    enki_value x = i->stack[i->sp - 1];
+    i->stack[i->sp - 1] = ix_at((enki_value)7, x);
+}
+void op66_row(enki_interpreter* i) {
+    enki_value h = i->stack[i->sp - 3];
+    enki_value n = i->stack[i->sp - 2];
+    enki_value xs = i->stack[i->sp - 1];
+    if(IS_PTR(n)) exit(1);
+    enki_value app = enki_alloc_app(i->gc, h, n);
+    enki_app* ptr = ENKI_TO_PTR(app);
+    enki_value curr = xs;
+    for (size_t k = 0; k < n; k++) {
+        ptr->args[k] = ix_at((enki_value)0, curr);
+        curr = ix_at((enki_value)1, curr);
+    }
+    i->sp-=2;
+    i->stack[i->sp - 1] = app;
+}
+void op66_rep(enki_interpreter* i) {
+    enki_value h = i->stack[i->sp - 3];
+    enki_value x = i->stack[i->sp - 2];
+    enki_value n = i->stack[i->sp - 1];
+    if(IS_PTR(n)) exit(1);
+    enki_value app = enki_alloc_app(i->gc, h, n);
+    enki_app* ptr = ENKI_TO_PTR(app);
+    for (size_t k = 0; k < n; k++) { 
+        ptr->args[k] = x;
+    }
+    i->sp -= 2;
+    i->stack[i->sp - 1] = app;
+}
+void op66_slice(enki_interpreter* i) {
+    enki_value o = i->stack[i->sp - 3];
+    enki_value n = i->stack[i->sp - 2];
+    enki_value x = i->stack[i->sp - 1];
+    if(IS_PTR(o) || IS_PTR(n) || !IS_PTR(x)) {
+        i->sp -= 2;
+        i->stack[i->sp - 1] = (enki_value)0;
+        return;
+    }
+    enki_value_header* h = (enki_value_header*)ENKI_TO_PTR(x);
+    enki_value res = 0;
+    if(h->kind == ENKI_APP) {
+        enki_app* app = (enki_app*)ENKI_TO_PTR(x);
+        if(o < app->n_args) {
+            size_t rsz = app->n_args - o;
+            if(n < rsz) rsz = n;
+            if(rsz != 0) {
+                enki_value new = enki_alloc_app(i->gc, (enki_value)0, rsz);
+                x = i->stack[i->sp - 1];
+                app = (enki_app*)ENKI_TO_PTR(x);
+                enki_app* new_app = (enki_app*)ENKI_TO_PTR(new);
+                for(size_t k = 0; k < rsz; k++) {
+                    new_app->args[k] = app->args[o + k];
+                }
+                res = new; 
+            }
+        }
+    }
+    i->sp -= 2;
+    i->stack[i->sp - 1] = (enki_value)res;
 
-BITS   a     →  a==0 ? 0 : (na-1)*64 + (64 - clz(top_limb))              // Template A
-BYTES  a     →  (BITS(a) + 7) / 8
-NIB    a     →  (BITS(a) + 3) / 4
+}
+enki_value* args(enki_value a) {
+    if(!IS_PTR(a)) return NULL;
+    enki_value_header* h = (enki_value_header*)ENKI_TO_PTR(a);
+    if(h->kind == ENKI_APP) {
+        enki_app* app = (enki_app*)ENKI_TO_PTR(a);
+        return app->args;
+    }
+    return NULL;
+}
 
+void op66_weld(enki_interpreter* i) {
+    enki_value x = i->stack[i->sp - 2];
+    enki_value y = i->stack[i->sp - 1]; 
+    enki_value* x_args = args(x);
+    enki_value* y_args = args(y);
+    enki_value res;
+    if(x_args == NULL && y_args == NULL) res = (enki_value)0;
+    else {
+        size_t x_c = 0;
+        if(x_args != NULL) x_c = ((enki_app*)ENKI_TO_PTR(x))->n_args;
+        size_t y_c = 0;
+        if(y_args != NULL) y_c = ((enki_app*)ENKI_TO_PTR(y))->n_args;
+        size_t n_args = (x_c + y_c);
+        res = enki_alloc_app(i->gc, (enki_value)0, n_args);
+        enki_app* ptr = (enki_app*)ENKI_TO_PTR(res);
+        x = i->stack[i->sp - 2];
+        y = i->stack[i->sp - 1]; 
+        x_args = args(x);
+        y_args = args(y);
+        if(x_args != NULL) {
+            for (size_t k = 0; k < x_c; k++) ptr->args[k] = x_args[k];
+        }
+        if(y_args != NULL) {
+            for (size_t k = 0; k < y_c; k++) ptr->args[x_c + k] = y_args[k];
+        }
+    }
+    i->sp--;
+    i->stack[i->sp - 1] = res;
+}
+void op66_up(enki_interpreter* i) {
+    enki_value idx = i->stack[i->sp - 3];
+    enki_value v = i->stack[i->sp - 2];
+    enki_value x = i->stack[i->sp - 1];
+    enki_value res = x;
+    if(IS_PTR(x) && !IS_PTR(idx)) {
+        enki_value_header* h = (enki_value_header*)ENKI_TO_PTR(x);
+        if(h->kind == ENKI_APP) {
+            enki_app* app = (enki_app*)ENKI_TO_PTR(x);
+            if(idx < app->n_args) {
+                size_t n_args = app->n_args;
+                enki_value fn = app->fn;
+                res = enki_alloc_app(i->gc, fn, n_args);
+                x = i->stack[i->sp - 1];
+                app = (enki_app*)ENKI_TO_PTR(x);
+                enki_app* new = (enki_app*)ENKI_TO_PTR(res);
+                memcpy(new->args, app->args, n_args * sizeof(enki_value));
+                new->args[idx] = v;
+            }
+        } 
+    }
+    i->sp -= 2;
+    i->stack[i->sp - 1] = res;
+}
+void op66_up_uniq(enki_interpreter* i) {
+    op66_up(i); // same as UP for now 
+}
+void op66_coup(enki_interpreter* i) {
+    enki_value h = i->stack[i->sp - 2];
+    enki_value x = i->stack[i->sp - 1];
+    if(!IS_PTR(x)) {
+        i->sp--;
+        i->stack[i->sp - 1] = h;
+        return;
+    }
+    enki_value_header* xh = (enki_value_header*)ENKI_TO_PTR(x);
+    if(xh->kind != ENKI_APP) {
+        i->sp--;
+        i->stack[i->sp - 1] = h;
+        return;
+    }
+    enki_app* app = (enki_app*)ENKI_TO_PTR(x);
+    i->sp--; // remove x leaving h at sp - 1
+    for(size_t k = 0; k < app->n_args; k++) {
+        i->stack[i->sp] = app->args[k];
+        i->sp++;
+    }
+    enki_apply(i, app->n_args);
+    return;
+}
 
+void op66_case(enki_interpreter* i) {
+    enki_value ix = i->stack[i->sp - 3];
+    enki_value cs = i->stack[i->sp - 2];
+    enki_value f = i->stack[i->sp - 1];
+    enki_value res = f;
 
-LOAD8   a i      →  i >= byte_len(a) ? 0 : ((uint8_t*)limbs)[i]     // little-endian byte view
-STORE8  a i v    →  copy a; ensure byte i exists; ((uint8_t*)limbs)[i] = v & 0xFF; finish
-LOADVAR a i      →  load a machine-word-sized chunk at limb i (or 0 past end)
+    if(!IS_PTR(ix) && IS_PTR(cs)) {
+        enki_value_header* h = (enki_value_header*)ENKI_TO_PTR(cs);
+        if(h->kind == ENKI_APP) {
+            enki_app* app = (enki_app*)ENKI_TO_PTR(cs);
+            if(ix < app->n_args) {
+                res = app->args[ix];
+            }
+        }
+    }
 
+    i->sp -= 2;
+    i->stack[i->sp - 1] = res;
+}
 
+void op66_case_n(enki_interpreter* i, size_t n) {
+    enki_value ix = i->stack[i->sp - (n + 2)];
+    enki_value fallback = i->stack[i->sp - 1];
+    enki_value res = fallback;
 
-nat_cmp(a,b):                          // the ONE function
-    if na != nb: return na < nb ? -1 : +1
-    return mpn_cmp(va.limbs, vb.limbs, na)
+    if(!IS_PTR(ix) && ix < n) {
+        res = i->stack[i->sp - (n + 1) + ix];
+    }
 
-CMP   a b  →  nat_cmp(a,b)              // -1 / 0 / +1   (often encoded 0/1/2)
-EQ    a b  →  nat_cmp(a,b) == 0
-NE    a b  →  nat_cmp(a,b) != 0
-LT    a b  →  nat_cmp(a,b) <  0
-LE    a b  →  nat_cmp(a,b) <= 0
-GT    a b  →  nat_cmp(a,b) >  0
-GE    a b  →  nat_cmp(a,b) >= 0
-EQUAL a b  →  structural: same tag? recurse on children; nat case → nat_cmp==0
+    i->sp -= (n + 1);
+    i->stack[i->sp - 1] = res;
+}
 
+void op66_case2(enki_interpreter* i) {
+    op66_case_n(i, 2);
+}
 
-TYPE     x   →  x.header.tag                       // 0..3 for pin/law/app/nat
-IS_PIN   x   →  tag(x) == PIN
-IS_LAW   x   →  tag(x) == LAW
-IS_APP   x   →  tag(x) == APP
-IS_NAT   x   →  tag(x) == NAT
-NAT      x   →  tag(x)==NAT ? x : 0                // coerce-to-nat
-ARITY    x   →  PIN→arity(item); LAW→x.law_arity; APP→arity(hd)-1; NAT→ depends on ABI
-NAME     x   →  LAW→x.law_name        else 0
-BODY     x   →  LAW→x.law_body        else 0
-HD       x   →  APP→x.fun             else x        // head of application
-LAST     x   →  APP→x.arg             else x        // last argument
-INIT     x   →  APP→x.fun             else x        // app minus its last arg
-UNPIN    x   →  PIN→x.item            else x
-NAT (op) x   →  same as IS-coerce above
--------------------------
+void op66_case3(enki_interpreter* i) {
+    op66_case_n(i, 3);
+}
 
-SZ(row) = row.n_args
-IX(row, i) = row.args[i]
-HD(row) = row.fn
+void op66_case4(enki_interpreter* i) {
+    op66_case_n(i, 4);
+}
 
-ROW    n x0..x(n-1)  →  alloc row of n; copy elems; return                // build
-REP    n v           →  alloc row of n; fill all slots with v
-SZ     r             →  r.row_len                                         // Template A
-IX     r i           →  i < SZ(r) ? r.elem[i] : throw
-IX0..IX7  r          →  IX with i = 0..7  (goto do_ix)
-SLICE  r s e         →  alloc row of (e-s); copy r.elem[s..e]
-WELD   r1 r2         →  alloc row of SZ(r1)+SZ(r2); copy both
-UP     r v           →  alloc row of SZ(r)+1; copy r; append v             // push
-UP_UNIQ r v          →  UP only if v not already in r (linear scan)
-COUP   r             →  alloc row of SZ(r)-1; copy all but last            // pop
+void op66_case5(enki_interpreter* i) {
+    op66_case_n(i, 5);
+}
 
+void op66_case6(enki_interpreter* i) {
+    op66_case_n(i, 6);
+}
 
+void op66_case7(enki_interpreter* i) {
+    op66_case_n(i, 7);
+}
 
-CASE   x b0..b(n-1)  →  k = nat_value(x);  k < n ? force(b_k) : throw
-CASE2..CASE16        →  CASE with n = 2..16   (numbered variant — goto, don't reimplement)
+void op66_case8(enki_interpreter* i) {
+    op66_case_n(i, 8);
+}
 
+void op66_case9(enki_interpreter* i) {
+    op66_case_n(i, 9);
+}
 
-NIL          →  push 0
-TRUTH        →  push 1
-OR    a b    →  is_zero(a) ? b : a              // short-circuit: nonzero wins
-NOR   a b    →  is_zero(OR(a,b)) ? 1 : 0
-AND   a b    →  is_zero(a) ? a : b
-IF    c t f  →  is_zero(c) ? f : t
-IFZ   c t f  →  is_zero(c) ? t : f              // IF with branches swapped
+void op66_case10(enki_interpreter* i) {
+    op66_case_n(i, 10);
+}
 
+void op66_case11(enki_interpreter* i) {
+    op66_case_n(i, 11);
+}
 
+void op66_case12(enki_interpreter* i) {
+    op66_case_n(i, 12);
+}
 
-SEQ    a b       →  force(a); return b                       // force a, discard, yield b
-SEQ2   a b c     →  force(a); force(b); return c
-SEQ3   a b c d   →  force(a); force(b); force(c); return d
-SAP    f x       →  return force( apply(f, x) )              // strict application
-SAP2   f x y     →  return force( apply(apply(f,x), y) )
-FORCE  x         →  return force(x)                          // WHNF
-DEEPSEQ x        →  recursively force x and all children; return x
-TRY    f         →  install handler; r = force(f); on throw → catch value; return r
-THROW  v         →  unwind to nearest TRY with payload v
+void op66_case13(enki_interpreter* i) {
+    op66_case_n(i, 13);
+}
+
+void op66_case14(enki_interpreter* i) {
+    op66_case_n(i, 14);
+}
+
+void op66_case15(enki_interpreter* i) {
+    op66_case_n(i, 15);
+}
+
+void op66_case16(enki_interpreter* i) {
+    op66_case_n(i, 16);
+}
+
+void op66_nil(enki_interpreter* i) {
+    enki_value x = i->stack[i->sp - 1];
+    i->stack[i->sp - 1] = (x == 0) ? (enki_value)1 : (enki_value)0;
+}
+
+void op66_truth(enki_interpreter* i) {
+    enki_value x = i->stack[i->sp - 1];
+    i->stack[i->sp - 1] = (x == 0) ? (enki_value)0 : (enki_value)1;
+}
+
+void op66_or(enki_interpreter* i) {
+    enki_value x = i->stack[i->sp - 2];
+    enki_value y = i->stack[i->sp - 1];
+    enki_value res = (x == 0) ? y : x;
+
+    i->sp--;
+    i->stack[i->sp - 1] = res;
+}
+
+void op66_nor(enki_interpreter* i) {
+    enki_value x = i->stack[i->sp - 2];
+    enki_value y = i->stack[i->sp - 1];
+    enki_value res = (x != 0) ? (enki_value)0 : ((y == 0) ? (enki_value)1 : (enki_value)0);
+
+    i->sp--;
+    i->stack[i->sp - 1] = res;
+}
+
+void op66_and(enki_interpreter* i) {
+    enki_value x = i->stack[i->sp - 2];
+    enki_value y = i->stack[i->sp - 1];
+    enki_value res = (x == 0) ? (enki_value)0 : y;
+
+    i->sp--;
+    i->stack[i->sp - 1] = res;
+}
+
+void op66_if(enki_interpreter* i) {
+    enki_value c = i->stack[i->sp - 3];
+    enki_value t = i->stack[i->sp - 2];
+    enki_value e = i->stack[i->sp - 1];
+    enki_value res = (c != 0) ? t : e;
+
+    i->sp -= 2;
+    i->stack[i->sp - 1] = res;
+}
+
+void op66_ifz(enki_interpreter* i) {
+    enki_value c = i->stack[i->sp - 3];
+    enki_value t = i->stack[i->sp - 2];
+    enki_value e = i->stack[i->sp - 1];
+    enki_value res = (c == 0) ? t : e;
+
+    i->sp -= 2;
+    i->stack[i->sp - 1] = res;
+}
+
+void op66_seq(enki_interpreter* i) {
+    enki_value x = i->stack[i->sp - 2];
+    enki_value y = i->stack[i->sp - 1];
+
+    x = enki_eval_whnf(i, x);
+
+    i->sp--;
+    i->stack[i->sp - 1] = y;
+}
+
+void op66_seq2(enki_interpreter* i) {
+    enki_value x = i->stack[i->sp - 3];
+    enki_value y = i->stack[i->sp - 2];
+    enki_value z = i->stack[i->sp - 1];
+
+    x = enki_eval_whnf(i, x);
+    y = enki_eval_whnf(i, y);
+
+    i->sp -= 2;
+    i->stack[i->sp - 1] = z;
+}
+
+void op66_seq3(enki_interpreter* i) {
+    enki_value a = i->stack[i->sp - 4];
+    enki_value b = i->stack[i->sp - 3];
+    enki_value c = i->stack[i->sp - 2];
+    enki_value d = i->stack[i->sp - 1];
+
+    a = enki_eval_whnf(i, a);
+    b = enki_eval_whnf(i, b);
+    c = enki_eval_whnf(i, c);
+
+    i->sp -= 3;
+    i->stack[i->sp - 1] = d;
+}
+
+void op66_sap(enki_interpreter* i) {
+    enki_value f = i->stack[i->sp - 2];
+    enki_value x = i->stack[i->sp - 1];
+
+    x = enki_eval_whnf(i, x);
+
+    i->stack[i->sp - 2] = f;
+    i->stack[i->sp - 1] = x;
+
+    enki_apply(i, 1);
+
+    enki_value result = i->stack[i->sp - 1];
+    result = enki_eval_whnf(i, result);
+    i->stack[i->sp - 1] = result;
+}
+
+void op66_sap2(enki_interpreter* i) {
+    enki_value f = i->stack[i->sp - 3];
+    enki_value x = i->stack[i->sp - 2];
+    enki_value y = i->stack[i->sp - 1];
+
+    x = enki_eval_whnf(i, x);
+    y = enki_eval_whnf(i, y);
+
+    i->sp--;
+    i->stack[i->sp - 2] = f;
+    i->stack[i->sp - 1] = x;
+
+    enki_apply(i, 1);
+
+    enki_value result = i->stack[i->sp - 1];
+    result = enki_eval_whnf(i, result);
+
+    i->stack[i->sp - 1] = result;
+    i->stack[i->sp] = y;
+    i->sp++;
+
+    enki_apply(i, 1);
+
+    result = i->stack[i->sp - 1];
+    result = enki_eval_whnf(i, result);
+    i->stack[i->sp - 1] = result;
+}
+
+void op66_force(enki_interpreter* i) {
+    enki_value x = i->stack[i->sp - 1];
+
+    x = enki_eval_nf(i, x);
+
+    i->stack[i->sp - 1] = x;
+}
+
+void op66_deepseq(enki_interpreter* i) {
+    enki_value x = i->stack[i->sp - 2];
+    enki_value y = i->stack[i->sp - 1];
+
+    x = enki_eval_nf(i, x);
+
+    i->sp--;
+    i->stack[i->sp - 1] = y;
+}

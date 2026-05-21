@@ -1,2 +1,128 @@
 void enki_compile_value(enki_value body, uint32_t depth, enki_vector* bc, enki_vector* const_table);
 void enki_compile_law(enki_value val, enki_vector* bc, enki_vector* const_table);
+
+typedef enum {
+    ENKI_PRIM_GROUP_OP0,
+    ENKI_PRIM_GROUP_OP66,
+} enki_prim_group;
+
+typedef struct {
+    enki_value id;
+    enki_prim_group group;
+    uint8_t subop;
+    uint8_t arity;
+} enki_prim_spec;
+
+static const enki_prim_spec ENKI_PRIMS[] = {
+    { PRIM_PIN,        ENKI_PRIM_GROUP_OP66, OP66_PIN,        1 },
+    { PRIM_LAW,        ENKI_PRIM_GROUP_OP66, OP66_LAW,        3 },
+    { PRIM_ELIM,       ENKI_PRIM_GROUP_OP66, OP66_ELIM,       6 },
+
+    { PRIM_INC,        ENKI_PRIM_GROUP_OP66, OP66_INC,        1 },
+    { PRIM_DEC,        ENKI_PRIM_GROUP_OP66, OP66_DEC,        1 },
+    { PRIM_ADD,        ENKI_PRIM_GROUP_OP66, OP66_ADD,        2 },
+    { PRIM_SUB,        ENKI_PRIM_GROUP_OP66, OP66_SUB,        2 },
+    { PRIM_MUL,        ENKI_PRIM_GROUP_OP66, OP66_MUL,        2 },
+    { PRIM_DIV,        ENKI_PRIM_GROUP_OP66, OP66_DIV,        2 },
+    { PRIM_MOD,        ENKI_PRIM_GROUP_OP66, OP66_MOD,        2 },
+
+    { PRIM_EQ,         ENKI_PRIM_GROUP_OP66, OP66_EQ,         2 },
+    { PRIM_NE,         ENKI_PRIM_GROUP_OP66, OP66_NE,         2 },
+    { PRIM_LT,         ENKI_PRIM_GROUP_OP66, OP66_LT,         2 },
+    { PRIM_LE,         ENKI_PRIM_GROUP_OP66, OP66_LE,         2 },
+    { PRIM_GT,         ENKI_PRIM_GROUP_OP66, OP66_GT,         2 },
+    { PRIM_GE,         ENKI_PRIM_GROUP_OP66, OP66_GE,         2 },
+    { PRIM_CMP,        ENKI_PRIM_GROUP_OP66, OP66_CMP,        2 },
+
+    { PRIM_RSH,        ENKI_PRIM_GROUP_OP66, OP66_RSH,        2 },
+    { PRIM_LSH,        ENKI_PRIM_GROUP_OP66, OP66_LSH,        2 },
+    { PRIM_TEST,       ENKI_PRIM_GROUP_OP66, OP66_TEST,       2 },
+    { PRIM_SET,        ENKI_PRIM_GROUP_OP66, OP66_SET,        2 },
+    { PRIM_CLEAR,      ENKI_PRIM_GROUP_OP66, OP66_CLEAR,      2 },
+    { PRIM_BEX,        ENKI_PRIM_GROUP_OP66, OP66_BEX,        1 },
+    { PRIM_BITS,       ENKI_PRIM_GROUP_OP66, OP66_BITS,       1 },
+    { PRIM_BYTES,      ENKI_PRIM_GROUP_OP66, OP66_BYTES,      1 },
+    { PRIM_NIB,        ENKI_PRIM_GROUP_OP66, OP66_NIB,        2 },
+    { PRIM_LOAD8,      ENKI_PRIM_GROUP_OP66, OP66_LOAD8,      2 },
+    { PRIM_STORE8,     ENKI_PRIM_GROUP_OP66, OP66_STORE8,     3 },
+    { PRIM_LOADVAR,    ENKI_PRIM_GROUP_OP66, OP66_LOADVAR,    2 },
+    { PRIM_TRUNC,      ENKI_PRIM_GROUP_OP66, OP66_TRUNC,      2 },
+    { PRIM_TRUNC8,     ENKI_PRIM_GROUP_OP66, OP66_TRUNC8,     1 },
+    { PRIM_TRUNC16,    ENKI_PRIM_GROUP_OP66, OP66_TRUNC16,    1 },
+    { PRIM_TRUNC32,    ENKI_PRIM_GROUP_OP66, OP66_TRUNC32,    1 },
+    { PRIM_TRUNC64,    ENKI_PRIM_GROUP_OP66, OP66_TRUNC64,    1 },
+
+    { PRIM_TYPE,       ENKI_PRIM_GROUP_OP66, OP66_TYPE,       1 },
+    { PRIM_IS_PIN,     ENKI_PRIM_GROUP_OP66, OP66_IS_PIN,     1 },
+    { PRIM_IS_LAW,     ENKI_PRIM_GROUP_OP66, OP66_IS_LAW,     1 },
+    { PRIM_IS_APP,     ENKI_PRIM_GROUP_OP66, OP66_IS_APP,     1 },
+    { PRIM_IS_NAT,     ENKI_PRIM_GROUP_OP66, OP66_IS_NAT,     1 },
+    { PRIM_NAT,        ENKI_PRIM_GROUP_OP66, OP66_NAT,        1 },
+    { PRIM_UNPIN,      ENKI_PRIM_GROUP_OP66, OP66_UNPIN,      1 },
+    { PRIM_ARITY,      ENKI_PRIM_GROUP_OP66, OP66_ARITY,      1 },
+    { PRIM_NAME,       ENKI_PRIM_GROUP_OP66, OP66_NAME,       1 },
+    { PRIM_BODY,       ENKI_PRIM_GROUP_OP66, OP66_BODY,       1 },
+    { PRIM_HD,         ENKI_PRIM_GROUP_OP66, OP66_HD,         1 },
+    { PRIM_LAST,       ENKI_PRIM_GROUP_OP66, OP66_LAST,       1 },
+    { PRIM_INIT,       ENKI_PRIM_GROUP_OP66, OP66_INIT,       1 },
+
+    { PRIM_ROW,        ENKI_PRIM_GROUP_OP66, OP66_ROW,        3 },
+    { PRIM_REP,        ENKI_PRIM_GROUP_OP66, OP66_REP,        3 },
+    { PRIM_SLICE,      ENKI_PRIM_GROUP_OP66, OP66_SLICE,      3 },
+    { PRIM_WELD,       ENKI_PRIM_GROUP_OP66, OP66_WELD,       2 },
+    { PRIM_UP,         ENKI_PRIM_GROUP_OP66, OP66_UP,         3 },
+    { PRIM_UP_UNIQ,    ENKI_PRIM_GROUP_OP66, OP66_UP_UNIQ,    3 },
+    { PRIM_COUP,       ENKI_PRIM_GROUP_OP66, OP66_COUP,       2 },
+    { PRIM_SZ,         ENKI_PRIM_GROUP_OP66, OP66_SZ,         1 },
+    { PRIM_IX,         ENKI_PRIM_GROUP_OP66, OP66_IX,         2 },
+    { PRIM_IX0,        ENKI_PRIM_GROUP_OP66, OP66_IX0,        1 },
+    { PRIM_IX1,        ENKI_PRIM_GROUP_OP66, OP66_IX1,        1 },
+    { PRIM_IX2,        ENKI_PRIM_GROUP_OP66, OP66_IX2,        1 },
+    { PRIM_IX3,        ENKI_PRIM_GROUP_OP66, OP66_IX3,        1 },
+    { PRIM_IX4,        ENKI_PRIM_GROUP_OP66, OP66_IX4,        1 },
+    { PRIM_IX5,        ENKI_PRIM_GROUP_OP66, OP66_IX5,        1 },
+    { PRIM_IX6,        ENKI_PRIM_GROUP_OP66, OP66_IX6,        1 },
+    { PRIM_IX7,        ENKI_PRIM_GROUP_OP66, OP66_IX7,        1 },
+
+    { PRIM_CASE,       ENKI_PRIM_GROUP_OP66, OP66_CASE,       3 },
+    { PRIM_CASE2,      ENKI_PRIM_GROUP_OP66, OP66_CASE2,      4 },
+    { PRIM_CASE3,      ENKI_PRIM_GROUP_OP66, OP66_CASE3,      5 },
+    { PRIM_CASE4,      ENKI_PRIM_GROUP_OP66, OP66_CASE4,      6 },
+    { PRIM_CASE5,      ENKI_PRIM_GROUP_OP66, OP66_CASE5,      7 },
+    { PRIM_CASE6,      ENKI_PRIM_GROUP_OP66, OP66_CASE6,      8 },
+    { PRIM_CASE7,      ENKI_PRIM_GROUP_OP66, OP66_CASE7,      9 },
+    { PRIM_CASE8,      ENKI_PRIM_GROUP_OP66, OP66_CASE8,      10 },
+    { PRIM_CASE9,      ENKI_PRIM_GROUP_OP66, OP66_CASE9,      11 },
+    { PRIM_CASE10,     ENKI_PRIM_GROUP_OP66, OP66_CASE10,     12 },
+    { PRIM_CASE11,     ENKI_PRIM_GROUP_OP66, OP66_CASE11,     13 },
+    { PRIM_CASE12,     ENKI_PRIM_GROUP_OP66, OP66_CASE12,     14 },
+    { PRIM_CASE13,     ENKI_PRIM_GROUP_OP66, OP66_CASE13,     15 },
+    { PRIM_CASE14,     ENKI_PRIM_GROUP_OP66, OP66_CASE14,     16 },
+    { PRIM_CASE15,     ENKI_PRIM_GROUP_OP66, OP66_CASE15,     17 },
+    { PRIM_CASE16,     ENKI_PRIM_GROUP_OP66, OP66_CASE16,     18 },
+
+    { PRIM_NIL,        ENKI_PRIM_GROUP_OP66, OP66_NIL,        1 },
+    { PRIM_TRUTH,      ENKI_PRIM_GROUP_OP66, OP66_TRUTH,      1 },
+    { PRIM_OR,         ENKI_PRIM_GROUP_OP66, OP66_OR,         2 },
+    { PRIM_NOR,        ENKI_PRIM_GROUP_OP66, OP66_NOR,        2 },
+    { PRIM_AND,        ENKI_PRIM_GROUP_OP66, OP66_AND,        2 },
+    { PRIM_IF,         ENKI_PRIM_GROUP_OP66, OP66_IF,         3 },
+    { PRIM_IFZ,        ENKI_PRIM_GROUP_OP66, OP66_IFZ,        3 },
+
+    { PRIM_SEQ,        ENKI_PRIM_GROUP_OP66, OP66_SEQ,        2 },
+    { PRIM_SEQ2,       ENKI_PRIM_GROUP_OP66, OP66_SEQ2,       3 },
+    { PRIM_SEQ3,       ENKI_PRIM_GROUP_OP66, OP66_SEQ3,       4 },
+    { PRIM_SAP,        ENKI_PRIM_GROUP_OP66, OP66_SAP,        2 },
+    { PRIM_SAP2,       ENKI_PRIM_GROUP_OP66, OP66_SAP2,       3 },
+    { PRIM_FORCE,      ENKI_PRIM_GROUP_OP66, OP66_FORCE,      1 },
+    { PRIM_DEEPSEQ,    ENKI_PRIM_GROUP_OP66, OP66_DEEPSEQ,    2 },
+    { PRIM_TRY,        ENKI_PRIM_GROUP_OP66, OP66_TRY,        1 },
+    { PRIM_THROW,      ENKI_PRIM_GROUP_OP66, OP66_THROW,      1 },
+
+    { PRIM_SAVE,       ENKI_PRIM_GROUP_OP66, OP66_SAVE,       1 },
+    { PRIM_LOAD,       ENKI_PRIM_GROUP_OP66, OP66_LOAD,       1 },
+    { PRIM_TRACE,      ENKI_PRIM_GROUP_OP66, OP66_TRACE,      2 },
+    { PRIM_EQUAL,      ENKI_PRIM_GROUP_OP66, OP66_EQUAL,      2 },
+    { PRIM_PARSE_REX,  ENKI_PRIM_GROUP_OP66, OP66_PARSE_REX,  1 },
+    { PRIM_PRINT_REX,  ENKI_PRIM_GROUP_OP66, OP66_PRINT_REX,  1 },
+};

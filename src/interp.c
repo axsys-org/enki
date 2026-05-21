@@ -15,11 +15,11 @@ enki_interpreter* enki_create_interp(enki_allocator sys, size_t heap,
     i->frame[0] = f;
     i->gc = enki_gc_create(sys, heap, i);
     i->sys = sys;
+    i->halted = false;
     i->fp = 0;
     i->sp = 0;
     return i;
 }
-
 void enki_trace_interp(enki_interpreter* i) {
     for(size_t k = 0; k < i->sp; k++) {
         i->stack[k] = i->gc->copy(i->gc, i->stack[k]);
@@ -30,8 +30,20 @@ void enki_trace_interp(enki_interpreter* i) {
         if(f->law != 0) f->law = i->gc->copy(i->gc, f->law);
     }  
 }
+void enki_destroy(enki_interpreter* i) {
+    enki_gc_destroy(i->gc);
+    i->sys.free(i);
+}
+void enki_halt(enki_interpreter* i) {
+    i->halted = true;
+}
+void enki_run(enki_interpreter* i) {
+    while (!i->halted) {
+        enki_step(i);
+    }
+}
 
-void enki_run_interpreter(enki_interpreter* i) {
+void enki_step(enki_interpreter* i) {
     enki_frame* f = &i->frame[i->fp];
     if(f->cont != 0) {
         enki_cont* cont = (enki_cont*)ENKI_TO_PTR(f->cont);
@@ -45,52 +57,53 @@ void enki_run_interpreter(enki_interpreter* i) {
         return;
     }
     enki_law* law = (enki_law*)ENKI_TO_PTR(f->law);
-    while (f->pc < law->bc_len) {
-        uint8_t op = ENKI_LAW_BC(law)[f->pc++];
-        switch (op) {
-            case OP_APPLY: 
-                uint8_t arg_c = ENKI_LAW_BC(law)[f->pc++];
-                enki_apply(i, arg_c); 
-                break;
-            case OP_PICK:  
-                size_t idx = f->arg_base + (size_t)ENKI_LAW_BC(law)[f->pc++];
-                i->stack[i->sp] = i->stack[idx];
-                i->sp++;
-                break;
-            case OP_RETURN:
-                if (i->fp == 0) break; // frame underflow 
-                enki_value ret_val = i->stack[i->sp - 1];
-                i->sp = f->res_base;
-                i->stack[i->sp] = ret_val; 
-                i->sp++;
-                i->fp--;                
-                break;
-            case NO_OP:
-                break;
-            case OP_PUSH_CONST:
-                uint8_t idx = ENKI_LAW_BC(law)[f->pc++];
-                i->stack[i->sp] = ENKI_LAW_CONSTS(law)[idx];
-                i->sp++;
-                break;
-            case OP_POP:
-                i->sp--;
-                break;
-            case OP_DUP:
-                if(i->sp == 0) return; // stack underflow 
-                i->stack[i->sp] = i->stack[i->sp - 1];
-                i->sp++;
-                break;
-            case OP_OP0:
-                uint8_t sub = ENKI_LAW_BC(law)[f->pc++];
-                switch (sub) {
-                    case 0: primop_mkpin(i);  break;
-                    case 1: primop_mklaw(i);  break;
-                    case 2: primop_match(i);  break;
-                    default: return;
-                }
-                break;
-            default:
+    uint8_t op = ENKI_LAW_BC(law)[f->pc++];
+    switch (op) {
+        case OP_APPLY: 
+            uint8_t arg_c = ENKI_LAW_BC(law)[f->pc++];
+            enki_apply(i, arg_c); 
+            break;
+        case OP_PICK:  
+            size_t idx = f->arg_base + (size_t)ENKI_LAW_BC(law)[f->pc++];
+            i->stack[i->sp] = i->stack[idx];
+            i->sp++;
+            break;
+        case OP_RETURN:
+            enki_value ret_val = i->stack[i->sp - 1];
+            if (i->fp == 0) {
+                i->halted = true;
                 return;
-        }
+            }
+            i->sp = f->res_base;
+            i->stack[i->sp] = ret_val; 
+            i->sp++;
+            i->fp--;                
+            break;
+        case NO_OP:
+            break;
+        case OP_PUSH_CONST:
+            uint8_t idx = ENKI_LAW_BC(law)[f->pc++];
+            i->stack[i->sp] = ENKI_LAW_CONSTS(law)[idx];
+            i->sp++;
+            break;
+        case OP_POP:
+            i->sp--;
+            break;
+        case OP_DUP:
+            if(i->sp == 0) return; // stack underflow 
+            i->stack[i->sp] = i->stack[i->sp - 1];
+            i->sp++;
+            break;
+        case OP_OP0:
+            uint8_t sub = ENKI_LAW_BC(law)[f->pc++];
+            switch (sub) {
+                case 0: primop_mkpin(i);  break;
+                case 1: primop_mklaw(i);  break;
+                case 2: primop_match(i);  break;
+                default: return;
+            }
+            break;
+        default:
+            return;
     }
 }

@@ -3,7 +3,11 @@ typedef struct {
     size_t n_limbs;
     mp_limb_t small[1];
 } enki_nat_view;
-
+bool enki_nat_is_zero(enki_value x) {
+    enki_nat_view a_v;
+    view_of_nat(a, &a_v);
+    return (a_v.n_limbs == 0);
+}
 void view_of_nat(enki_value a, enki_nat_view* v) {
     if(IS_PTR(a)) {
         enki_nat* nat = (enki_nat*)ENKI_TO_PTR(a);
@@ -11,6 +15,7 @@ void view_of_nat(enki_value a, enki_nat_view* v) {
         v->n_limbs = nat->n_limbs;
         return;        
     }
+    if(a == 0) v->n_limbs = 0;
     v->small[0] = (mp_limb_t)a;
     v->limbs = v.small;
     v->n_limbs = 1;
@@ -50,26 +55,6 @@ enki_value enki_nat_gt(enki_value a, enki_value b) {
 }
 enki_value enki_nat_ge(enki_value a, enki_value b) {
     return (enki_nat_gt(a, b) || (enki_nat_eq(a, b))) ? (enki_value)1 : (enki_value)0;
-}
-// todo move to value.c 
-enki_value enki_alloc_nat(enki_gc* gc, mp_limb_t* out, size_t n_limbs) {
-    size_t n = n_limbs;
-    while (n > 0 && out[n - 1] == 0) {
-        n--;
-    }
-    if(n == 0) return (enki_value)0;
-    if(n == 1 && out[n - 1] < (1ULL << 63)) {
-        size_t size = sizeof(enki_nat) + (sizeof(mp_limb_t) * n);
-        enki_nat* nat = (enki_nat*)gc->alloc(gc, size);
-        nat->h.size = size;
-        nat->h.kind = ENKI_BIG_NAT;
-        nat->n_limbs = n;
-        memcpy(nat->limbs, out, n * sizeof(mp_limb_t));
-        gc->sys.free(out);
-        return PTR_TO_ENKI(nat);
-    }
-    gc->sys.free(out);
-    return (enki_value)out[0];
 }
 enki_value enki_nat_inc(enki_gc* gc, enki_value a) {
     enki_nat_view a_v;
@@ -246,34 +231,82 @@ enki_value enki_nat_clear(enki_gc* gc, enki_value bit, enki_value a) {
     out[word_off] = out[word_off] & ~((mp_limb_t)1 << bit_off);
     return enki_alloc_nat(gc, out, n);
 }
-
-enki_value enki_nat_bits(enki_value a); // find highest non zero limb and the highest set bit isndei it
-enki_value enki_nat_trunc(enki_gc* gc, enki_value width, enki_value a);
-// Keep only the low width bits. Cut off everything above that.
-// copy low limbs u need 
-// mask the final limb so only width bits survive
-
-enki_value enki_nat_load8(enki_value index, enki_value a);
-enki_value enki_nat_store8(enki_gc* gc, enki_value index, enki_value byte, enki_value a);
-
-
-enki_value enki_nat_bytes(enki_value a); // (bits + 7) / 8
-
-
-
-enki_value enki_nat_nib(enki_value index, enki_value a);
-// rsh _ trunc 4
-enki_value enki_nat_loadvar(enki_value offset, enki_value width, enki_value a);
-// repeated load 8
-
-
-
-enki_value enki_nat_from_size(enki_gc* gc, size_t x);
-enki_value enki_nat_from_limbs(enki_gc* gc, const mp_limb_t* limbs, size_t n_limbs);
-enki_value enki_nat_from_mpz(enki_gc* gc, const mpz_t x);
-
-
-bool enki_is_nat(enki_value x);
-bool enki_nat_is_zero(enki_value x);
-bool enki_nat_fits_size(enki_value x);
-size_t enki_nat_to_size(enki_value x);      // caller uses only if fits
+enki_value enki_nat_bits(enki_value a) {
+    enki_nat_view a_v;
+    view_of_nat(a, &a_v);
+    if(a_v.n_limbs == 0) return (enki_value)0;
+    mp_limb_t top_limb = a_v.limb[a_v.n_limbs - 1];
+    size_t top = top_limb == 0 ? 0 : (64 - __builtin_clzl(top_limb));
+    return (enki_value)(top + ((a_v.n_limbs - 1) * 64));
+}
+enki_value enki_nat_bytes(enki_value a) {
+    return (enki_value)((enki_nat_bits(a) + 7)/8);
+}
+enki_value enki_nat_trunc(enki_gc* gc, enki_value width, enki_value a) {
+    if(IS_PTR(width)) exit(1); // temp 
+    enki_nat_view a_v;
+    view_of_nat(a, &a_v);
+    if(a_v.n_limbs == 0) return (enki_value)0;
+    size_t word_off = (size_t)width / 64;
+    size_t bit_off = (size_t)width % 64; 
+    size_t n = bit_off != 0 ? word_off + 1 : word_off;
+    size_t keep = min(a_v.n_limbs, n);
+    if(keep == 0) return (enki_value)0;
+    mp_limb_t* out = gc->sys.alloc(keep * sizeof(mp_limb_t));
+    memcpy(out, a_v.limbs, keep * sizeof(mp_limb_t));
+    if(bit_off == 0) {
+        return enki_alloc_nat(gc, out, keep);
+    }
+    if(keep == n) {
+        out[keep - 1] = (out[keep - 1] & (((mp_limb_t)1ULL << bit_off) - 1));
+    }
+    return enki_alloc_nat(gc, out, keep);
+}
+enki_value enki_nat_trunc_8(enki_gc* gc, enki_value a) {
+    return enki_nat_trunc(gc, 8, a);
+}
+enki_value enki_nat_trunc_16(enki_gc* gc, enki_value a) {
+    return enki_nat_trunc(gc, 16, a);
+}
+enki_value enki_nat_trunc_32(enki_gc* gc, enki_value a) {
+    return enki_nat_trunc(gc, 32, a);
+}
+enki_value enki_nat_trunc_64(enki_gc* gc, enki_value a) {
+    return enki_nat_trunc(gc, 64, a);
+}
+enki_value enki_nat_load8(enki_value index, enki_value a) {
+    if(IS_PTR(index)) exit(1); // temp 
+    enki_nat_view a_v;
+    view_of_nat(a, &a_v);
+    // sizeof(mp_limb_t) = 8 for my machine 
+    size_t limb_index = (size_t)index / sizeof(mp_limb_t);
+    size_t byte_offset = (size_t)index % sizeof(mp_limb_t);
+    if(a_v.n_limbs <= limb_index) return (enki_value)0;
+    mp_limb_t limb = a_v.limbs[limb_index];
+    return (enki_value)((limb >> (byte_offset * 8)) & ((1 << 8) - 1));
+}
+enki_value enki_nat_store8(enki_gc* gc, enki_value index, enki_value byte, enki_value a) {
+    if(IS_PTR(index)) exit(1); // temp 
+    if(IS_PTR(byte)) exit(1);
+    enki_nat_view a_v;
+    view_of_nat(a, &a_v);
+    size_t limb_index = (size_t)index / sizeof(mp_limb_t);
+    size_t byte_offset = (size_t)index % sizeof(mp_limb_t);
+    size_t n = a_v.n_limbs <= limb_index ? limb_index + 1 : a_v.n_limbs;
+    mp_limb_t* out = gc->sys.alloc(n * sizeof(mp_limb_t));
+    memset(out, 0, n * sizeof(mp_limb_t));
+    memcpy(out, a_v.limbs, a_v.n_limbs * sizeof(mp_limb_t));
+    mp_limb_t mask = (mp_limb_t)~(0xFFULL << (byte_offset * 8)); 
+    mp_limb_t byte_bits = (mp_limb_t)(byte & 0xFF) << (byte_offset * 8);
+    out[limb_index] = (out[limb_index] & mask) | byte_bits;
+    return enki_alloc_nat(gc, out, n);
+}
+enki_value enki_nat_nib(enki_value index, enki_value a) {
+    if(IS_PTR(index)) exit(1); // temp 
+    enki_nat_view a_v;
+    view_of_nat(a, &a_v);
+    size_t limb_index = index/16;
+    size_t shift = (index % 16) * 4;
+    if (limb_index >= a_v.n_limbs) return (enki_value)0;
+    return (enki_value)((a_v.limbs[limb_index] >> shift) & 0x0F);
+}
