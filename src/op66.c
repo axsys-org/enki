@@ -541,12 +541,14 @@ void op66_slice(enki_interpreter* i) {
             size_t rsz = app->n_args - o;
             if(n < rsz) rsz = n;
             if(rsz != 0) {
+                enki_value src_args[rsz];
+                for(size_t k = 0; k < rsz; k++) {
+                    src_args[k] = app->args[o + k];
+                }
                 enki_value new = enki_alloc_app(i->gc, (enki_value)0, rsz);
-                x = i->stack[i->sp - 1];
-                app = (enki_app*)ENKI_TO_PTR(x);
                 enki_app* new_app = (enki_app*)ENKI_TO_PTR(new);
                 for(size_t k = 0; k < rsz; k++) {
-                    new_app->args[k] = app->args[o + k];
+                    new_app->args[k] = src_args[k];
                 }
                 res = new; 
             }
@@ -607,12 +609,18 @@ void op66_up(enki_interpreter* i) {
             if(idx < app->n_args) {
                 size_t n_args = app->n_args;
                 enki_value fn = app->fn;
+                size_t scratch = i->sp;
+                for(size_t k = 0; k < n_args; k++) {
+                    i->stack[i->sp] = app->args[k];
+                    i->sp++;
+                }
                 res = enki_alloc_app(i->gc, fn, n_args);
-                x = i->stack[i->sp - 1];
-                app = (enki_app*)ENKI_TO_PTR(x);
                 enki_app* new = (enki_app*)ENKI_TO_PTR(res);
-                memcpy(new->args, app->args, n_args * sizeof(enki_value));
+                for(size_t k = 0; k < n_args; k++) {
+                    new->args[k] = i->stack[scratch + k];
+                }
                 new->args[idx] = v;
+                i->sp = scratch;
             }
         } 
     }
@@ -832,6 +840,23 @@ void op66_seq3(enki_interpreter* i) {
     i->stack[i->sp - 1] = d;
 }
 
+static enki_value op66_apply_whnf(enki_interpreter* i, size_t n_args) {
+    size_t base_fp = i->fp;
+    size_t res_base = i->sp - (n_args + 1);
+
+    enki_apply(i, n_args);
+    while(i->fp > base_fp && !i->halted) {
+        enki_step(i);
+    }
+
+    enki_value result = i->stack[res_base];
+    i->sp = res_base + 1;
+    result = enki_eval_whnf(i, result);
+    i->stack[res_base] = result;
+    i->sp = res_base + 1;
+    return result;
+}
+
 void op66_sap(enki_interpreter* i) {
     enki_value f = i->stack[i->sp - 2];
     enki_value x = i->stack[i->sp - 1];
@@ -841,11 +866,7 @@ void op66_sap(enki_interpreter* i) {
     i->stack[i->sp - 2] = f;
     i->stack[i->sp - 1] = x;
 
-    enki_apply(i, 1);
-
-    enki_value result = i->stack[i->sp - 1];
-    result = enki_eval_whnf(i, result);
-    i->stack[i->sp - 1] = result;
+    op66_apply_whnf(i, 1);
 }
 
 void op66_sap2(enki_interpreter* i) {
@@ -860,20 +881,11 @@ void op66_sap2(enki_interpreter* i) {
     i->stack[i->sp - 2] = f;
     i->stack[i->sp - 1] = x;
 
-    enki_apply(i, 1);
-
-    enki_value result = i->stack[i->sp - 1];
-    result = enki_eval_whnf(i, result);
-
-    i->stack[i->sp - 1] = result;
+    op66_apply_whnf(i, 1);
     i->stack[i->sp] = y;
     i->sp++;
 
-    enki_apply(i, 1);
-
-    result = i->stack[i->sp - 1];
-    result = enki_eval_whnf(i, result);
-    i->stack[i->sp - 1] = result;
+    op66_apply_whnf(i, 1);
 }
 
 void op66_force(enki_interpreter* i) {

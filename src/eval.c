@@ -14,7 +14,7 @@ enki_value enki_eval_whnf(enki_interpreter* i, enki_value x) {
             h->state = NF;
             return x;
         case ENKI_LAW:
-            h->state = NF;
+            h->state = WHNF;
             return x;
         case ENKI_PIN: 
             h->state = WHNF;

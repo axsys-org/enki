@@ -22,6 +22,15 @@ static void teardown(void)
 
 TestSuite(op66, .init = setup, .fini = teardown);
 
+static enki_value app2(enki_value fn, enki_value a, enki_value b)
+{
+    enki_value value = enki_alloc_app(fixture_interp->gc, fn, 2);
+    enki_app* app = (enki_app*)ENKI_TO_PTR(value);
+    app->args[0] = a;
+    app->args[1] = b;
+    return value;
+}
+
 Test(op66, direct_add_replaces_two_stack_values_with_sum)
 {
     fixture_interp->stack[0] = 2;
@@ -32,6 +41,68 @@ Test(op66, direct_add_replaces_two_stack_values_with_sum)
 
     cr_assert_eq(fixture_interp->sp, 1);
     cr_assert_eq(fixture_interp->stack[0], 5);
+}
+
+Test(op66, structural_eq_compares_small_and_big_nats)
+{
+    enki_value big_a = enki_nat_lsh(fixture_interp->gc, 1, 70);
+    enki_value big_b = enki_nat_lsh(fixture_interp->gc, 1, 70);
+
+    cr_assert_eq(op66_structural_eq(42, 42), 1);
+    cr_assert_eq(op66_structural_eq(42, 43), 0);
+    cr_assert_eq(op66_structural_eq(big_a, big_b), 1);
+    cr_assert_eq(op66_structural_eq(big_a, 42), 0);
+}
+
+Test(op66, structural_eq_compares_apps_laws_and_pins)
+{
+    enki_value app_a = app2(99, 10, 20);
+    enki_value app_b = app2(99, 10, 20);
+    enki_value app_c = app2(99, 10, 21);
+
+    cr_assert_eq(op66_structural_eq(app_a, app_b), 1);
+    cr_assert_eq(op66_structural_eq(app_a, app_c), 0);
+
+    uint8_t bc[] = { OP_RETURN };
+    enki_value law_a = enki_alloc_law(fixture_interp->gc, 2, 11, 22, sizeof(bc), 0, bc, NULL);
+    enki_value law_b = enki_alloc_law(fixture_interp->gc, 2, 11, 22, sizeof(bc), 0, bc, NULL);
+    enki_value law_c = enki_alloc_law(fixture_interp->gc, 1, 11, 22, sizeof(bc), 0, bc, NULL);
+
+    cr_assert_eq(op66_structural_eq(law_a, law_b), 1);
+    cr_assert_eq(op66_structural_eq(law_a, law_c), 0);
+
+    uint8_t hash[32] = {0};
+    enki_value subpins_a[] = { 7 };
+    enki_value subpins_b[] = { 7 };
+    enki_value pin_a = enki_alloc_pin(fixture_interp->gc, hash, 42, 1, subpins_a);
+    enki_value pin_b = enki_alloc_pin(fixture_interp->gc, hash, 42, 1, subpins_b);
+
+    cr_assert_eq(op66_structural_eq(pin_a, pin_b), 1);
+}
+
+Test(op66, eq_forces_before_structural_compare)
+{
+    uint8_t bc[] = {
+        OP_PICK, 0,
+        OP_OP66, OP66_INC,
+        OP_RETURN,
+    };
+    enki_value inc = enki_alloc_law(fixture_interp->gc, 1, 0, 0, sizeof(bc), 0, bc, NULL);
+    enki_value thunk = enki_alloc_app(fixture_interp->gc, inc, 1);
+    enki_app* app = (enki_app*)ENKI_TO_PTR(thunk);
+    app->h.state = THUNK;
+    app->args[0] = 41;
+
+    fixture_interp->stack[0] = thunk;
+    fixture_interp->stack[1] = 42;
+    fixture_interp->sp = 2;
+    fixture_interp->fp = 0;
+    fixture_interp->halted = false;
+
+    op66_eq(fixture_interp);
+
+    cr_assert_eq(fixture_interp->sp, 1);
+    cr_assert_eq(fixture_interp->stack[0], 1);
 }
 
 Test(op66, direct_inc_and_dec_update_top_of_stack)
