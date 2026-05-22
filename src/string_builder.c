@@ -1,0 +1,5 @@
+#define ENKI_STRING_BUILDER_IMPLEMENTATION
+#include "enki/string_builder.h"
+
+#undef ENKI_STRING_BUILDER_IMPLEMENTATION
+
