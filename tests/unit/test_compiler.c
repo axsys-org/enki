@@ -54,14 +54,9 @@ static enki_value compile_body(enki_value body_v)
 
 static void run_compiled(enki_value law)
 {
-    fixture_interp->frame[0].law = law;
-    fixture_interp->frame[0].pc = 0;
-    fixture_interp->frame[0].res_base_s = 0;
-    fixture_interp->frame[0].arg_base_s = 0;
-    fixture_interp->frame[0].cont_v = 0;
     fixture_interp->sp = 0;
     fixture_interp->fp = 0;
-    fixture_interp->halted = false;
+    enki_load_frame(fixture_interp, (enki_law*)ENKI_TO_PTR(law));
 
     enki_run(fixture_interp);
 }

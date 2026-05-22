@@ -12,10 +12,10 @@
 void primop_mkpin(enki_interpreter* i) {
     enki_value inner_v = i->stack_v[i->sp - 1];
     /* TODO: TEMPORARY */
-    enki_value* subpins_v = NULL; 
+    enki_value* subpins_v = NULL;
     size_t n_subpins_s = 0;
     uint8_t hash_b[32];
-    memset(hash_b, 0, 32); 
+    memset(hash_b, 0, 32);
     ///
     enki_value pin = enki_alloc_pin(i->gc, hash_b, inner_v, n_subpins_s, subpins_v);
     i->stack_v[i->sp - 1] = pin;
@@ -32,22 +32,22 @@ void primop_mklaw(enki_interpreter* i) {
     uint8_t* bc_b = (uint8_t*)enki_vector_data(bc_v);
     size_t n_const_s = enki_vector_len(const_v);
     enki_value* const_table_v = (enki_value*)enki_vector_data(const_v);
-    enki_value law = enki_alloc_law(i->gc, (size_t)arity_s, name_v, body_v, bc_len_s, n_const_s, 
+    enki_value law = enki_alloc_law(i->gc, (size_t)arity_s, name_v, body_v, bc_len_s, n_const_s,
         bc_b, const_table_v);
     enki_vector_destroy(bc_v);
     enki_vector_destroy(const_v);
     i->sp -= 2;
-    i->stack_v[i->sp - 1] = law; 
+    i->stack_v[i->sp - 1] = law;
 }
 
 void primop_match(enki_interpreter* i) {
-    enki_value o = i->stack_v[i->sp - 6];
-    enki_value p = i->stack_v[i->sp - 5];
-    enki_value l = i->stack_v[i->sp - 4];
-    enki_value a = i->stack_v[i->sp - 3];
-    enki_value z = i->stack_v[i->sp - 2];
-    enki_value n = i->stack_v[i->sp - 1];
-    
+    enki_value p = i->stack_v[i->sp - 6];
+    enki_value l = i->stack_v[i->sp - 5];
+    enki_value a = i->stack_v[i->sp - 4];
+    enki_value z = i->stack_v[i->sp - 3];
+    enki_value m = i->stack_v[i->sp - 2];
+    enki_value o = i->stack_v[i->sp - 1];
+
     if(!IS_PTR(o)) {
         if(o == 0) {
             i->sp -= 5;
@@ -56,11 +56,11 @@ void primop_match(enki_interpreter* i) {
         }
         i->sp -= 4;
         i->stack_v[i->sp - 1] = o - 1;
-        i->stack_v[i->sp - 2] = n;
+        i->stack_v[i->sp - 2] = m;
         enki_apply(i, 1);
         return;
     }
-    enki_value_header* h = (enki_value_header*)ENKI_TO_PTR(o); 
+    enki_value_header* h = (enki_value_header*)ENKI_TO_PTR(o);
     switch(h->kind_b) {
         case ENKI_PIN: {
             enki_pin* pin = ENKI_TO_PTR(o);
@@ -92,7 +92,7 @@ void primop_match(enki_interpreter* i) {
             enki_apply(i, 3);
             return;
         }
-        default: 
+        default:
             return;
     }
 }

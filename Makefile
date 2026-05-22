@@ -7,10 +7,13 @@ AR ?= ar
 VALID_BUILD_TYPES := debug release asan ubsan tsan coverage
 
 BASE_CPPFLAGS := -Iinclude -Itests/support -Itests/property/vendor/theft -isystem /opt/homebrew/include
-BASE_CFLAGS := -std=c11 -MMD -MP
+BASE_CFLAGS := -std=c23 -MMD -MP
 
-WARN_COMMON := -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wstrict-prototypes \
-	-Wmissing-prototypes -Wold-style-definition -Wnull-dereference -Wdouble-promotion -Werror
+WARN_COMMON := -Wall -Wextra  \
+	-Wpedantic -Wshadow -Wconversion -Wstrict-prototypes \
+	-Wmissing-prototypes -Wold-style-definition -Wnull-dereference \
+	-Wdouble-promotion -Werror \
+	-Wno-sign-conversion -Wno-char-subscripts -Wno-unused-function
 
 CC_VERSION := $(shell $(CC) --version 2>/dev/null)
 IS_CLANG := $(findstring clang,$(CC_VERSION))
@@ -40,6 +43,10 @@ endif
 CPPFLAGS_ALL := $(BASE_CPPFLAGS) $(CPPFLAGS)
 CFLAGS_ALL := $(BASE_CFLAGS) $(WARN_CFLAGS) $(BUILD_CFLAGS_$(BUILD_TYPE)) $(CFLAGS)
 LDFLAGS_ALL := $(BUILD_LDFLAGS_$(BUILD_TYPE)) $(LDFLAGS) -L/opt/homebrew/lib -lgmp
+
+APP_DIR := app
+APP_SRCS := $(wildcard $(APP_DIR)/*.c)
+APP_BINS := $(patsubst $(APP_DIR)/%.c,$(BUILD_DIR)/bin/%,$(APP_SRCS))
 
 SRC_DIR := src
 INCLUDE_DIR := include
@@ -94,7 +101,13 @@ LCOV_IGNORE_ERRORS ?= --ignore-errors inconsistent,inconsistent,mismatch,mismatc
 .PHONY: all lib install test test-binaries test-unit test-property fuzz fuzz-bin coverage tidy \
 	format format-check compile-commands compile-commands-fallback compiler-detection clean distclean
 
-all: lib
+all: lib bin
+
+bin: $(APP_BINS)
+
+$(BUILD_DIR)/bin/%: $(APP_DIR)/%.c $(LIB)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS_ALL) $(CFLAGS_ALL) $< $(LIB) $(LDFLAGS_ALL) -o $@
 
 lib: $(LIB)
 

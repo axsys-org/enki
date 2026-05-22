@@ -83,7 +83,7 @@ Test(op66, structural_eq_compares_apps_laws_and_pins)
 Test(op66, eq_forces_before_structural_compare)
 {
     uint8_t bc_b[] = {
-        OP_PICK, 0,
+        OP_PICK, 1,
         OP_OP66, OP66_INC,
         OP_RETURN,
     };
@@ -166,10 +166,9 @@ Test(op66, bytecode_dispatch_runs_op66_add)
     enki_value law = enki_alloc_law(
         fixture_interp->gc, 0, 0, 0, sizeof(bc_b), 2, bc_b, consts_v);
 
-    fixture_interp->frame[0].law = law;
-    fixture_interp->halted = false;
     fixture_interp->sp = 0;
     fixture_interp->fp = 0;
+    enki_load_frame(fixture_interp, (enki_law*)ENKI_TO_PTR(law));
 
     enki_run(fixture_interp);
 

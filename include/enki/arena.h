@@ -22,6 +22,9 @@ void*          enki_arena_alloc(void* ctx, size_t size_s);
 void           enki_arena_free(void* ctx, void* ptr);   // no-op_b
 void           enki_arena_reset(enki_arena* a);
 
+enki_allocator enki_tmp_allocator();
+#define EA_TMP_ALLOC enki_tmp_allocator()
+
 enki_allocator enki_arena_as_allocator(enki_arena* a);
 
 void* enki_arena_start(enki_arena* a);

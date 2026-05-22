@@ -82,7 +82,7 @@ enki_value op66_structural_eq(enki_value a, enki_value b) {
             else:
                 force/freeze or structural compare temporarily
         */
-        return (op66_structural_eq(pin_a->inner_v, pin_b->inner_v)) ? (enki_value)1 : (enki_value)0;  
+        return (op66_structural_eq(pin_a->inner_v, pin_b->inner_v)) ? (enki_value)1 : (enki_value)0;
     }
     else if(h_a->kind_b == ENKI_LAW) {
         enki_law* law_a = (enki_law*)ENKI_TO_PTR(a);
@@ -91,7 +91,7 @@ enki_value op66_structural_eq(enki_value a, enki_value b) {
                 op66_structural_eq(law_a->body_v, law_b->body_v) &&
                 (law_b->arity_s == law_a->arity_s))
         ? (enki_value)1
-        : (enki_value)0;        
+        : (enki_value)0;
     }
     else if(h_a->kind_b == ENKI_APP) {
         enki_app* app_a = (enki_app*)ENKI_TO_PTR(a);
@@ -102,7 +102,7 @@ enki_value op66_structural_eq(enki_value a, enki_value b) {
                 return (enki_value)0;
             }
         }
-        return (op66_structural_eq(app_a->fn_v, app_b->fn_v)) ? (enki_value)1 : (enki_value)0;  
+        return (op66_structural_eq(app_a->fn_v, app_b->fn_v)) ? (enki_value)1 : (enki_value)0;
     }
     else return (enki_value)0;
 }
@@ -243,11 +243,11 @@ void op66_type(enki_interpreter* i) {
     else {
         enki_value_header* h = (enki_value_header*)ENKI_TO_PTR(x);
         switch (h->kind_b) {
-            case ENKI_NAT: 
+            case ENKI_NAT:
                 res_v = 0; break;
-            case ENKI_PIN: 
+            case ENKI_PIN:
                 res_v = 1; break;
-            case ENKI_LAW: 
+            case ENKI_LAW:
                 res_v = 2; break;
             case ENKI_APP:
                 res_v = 3; break;
@@ -518,7 +518,7 @@ void op66_rep(enki_interpreter* i) {
     if(IS_PTR(n)) exit(1);
     enki_value app = enki_alloc_app(i->gc, h, n);
     enki_app* ptr = ENKI_TO_PTR(app);
-    for (size_t k = 0; k < n; k++) { 
+    for (size_t k = 0; k < n; k++) {
         ptr->args_v[k] = x;
     }
     i->sp -= 2;
@@ -550,7 +550,7 @@ void op66_slice(enki_interpreter* i) {
                 for(size_t k = 0; k < rsz; k++) {
                     new_app->args_v[k] = src_args[k];
                 }
-                res_v = new; 
+                res_v = new;
             }
         }
     }
@@ -570,7 +570,7 @@ static enki_value* args_v(enki_value a) {
 
 void op66_weld(enki_interpreter* i) {
     enki_value x = i->stack_v[i->sp - 2];
-    enki_value y = i->stack_v[i->sp - 1]; 
+    enki_value y = i->stack_v[i->sp - 1];
     enki_value* x_args = args_v(x);
     enki_value* y_args = args_v(y);
     enki_value res_v;
@@ -584,7 +584,7 @@ void op66_weld(enki_interpreter* i) {
         res_v = enki_alloc_app(i->gc, (enki_value)0, n_args_s);
         enki_app* ptr = (enki_app*)ENKI_TO_PTR(res_v);
         x = i->stack_v[i->sp - 2];
-        y = i->stack_v[i->sp - 1]; 
+        y = i->stack_v[i->sp - 1];
         x_args = args_v(x);
         y_args = args_v(y);
         if(x_args != NULL) {
@@ -622,13 +622,13 @@ void op66_up(enki_interpreter* i) {
                 new->args_v[idx_i] = v;
                 i->sp = scratch_s;
             }
-        } 
+        }
     }
     i->sp -= 2;
     i->stack_v[i->sp - 1] = res_v;
 }
 void op66_up_uniq(enki_interpreter* i) {
-    op66_up(i); // same as UP for now 
+    op66_up(i); // same as UP for now
 }
 void op66_coup(enki_interpreter* i) {
     enki_value h = i->stack_v[i->sp - 2];
@@ -842,10 +842,11 @@ void op66_seq3(enki_interpreter* i) {
 
 static enki_value op66_apply_whnf(enki_interpreter* i, size_t n_args_s) {
     size_t base_fp_s = i->fp;
+    enki_law* base_law = i->law;
     size_t res_base_s = i->sp - (n_args_s + 1);
 
     enki_apply(i, n_args_s);
-    while(i->fp > base_fp_s && !i->halted) {
+    while((i->fp > base_fp_s || i->law != base_law) && !i->halted) {
         enki_step(i);
     }
 

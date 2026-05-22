@@ -7,9 +7,9 @@
 
 /*
 TODO assembler
-     big nats 
-     op66 ops 
-     real pinning 
+     big nats
+     op66 ops
+     real pinning
 */
 
 typedef enum {
@@ -17,11 +17,14 @@ typedef enum {
     OP_PUSH_CONST = 0x01,
     OP_PICK       = 0x02,
     OP_POP        = 0x03,
+    OP_UPD        = 0x04,
+    OP_EVAL       = 0x05,
+    OP_CALL       = 0x06,
     OP_APPLY      = 0x08,
     OP_DUP        = 0x09,
-    OP_OP0        = 0x10,    
-    OP_OP66       = 0x42,    
-    OP_OP82       = 0x52,    
+    OP_OP0        = 0x10,
+    OP_OP66       = 0x42,
+    OP_OP82       = 0x52,
     OP_RETURN     = 0xFF,
 } enki_opcode;
 
@@ -142,21 +145,27 @@ typedef enum {
 
 
 typedef struct {
-    enki_value law;
-    size_t pc;
-    size_t res_base_s;
-    size_t arg_base_s;
-    enki_value cont_v;
+  uint8_t* pc;
+  size_t bp;
+  size_t sp;
+  uint64_t dep_q;
+  enki_law* law;
 } enki_frame;
 
 typedef struct enki_interpreter {
-    size_t sp;
-    enki_value stack_v[STACK_MAX];
-    size_t fp;
-    enki_frame frame[FRAME_MAX];
-    enki_gc* gc;
-    enki_allocator sys_a;
-    bool halted; 
+  size_t sp; // top of stack
+  size_t fp;
+  uint8_t* pc; // bytecode ptr
+  size_t bp; // bottom of stack for current frame
+  uint64_t dep_q; // current depth
+  enki_value stack_v[STACK_MAX];
+  uint8_t* byt_b; // bytecode
+  enki_law* law;
+
+  enki_frame frame[FRAME_MAX];
+  enki_gc* gc;
+  enki_allocator sys_a;
+  bool halted;
 } enki_interpreter;
 
 void enki_trace_interp(enki_interpreter* i);
@@ -164,6 +173,12 @@ void enki_run(enki_interpreter* i);
 void enki_step(enki_interpreter* i);
 void enki_halt(enki_interpreter* i);
 void enki_destroy(enki_interpreter* i);
+void enki_restore_frame(enki_interpreter* i);
+void enki_save_frame(enki_interpreter* i);
+void enki_load_frame(enki_interpreter* i, enki_law* law);
+void enki_run_until(enki_interpreter* i);
+
+void enki_upd_lets(enki_interpreter* i, enki_value* let_v, size_t let_s);
 enki_value enki_eval_whnf(enki_interpreter* i, enki_value x);
 enki_value enki_eval_nf(enki_interpreter* i, enki_value x);
-enki_interpreter* enki_create_interp(enki_allocator sys_a, size_t heap, enki_value law);
+enki_interpreter* enki_create_interp(enki_allocator sys_a, size_t heap, enki_law* law);

@@ -33,7 +33,7 @@ static enki_value make_law_with_consts(size_t arity_s, uint8_t* bc_b, size_t bc_
 
 static void run_until_base_frame(void)
 {
-    while(fixture_interp->fp > 0 && !fixture_interp->halted) {
+    while(fixture_interp->law != NULL && !fixture_interp->halted) {
         enki_step(fixture_interp);
     }
 }
@@ -43,8 +43,8 @@ TestSuite(apply_eval, .init = setup, .fini = teardown);
 Test(apply_eval, exact_law_application_runs_law_body)
 {
     uint8_t bc_b[] = {
-        OP_PICK, 0,
         OP_PICK, 1,
+        OP_PICK, 2,
         OP_OP66, OP66_ADD,
         OP_RETURN,
     };
@@ -67,8 +67,8 @@ Test(apply_eval, exact_law_application_runs_law_body)
 Test(apply_eval, under_application_returns_app)
 {
     uint8_t bc_b[] = {
-        OP_PICK, 0,
         OP_PICK, 1,
+        OP_PICK, 2,
         OP_OP66, OP66_ADD,
         OP_RETURN,
     };
@@ -91,8 +91,8 @@ Test(apply_eval, under_application_returns_app)
 Test(apply_eval, partial_app_can_be_completed_later)
 {
     uint8_t bc_b[] = {
-        OP_PICK, 0,
         OP_PICK, 1,
+        OP_PICK, 2,
         OP_OP66, OP66_ADD,
         OP_RETURN,
     };
@@ -119,11 +119,11 @@ Test(apply_eval, partial_app_can_be_completed_later)
 Test(apply_eval, over_application_uses_continuation)
 {
     uint8_t id_bc[] = {
-        OP_PICK, 0,
+        OP_PICK, 1,
         OP_RETURN,
     };
     uint8_t inc_bc[] = {
-        OP_PICK, 0,
+        OP_PICK, 1,
         OP_OP66, OP66_INC,
         OP_RETURN,
     };
@@ -147,11 +147,11 @@ Test(apply_eval, over_application_uses_continuation)
 Test(apply_eval, over_application_of_two_arity_law_uses_continuation)
 {
     uint8_t choose_bc[] = {
-        OP_PICK, 0,
+        OP_PICK, 1,
         OP_RETURN,
     };
     uint8_t inc_bc[] = {
-        OP_PICK, 0,
+        OP_PICK, 1,
         OP_OP66, OP66_INC,
         OP_RETURN,
     };
@@ -176,11 +176,11 @@ Test(apply_eval, over_application_of_two_arity_law_uses_continuation)
 Test(apply_eval, over_application_of_partial_app_uses_continuation)
 {
     uint8_t choose_bc[] = {
-        OP_PICK, 0,
+        OP_PICK, 1,
         OP_RETURN,
     };
     uint8_t inc_bc[] = {
-        OP_PICK, 0,
+        OP_PICK, 1,
         OP_OP66, OP66_INC,
         OP_RETURN,
     };
@@ -207,12 +207,12 @@ Test(apply_eval, over_application_of_partial_app_uses_continuation)
 Test(apply_eval, continuation_applies_multiple_extra_args)
 {
     uint8_t id_bc[] = {
-        OP_PICK, 0,
+        OP_PICK, 1,
         OP_RETURN,
     };
     uint8_t add_bc[] = {
-        OP_PICK, 0,
         OP_PICK, 1,
+        OP_PICK, 2,
         OP_OP66, OP66_ADD,
         OP_RETURN,
     };
@@ -237,7 +237,7 @@ Test(apply_eval, continuation_applies_multiple_extra_args)
 Test(apply_eval, eval_whnf_forces_app_thunk_to_outer_value)
 {
     uint8_t bc_b[] = {
-        OP_PICK, 0,
+        OP_PICK, 1,
         OP_OP66, OP66_INC,
         OP_RETURN,
     };
@@ -255,7 +255,7 @@ Test(apply_eval, eval_whnf_forces_app_thunk_to_outer_value)
 Test(apply_eval, eval_whnf_does_not_force_children)
 {
     uint8_t bc_b[] = {
-        OP_PICK, 0,
+        OP_PICK, 1,
         OP_OP66, OP66_INC,
         OP_RETURN,
     };
@@ -281,7 +281,7 @@ Test(apply_eval, eval_whnf_does_not_force_children)
 Test(apply_eval, eval_nf_forces_children_inside_whnf_app)
 {
     uint8_t bc_b[] = {
-        OP_PICK, 0,
+        OP_PICK, 1,
         OP_OP66, OP66_INC,
         OP_RETURN,
     };
@@ -307,7 +307,7 @@ Test(apply_eval, eval_nf_forces_children_inside_whnf_app)
 Test(apply_eval, eval_nf_forces_law_name_body_and_consts)
 {
     uint8_t inc_bc[] = {
-        OP_PICK, 0,
+        OP_PICK, 1,
         OP_OP66, OP66_INC,
         OP_RETURN,
     };
@@ -345,7 +345,7 @@ Test(apply_eval, eval_nf_forces_law_name_body_and_consts)
 Test(apply_eval, eval_nf_forces_pin_inner_and_subpins)
 {
     uint8_t inc_bc[] = {
-        OP_PICK, 0,
+        OP_PICK, 1,
         OP_OP66, OP66_INC,
         OP_RETURN,
     };
@@ -438,7 +438,7 @@ Test(apply_eval, seq2_and_seq3_return_last_value)
 Test(apply_eval, sap_forces_arg_applies_function_and_forces_result)
 {
     uint8_t bc_b[] = {
-        OP_PICK, 0,
+        OP_PICK, 1,
         OP_OP66, OP66_INC,
         OP_RETURN,
     };
@@ -459,8 +459,8 @@ Test(apply_eval, sap_forces_arg_applies_function_and_forces_result)
 Test(apply_eval, sap_can_apply_partial_function)
 {
     uint8_t bc_b[] = {
-        OP_PICK, 0,
         OP_PICK, 1,
+        OP_PICK, 2,
         OP_OP66, OP66_ADD,
         OP_RETURN,
     };
@@ -484,8 +484,8 @@ Test(apply_eval, sap_can_apply_partial_function)
 Test(apply_eval, sap2_forces_args_applies_function_twice_and_forces_result)
 {
     uint8_t bc_b[] = {
-        OP_PICK, 0,
         OP_PICK, 1,
+        OP_PICK, 2,
         OP_OP66, OP66_ADD,
         OP_RETURN,
     };

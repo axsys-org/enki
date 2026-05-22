@@ -153,7 +153,7 @@ Test(gc_runtime, slice_weld_and_up_preserve_pointer_args_across_gc)
 Test(gc_runtime, law_application_survives_gc_during_primitive_allocation)
 {
     uint8_t bc_b[] = {
-        OP_PICK, 0,
+        OP_PICK, 1,
         OP_OP66, OP66_BEX,
         OP_RETURN,
     };
@@ -167,7 +167,7 @@ Test(gc_runtime, law_application_survives_gc_during_primitive_allocation)
 
     stress_alloc(40);
     enki_apply(fixture_interp, 1);
-    while(fixture_interp->fp > 0 && !fixture_interp->halted) {
+    while(fixture_interp->law != NULL && !fixture_interp->halted) {
         enki_step(fixture_interp);
     }
 
@@ -178,7 +178,7 @@ Test(gc_runtime, law_application_survives_gc_during_primitive_allocation)
 Test(gc_runtime, eval_whnf_survives_gc_during_thunk_evaluation)
 {
     uint8_t bc_b[] = {
-        OP_PICK, 0,
+        OP_PICK, 1,
         OP_OP66, OP66_BEX,
         OP_RETURN,
     };

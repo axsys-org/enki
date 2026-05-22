@@ -1,4 +1,5 @@
 #include "enki/allocator.h"
+#include "enki/apply.h"
 #include "enki/interp.h"
 #include "enki/value.h"
 
@@ -24,13 +25,8 @@ static void run_law(uint8_t* bc_b, size_t bc_len_s, enki_value* consts_v, size_t
     enki_value law = enki_alloc_law(
         fixture_interp->gc, 0, 0, 0, bc_len_s, n_const_s, bc_b, consts_v);
 
-    fixture_interp->frame[0].law = law;
-    fixture_interp->frame[0].pc = 0;
-    fixture_interp->frame[0].res_base_s = 0;
-    fixture_interp->frame[0].arg_base_s = 0;
-    fixture_interp->frame[0].cont_v = 0;
-    fixture_interp->halted = false;
     fixture_interp->fp = 0;
+    enki_load_frame(fixture_interp, (enki_law*)ENKI_TO_PTR(law));
 
     enki_run(fixture_interp);
 }
@@ -75,25 +71,57 @@ Test(interp_bytecode, dup_and_pop_leave_expected_stack)
     cr_assert_eq(fixture_interp->stack_v[0], 14);
 }
 
-Test(interp_bytecode, pick_reads_from_arg_base)
+Test(interp_bytecode, pick_zero_reads_self)
 {
     uint8_t bc_b[] = {
         OP_PICK, 0,
         OP_RETURN,
     };
+    enki_value law = enki_alloc_law(
+        fixture_interp->gc, 0, 0, 0, sizeof(bc_b), 0, bc_b, NULL);
 
-    fixture_interp->stack_v[0] = 1234;
+    fixture_interp->stack_v[0] = law;
     fixture_interp->sp = 1;
-    run_law(bc_b, sizeof(bc_b), NULL, 0);
+    fixture_interp->fp = 0;
+    fixture_interp->halted = false;
 
-    cr_assert_eq(fixture_interp->sp, 2);
-    cr_assert_eq(fixture_interp->stack_v[1], 1234);
+    enki_apply(fixture_interp, 0);
+    while (fixture_interp->law != NULL && !fixture_interp->halted) {
+        enki_step(fixture_interp);
+    }
+
+    cr_assert_eq(fixture_interp->sp, 1);
+    cr_assert_eq(fixture_interp->stack_v[0], law);
+}
+
+Test(interp_bytecode, pick_one_reads_first_arg)
+{
+    uint8_t bc_b[] = {
+        OP_PICK, 1,
+        OP_RETURN,
+    };
+    enki_value law = enki_alloc_law(
+        fixture_interp->gc, 1, 0, 0, sizeof(bc_b), 0, bc_b, NULL);
+
+    fixture_interp->stack_v[0] = law;
+    fixture_interp->stack_v[1] = 1234;
+    fixture_interp->sp = 2;
+    fixture_interp->fp = 0;
+    fixture_interp->halted = false;
+
+    enki_apply(fixture_interp, 1);
+    while (fixture_interp->law != NULL && !fixture_interp->halted) {
+        enki_step(fixture_interp);
+    }
+
+    cr_assert_eq(fixture_interp->sp, 1);
+    cr_assert_eq(fixture_interp->stack_v[0], 1234);
 }
 
 Test(interp_bytecode, op_apply_calls_law_from_bytecode)
 {
     uint8_t inc_bc[] = {
-        OP_PICK, 0,
+        OP_PICK, 1,
         OP_OP66, OP66_INC,
         OP_RETURN,
     };

@@ -49,6 +49,8 @@ typedef struct enki_allocator {
  */
 enki_allocator enki_allocator_system(void);
 
+#define ea_alloc(loc_a, size) (loc_a.alloc(loc_a.ctx, size))
+#define ea_free(loc_a, ptr) (loc_a.free(loc_a.ctx, ptr))
 #ifdef __cplusplus
 }
 #endif
