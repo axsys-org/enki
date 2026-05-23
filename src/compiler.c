@@ -62,3 +62,4 @@ void enki_compile_law(enki_value body_v, size_t arity_s, enki_vector* bc_b, enki
     enki_compile_value(body_v, arity_s, bc_b, const_table_v);
     enki_vector_push_u8(bc_b, OP_RETURN);
 }
+
