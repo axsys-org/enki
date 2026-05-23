@@ -19,6 +19,7 @@ typedef enum {
     OP_POP        = 0x03,
     OP_APPLY      = 0x08,
     OP_DUP        = 0x09,
+    OP_JUDGE      = 0x0A,
     OP_OP0        = 0x10,    
     OP_OP66       = 0x42,    
     OP_OP82       = 0x52,    

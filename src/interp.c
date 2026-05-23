@@ -2,6 +2,7 @@
 #include "enki/apply.h"
 #include "enki/value.h"
 #include "enki/gc.h"
+#include "enki/judge.h"
 #include "enki/op66.h"
 #include "enki/primops.h"
 
@@ -100,6 +101,14 @@ void enki_step(enki_interpreter* i) {
             i->stack[i->sp] = i->stack[i->sp - 1];
             i->sp++;
             break;
+        case OP_JUDGE: {
+            enki_value law_v = f->law;
+            size_t arg_base = f->arg_base;
+            enki_value res = enki_judge(i, law_v, arg_base);
+            i->stack[i->sp] = res;
+            i->sp++;
+            break;
+        }
         case OP_OP0: {
             uint8_t sub = ENKI_LAW_BC(law)[f->pc++];
             switch (sub) {

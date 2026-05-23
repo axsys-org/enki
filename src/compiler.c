@@ -59,6 +59,9 @@ void enki_compile_args(enki_app* app, size_t depth, enki_vector* bc, enki_vector
 }
 
 void enki_compile_law(enki_value body, size_t arity, enki_vector* bc, enki_vector* const_table) {
-    enki_compile_value(body, arity, bc, const_table);
+    (void)body;
+    (void)arity;
+    (void)const_table;
+    enki_vector_push_u8(bc, OP_JUDGE);
     enki_vector_push_u8(bc, OP_RETURN);
 }
