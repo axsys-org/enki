@@ -2,10 +2,7 @@
 collect_subpins 
 canonize
 hash 
-*/
 
-
-/*
 NAT:
 offset  size                 field
 0       1                    tag = 0x00
@@ -51,11 +48,6 @@ offset  size                 field
 13+...  size(inner)          encoded inner value
 
 
-
-*/
-
-/*
-
 init:
     MDB_env* env;
     mdb_env_create(&env);
@@ -93,7 +85,89 @@ close
     mdb_env_close(store->env)
 */
 
-enki_value enki_deserialize(uint8_t* buf, size_t* off) {
+enki_value enki_deserialize(uint8_t* buff, size_t* off) {
+
+    uint8_t tag = buff[off*];
+    *off += 1;
+    switch(tag) {
+        case ENKI_NAT:
+            size_t byte_len = 0;
+            for(size_t k = 0; k < 8; k++) {
+                byte_len |= ((size_t)buff[*off] << (k * 8));
+                *off += 1;
+            }
+            if(byte_len <= 8) {
+                enki_value imm = 0;
+                for(size_t k = 0; k < 8; k++) {
+                    imm |= ((enki_value)buff[*off + k] << (k * 8));
+                }
+                *off += byte_len;
+                return imm;
+            }
+            size_t n_limbs = (byte_len + 7) / 8;
+            size_t n = sizeof(enki_nat) + (n_limbs * sizeof(enki_value))
+            enki_nat* nat = (enki_nat*)i->gc->alloc(n);
+            nat->h.size_s = n;
+            nat->h.kind = ENKI_NAT;
+            nat->h.state = NF;
+            nat->n_limbs = n_limbs;
+            i->stack[i->sp++] = PTR_TO_ENKI(nat);
+            for(size_t k = 0; k < byte_len; k++) {
+                size_t limb_i = k / 8;
+                size_t shift = (k % 8) * 8;
+                nat->limbs[limb_i] = nat->limbs[limb_i] |= ((mp_limb_t)buff[*off + k] << shift);
+            }
+            *off += byte_len;
+            return PTR_TO_ENKI(nat);
+        case ENKI_PIN:
+            size_t n = sizeof(enki_pin);
+            enki_pin* pin = (enki_pin*)i->gc->alloc(n);
+            pin->h.size_s = n;
+            pin->h.kind_b = ENKI_PIN;
+            pin->h.state_b = WHNF;
+            pin->n_subpins_s = 0;
+            pin->inner_v = 0;
+            for(size_t k = 0; k < 32; k++) {
+                pin->hash[k] = buff[*off + k];
+            }
+            *off += 32;
+            return PTR_TO_ENKI(pin);
+        case ENKI_LAW:
+            size_t arity = 0;
+            for(size_t k = 0; k < 8; k++) {
+                arity |= ((size_t)buff[*off] << (k * 8));
+                *off += 1;
+            }
+            enki_value name = enki_deserialize(i, buff, off);
+            i->stack[i->sp++] = name;
+            enki_value body = enki_deserialize(i, buff, off);
+            i->stack[i->sp++] = body;
+            size_t n_const = 0;
+            for(size_t k = 0; k < 8; k++) {
+                n_const |= ((size_t)buff[*off] << (k * 8));
+                *off += 1;
+            }
+            size_t n = sizeof(enki_law) + (n_const * sizeof(enki_value));
+            enki_law* law = (enki_law*)i->gc->alloc(n);
+            law->body_v = body;
+            law->name_v = name;
+            law->arity_s = arity;
+            law->n_const_s = n_const;
+            law->h.size_s = n;
+            law->h.kind_b = ENKI_LAW;
+            law->h.state_b = WHNF;
+            size_t res_base = i->sp;
+            i->stack[i->sp++] = PTR_TO_ENKI(law);
+            for (size_t k = 0; k < n_const; k++) {
+                ENKI_LAW_CONSTS(law)[k] = enki_deserialize(i, buff, off);
+            }
+            i->sp = res_base + 1;
+            return i->stack[res_base];
+        case ENKI_APP:
+
+        default: break;
+    }
+
 
     /*
         caller must go back to base sp once this is doen to remove scratch stack 

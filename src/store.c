@@ -1,0 +1,1 @@
+int enki_store_translation_unit_anchor;
