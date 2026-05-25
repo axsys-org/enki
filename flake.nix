@@ -75,7 +75,7 @@
         in
           import ./nix/mkenki.nix {
             inherit lib stdenv src;
-            inherit (pkgs) gnumake pkg-config criterion;
+            inherit (pkgs) gnumake pkg-config criterion gmp;
             inherit (selected) compiler cc;
           };
 
