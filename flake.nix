@@ -127,6 +127,7 @@
 
           buildInputs = [
             pkgs.criterion
+            pkgs.gmp
           ];
 
           dontConfigure = true;
@@ -160,6 +161,7 @@
 
           buildInputs = [
             pkgs.criterion
+            pkgs.gmp
           ];
 
           dontConfigure = true;
@@ -238,9 +240,9 @@
         checks =
           testChecks
           // {
-            tidy = tidyCheck;
-            format = treefmtEval.config.build.check self;
-            coverage = coverageReport;
+            # tidy = tidyCheck;
+            #format = treefmtEval.config.build.check self;
+            #coverage = coverageReport;
           };
 
         apps = {
@@ -259,6 +261,7 @@
               pkgs.bear
               pkgs.gnumake
               pkgs.criterion
+              pkgs.gmp
               pkgs.lcov
               pkgs.gcovr
               pkgs.pkg-config

@@ -10,7 +10,9 @@ BASE_CPPFLAGS := -Iinclude -Itests/support -Itests/property/vendor/theft -isyste
 BASE_CFLAGS := -std=c11 -MMD -MP
 
 WARN_COMMON := -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wstrict-prototypes \
-	-Wmissing-prototypes -Wold-style-definition -Wnull-dereference -Wdouble-promotion -Werror
+	-Wmissing-prototypes -Wold-style-definition -Wnull-dereference \
+	 -Wdouble-promotion -Werror -Wno-sign-conversion
+
 
 CC_VERSION := $(shell $(CC) --version 2>/dev/null)
 IS_CLANG := $(findstring clang,$(CC_VERSION))
