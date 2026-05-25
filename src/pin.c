@@ -159,7 +159,8 @@ enki_value enki_deserialize(uint8_t* buff, size_t* off) {
             size_t res_base = i->sp;
             i->stack[i->sp++] = PTR_TO_ENKI(law);
             for (size_t k = 0; k < n_const; k++) {
-                ENKI_LAW_CONSTS(law)[k] = enki_deserialize(i, buff, off);
+                enki_value val = enki_deserialize(i, buff, off);
+                i->stack[i->sp++] = val;
             }
             i->sp = res_base + 1;
             return i->stack[res_base];
