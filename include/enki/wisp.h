@@ -6,10 +6,12 @@
 #include <enki/allocator.h>
 #include <enki/value.h>
 #include <enki/gc.h>
+#include <enki/bst.h>
 #include <setjmp.h>
 
 typedef struct _wisp_env_entry {
-  bool mac_f;
+  // TODO: fix should
+  int mac_f;
   enki_value val_v;
 } wisp_env_entry;
 
@@ -25,7 +27,7 @@ typedef struct _wisp_rt {
   jmp_buf errjmp;
   char err_f; // has errjmp been set
   char* msg_c;
-  wisp_env* env;
+  enki_bst_tree* env;
 } wisp_rt;
 
 

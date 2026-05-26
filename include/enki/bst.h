@@ -22,6 +22,7 @@
 #include <stddef.h>
 
 #include "enki/allocator.h"
+#include "enki/value.h"
 
 #ifndef ENKI_BST_API
 #ifdef ENKI_BST_STATIC
@@ -36,11 +37,11 @@
 #endif
 
 #ifndef ENKI_BST_KEY_T
-#define ENKI_BST_KEY_T uint64_t
+#define ENKI_BST_KEY_T enki_value
 #endif
 
 #ifndef ENKI_BST_KEY_LESS
-#define ENKI_BST_KEY_LESS(a, b) ((a) < (b))
+#define ENKI_BST_KEY_LESS(a, b) enki_nat_le_bool(a,b)
 #endif
 
 #ifdef __cplusplus

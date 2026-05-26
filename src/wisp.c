@@ -11,6 +11,54 @@
 
 #define MOTE_JUXT ea_s4('J', 'U', 'X', 'T')
 
+// MARK: - Runtime lifecycle
+wisp_rt* wisp_rt_alloc(enki_allocator* loc_a)
+{
+    wisp_rt* rt = ea_calloc(loc_a, wisp_rt, 1);
+
+    rt->gc = enki_gc_create(*loc_a, 1 << 14, NULL);
+    rt->loc_a = &sys_a;
+    rt->env = ea_calloc(loc_a, enki_bst_tree, 1);
+    enki_bst_init(rt->env, *loc_a);
+    rt->err_f = 0; //
+    rt->msg_c = NULL;
+    return rt;
+}
+
+void wisp_rt_free(enki_allocator* loc_a, wisp_rt* rt)
+{
+    enki_gc_destroy(rt->gc);
+    free(rt->msg_c);
+    ea_free(loc_a, rt);
+}
+
+[[noreturn]] static void wisp_fail_fn(wisp_rt* rt, const char* msg, int line)
+{
+    if (rt->err_f) {
+        free(rt->msg_c);
+        rt->msg_c = malloc(strlen(msg) + 1);
+        strcpy(rt->msg_c, msg);
+        longjmp(rt->errjmp, 0);
+    } else {
+        fprintf(stderr, "wisp.c:%i fail: %s\r\n", line, msg);
+        abort();
+    }
+}
+
+#define wisp_fail(rt, msg) wisp_fail_fn(rt, msg, __LINE__)
+
+static void _wisp_fail_with_val(wisp_rt* rt, char* msg_c, enki_value val_v)
+{
+  char* key_c = enki_pvalue(rt->loc_a, val_v);
+  size_t str_s = strlen(msg_c) + strlen(key_c) + 5;
+  char* str_c = ea_calloc(rt->loc_a, char, str_s);
+  snprintf(str_c, str_s, "%s: %s\n", msg_c, key_c);
+  wisp_fail(rt, str_c);
+}
+
+
+// MARK: parser
+
 static bool wisp_is_juxt(enki_value val_v)
 {
     return val_v == MOTE_HJUXT || val_v == MOTE_JUXT;
@@ -47,25 +95,6 @@ static const char_class char_classes[256] = {
     /* 0xF0     */ 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
 };
 
-wisp_rt* wisp_rt_alloc(enki_allocator* loc_a)
-{
-    wisp_rt* rt = ea_calloc(loc_a, wisp_rt, 1);
-
-    rt->gc = enki_gc_create(*loc_a, 1 << 14, NULL);
-    rt->loc_a = &sys_a;
-    rt->env = NULL;
-    rt->err_f = 0; //
-    rt->msg_c = NULL;
-    return rt;
-}
-
-void wisp_rt_free(enki_allocator* loc_a, wisp_rt* rt)
-{
-    enki_gc_destroy(rt->gc);
-    free(rt->msg_c);
-    ea_free(loc_a, rt);
-}
-
 static char_class wisp_class(char c)
 {
     return char_classes[(unsigned char)c];
@@ -89,42 +118,6 @@ static bool wisp_eat(char** str)
         break;
     }
     return false;
-}
-
-[[noreturn]] static void wisp_fail_fn(wisp_rt* rt, const char* msg, int line)
-{
-    if (rt->err_f) {
-        free(rt->msg_c);
-        rt->msg_c = malloc(strlen(msg) + 1);
-        strcpy(rt->msg_c, msg);
-        longjmp(rt->errjmp, 0);
-    } else {
-        fprintf(stderr, "wisp.c:%i fail: %s\r\n", line, msg);
-        abort();
-    }
-}
-
-#define wisp_fail(rt, msg) wisp_fail_fn(rt, msg, __LINE__)
-
-static char* _val_to_key(wisp_rt* rt, enki_value val_v)
-{
-  UNUSED(rt);
-  return enki_pvalue(rt->loc_a, val_v);
-
-  // if (IS_PTR(val_v)) { wisp_fail(rt, "bigint keys unimplemented"); }
-  // // XX: too lazy to do bigint
-  // char* str = ea_alloc(EA_TMP_ALLOC, 20);
-  // assert(snprintf(str, 20, "%llu", val_v) > 0);
-  // return str;
-}
-
-static void _wisp_fail_with_val(wisp_rt* rt, char* msg_c, enki_value val_v)
-{
-  char* key_c = enki_pvalue(rt->loc_a, val_v);
-  size_t str_s = strlen(msg_c) + strlen(key_c) + 5;
-  char* str_c = ea_calloc(rt->loc_a, char, str_s);
-  snprintf(str_c, str_s, "%s: %s\n", msg_c, key_c);
-  wisp_fail(rt, str_c);
 }
 
 
@@ -358,13 +351,15 @@ enki_value wisp_parse(wisp_rt* rt, char** str_c)
 }
 
 
-
-
-
-static wisp_env_entry* wisp_getenv(wisp_rt* rt, enki_value val_v)
+static wisp_env_entry* wisp_getenv(wisp_rt* rt, enki_value key_v)
 {
-  if ( IS_PTR(val_v) ) { return NULL; }
-  return shget(rt->env, _val_to_key(rt, val_v));
+  if ( IS_PTR(key_v) ) { return NULL; }
+  wisp_env_entry* ent = ea_calloc(rt->loc_a, wisp_env_entry, 1);
+  if ( enki_bst_get(rt->env->root, key_v, &ent->mac_f, &ent->val_v, NULL) ) {
+    return ent;
+  }
+  ea_free(rt->loc_a, ent);
+  return NULL;
 }
 
 static void wisp_putenv(wisp_rt* rt, enki_value key_v, bool mac_f, enki_value val_v)
@@ -372,46 +367,11 @@ static void wisp_putenv(wisp_rt* rt, enki_value key_v, bool mac_f, enki_value va
   wisp_env_entry* ent = ea_calloc(rt->loc_a, wisp_env_entry, 1);
   ent->mac_f = mac_f;
   ent->val_v = val_v;
-  char* key_c = _val_to_key(rt, key_v);
 
-  shput(rt->env, key_c, ent);
+  enki_bst_tree_put(rt->env, key_v, val_v, mac_f);
+  // shput(rt->env, key_c, ent);
 }
 
-
-// static enki_value env_to_bst_inner(
-//   wisp_rt* rt,
-//   enki_bst_node* node
-// ) {
-//   if (node == NULL ) {
-//     return 0;
-//   }
-//
-//   enki_value macro_v = node->macro ? MOTE_MACRO : MOTE_VALUE;
-//   enki_value l_v = env_to_bst_inner(rt, node->left);
-//   enki_value r_v = env_to_bst_inner(rt, node->right);
-//
-//   return enki_alloc_quin(rt->gc, node->key, macro_v, node->value, l_v, r_v);
-// }
-
-// static enki_value env_to_bst(
-//   wisp_rt* rt,
-//   enki_bst_tree* tree
-// ) {
-//   return env_to_bst_inner(rt, tree->root);
-// }
-
-
-
-
-
-
-
-//     *
-//
-//
-//
-//
-//     )
 
 static enki_value wisp_expand_user(
   wisp_rt* rt,
@@ -724,18 +684,6 @@ static void wisp_emit_expr(wisp_emit_ctx* ctx, enki_value bod_v)
   enki_vector_push_u8(ctx->bc_v, (uint8_t)(app->n_args_s - 1));
 }
 
-// static enki_value wisp_compile_expr(
-//   wisp_rt* rt,
-//   size_t loc_s,
-//   wisp_local* loc,
-//   enki_value bod_v
-// ) {
-//   UNUSED(rt);
-//   UNUSED(loc_s);
-//   UNUSED(loc);
-//   UNUSED(bod_v);
-//   return 0;
-// }
 
 static enki_value wisp_law(
   wisp_rt* rt,
@@ -916,8 +864,6 @@ static bool is_sys_macro(uint64_t mac_q)
 }
 
 
-
-
 static enki_value _wisp_macroexpand(
     wisp_rt* rt,
     size_t loc_s,
@@ -981,31 +927,8 @@ static enki_value _wisp_thunk(wisp_rt* rt, enki_value val_v)
   }
 }
 
-
-// compileExpr :: InActor => Locals -> Val -> IO Val
-// compileExpr locals = \case
-//     N 0       -> pure $ lawQuote (N 0) -- (0 0)
-//     A (N 1) x -> pure $ lawQuote (x!0) -- (0 x)
-//
-//     N s -> case lookup s locals of
-//         Just ix -> pure (N ix)
-//         Nothing -> getenvIO s >>= \case
-//             Just (_, gv, _) -> pure (N 0 % gv)   -- embed as constant
-//             Nothing         -> unbound "law" (prettyNat s)
-//
-//     x@(A (N 0) xs) -> do
-//         case V.toList xs of
-//             ["#juxt", "#", expr] -> eval expr
-//             _ -> do
-//                 let f:as = V.toList xs
-//                 f'  <- compileExpr locals f
-//                 as' <- traverse (compileExpr locals) as
-//                 pure (foldl (\acc x -> array [acc,x]) f' as')
-
-
 enki_value wisp_eval(wisp_rt* rt, enki_value val_v) {
   enki_value exp_v = _wisp_macroexpand(rt, 0, NULL, val_v);
-  // printf("expanded: %s\n", enki_pvalue(exp_v));
   enki_value thk_v = _wisp_thunk(rt, exp_v);
   return thk_v;
 }
