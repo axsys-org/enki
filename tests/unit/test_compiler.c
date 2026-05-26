@@ -29,6 +29,14 @@ static enki_value app2(enki_value fn_v, enki_value a, enki_value b)
     return value_v;
 }
 
+static enki_value app1(enki_value fn_v, enki_value a)
+{
+    enki_value value_v = enki_alloc_app(fixture_interp->gc, fn_v, 1);
+    enki_app* app = (enki_app*)ENKI_TO_PTR(value_v);
+    app->args_v[0] = a;
+    return value_v;
+}
+
 static enki_value compile_body(enki_value body_v)
 {
     enki_vector* bc_b = enki_vector_create_sized(enki_allocator_system(), sizeof(uint8_t));
@@ -41,7 +49,7 @@ static enki_value compile_body(enki_value body_v)
         fixture_interp->gc,
         0,
         0,
-        0,
+        body_v,
         enki_vector_len(bc_b),
         enki_vector_len(consts_v),
         (uint8_t*)enki_vector_data(bc_b),
@@ -68,25 +76,30 @@ static void run_compiled(enki_value law)
 
 TestSuite(compiler, .init = setup, .fini = teardown);
 
-Test(compiler, compiles_primitive_add_app_to_bytecode)
+Test(compiler, compile_law_emits_judge)
 {
-    enki_value body_v = app2(PRIM_ADD, 2, 3);
-    enki_value law = compile_body(body_v);
+    enki_vector* bc_b = enki_vector_create_sized(enki_allocator_system(), sizeof(uint8_t));
+    enki_vector* consts_v = enki_vector_create_sized(enki_allocator_system(), sizeof(enki_value));
 
-    run_compiled(law);
+    enki_compile_law(0, 0, bc_b, consts_v);
 
-    cr_assert_eq(fixture_interp->sp, 1);
-    cr_assert_eq(fixture_interp->stack_v[0], 5);
+    cr_assert_eq(enki_vector_len(bc_b), 2);
+    cr_assert_eq(((uint8_t*)enki_vector_data(bc_b))[0], OP_JUDGE);
+    cr_assert_eq(((uint8_t*)enki_vector_data(bc_b))[1], OP_RETURN);
+    cr_assert_eq(enki_vector_len(consts_v), 0);
+
+    enki_vector_destroy(bc_b);
+    enki_vector_destroy(consts_v);
 }
 
-Test(compiler, compiles_nested_primitive_apps_to_bytecode)
+Test(compiler, compiled_law_runs_letrec_body)
 {
-    enki_value add = app2(PRIM_ADD, 2, 3);
-    enki_value body_v = app2(PRIM_MUL, add, 4);
+    enki_value quote_v = app1(0, 42);
+    enki_value body_v = app2(1, quote_v, 1);
     enki_value law = compile_body(body_v);
 
     run_compiled(law);
 
     cr_assert_eq(fixture_interp->sp, 1);
-    cr_assert_eq(fixture_interp->stack_v[0], 20);
+    cr_assert_eq(fixture_interp->stack_v[0], 42);
 }

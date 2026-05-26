@@ -19,12 +19,13 @@ void enki_arena_destroy(enki_arena* a) {
 }   
 void* enki_arena_alloc(void* ctx, size_t size_s) {
     enki_arena* a = ctx;
-    if(!a) return NULL; 
-    if((a->off_o + size_s) > a->cap_s) {
+    if(!a) return NULL;
+    size_t align_s = _Alignof(max_align_t);
+    size_t old_o = (a->off_o + align_s - 1) & ~(align_s - 1);
+    if((old_o + size_s) > a->cap_s) {
         return NULL;
     }
-    size_t old_o = a->off_o;
-    a->off_o += size_s; 
+    a->off_o = old_o + size_s; 
     return (void*)(a->ptr + old_o);
 }
 

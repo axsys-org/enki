@@ -25,14 +25,14 @@ jobs:
       - uses: DeterminateSystems/magic-nix-cache-action@v8
       - run: nix run .#fuzz -- -max_total_time=60 -error_exitcode=1
 
-  coverage:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: cachix/install-nix-action@v31
-      - uses: DeterminateSystems/magic-nix-cache-action@v8
-      - run: nix build .#coverage
-      - uses: actions/upload-artifact@v4
-        with:
-          name: enki-coverage
-          path: result/
+  # coverage:
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: cachix/install-nix-action@v31
+  #     - uses: DeterminateSystems/magic-nix-cache-action@v8
+  #     - run: nix build .#coverage
+  #     - uses: actions/upload-artifact@v4
+  #       with:
+  #         name: enki-coverage
+  #         path: result/

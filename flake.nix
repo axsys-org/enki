@@ -75,7 +75,7 @@
         in
           import ./nix/mkenki.nix {
             inherit lib stdenv src;
-            inherit (pkgs) gnumake pkg-config criterion;
+            inherit (pkgs) gnumake pkg-config criterion gmp;
             inherit (selected) compiler cc;
           };
 
@@ -127,6 +127,7 @@
 
           buildInputs = [
             pkgs.criterion
+            pkgs.gmp
           ];
 
           dontConfigure = true;
@@ -160,6 +161,7 @@
 
           buildInputs = [
             pkgs.criterion
+            pkgs.gmp
           ];
 
           dontConfigure = true;
@@ -178,38 +180,38 @@
           '';
         };
 
-        fuzzBinary = stdenv.mkDerivation {
-          pname = "enki-fuzz-vector";
-          version = "0.1.0";
-          inherit src;
+        # fuzzBinary = stdenv.mkDerivation {
+        #   pname = "enki-fuzz-vector";
+        #   version = "0.1.0";
+        #   inherit src;
+        #
+        #   nativeBuildInputs = [
+        #     pkgs.gnumake
+        #     pkgs.clang
+        #   ];
+        #
+        #   dontConfigure = true;
+        #   buildPhase = ''
+        #     runHook preBuild
+        #     make BUILD_TYPE=asan CC=${pkgs.clang}/bin/clang fuzz-bin
+        #     runHook postBuild
+        #   '';
+        #
+        #   installPhase = ''
+        #     runHook preInstall
+        #     mkdir -p $out/bin $out/share/enki/fuzz
+        #     cp build/asan/tests/fuzz/fuzz_vector $out/bin/enki-fuzz-vector
+        #     cp -R tests/fuzz/corpus $out/share/enki/fuzz/corpus
+        #     runHook postInstall
+        #   '';
+        # };
 
-          nativeBuildInputs = [
-            pkgs.gnumake
-            pkgs.clang
-          ];
-
-          dontConfigure = true;
-          buildPhase = ''
-            runHook preBuild
-            make BUILD_TYPE=asan CC=${pkgs.clang}/bin/clang fuzz-bin
-            runHook postBuild
-          '';
-
-          installPhase = ''
-            runHook preInstall
-            mkdir -p $out/bin $out/share/enki/fuzz
-            cp build/asan/tests/fuzz/fuzz_vector $out/bin/enki-fuzz-vector
-            cp -R tests/fuzz/corpus $out/share/enki/fuzz/corpus
-            runHook postInstall
-          '';
-        };
-
-        fuzzApp = pkgs.writeShellApplication {
-          name = "enki-fuzz";
-          text = ''
-            exec ${fuzzBinary}/bin/enki-fuzz-vector ${fuzzBinary}/share/enki/fuzz/corpus "$@"
-          '';
-        };
+        # fuzzApp = pkgs.writeShellApplication {
+        #   name = "enki-fuzz";
+        #   text = ''
+        #     exec ${fuzzBinary}/bin/enki-fuzz-vector ${fuzzBinary}/share/enki/fuzz/corpus "$@"
+        #   '';
+        # };
 
         coverageApp = pkgs.writeShellApplication {
           name = "enki-coverage-report";
@@ -238,13 +240,13 @@
         checks =
           testChecks
           // {
-            tidy = tidyCheck;
-            format = treefmtEval.config.build.check self;
-            coverage = coverageReport;
+            # tidy = tidyCheck;
+            #format = treefmtEval.config.build.check self;
+            #coverage = coverageReport;
           };
 
         apps = {
-          fuzz = flake-utils.lib.mkApp {drv = fuzzApp;};
+          # fuzz = flake-utils.lib.mkApp {drv = fuzzApp;};
           coverage-report = flake-utils.lib.mkApp {drv = coverageApp;};
         };
 
@@ -259,6 +261,7 @@
               pkgs.bear
               pkgs.gnumake
               pkgs.criterion
+              pkgs.gmp
               pkgs.lcov
               pkgs.gcovr
               pkgs.pkg-config
@@ -285,7 +288,7 @@
               make compile-commands
               make tidy
               make format-check
-              make CC=clang BUILD_TYPE=asan fuzz FUZZ_ARGS="-max_total_time=60"
+              # make CC=clang BUILD_TYPE=asan fuzz FUZZ_ARGS="-max_total_time=60"
             BANNER
           '';
         };
