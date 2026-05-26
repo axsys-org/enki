@@ -491,6 +491,59 @@ typedef struct _wisp_local {
 } wisp_local;
 
 
+enki_value wisp_eval(wisp_rt* rt, enki_value val_v);
+static bool wisp_quote_payload(enki_value val_v, enki_value* out_v);
+static bool wisp_law_quote_payload(enki_value val_v, enki_value* out_v);
+
+static enki_value compile_expr(
+  wisp_rt* rt,
+  size_t loc_s,
+  wisp_local* loc,
+  enki_value val_v
+) {
+#define recur(x) compile_expr(rt, loc_s, loc, x)
+#define law_quote(x) enki_alloc_pair(rt->gc, 0, x)
+  if (val_v == 0) {
+    return law_quote(0);
+  }
+  if ( !IS_PTR(val_v) ) {
+    for (size_t i = 0; i < loc_s; i++ ) {
+      if ( loc[i].nam_v == val_v ) {
+        return loc[i].idx_q;
+      }
+    }
+    wisp_env_entry* ent = wisp_getenv(rt, val_v);
+    if (ent == NULL ) {
+      _wisp_fail_with_val(rt, "unbound", val_v);
+      return 0;
+    }
+    return law_quote(ent->val_v);
+  }
+  enki_app* app;
+  app = ENKI_TO_APP(val_v);
+
+  enki_value payload_v;
+  if (wisp_quote_payload(val_v, &payload_v)) {
+    return law_quote(payload_v);
+  }
+
+  if (app == NULL || app->fn_v != 0 ) {
+    return law_quote(val_v);
+  }
+
+  if (app->n_args_s == 0) {
+    return law_quote(0);
+  }
+
+  enki_value ret = recur(app->args_v[0]);
+  for(size_t i = 1; i < app->n_args_s; i++ ) {
+    ret = enki_alloc_trel(rt->gc, 0, ret, recur(app->args_v[i]));
+  }
+  return ret;
+#undef recur
+#undef law_quote
+}
+
 static enki_value _wisp_macroexpand(
     wisp_rt* rt,
     size_t loc_s,
@@ -513,6 +566,16 @@ static bool wisp_quote_payload(enki_value val_v, enki_value* out_v)
 {
   enki_app* app = ENKI_TO_APP(val_v);
   if (app != NULL && app->fn_v == 1 && app->n_args_s == 1) {
+    *out_v = app->args_v[0];
+    return true;
+  }
+  return false;
+}
+
+static bool wisp_law_quote_payload(enki_value val_v, enki_value* out_v)
+{
+  enki_app* app = ENKI_TO_APP(val_v);
+  if (app != NULL && app->fn_v == 0 && app->n_args_s == 1) {
     *out_v = app->args_v[0];
     return true;
   }
@@ -600,12 +663,17 @@ static void wisp_emit_prim(wisp_emit_ctx* ctx, const enki_prim_spec* prim)
 static void wisp_emit_expr(wisp_emit_ctx* ctx, enki_value bod_v)
 {
   enki_value payload_v;
-  if (wisp_quote_payload(bod_v, &payload_v)) {
+  if (wisp_law_quote_payload(bod_v, &payload_v) || wisp_quote_payload(bod_v, &payload_v)) {
     wisp_emit_const(ctx, payload_v);
     return;
   }
 
   if (!IS_PTR(bod_v)) {
+    if (bod_v < ctx->loc_s) {
+      wisp_emit_pick(ctx, bod_v);
+      return;
+    }
+
     uint64_t idx_q = 0;
     if (wisp_find_local(ctx->loc_s, ctx->loc, bod_v, &idx_q)) {
       wisp_emit_pick(ctx, idx_q);
@@ -716,8 +784,11 @@ static enki_value wisp_law(
   enki_app* bin_exp = enki_alloc_app_bare(rt->gc, 0, bin_s);
   for (size_t j = 0; j < bin_s; j++ ) {
     bin_exp->args_v[j] = _wisp_macroexpand(rt, loc_s, loc, loc[j + arg_s + 1].exp_v);
+    bin_exp->args_v[j] = compile_expr(rt, loc_s, loc, bin_exp->args_v[j]);
   }
+
   enki_value bod_exp_v = _wisp_macroexpand(rt, loc_s, loc, bod_v);
+  bod_exp_v = compile_expr(rt, loc_s, loc, bod_exp_v);
 
   enki_vector* bc_v = enki_vector_create_sized(enki_allocator_system(), sizeof(uint8_t));
   enki_vector* const_v = enki_vector_create_sized(enki_allocator_system(), sizeof(enki_value));
@@ -770,6 +841,8 @@ static enki_value wisp_bind(
 
 static enki_value _wisp_expand1(
   wisp_rt* rt,
+  size_t loc_s,
+  wisp_local* loc,
   uint64_t mac_q,
   enki_value val_v
 ) {
@@ -783,6 +856,7 @@ static enki_value _wisp_expand1(
     return wisp_expand_user(rt, ent->val_v, val_v);
   }
 
+#define RECUR(x) _wisp_macroexpand(rt, loc_s, loc, x)
   switch (mac_q) {
     case MOTE_HBIND:
       if ( app->n_args_s != 3 ) {
@@ -813,8 +887,15 @@ static enki_value _wisp_expand1(
         _wisp_fail_with_val(rt, "invalid #app", val_v);
         return 0;
       }
-      return wisp_app(rt, app->n_args_s - 1, &app->args_v[1]);
+      enki_value* args_v = NULL;
+      for (size_t i = 1; i < app->n_args_s; i++) {
+        arrpush(args_v, RECUR(app->args_v[i]));
+      }
+      size_t args_s = arrlen(args_v);
+
+      return wisp_app(rt, args_s, args_v);
   }
+#undef RECUR
   _wisp_fail_with_val(rt, "unknown macro", mac_q);
   return 0;
 
@@ -833,6 +914,7 @@ static bool is_sys_macro(uint64_t mac_q)
       (mac_q == MOTE_HEXPORT)
   );
 }
+
 
 
 
@@ -861,7 +943,7 @@ static enki_value _wisp_macroexpand(
                        wisp_find_local(loc_s, loc, app->args_v[0], &local_idx_q);
   wisp_env_entry* ent = wisp_getenv(rt, app->args_v[0]);
   if (!head_is_local && ((ent && ent->mac_f) || is_sys_macro(app->args_v[0])) ) {
-    return _wisp_expand1(rt, app->args_v[0], val_v);
+    return _wisp_expand1(rt, loc_s, loc, app->args_v[0], val_v);
   }
 
   enki_app* nex = enki_alloc_app_bare(rt->gc, 0, app->n_args_s);
@@ -884,8 +966,8 @@ static enki_value _wisp_thunk(wisp_rt* rt, enki_value val_v)
   }
   obj_header* h = (obj_header*)ENKI_TO_PTR(val_v);
   if (h->kind_b != ENKI_APP) {
-    _wisp_fail_with_val(rt, "not app in thunk", val_v);
-    return 0;
+    // _wisp_fail_with_val(rt, "not app in thunk", val_v);
+    return val_v;
   }
   enki_app* app = (enki_app*)h;
   if ( app->fn_v == 1 && app->n_args_s == 1 )  {
@@ -897,8 +979,29 @@ static enki_value _wisp_thunk(wisp_rt* rt, enki_value val_v)
     }
     return PTR_TO_ENKI(nex);
   }
-
 }
+
+
+// compileExpr :: InActor => Locals -> Val -> IO Val
+// compileExpr locals = \case
+//     N 0       -> pure $ lawQuote (N 0) -- (0 0)
+//     A (N 1) x -> pure $ lawQuote (x!0) -- (0 x)
+//
+//     N s -> case lookup s locals of
+//         Just ix -> pure (N ix)
+//         Nothing -> getenvIO s >>= \case
+//             Just (_, gv, _) -> pure (N 0 % gv)   -- embed as constant
+//             Nothing         -> unbound "law" (prettyNat s)
+//
+//     x@(A (N 0) xs) -> do
+//         case V.toList xs of
+//             ["#juxt", "#", expr] -> eval expr
+//             _ -> do
+//                 let f:as = V.toList xs
+//                 f'  <- compileExpr locals f
+//                 as' <- traverse (compileExpr locals) as
+//                 pure (foldl (\acc x -> array [acc,x]) f' as')
+
 
 enki_value wisp_eval(wisp_rt* rt, enki_value val_v) {
   enki_value exp_v = _wisp_macroexpand(rt, 0, NULL, val_v);
@@ -906,7 +1009,3 @@ enki_value wisp_eval(wisp_rt* rt, enki_value val_v) {
   enki_value thk_v = _wisp_thunk(rt, exp_v);
   return thk_v;
 }
-
-
-
-

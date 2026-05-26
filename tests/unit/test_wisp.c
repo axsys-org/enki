@@ -231,7 +231,7 @@ Test(wisp, bind_law_and_apply_it)
     cr_assert(IS_PTR(law_v));
     cr_assert_eq(((obj_header*)ENKI_TO_PTR(law_v))->kind_b, ENKI_LAW);
 
-    cr_assert_eq(eval_input("(#app plus 20 22)"), 42);
+    cr_assert_eq(eval_input("(#app add 20 22)"), 42);
 }
 
 Test(wisp, law_self_is_pick_zero)

@@ -53,6 +53,11 @@ static enki_value make_app(enki_value fn_v, size_t n_args_s, const enki_value* a
     return app_v;
 }
 
+static enki_value make_law(size_t arity_s, enki_value name_v, enki_value body_v)
+{
+    return enki_alloc_law(fixture_interp->gc, arity_s, name_v, body_v, 0, 0, NULL, NULL);
+}
+
 static enki_value make_big_nat_bytes(const char* bytes_c, size_t bytes_s)
 {
     mp_limb_t limbs[4] = {0};
@@ -119,9 +124,23 @@ Test(print, pins_wrap_printed_inner_value_in_angle_brackets)
     assert_prints(nested_pin_v, "<<42>>");
 }
 
+Test(print, law_prints_zero_arity_signature_and_body)
+{
+    enki_value law_v = make_law(0, 7, 42);
+
+    assert_prints(law_v, "{7 (self)\n#(42#)}");
+}
+
+Test(print, law_prints_argument_names_in_signature)
+{
+    enki_value law_v = make_law(3, 7, 42);
+
+    assert_prints(law_v, "{7 (self a b c)\n#(42#)}");
+}
+
 Test(print, unknown_heap_objects_print_placeholder)
 {
-    enki_value law_v = enki_alloc_law(fixture_interp->gc, 0, 0, 0, 0, 0, NULL, NULL);
+    enki_value cont_v = enki_alloc_cont(fixture_interp->gc, 0, NULL);
 
-    assert_prints(law_v, "<<>>");
+    assert_prints(cont_v, "<<>>");
 }

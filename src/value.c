@@ -275,6 +275,7 @@ enki_value enki_make_pin(enki_gc* gc, enki_value val_v)
 {
   return enki_alloc_pin(gc, empty_pinhash, val_v, 0, NULL);
 }
+//(#bind add (#law "add" (add x y) ((#pin "B") ("Add" x y))))
 
 
 // enki_value enki_make_law(
