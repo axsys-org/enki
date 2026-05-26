@@ -17,14 +17,14 @@ static char buf_is_print(char* buf_c, size_t buf_s)
 
 static void enki_print_bat(enki_allocator cat_a, enki_string_builder* sb, enki_nat* nat)
 {
-    size_t byt_s = enki_bat_met_bytes(nat);
+    size_t byt_s = enki_bat_met_bytes((enki_value)nat);
     if (buf_is_print((char*)nat->limbs, byt_s)) {
         enki_sb_append_lit(sb, "\"");
         enki_sb_append_ref(sb, (const char*)nat->limbs, byt_s);
         enki_sb_append_lit(sb, "\"");
     } else {
         size_t buf_s = mpn_sizeinbase(nat->limbs, nat->n_limbs_s, 10); // upper bound, off by ≤1
-        unsigned char* buf_c = ea_alloc(cat_a, buf_s);
+        unsigned char* buf_c = ea_calloc(cat_a, unsigned char, buf_s);
         size_t str_s = mpn_get_str(buf_c, 10, nat->limbs, nat->n_limbs_s);
         for (size_t i = 0; i < str_s; i++) {
             buf_c[i] = buf_c[i] < 10 ? buf_c[i] + '0' : buf_c[i] - 10 + 'a';
