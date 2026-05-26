@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "enki/interp.h"
+
 struct enki_vector {
     enki_allocator allocator_a;
     uint8_t* data_b;
@@ -31,9 +33,9 @@ static void system_free(void* ctx, void* ptr)
     free(ptr);
 }
 
-static bool allocator_is_valid(enki_allocator allocator_a)
+static bool allocator_is_valid(const enki_allocator* allocator_a)
 {
-    return allocator_a.alloc != NULL && allocator_a.free != NULL;
+    return allocator_a != NULL && allocator_a->alloc != NULL && allocator_a->free != NULL;
 }
 
 static bool item_bytes(size_t capacity_s, size_t elem_size_s, size_t* bytes_s)
@@ -81,30 +83,24 @@ static enki_status resize_storage(enki_vector* vector, size_t capacity_s)
     return ENKI_OK;
 }
 
-enki_allocator sys_a = (enki_allocator){
+const enki_allocator sys_a = {
     .ctx = NULL,
     .alloc = system_alloc,
     .realloc = system_realloc,
     .free = system_free,
 };
-
-enki_allocator enki_allocator_system(void)
+const enki_allocator* enki_allocator_system(void)
 {
-    return (enki_allocator){
-        .ctx = NULL,
-        .alloc = system_alloc,
-        .realloc = system_realloc,
-        .free = system_free,
-    };
+
+    return &sys_a;
 }
 
-
-enki_vector* enki_vector_create(enki_allocator allocator_a)
+enki_vector* enki_vector_create(const enki_allocator* allocator_a)
 {
     return enki_vector_create_sized(allocator_a, sizeof(void*));
 }
 
-enki_vector* enki_vector_create_sized(enki_allocator allocator_a, size_t elem_size_s)
+enki_vector* enki_vector_create_sized(const enki_allocator* allocator_a, size_t elem_size_s)
 {
     if (!allocator_is_valid(allocator_a)) {
         return NULL;
@@ -113,18 +109,52 @@ enki_vector* enki_vector_create_sized(enki_allocator allocator_a, size_t elem_si
         return NULL;
     }
 
-    enki_vector* vector = allocator_a.alloc(allocator_a.ctx, sizeof(*vector));
+    enki_vector* vector = allocator_a->alloc(allocator_a->ctx, sizeof(*vector));
     if (vector == NULL) {
         return NULL;
     }
 
-    vector->allocator_a = allocator_a;
+    vector->allocator_a = *allocator_a;
     vector->data_b = NULL;
     vector->elem_size_s = elem_size_s;
     vector->len_s = 0;
     vector->capacity_s = 0;
 
     return vector;
+}
+
+static void vector_throw_status(enki_interpreter* i, enki_status status)
+{
+    switch(status) {
+        case ENKI_ERR_ALLOC:
+            enki_interp_throw(i, ENKI_ERROR_OOM, 0);
+        case ENKI_ERR_BOUNDS:
+            enki_interp_throw(i, ENKI_ERROR_BOUNDS, 0);
+        case ENKI_ERR_INVALID:
+            enki_interp_throw(i, ENKI_ERROR_TYPE, 0);
+        case ENKI_OK:
+            return;
+    }
+    enki_interp_throw(i, ENKI_ERROR_TYPE, 0);
+}
+
+enki_vector* enki_vector_create_sized_or_throw(enki_interpreter* i, const enki_allocator* allocator_a, size_t elem_size_s)
+{
+    enki_vector* vector = enki_vector_create_sized(allocator_a, elem_size_s);
+    if(vector == NULL) {
+        enki_interp_throw(i, ENKI_ERROR_OOM, 0);
+    }
+    return vector;
+}
+
+void enki_vector_push_u8_or_throw(enki_interpreter* i, enki_vector* vector, uint8_t item_v)
+{
+    vector_throw_status(i, enki_vector_push_u8(vector, item_v));
+}
+
+void enki_vector_push_copy_or_throw(enki_interpreter* i, enki_vector* vector, const void* item_v)
+{
+    vector_throw_status(i, enki_vector_push_copy(vector, item_v));
 }
 
 void enki_vector_destroy(enki_vector* vector)

@@ -72,7 +72,7 @@ typedef struct enki_sb_piece {
 } enki_sb_piece;
 
 typedef struct enki_string_builder {
-    enki_allocator* allocator;
+    const enki_allocator* allocator;
 
     enki_sb_piece* pieces;
     size_t         count;
@@ -87,7 +87,7 @@ typedef struct enki_string_builder {
     enki_sb_append_ref((sb), "" literal, sizeof(literal) - 1u)
 
 /* lifecycle */
-ENKI_SB_API void enki_sb_init(enki_string_builder* sb, enki_allocator* allocator);
+ENKI_SB_API void enki_sb_init(enki_string_builder* sb, const enki_allocator* allocator);
 ENKI_SB_API void enki_sb_reset(enki_string_builder* sb);
 ENKI_SB_API void enki_sb_free(enki_string_builder* sb);
 
@@ -117,7 +117,7 @@ ENKI_SB_API int   enki_sb_write(const enki_string_builder* sb,
                                 char* dst, size_t dst_size, size_t* out_len);
 ENKI_SB_API char* enki_sb_build(const enki_string_builder* sb, size_t* out_len);
 ENKI_SB_API char* enki_sb_build_with_allocator(const enki_string_builder* sb,
-                                               enki_allocator* allocator,
+                                               const enki_allocator* allocator,
                                                size_t* out_len);
 
 #if defined(ENKI_STRING_BUILDER_IMPLEMENTATION) || defined(ENKI_SB_IMPLEMENTATION)
@@ -128,7 +128,7 @@ ENKI_SB_API char* enki_sb_build_with_allocator(const enki_string_builder* sb,
 #define SIZE_MAX ((size_t)-1)
 #endif
 
-static int enki_sb__allocator_ok(enki_allocator* a)
+static int enki_sb__allocator_ok(const enki_allocator* a)
 {
     return a->alloc != 0 && a->free != 0;
 }
@@ -270,7 +270,7 @@ static char* enki_sb__emit_i64(char* dst, int64_t value)
     return enki_sb__emit_u64(dst, enki_sb__abs_i64_to_u64(value), 10, 0);
 }
 
-ENKI_SB_API void enki_sb_init(enki_string_builder* sb, enki_allocator* allocator)
+ENKI_SB_API void enki_sb_init(enki_string_builder* sb, const enki_allocator* allocator)
 {
     if (!sb)
         return;
@@ -293,7 +293,7 @@ ENKI_SB_API void enki_sb_reset(enki_string_builder* sb)
 
 ENKI_SB_API void enki_sb_free(enki_string_builder* sb)
 {
-    enki_allocator* allocator;
+    const enki_allocator* allocator;
 
     if (!sb)
         return;
@@ -580,7 +580,7 @@ ENKI_SB_API char* enki_sb_build(const enki_string_builder* sb, size_t* out_len)
 }
 
 ENKI_SB_API char* enki_sb_build_with_allocator(const enki_string_builder* sb,
-                                               enki_allocator* allocator,
+                                               const enki_allocator* allocator,
                                                size_t* out_len)
 {
     size_t len;

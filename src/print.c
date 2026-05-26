@@ -3,7 +3,7 @@
 #include <enki/string_builder.h>
 #include <enki/util.h>
 
-static void enki_print_value_sb(enki_allocator* cat_a, enki_string_builder* sb, enki_value val_v);
+static void enki_print_value_sb(const enki_allocator* cat_a, enki_string_builder* sb, enki_value val_v);
 
 static char buf_is_print(char* buf_c, size_t buf_s)
 {
@@ -15,7 +15,7 @@ static char buf_is_print(char* buf_c, size_t buf_s)
     return true;
 }
 
-static void enki_print_bat(enki_allocator* cat_a, enki_string_builder* sb, enki_nat* nat)
+static void enki_print_bat(const enki_allocator* cat_a, enki_string_builder* sb, enki_nat* nat)
 {
     size_t byt_s = enki_bat_met_bytes(PTR_TO_ENKI(nat));
     if (buf_is_print((char*)nat->limbs, byt_s)) {
@@ -33,7 +33,7 @@ static void enki_print_bat(enki_allocator* cat_a, enki_string_builder* sb, enki_
     }
 }
 
-static void enki_print_app(enki_allocator* cat_a, enki_string_builder* sb, enki_app* app)
+static void enki_print_app(const enki_allocator* cat_a, enki_string_builder* sb, enki_app* app)
 {
     enki_sb_append_lit(sb, "(");
     enki_print_value_sb(cat_a, sb, app->fn_v);
@@ -81,7 +81,7 @@ static void enki_print_direct_text_raw(enki_string_builder* sb, uint64_t dir_q)
 }
 
 static bool enki_print_law_name_raw(
-    enki_allocator* cat_a,
+    const enki_allocator* cat_a,
     enki_string_builder* sb,
     enki_value name_v
 ) {
@@ -138,7 +138,7 @@ static const char law_names[] = {
   'z',
 };
 
-static char* get_law_name(enki_allocator* loc_a, size_t idx_o)
+static char* get_law_name(const enki_allocator* loc_a, size_t idx_o)
 {
   uint8_t idx_b[4] = {0};
   size_t idx_s = 0;
@@ -156,7 +156,7 @@ static char* get_law_name(enki_allocator* loc_a, size_t idx_o)
   return ret_c;
 }
 static void print_calls(
-    enki_allocator* cat_a,
+    const enki_allocator* cat_a,
     enki_string_builder* sb,
     size_t dep_s,
     enki_value self_v,
@@ -164,7 +164,7 @@ static void print_calls(
 );
 
 static void enki_print_law_local(
-    enki_allocator* cat_a,
+    const enki_allocator* cat_a,
     enki_string_builder* sb,
     enki_value self_v,
     size_t idx_s
@@ -180,7 +180,7 @@ static void enki_print_law_local(
 }
 
 static void flatten_calls(
-    enki_allocator* cat_a,
+    const enki_allocator* cat_a,
     enki_string_builder* sb,
     size_t dep_s,
     enki_value self_v,
@@ -207,7 +207,7 @@ static void flatten_calls(
 
 
 static void print_calls(
-    enki_allocator* cat_a,
+    const enki_allocator* cat_a,
     enki_string_builder* sb,
     size_t dep_s,
     enki_value self_v,
@@ -233,7 +233,7 @@ static void print_calls(
 
 
 static void enki_print_law_let(
-    enki_allocator* cat_a,
+    const enki_allocator* cat_a,
     enki_string_builder* sb,
     size_t idx_s,
     size_t dep_s,
@@ -245,7 +245,7 @@ static void enki_print_law_let(
 }
 
 static void enki_print_law(
-    enki_allocator* cat_a,
+    const enki_allocator* cat_a,
     enki_string_builder* sb,
     enki_law* law
 ) {
@@ -291,7 +291,7 @@ static void enki_print_law(
   arrfree(lets_v);
 }
 
-static void enki_print_value_sb(enki_allocator* cat_a, enki_string_builder* sb, enki_value val_v)
+static void enki_print_value_sb(const enki_allocator* cat_a, enki_string_builder* sb, enki_value val_v)
 {
     if (!IS_PTR(val_v)) {
         if (direct_is_print(val_v)) {
@@ -324,7 +324,7 @@ static void enki_print_value_sb(enki_allocator* cat_a, enki_string_builder* sb, 
 }
 
 
-char* enki_print_value(enki_allocator* cat_a, enki_value val_v, size_t* out_s)
+char* enki_print_value(const enki_allocator* cat_a, enki_value val_v, size_t* out_s)
 {
   size_t def_s = 0;
   if (out_s == NULL ) {

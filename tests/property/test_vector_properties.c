@@ -82,10 +82,10 @@ static void accounting_free(void* ctx, void* ptr)
     free(header);
 }
 
-static enki_allocator make_accounting_allocator(accounting_allocator* account)
+static void make_accounting_allocator(accounting_allocator* account, enki_allocator* allocator_a)
 {
     *account = (accounting_allocator){0};
-    return (enki_allocator){
+    *allocator_a = (enki_allocator){
         .ctx = account,
         .alloc = accounting_alloc,
         .realloc = accounting_realloc,
@@ -151,7 +151,9 @@ static bool property_push_increases_len(const void* generated, void* ctx, char* 
     (void)ctx;
     const sequence_case* sequence = generated;
     accounting_allocator account;
-    enki_vector* vector = enki_vector_create(make_accounting_allocator(&account));
+    enki_allocator allocator_a;
+    make_accounting_allocator(&account, &allocator_a);
+    enki_vector* vector = enki_vector_create(&allocator_a);
     if (vector == NULL) {
         message(out, out_len, "vector creation failed");
         return false;
@@ -183,7 +185,9 @@ static bool property_get_pushed_item(const void* generated, void* ctx, char* out
     (void)ctx;
     const sequence_case* sequence = generated;
     accounting_allocator account;
-    enki_vector* vector = enki_vector_create(make_accounting_allocator(&account));
+    enki_allocator allocator_a;
+    make_accounting_allocator(&account, &allocator_a);
+    enki_vector* vector = enki_vector_create(&allocator_a);
     if (vector == NULL) {
         message(out, out_len, "vector creation failed");
         return false;
@@ -216,7 +220,9 @@ static bool property_pushes_then_pops_empty(const void* generated, void* ctx, ch
     (void)ctx;
     const sequence_case* sequence = generated;
     accounting_allocator account;
-    enki_vector* vector = enki_vector_create(make_accounting_allocator(&account));
+    enki_allocator allocator_a;
+    make_accounting_allocator(&account, &allocator_a);
+    enki_vector* vector = enki_vector_create(&allocator_a);
     if (vector == NULL) {
         message(out, out_len, "vector creation failed");
         return false;
@@ -255,7 +261,9 @@ static bool property_reserve_keeps_len_and_capacity(const void* generated, void*
     (void)ctx;
     const sequence_case* sequence = generated;
     accounting_allocator account;
-    enki_vector* vector = enki_vector_create(make_accounting_allocator(&account));
+    enki_allocator allocator_a;
+    make_accounting_allocator(&account, &allocator_a);
+    enki_vector* vector = enki_vector_create(&allocator_a);
     if (vector == NULL) {
         message(out, out_len, "vector creation failed");
         return false;

@@ -30,6 +30,8 @@
         }                                                                   \
     } while (0)
 
+#define ea_abort(...) ea_assertf(false, __VA_ARGS__)
+
 
 #     define ea_s1(a)          ( (a) )
 #     define ea_s2(a, b)       ( ((b) << 8) | ea_s1(a) )

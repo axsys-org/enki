@@ -29,14 +29,15 @@ static void teardown(void)
 
 TestSuite(vector, .init = setup, .fini = teardown);
 
-static enki_allocator fake_allocator(void)
+static const enki_allocator* fake_allocator(void)
 {
-    return (enki_allocator){
+    static const enki_allocator allocator_a = {
         .ctx = NULL,
         .alloc = fake_alloc,
         .realloc = fake_realloc,
         .free = fake_free,
     };
+    return &allocator_a;
 }
 
 static void reset_allocator_fakes(void)
@@ -109,7 +110,7 @@ Test(vector, pushes_gets_sets_and_pops)
 
 Test(vector, rejects_invalid_arguments)
 {
-    cr_assert_null(enki_vector_create((enki_allocator){0}));
+    cr_assert_null(enki_vector_create(&(const enki_allocator){0}));
     cr_assert_eq(enki_vector_push(NULL, NULL), ENKI_ERR_INVALID);
     cr_assert_eq(enki_vector_set(NULL, 0, NULL), ENKI_ERR_INVALID);
     cr_assert_eq(enki_vector_reserve(NULL, 1), ENKI_ERR_INVALID);

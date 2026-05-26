@@ -1,73 +1,150 @@
+#include <stdlib.h>
+
 #include "enki/interp.h"
-#include "enki/apply.h"
+#include "enki/app.h"
 #include "enki/value.h"
 #include "enki/gc.h"
-#include "enki/judge.h"
+#include "enki/util.h"
+#include "enki/law.h"
 #include "enki/op66.h"
-#include "enki/primops.h"
+#include "enki/op0.h"
 
-enki_interpreter* enki_create_interp(enki_allocator sys_a, size_t heap, 
-   enki_value law) {
-    enki_interpreter* i = (enki_interpreter*)sys_a.alloc(sys_a.ctx, sizeof(enki_interpreter));
-    enki_frame f; 
+enki_interpreter* enki_interp_create(const enki_allocator* loc_a, size_t heap,
+   enki_value law, const char* store_path_s, size_t store_size_s, size_t scratch_size_s) {
+    if(!loc_a) abort();
+    enki_interpreter* i = (enki_interpreter*)loc_a->alloc(loc_a->ctx, sizeof(enki_interpreter));
+    if(!i) abort();
+    enki_frame f;
     f.pc = 0;
     f.res_base_s = 0;
     f.arg_base_s = 0;
     f.cont_v = 0;
     f.law = law;
     i->frame[0] = f;
-    i->gc = enki_gc_create(sys_a, heap, i);
-    i->sys_a = sys_a;
+    i->gc = enki_gc_create(loc_a, heap, i);
+    if(i->gc == NULL) {
+        loc_a->free(loc_a->ctx, i);
+        ea_abort("Failed to init gc");
+    }
+    i->our_a = *loc_a;
     i->halted = false;
     i->fp = 0;
     i->sp = 0;
+    i->hp = 0;
+    i->scratch_a = enki_arena_create(loc_a, scratch_size_s);
+    if(!i->scratch_a) {
+        enki_gc_destroy(i->gc);
+        loc_a->free(loc_a->ctx, i);
+        ea_abort("failed to init scratch");
+    }
+    enki_error st = enki_store_init(store_path_s, store_size_s, &i->store);
+    if(st != ENKI_ERROR_OK) {
+        enki_arena_destroy(i->scratch_a);
+        enki_gc_destroy(i->gc);
+        loc_a->free(loc_a->ctx, i);
+        ea_abort("failed to init store");
+    }
     return i;
 }
-void enki_trace_interp(enki_interpreter* i) {
-    for(size_t k = 0; k < i->sp; k++) {
-        i->stack_v[k] = i->gc->copy(i->gc, i->stack_v[k]);
-    } 
-    for(size_t k = 0; k <= i->fp; k++) {
-        enki_frame* f = &i->frame[k];
-        if(f->cont_v != 0) f->cont_v = i->gc->copy(i->gc, f->cont_v);
-        if(f->law != 0) f->law = i->gc->copy(i->gc, f->law);
-    }  
+void enki_interp_destroy(enki_interpreter* i) {
+    if(i->gc) enki_gc_destroy(i->gc);
+    if(i->scratch_a) enki_arena_destroy(i->scratch_a);
+    i->our_a.free(i->our_a.ctx, i);
 }
-void enki_destroy(enki_interpreter* i) {
-    enki_gc_destroy(i->gc);
-    i->sys_a.free(i->sys_a.ctx, i);
-}
-void enki_halt(enki_interpreter* i) {
+void enki_interp_halt(enki_interpreter* i) {
     i->halted = true;
 }
-void enki_run(enki_interpreter* i) {
-    while (!i->halted) {
-        enki_step(i);
+void enki_interp_throw(enki_interpreter* i, int error_code, enki_value val) {
+    i->error_v = val;
+    i->error_code = error_code;
+    if(i->hp > 0 && error_code == ENKI_ERROR_THROW) {
+        enki_handler hdlr = i->handler_v[i->hp - 1];
+        size_t val_slot_s = i->sp;
+        i->stack_v[val_slot_s] = val;
+        i->sp++;
+        enki_value app = enki_app_alloc(i->gc, (enki_value)1, 1);
+        enki_app* ptr = ENKI_AS(enki_app, app);
+        ptr->args_v[0] = i->stack_v[val_slot_s];
+        i->stack_v[hdlr.res_base_s] = app;
+        i->sp = hdlr.sp;
+        i->fp = hdlr.fp;
+        i->hp--;
+        return;
     }
+    if(i->has_error_jmp) longjmp(i->error_jmp, 1);
+    abort();
+}
+int enki_interp_run(enki_interpreter* i) {
+    i->has_error_jmp = true;
+    if(setjmp(i->error_jmp) == 0) {
+        while (!i->halted) {
+            enki_interp_step(i);
+            enki_arena_reset(i->scratch_a);
+        }
+        enki_arena_reset(i->scratch_a);
+        i->has_error_jmp = false;
+        return 0;
+    }
+    enki_arena_reset(i->scratch_a);
+    i->has_error_jmp = false;
+    return 1;
 }
 
-void enki_step(enki_interpreter* i) {
+void enki_interp_reset(enki_interpreter* i)
+{
+  i->sp = 0;
+  i->fp = 0;
+  i->halted = false;
+  i->frame[0].pc = 0;
+  i->frame[0].law = 0;
+  i->frame[0].arg_base_s = 0;
+  i->frame[0].res_base_s = 0;
+  i->frame[0].cont_v = 0;
+}
+
+void enki_interp_push(enki_interpreter* i, enki_value val_v)
+{
+  i->stack_v[i->sp++] = val_v;
+}
+
+void enki_interp_step(enki_interpreter* i) {
     enki_frame* f = &i->frame[i->fp];
     if(f->cont_v != 0) {
-        enki_cont* cont_v = (enki_cont*)ENKI_TO_PTR(f->cont_v);
+        enki_cont* cont_v = ENKI_AS(enki_cont, f->cont_v);
         i->sp = f->res_base_s + 1;
         for(size_t k = 0; k < cont_v->n_args_s; k++) {
             i->stack_v[i->sp] = cont_v->args_v[k];
             i->sp++;
         }
         i->fp--;
-        enki_apply(i, cont_v->n_args_s);
+        enki_app_apply(i, cont_v->n_args_s);
         return;
     }
-    enki_law* law = (enki_law*)ENKI_TO_PTR(f->law);
+    enki_law* law = ENKI_AS(enki_law, f->law);
     uint8_t op_b = ENKI_LAW_BC(law)[f->pc++];
     switch (op_b) {
-        case OP_APPLY: {
-            uint8_t arg_c = ENKI_LAW_BC(law)[f->pc++];
-            enki_apply(i, arg_c); 
+        case OP_APPLY_WIDE: {
+            uint8_t lo = ENKI_LAW_BC(law)[f->pc++];
+            uint8_t hi = ENKI_LAW_BC(law)[f->pc++];
+            size_t arg_c = ((size_t)hi << 8) | lo;
+            enki_app_apply(i, arg_c);
             break;
         }
-        case OP_PICK: { 
+        case OP_APPLY: {
+            uint8_t arg_c = ENKI_LAW_BC(law)[f->pc++];
+            enki_app_apply(i, arg_c);
+            break;
+        }
+        case OP_PICK_WIDE: {
+            uint8_t lo = ENKI_LAW_BC(law)[f->pc++];
+            uint8_t hi = ENKI_LAW_BC(law)[f->pc++];
+            size_t pick_i = ((size_t)hi << 8) | lo;
+            size_t stack_i = f->arg_base_s + pick_i;
+            i->stack_v[i->sp] = i->stack_v[stack_i];
+            i->sp++;
+            break;
+        }
+        case OP_PICK: {
             size_t idx_i = f->arg_base_s + (size_t)ENKI_LAW_BC(law)[f->pc++];
             i->stack_v[i->sp] = i->stack_v[idx_i];
             i->sp++;
@@ -75,18 +152,37 @@ void enki_step(enki_interpreter* i) {
         }
         case OP_RETURN: {
             enki_value ret_val_v = i->stack_v[i->sp - 1];
+            i->sp = f->res_base_s;
+            i->stack_v[i->sp] = ret_val_v;
             if (i->fp == 0) {
+                i->sp++;
                 i->halted = true;
                 return;
             }
-            i->sp = f->res_base_s;
-            i->stack_v[i->sp] = ret_val_v; 
+            i->fp--;
+            if(i->hp > 0) {
+                enki_handler hdlr = i->handler_v[i->hp - 1];
+                if(hdlr.fp == i->fp) {
+                    enki_value app = enki_app_alloc(i->gc, (enki_value)0, 1);
+                    enki_app* ptr = ENKI_AS(enki_app, app);
+                    ptr->args_v[0] = i->stack_v[i->sp];
+                    i->stack_v[i->sp] = app;
+                    i->hp--;
+                }
+            }
             i->sp++;
-            i->fp--;                
             break;
         }
         case NO_OP:
             break;
+        case OP_PUSH_CONST_WIDE: {
+            uint8_t lo = ENKI_LAW_BC(law)[f->pc++];
+            uint8_t hi = ENKI_LAW_BC(law)[f->pc++];
+            size_t idx_i = ((size_t)hi << 8) | lo;
+            i->stack_v[i->sp] = ENKI_LAW_CONSTS(law)[idx_i];
+            i->sp++;
+            break;
+        }
         case OP_PUSH_CONST: {
             uint8_t idx_i = ENKI_LAW_BC(law)[f->pc++];
             i->stack_v[i->sp] = ENKI_LAW_CONSTS(law)[idx_i];
@@ -97,34 +193,25 @@ void enki_step(enki_interpreter* i) {
             i->sp--;
             break;
         case OP_DUP:
-            if(i->sp == 0) return; // stack_v underflow 
+            if(i->sp == 0) {
+                enki_interp_throw(i, ENKI_ERROR_BOUNDS, 0);
+            }
             i->stack_v[i->sp] = i->stack_v[i->sp - 1];
             i->sp++;
             break;
-        case OP_JUDGE: {
-            enki_value law_v = f->law;
-            size_t arg_base_s = f->arg_base_s;
-            enki_value res_v = enki_judge(i, law_v, arg_base_s);
-            i->stack_v[i->sp] = res_v;
-            i->sp++;
-            break;
-        }
         case OP_OP0: {
             uint8_t sub_b = ENKI_LAW_BC(law)[f->pc++];
             switch (sub_b) {
-                case 0: primop_mkpin(i);  break;
-                case 1: primop_mklaw(i);  break;
-                case 2: primop_match(i);  break;
-                default: return;
+                case 0: op0_pin(i);  break;
+                case 1: op0_law(i);  break;
+                case 2: op0_elim(i);  break;
+                default: enki_interp_throw(i, ENKI_ERROR_BAD_TAG, sub_b);
             }
             break;
         }
         case OP_OP66: {
             uint8_t sub_b = ENKI_LAW_BC(law)[f->pc++];
             switch (sub_b) {
-                case OP66_PIN:        primop_mkpin(i);     break;
-                case OP66_LAW:        primop_mklaw(i);     break;
-                case OP66_ELIM:       primop_match(i);     break;
                 case OP66_INC:        op66_inc(i);         break;
                 case OP66_DEC:        op66_dec(i);         break;
                 case OP66_ADD:        op66_add(i);         break;
@@ -150,7 +237,6 @@ void enki_step(enki_interpreter* i) {
                 case OP66_NIB:        op66_nib(i);         break;
                 case OP66_LOAD8:      op66_load8(i);       break;
                 case OP66_STORE8:     op66_store8(i);      break;
-                case OP66_LOADVAR:    return;
                 case OP66_TRUNC:      op66_trunc(i);       break;
                 case OP66_TRUNC8:     op66_trunc8(i);      break;
                 case OP66_TRUNC16:    op66_trunc16(i);     break;
@@ -216,19 +302,19 @@ void enki_step(enki_interpreter* i) {
                 case OP66_SAP2:       op66_sap2(i);        break;
                 case OP66_FORCE:      op66_force(i);       break;
                 case OP66_DEEPSEQ:    op66_deepseq(i);     break;
-                case OP66_TRY:        return;
-                case OP66_THROW:      return;
-                case OP66_SAVE:       return;
-                case OP66_LOAD:       return;
+                case OP66_TRY:        op66_try(i);         break;
+                case OP66_THROW:      op66_throw(i);       break;
+                case OP66_SAVE:       op66_save(i);        break;
+                case OP66_LOAD:       op66_load(i);        break;
                 case OP66_TRACE:      return;
                 case OP66_EQUAL:      op66_eq(i);          break;
-                case OP66_PARSE_REX:  return;
-                case OP66_PRINT_REX:  return;
-                default: return;
+                case OP66_PARSE_REX:  return; // TODO: liam
+                case OP66_PRINT_REX:  return; // TODO: liam
+                default: enki_interp_throw(i, ENKI_ERROR_BAD_TAG, sub_b);
             }
             break;
         }
         default:
-            return;
+            enki_interp_throw(i, ENKI_ERROR_BAD_TAG, op_b);
     }
 }

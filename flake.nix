@@ -75,7 +75,7 @@
         in
           import ./nix/mkenki.nix {
             inherit lib stdenv src;
-            inherit (pkgs) gnumake pkg-config criterion gmp;
+            inherit (pkgs) gnumake pkg-config criterion gmp lmdb;
             inherit (selected) compiler cc;
           };
 
@@ -128,6 +128,7 @@
           buildInputs = [
             pkgs.criterion
             pkgs.gmp
+            pkgs.lmdb
           ];
 
           dontConfigure = true;
@@ -162,6 +163,7 @@
           buildInputs = [
             pkgs.criterion
             pkgs.gmp
+            pkgs.lmdb
           ];
 
           dontConfigure = true;
@@ -262,6 +264,7 @@
               pkgs.gnumake
               pkgs.criterion
               pkgs.gmp
+              pkgs.lmdb
               pkgs.lcov
               pkgs.gcovr
               pkgs.compiledb

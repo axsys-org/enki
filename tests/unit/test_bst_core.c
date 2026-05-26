@@ -13,7 +13,7 @@
 
 static enki_allocator test_allocator(void)
 {
-    return enki_allocator_system();
+    return *enki_allocator_system();
 }
 
 typedef struct item {

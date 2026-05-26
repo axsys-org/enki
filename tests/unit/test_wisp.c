@@ -2,8 +2,10 @@
 #include <enki/interp.h>
 #include <enki/wisp.h>
 #include <enki/vector.h>
+#include <enki/print.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
 static wisp_rt* rt;
 
@@ -228,10 +230,16 @@ Test(wisp, bind_law_and_apply_it)
 {
     cr_assert_eq(eval_input("(#bind add 5)"), 5);
     enki_value law_v = eval_input("(#bind add (#law \"add\" (add x y) ((#pin \"B\") (\"Add\" x y))))");
+    fprintf(stderr, "law: %s\n", enki_pvalue(&sys_a, law_v));
+    fflush(stderr);
+
     cr_assert(IS_PTR(law_v));
     cr_assert_eq(((obj_header*)ENKI_TO_PTR(law_v))->kind_b, ENKI_LAW);
 
-    cr_assert_eq(eval_input("(#app add 20 22)"), 42);
+    enki_value ret_v = eval_input("(add 20 22)");
+    fprintf(stderr, "added: %s\n", enki_pvalue(&sys_a, ret_v));
+    fflush(stderr);
+    cr_assert_eq(ret_v, 42);
 }
 
 Test(wisp, law_self_is_pick_zero)

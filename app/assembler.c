@@ -31,8 +31,8 @@ static ssize_t repl(char** out_c)
 
 int main()
 {
-  enki_allocator loc_a = enki_allocator_system();
-  rt = wisp_rt_alloc(&loc_a);
+  const enki_allocator* loc_a = enki_allocator_system();
+  rt = wisp_rt_alloc(loc_a);
 
   char* inp_c = NULL;
   ssize_t inp_s;
@@ -48,7 +48,7 @@ int main()
       enki_value val_v = wisp_parse(rt, &txt_c);
       // printf("parsed: %s\n", enki_print_value(EA_TMP_ALLOC, val_v, NULL));
       enki_value eve_v = wisp_eval(rt, val_v);
-      printf(">> %s\n", enki_print_value(&loc_a, eve_v, NULL));
+      printf(">> %s\n", enki_print_value(loc_a, eve_v, NULL));
     }
   }
   return 0;

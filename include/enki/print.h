@@ -4,7 +4,7 @@
 #include <enki/value.h>
 
 char* enki_print_value(
-    enki_allocator* cat_a,
+    const enki_allocator* cat_a,
     enki_value val_v,
     size_t* out_s
 );

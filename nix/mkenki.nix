@@ -6,6 +6,7 @@
   pkg-config,
   criterion,
   gmp,
+  lmdb,
   compiler,
   cc,
   extraNativeBuildInputs ? [],
@@ -30,6 +31,7 @@ stdenv.mkDerivation {
   buildInputs = [
     criterion
     gmp
+    lmdb
 
   ];
 

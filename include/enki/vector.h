@@ -6,6 +6,8 @@
 
 #include "enki/allocator.h"
 
+typedef struct enki_interpreter enki_interpreter;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -35,7 +37,7 @@ typedef struct enki_vector enki_vector;
  * Returns NULL if the allocator_a is invalid or cannot allocate the vector
  * header.
  */
-enki_vector* enki_vector_create(enki_allocator allocator_a);
+enki_vector* enki_vector_create(const enki_allocator* allocator_a);
 
 /**
  * Creates an empty vector with fixed-size_s copied elements.
@@ -44,7 +46,14 @@ enki_vector* enki_vector_create(enki_allocator allocator_a);
  * backing storage needs to be a packed array, such as uint8_t bytecode or
  * enki_value constants.
  */
-enki_vector* enki_vector_create_sized(enki_allocator allocator_a, size_t elem_size_s);
+enki_vector* enki_vector_create_sized(const enki_allocator* allocator_a, size_t elem_size_s);
+
+/**
+ * VM-facing vector helpers that throw through the interpreter on failure.
+ */
+enki_vector* enki_vector_create_sized_or_throw(enki_interpreter* i, const enki_allocator* allocator_a, size_t elem_size_s);
+void enki_vector_push_u8_or_throw(enki_interpreter* i, enki_vector* vector, uint8_t item_v);
+void enki_vector_push_copy_or_throw(enki_interpreter* i, enki_vector* vector, const void* item_v);
 
 /**
  * Destroys a vector and releases all storage owned by the vector.
@@ -131,7 +140,6 @@ enki_status enki_vector_reserve(enki_vector* vector, size_t capacity_s);
  */
 enki_status enki_vector_shrink(enki_vector* vector);
 
-extern enki_allocator sys_a;
 
 #ifdef __cplusplus
 }

@@ -1,5 +1,7 @@
 #include "enki/allocator.h"
+#include "test_interp.h"
 #include "enki/interp.h"
+#include "enki/law.h"
 #include "enki/value.h"
 
 #include <criterion/criterion.h>
@@ -9,19 +11,19 @@ static enki_interpreter* fixture_interp;
 
 static void setup(void)
 {
-    fixture_interp = enki_create_interp(enki_allocator_system(), 1024 * 1024, 0);
+    fixture_interp = enki_test_interp_create(1024 * 1024, 0);
     cr_assert_not_null(fixture_interp);
 }
 
 static void teardown(void)
 {
-    enki_destroy(fixture_interp);
+    enki_test_interp_destroy(fixture_interp);
     fixture_interp = NULL;
 }
 
 static void run_law(uint8_t* bc_b, size_t bc_len_s, enki_value* consts_v, size_t n_const_s)
 {
-    enki_value law = enki_alloc_law(
+    enki_value law = enki_law_alloc(
         fixture_interp->gc, 0, 0, 0, bc_len_s, n_const_s, bc_b, consts_v);
 
     fixture_interp->frame[0].law = law;
@@ -32,7 +34,7 @@ static void run_law(uint8_t* bc_b, size_t bc_len_s, enki_value* consts_v, size_t
     fixture_interp->halted = false;
     fixture_interp->fp = 0;
 
-    enki_run(fixture_interp);
+    enki_interp_run(fixture_interp);
 }
 
 TestSuite(interp_bytecode, .init = setup, .fini = teardown);
@@ -86,8 +88,8 @@ Test(interp_bytecode, pick_reads_from_arg_base)
     fixture_interp->sp = 1;
     run_law(bc_b, sizeof(bc_b), NULL, 0);
 
-    cr_assert_eq(fixture_interp->sp, 2);
-    cr_assert_eq(fixture_interp->stack_v[1], 1234);
+    cr_assert_eq(fixture_interp->sp, 1);
+    cr_assert_eq(fixture_interp->stack_v[0], 1234);
 }
 
 Test(interp_bytecode, op_apply_calls_law_from_bytecode)
@@ -97,7 +99,7 @@ Test(interp_bytecode, op_apply_calls_law_from_bytecode)
         OP_OP66, OP66_INC,
         OP_RETURN,
     };
-    enki_value inc = enki_alloc_law(
+    enki_value inc = enki_law_alloc(
         fixture_interp->gc, 1, 0, 0, sizeof(inc_bc), 0, inc_bc, NULL);
     uint8_t bc_b[] = {
         OP_PUSH_CONST, 0,
@@ -112,4 +114,75 @@ Test(interp_bytecode, op_apply_calls_law_from_bytecode)
 
     cr_assert_eq(fixture_interp->sp, 1);
     cr_assert_eq(fixture_interp->stack_v[0], 42);
+}
+
+Test(interp_bytecode, push_const_wide_reads_two_byte_const_index)
+{
+    uint8_t bc_b[] = {
+        OP_PUSH_CONST_WIDE, 0x00, 0x01,
+        OP_RETURN,
+    };
+    enki_value consts_v[257];
+    for(size_t k = 0; k < 257; k++) {
+        consts_v[k] = (enki_value)k;
+    }
+    consts_v[256] = 4242;
+
+    fixture_interp->sp = 0;
+    run_law(bc_b, sizeof(bc_b), consts_v, 257);
+
+    cr_assert_eq(fixture_interp->sp, 1);
+    cr_assert_eq(fixture_interp->stack_v[0], 4242);
+}
+
+Test(interp_bytecode, pick_wide_reads_two_byte_stack_index)
+{
+    uint8_t bc_b[] = {
+        OP_PICK_WIDE, 0x2c, 0x01,
+        OP_RETURN,
+    };
+
+    fixture_interp->stack_v[300] = 9001;
+    fixture_interp->sp = 301;
+    run_law(bc_b, sizeof(bc_b), NULL, 0);
+
+    cr_assert_eq(fixture_interp->sp, 1);
+    cr_assert_eq(fixture_interp->stack_v[0], 9001);
+}
+
+Test(interp_bytecode, apply_wide_applies_more_than_255_args)
+{
+    uint8_t id_bc[] = {
+        OP_PICK, 0,
+        OP_RETURN,
+    };
+    enki_value id = enki_law_alloc(
+        fixture_interp->gc, 256, 0, 0, sizeof(id_bc), 0, id_bc, NULL);
+    enki_value consts_v[257];
+    consts_v[0] = id;
+    for(size_t k = 1; k < 257; k++) {
+        consts_v[k] = (enki_value)(1000 + k - 1);
+    }
+
+    uint8_t bc_b[3 + (255 * 2) + 3 + 3 + 1];
+    size_t pc = 0;
+    bc_b[pc++] = OP_PUSH_CONST;
+    bc_b[pc++] = 0;
+    for(size_t k = 1; k < 256; k++) {
+        bc_b[pc++] = OP_PUSH_CONST;
+        bc_b[pc++] = (uint8_t)k;
+    }
+    bc_b[pc++] = OP_PUSH_CONST_WIDE;
+    bc_b[pc++] = 0x00;
+    bc_b[pc++] = 0x01;
+    bc_b[pc++] = OP_APPLY_WIDE;
+    bc_b[pc++] = 0x00;
+    bc_b[pc++] = 0x01;
+    bc_b[pc++] = OP_RETURN;
+
+    fixture_interp->sp = 0;
+    run_law(bc_b, pc, consts_v, 257);
+
+    cr_assert_eq(fixture_interp->sp, 1);
+    cr_assert_eq(fixture_interp->stack_v[0], 1000);
 }

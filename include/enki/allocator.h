@@ -47,7 +47,9 @@ typedef struct enki_allocator {
 /**
  * Returns an allocator_a backed by malloc, realloc, and free.
  */
-enki_allocator enki_allocator_system(void);
+const enki_allocator* enki_allocator_system(void);
+
+extern const enki_allocator sys_a;
 
 #define ea_calloc(loc_a,typ,count) (typ*)(loc_a->alloc((loc_a->ctx), sizeof(typ) * count));
 #define ea_free(loc_a, ptr) (loc_a->free(loc_a->ctx, ptr))
