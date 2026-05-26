@@ -41,12 +41,38 @@ static void view_of_nat(enki_value a_v, enki_nat_view* v) {
     v->limbs = v->small;
     v->n_limbs_s = 1;
 }
+
 int enki_nat_cmp(enki_value a_v, enki_value b_v) {
     enki_nat_view a_nv;
     enki_nat_view b_nv;
     view_of_nat(a_v, &a_nv);
     view_of_nat(b_v, &b_nv);
     return enki_nat_cmp_v(a_nv, b_nv);
+}
+
+int enki_nat_le_bool(enki_value a_v, enki_value b_v) {
+  if (!IS_PTR(a_v)) {
+    if (IS_PTR(b_v)) {
+      return 1;
+    } else {
+      return a_v < b_v;
+    }
+  }
+
+  if (!IS_PTR(b_v)) {
+    return 0;
+  }
+  enki_nat* a = ENKI_TO_PTR(a_v);
+  enki_nat* b = ENKI_TO_PTR(b_v);
+  if (a->n_limbs_s != b->n_limbs_s) {
+    return (a->n_limbs_s < b->n_limbs_s);
+  }
+  for(size_t i = a->n_limbs_s - 1; i-- > 0; ) {
+    if (a->limbs[i] != b->limbs[i]) {
+      return (a->limbs[i] < b->limbs[i]);
+    }
+  }
+  return 0;
 }
 static int enki_nat_cmp_v(enki_nat_view a_nv, enki_nat_view b_nv) {
     if(a_nv.n_limbs_s != b_nv.n_limbs_s) {

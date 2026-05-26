@@ -21,6 +21,8 @@ typedef struct enki_gc enki_gc;
 
 #define ENKI_TO_APP(v) \
   ((IS_PTR(v) && ((obj_header*)v)->kind_b == ENKI_APP) ? (ENKI_TO_PTR(v)) : NULL)
+#define ENKI_TO_LAW(v) \
+  ((IS_PTR(v) && ((obj_header*)v)->kind_b == ENKI_LAW) ? (ENKI_TO_PTR(v)) : NULL)
 typedef enum {
     ENKI_PIN,
     ENKI_LAW,
@@ -167,5 +169,6 @@ add_v);
 
 enki_value enki_unpin(enki_value pin_v);
 
+int enki_nat_le_bool(enki_value a_v, enki_value b_v);
 
 enki_value enki_alloc_big_nat_bytes(enki_gc* gc, size_t byt_s, char* byt_b);
