@@ -1,37 +1,40 @@
 #pragma once
 #include <stdbool.h>
+#include <setjmp.h>
+#include "enki/arena.h"
+#include "enki/error.h"
 #include "enki/gc.h"
+#include "enki/store.h"
 
-#define STACK_MAX 8096
+#define STACK_MAX 8192
 #define FRAME_MAX 1024
-
-/*
-TODO assembler
-     big nats 
-     op66 ops 
-     real pinning 
-*/
+#define HANDLER_MAX 1024
 
 typedef enum {
-    NO_OP         = 0x00,
-    OP_PUSH_CONST = 0x01,
-    OP_PICK       = 0x02,
-    OP_POP        = 0x03,
-    OP_APPLY      = 0x08,
-    OP_DUP        = 0x09,
-    OP_JUDGE      = 0x0A,
-    OP_OP0        = 0x10,    
-    OP_OP66       = 0x42,    
-    OP_OP82       = 0x52,    
-    OP_RETURN     = 0xFF,
+    NO_OP              = 0x00,
+    OP_PUSH_CONST      = 0x01,
+    OP_PICK            = 0x02,
+    OP_POP             = 0x03,
+    OP_PUSH_CONST_WIDE = 0x04,
+    OP_PICK_WIDE       = 0x05,
+    OP_APPLY           = 0x08,
+    OP_DUP             = 0x09,
+    OP_APPLY_WIDE      = 0x0A,
+    OP_OP0             = 0x10,
+    OP_OP66            = 0x42,
+    OP_OP82            = 0x52,
+    OP_RETURN          = 0xFF,
 } enki_opcode;
 
-typedef enum {
-    OP66_PIN = 0,
-    OP66_LAW,
-    OP66_ELIM,
 
-    OP66_INC,
+typedef enum {
+    OP0_PIN = 0,
+    OP0_LAW,
+    OP0_ELIM,
+} enki_op0_sub;
+
+typedef enum {
+    OP66_INC = 0,
     OP66_DEC,
     OP66_ADD,
     OP66_SUB,
@@ -58,7 +61,6 @@ typedef enum {
     OP66_NIB,
     OP66_LOAD8,
     OP66_STORE8,
-    OP66_LOADVAR,
     OP66_TRUNC,
     OP66_TRUNC8,
     OP66_TRUNC16,
@@ -140,8 +142,6 @@ typedef enum {
     OP66_PRINT_REX,
 } enki_op66_sub;
 
-
-
 typedef struct {
     enki_value law;
     size_t pc;
@@ -149,6 +149,12 @@ typedef struct {
     size_t arg_base_s;
     enki_value cont_v;
 } enki_frame;
+
+typedef struct {
+    size_t fp;
+    size_t sp;
+    size_t res_base_s;
+} enki_handler;
 
 typedef struct enki_interpreter {
     size_t sp;
@@ -158,13 +164,20 @@ typedef struct enki_interpreter {
     enki_gc* gc;
     enki_allocator sys_a;
     bool halted; 
+    enki_store store;
+    jmp_buf error_jmp;
+    bool has_error_jmp;
+    int error_code;
+    enki_value error_v;
+    enki_arena* scratch_a;
+    size_t hp;
+    enki_handler handler_v[HANDLER_MAX];
 } enki_interpreter;
 
-void enki_trace_interp(enki_interpreter* i);
-void enki_run(enki_interpreter* i);
-void enki_step(enki_interpreter* i);
-void enki_halt(enki_interpreter* i);
-void enki_destroy(enki_interpreter* i);
-enki_value enki_eval_whnf(enki_interpreter* i, enki_value x);
-enki_value enki_eval_nf(enki_interpreter* i, enki_value x);
-enki_interpreter* enki_create_interp(enki_allocator sys_a, size_t heap, enki_value law);
+int enki_interp_run(enki_interpreter* i);
+void enki_interp_step(enki_interpreter* i);
+void enki_interp_halt(enki_interpreter* i);
+void enki_interp_destroy(enki_interpreter* i);
+enki_interpreter* enki_interp_create(const enki_allocator* sys_a, size_t heap, 
+   enki_value law, const char* store_path_s, size_t store_size_s, size_t scratch_size_s);
+void enki_interp_throw(enki_interpreter* i, int error_code, enki_value val);

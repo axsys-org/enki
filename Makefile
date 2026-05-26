@@ -39,7 +39,7 @@ endif
 
 CPPFLAGS_ALL := $(BASE_CPPFLAGS) $(CPPFLAGS)
 CFLAGS_ALL := $(BASE_CFLAGS) $(WARN_CFLAGS) $(BUILD_CFLAGS_$(BUILD_TYPE)) $(CFLAGS)
-LDFLAGS_ALL := $(BUILD_LDFLAGS_$(BUILD_TYPE)) $(LDFLAGS) -L/opt/homebrew/lib -lgmp
+LDFLAGS_ALL := $(BUILD_LDFLAGS_$(BUILD_TYPE)) $(LDFLAGS) -L/opt/homebrew/lib -lgmp -llmdb -lcrypto
 
 SRC_DIR := src
 INCLUDE_DIR := include
@@ -61,7 +61,7 @@ UNIT_BINS := $(patsubst %.c,$(BUILD_DIR)/%,$(UNIT_SRCS))
 TSAN_UNIT_BINS := $(patsubst %.c,$(BUILD_DIR)/%,$(TSAN_UNIT_SRCS))
 PROPERTY_BINS := $(patsubst %.c,$(BUILD_DIR)/%,$(PROPERTY_SRCS))
 THEFT_OBJS := $(patsubst %.c,$(BUILD_DIR)/%.o,$(THEFT_SRCS))
-FUZZ_BIN := $(BUILD_DIR)/tests/fuzz/fuzz_vector
+FUZZ_BINS := $(patsubst %.c,$(BUILD_DIR)/%,$(FUZZ_SRCS))
 LIB := $(BUILD_DIR)/lib/libenki.a
 
 UNAME_S := $(shell uname -s 2>/dev/null)
@@ -120,14 +120,14 @@ $(BUILD_DIR)/tests/property/%: tests/property/%.c $(LIB_OBJS) $(THEFT_OBJS)
 	$(CC) $(CPPFLAGS_ALL) $(CFLAGS_ALL) $< $(LIB_OBJS) $(THEFT_OBJS) \
 		$(LDFLAGS_ALL) -o $@
 
-$(FUZZ_BIN): $(FUZZ_SRCS) $(LIB_OBJS)
+$(BUILD_DIR)/tests/fuzz/%: tests/fuzz/%.c $(LIB_OBJS)
 	@if ! $(CC) --version 2>/dev/null | grep -qi clang; then \
 		echo "libFuzzer target requires Clang; use CC=clang"; \
 		exit 2; \
 	fi
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS_ALL) $(BASE_CFLAGS) $(WARN_CFLAGS) $(BUILD_CFLAGS_asan) \
-		$(FUZZ_CFLAGS) $(FUZZ_SRCS) $(LIB_OBJS) $(LDFLAGS) -o $@
+		$(FUZZ_CFLAGS) $< $(LIB_OBJS) $(LDFLAGS_ALL) -o $@
 
 install: lib
 	install -d $(PREFIX)/lib $(PREFIX)/include/enki
@@ -150,10 +150,10 @@ test-unit: $(ACTIVE_UNIT_BINS)
 test-property: $(PROPERTY_BINS)
 	@set -eu; for test_bin in $(PROPERTY_BINS); do "$$test_bin"; done
 
-fuzz-bin: $(FUZZ_BIN)
+fuzz-bin: $(FUZZ_BINS)
 
-fuzz: $(FUZZ_BIN)
-	$(FUZZ_BIN) $(FUZZ_ARGS)
+fuzz: $(FUZZ_BINS)
+	@set -eu; for fuzz_bin in $(FUZZ_BINS); do "$$fuzz_bin" $(FUZZ_ARGS); done
 
 coverage:
 	$(MAKE) BUILD_TYPE=coverage test

@@ -1,338 +1,296 @@
-/* 
-collect_subpins 
-canonize
-hash 
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <gmp.h>
+#include <openssl/sha.h>
 
-NAT:
-offset  size                 field
-0       1                    tag = 0x00
-1       8                    byte_len, u64 little-endian
-9       byte_len             nat bytes, little-endian, canonical trimmed
+#include "enki/interp.h"
+#include "enki/app.h"
+#include "enki/gc.h"
+#include "enki/law.h"
+#include "enki/nat.h"
+#include "enki/pin.h"
+#include "enki/value.h"
+#include "enki/vector.h"
 
+#define VERSION 0x01
+enki_value enki_pin_alloc(enki_gc* gc, const 
+    uint8_t hash_b[32], enki_value inner_v, size_t n_subpins_s, enki_value subpins_v[]) {
+    size_t n = sizeof(enki_pin) + (n_subpins_s * sizeof(enki_value));
+    enki_pin* new = (enki_pin*)enki_gc_alloc_locked(gc, n, _Alignof(enki_pin));
+    new->h.size_s = n;
+    new->h.kind_b = ENKI_PIN;
+    new->h.state_b = WHNF;
+    new->inner_v = inner_v;
+    new->n_subpins_s = n_subpins_s;
+    memcpy(new->hash_b, hash_b, 32);
+    if(n_subpins_s > 0) memcpy(new->subpins_v, subpins_v, n_subpins_s * sizeof(enki_value));
+    return PTR_TO_ENKI(new);
+}
 
-PINREF: 
-offset  size                 field
-0       1                    tag = 0x01
-1       32                   hash bytes
-
-
-LAW:
-offset  size                 field
-0       1                    tag = 0x02
-1       8                    arity, u64 little-endian
-9       size(name)           encoded name value
-9+N     size(body)           encoded body value
-9+N+B   8                    const_count, u64 little-endian
-17+N+B  size(const[0])       encoded const 0
-...     ...                  encoded const 1, const 2, ...
-N = encoded byte size of name
-B = encoded byte size of body
-
-APP
-offset  size                 field
-0       1                    tag = 0x03
-1       size(fn)             encoded fn value
-1+F     8                    arg_count, u64 little-endian
-9+F     size(arg[0])         encoded arg 0
-...     ...                  encoded arg 1, arg 2, ...
-F = encoded byte size of fn
-
-
-PINFILE
-
-offset  size                 field
-0       4                    magic = "ENKP"
-4       1                    version = 0x01
-5       8                    subpin_count, u64 little-endian
-13      32 * subpin_count    subpin hashes
-13+...  size(inner)          encoded inner value
-
-
-init:
-    MDB_env* env;
-    mdb_env_create(&env);
-    mdb_env_set_mapsize(env, 1024ULL * 1024ULL * 1024ULL); // 1GB max map
-    mdb_env_open(env, "./snap.lmdb", 0, 0664);
-    MDB_txn* txn;
-    MDB_dbi dbi;
-    mdb_txn_begin(env, NULL, 0, &txn);
-    mdb_dbi_open(txn, NULL, MDB_CREATE, &dbi);
-    /* alloc store object with txn and dbi * /
-    mdb_txn_commit(txn);
-
-write (for very save)
-    MDB_txn* txn;
-    mdb_txn_begin(store->env, NULL, 0, &txn);
-    MDB_val key = {.mv_size = 32, .mv_data = hash_b };
-    MDB_val key = {.mv_size = len, .mv_data = bytes };
-    mdb_put(txn, dbi, &key, &val, 0);
-    mdb_txn_commit_(txn);
-
-read (for every load)
-    MDB_txn* txn;
-    mdb_txn_begin(store->env, NULL, 0, &txn);
-    MDB_val key = {.mv_size = 32, .mv_data = hash_b };
-    MDB_val val;
-    int rc = mdb_get(txn, dbi, &key, &val);
-    if(rc == 0) {
-        uint8* bytes = val.mv_data;
-        size_t len = val.mv_size;
-    }
-    mdb_txn_abort(txn);
-
-close 
-    mdb_dbi_close(store->env, store->dbi)
-    mdb_env_close(store->env)
-*/
-
-enki_value enki_deserialize(uint8_t* buff, size_t* off) {
-
-    uint8_t tag = buff[off*];
+enki_value enki_pin_deserialize(enki_interpreter* i, uint8_t* buff, size_t n_buff, size_t* off) {
+    if(*off > n_buff || n_buff - *off < 1)  enki_interp_throw(i, ENKI_ERROR_BOUNDS, 0);
+    uint8_t tag = buff[*off];
     *off += 1;
     switch(tag) {
-        case ENKI_NAT:
+        case ENKI_NAT: {
             size_t byte_len = 0;
+            if(*off > n_buff || n_buff - *off < 8)  enki_interp_throw(i, ENKI_ERROR_BOUNDS, 0);
             for(size_t k = 0; k < 8; k++) {
                 byte_len |= ((size_t)buff[*off] << (k * 8));
                 *off += 1;
             }
+            if(*off > n_buff || n_buff - *off < byte_len)  enki_interp_throw(i, ENKI_ERROR_BOUNDS, 0);
             if(byte_len <= 8) {
                 enki_value imm = 0;
-                for(size_t k = 0; k < 8; k++) {
+                for(size_t k = 0; k < byte_len; k++) {
                     imm |= ((enki_value)buff[*off + k] << (k * 8));
                 }
                 *off += byte_len;
                 return imm;
             }
             size_t n_limbs = (byte_len + 7) / 8;
-            size_t n = sizeof(enki_nat) + (n_limbs * sizeof(enki_value))
-            enki_nat* nat = (enki_nat*)i->gc->alloc(n);
+            size_t n = sizeof(enki_nat) + (n_limbs * sizeof(mp_limb_t));
+            enki_nat* nat = (enki_nat*)i->gc->alloc(i->gc, n, _Alignof(enki_nat));
             nat->h.size_s = n;
-            nat->h.kind = ENKI_NAT;
-            nat->h.state = NF;
-            nat->n_limbs = n_limbs;
-            i->stack[i->sp++] = PTR_TO_ENKI(nat);
+            nat->h.kind_b = ENKI_NAT;
+            nat->h.state_b = NF;
+            nat->n_limbs_s = n_limbs;
+            i->stack_v[i->sp++] = PTR_TO_ENKI(nat);
+            memset(nat->limbs, 0, n_limbs * sizeof(mp_limb_t));
             for(size_t k = 0; k < byte_len; k++) {
                 size_t limb_i = k / 8;
                 size_t shift = (k % 8) * 8;
-                nat->limbs[limb_i] = nat->limbs[limb_i] |= ((mp_limb_t)buff[*off + k] << shift);
+                nat->limbs[limb_i] |= ((mp_limb_t)buff[*off + k] << shift);
             }
             *off += byte_len;
             return PTR_TO_ENKI(nat);
-        case ENKI_PIN:
+        }
+        case ENKI_PIN: {
             size_t n = sizeof(enki_pin);
-            enki_pin* pin = (enki_pin*)i->gc->alloc(n);
+            enki_pin* pin = (enki_pin*)i->gc->alloc(i->gc, n, _Alignof(enki_pin));
             pin->h.size_s = n;
             pin->h.kind_b = ENKI_PIN;
             pin->h.state_b = WHNF;
             pin->n_subpins_s = 0;
             pin->inner_v = 0;
+            i->stack_v[i->sp++] = PTR_TO_ENKI(pin);
+            if(*off > n_buff || n_buff - *off < 32)  enki_interp_throw(i, ENKI_ERROR_BOUNDS, 0);
             for(size_t k = 0; k < 32; k++) {
-                pin->hash[k] = buff[*off + k];
+                pin->hash_b[k] = buff[*off + k];
             }
             *off += 32;
             return PTR_TO_ENKI(pin);
-        case ENKI_LAW:
+        }
+        case ENKI_LAW: {
             size_t arity = 0;
+            if(*off > n_buff || n_buff - *off < 8)  enki_interp_throw(i, ENKI_ERROR_BOUNDS, 0);
             for(size_t k = 0; k < 8; k++) {
                 arity |= ((size_t)buff[*off] << (k * 8));
                 *off += 1;
             }
-            enki_value name = enki_deserialize(i, buff, off);
-            i->stack[i->sp++] = name;
-            enki_value body = enki_deserialize(i, buff, off);
-            i->stack[i->sp++] = body;
-            size_t n_const = 0;
+            enki_value name = enki_pin_deserialize(i, buff, n_buff, off);
+            i->stack_v[i->sp++] = name;
+            enki_value body = enki_pin_deserialize(i, buff, n_buff, off);
+            i->stack_v[i->sp++] = body;
+            enki_vector* bc_v = enki_vector_create_sized_or_throw(i,
+                enki_arena_as_allocator(i->scratch_a), sizeof(uint8_t));
+            enki_vector* const_v = enki_vector_create_sized_or_throw(i,
+                enki_arena_as_allocator(i->scratch_a), sizeof(enki_value));
+            enki_law_compile(i, body, (size_t)arity, bc_v, const_v);
+            size_t bc_len_s = enki_vector_len(bc_v);
+            uint8_t* bc_b = (uint8_t*)enki_vector_data(bc_v);
+            size_t n_const_s = enki_vector_len(const_v);
+            enki_value* const_table_v = (enki_value*)enki_vector_data(const_v);
+            enki_value law = enki_law_alloc(i->gc, arity, name, body, bc_len_s, n_const_s, 
+                bc_b, const_table_v);
+            i->stack_v[i->sp++] = law;
+            return law;
+        }
+        case ENKI_APP: {    
+            enki_value fn = enki_pin_deserialize(i, buff, n_buff, off);
+            size_t n_args = 0;
+            if(*off > n_buff || n_buff - *off < 8)  enki_interp_throw(i, ENKI_ERROR_BOUNDS, 0);
             for(size_t k = 0; k < 8; k++) {
-                n_const |= ((size_t)buff[*off] << (k * 8));
+                n_args |= ((size_t)buff[*off] << (k * 8));
                 *off += 1;
             }
-            size_t n = sizeof(enki_law) + (n_const * sizeof(enki_value));
-            enki_law* law = (enki_law*)i->gc->alloc(n);
-            law->body_v = body;
-            law->name_v = name;
-            law->arity_s = arity;
-            law->n_const_s = n_const;
-            law->h.size_s = n;
-            law->h.kind_b = ENKI_LAW;
-            law->h.state_b = WHNF;
+            enki_value app = enki_app_alloc(i->gc, fn, n_args);
             size_t res_base = i->sp;
-            i->stack[i->sp++] = PTR_TO_ENKI(law);
-            for (size_t k = 0; k < n_const; k++) {
-                enki_value val = enki_deserialize(i, buff, off);
-                i->stack[i->sp++] = val;
+            i->stack_v[i->sp++] = app;
+            for(size_t k = 0; k < n_args; k++) {
+                enki_value arg = enki_pin_deserialize(i, buff, n_buff, off);
+                i->stack_v[i->sp++] = arg;
+                enki_app* ptr = ENKI_AS(enki_app, i->stack_v[res_base]);
+                ptr->args_v[k] = arg;
             }
-            i->sp = res_base + 1;
-            return i->stack[res_base];
-        case ENKI_APP:
-
-        default: break;
+            return i->stack_v[res_base];
+        }
+        default: 
+            enki_interp_throw(i, ENKI_ERROR_BAD_PIN, 0);
     }
-
-
-    /*
-        caller must go back to base sp once this is doen to remove scratch stack 
-        switch on buf[*off]
-            NAT:
-                uint8_t tag = ENKI_NAT;
-                size_t byte_len = 0;
-                *off += 1
-                for i=*off to *off+7: 
-                    byte_len |= ((uint64_t)buf[i]) << (8 * i)
-                    *off += 8
-                size_t n_limbs = (byte_len + 7) / 8
-                alloc nat 
-                push to stack 
-                for i=0..byte_len:
-                    size_t index_i = i / 64;
-                    limbs[index_i] |= ((mp_limb_t)buf[*off + i]) << ((i % 8) * 8)
-                *off += byte_len                
-                
-            PIN_REF:
-                uint8_t tag = ENKI_PIN;
-                *off += 1
-                uint8_t[32] hash; 
-                for i=off to off+32
-                    hash[i] = buff[i]
-                *off += 32;
-                alloc 
-                push to stack 
-            LAW: 
-                uint8_t tag = ENKI_LAW;
-                off += 1
-                size_t arity = 0
-                for i=0 to 7
-                    arity |= ((uint64_t)buff[i] << (8 * i))
-                    *off += 8
-                name = enki_deserialize(buf, &off)
-                push to stack 
-                body = enki_deserialize(buf, &off)
-                push to stack 
-                size_t n_const = 0
-                for i=off to off+7:
-                    n_const |= ((uint64_t)buff[i] << (8 * i))
-                    *off += 8
-                alloc law 
-                push to stack 
-                for i=0..n_const:
-                    const[i] = enki_deserialize(buf, &off)
-                    push to stack                 
-            APP:
-                uint8_t tag = ENKI_APP;
-                off += 1
-                fn = enki_deserialize(buf, &off)
-                push to stack 
-                size_t n_args = 0
-                for i=off to off+7:
-                    n_args |= ((uint64_t)buff[i] << (8 * i))
-                    off += 8
-                alloc app 
-                 push to stack 
-                for i=0..n_args:
-                    args[i] = enki_deserialize(buf, &off)
-                    push to stack                 
-    */
+    return 0;
+    
 }
 
-void enki_serialize(enki_interpreter* i, enki_value val, enki_vector* out) {
+void enki_pin_serialize(enki_interpreter* i, enki_value val, enki_vector* out) {
 
     if(!IS_PTR(val)) {
-        enki_vector_push_u8(out, ENKI_NAT);
-        enki_vector_push_u8(out, (uint8_t)8);
-        for(size_t k = 0; k < 8; k++) {
-            enki_vector_push_u8(out, ((uint8_t)val >> 8 * k) & 0xFF);
+        enki_vector_push_u8_or_throw(i, out, ENKI_NAT);
+        size_t byte_len = 0;
+        enki_value tmp = val;
+        while(tmp != 0) {
+            byte_len += 1;
+            tmp >>= 8;
         }
+        for(size_t k = 0; k < 8; k++) {
+            enki_vector_push_u8_or_throw(i, out, (uint8_t)((byte_len >> (8 * k)) & 0xFF));
+        }
+        for(size_t k = 0; k < byte_len; k++) {
+            enki_vector_push_u8_or_throw(i, out, (uint8_t)((val >> (8 * k)) & 0xFF));
+        }
+        return;
     }
-    enki_value_header* h = (enki_value_header*)ENKI_TO_PTR(val);
-    enki_vector_push_u8(out, h->kind_b);
+    enki_value_header* h = ENKI_AS(enki_value_header, val);
+    enki_vector_push_u8_or_throw(i, out, h->kind_b);
     switch (h->kind_b) {
-        case ENKI_NAT:
+        case ENKI_NAT: {
             size_t bytes_len = enki_nat_bytes(i->gc, val);
             for(size_t k = 0; k < 8; k++) {
-                enki_vector_push_u8(out, ((uint8_t)bytes_len >> 8 * k) & 0xFF);
+                enki_vector_push_u8_or_throw(i, out, (uint8_t)((bytes_len >> (8 * k)) & 0xFF));
             }
-            for(size_tk = 0; k < byte_len; k++) {
-                enki_vector_push_u8(out, (uint8_t)enki_nat_load8(i->gc, k, val));
+            for(size_t k = 0; k < bytes_len; k++) {
+                enki_vector_push_u8_or_throw(i, out, (uint8_t)enki_nat_load8(i->gc, k, val));
             }
             break;
-        case ENKI_PIN:
-            enki_pin* pin = (enki_pin*)val;
+        }
+        case ENKI_PIN: {
+            enki_pin* pin = ENKI_AS(enki_pin, val);
             for(size_t k = 0; k < 32; k++) {
-                enki_vector_push_u8(out, pin->hash_b[k]);
+                enki_vector_push_u8_or_throw(i, out, pin->hash_b[k]);
             } 
             break;
-        case ENKI_LAW:
-            enki_law* law = (enki_law*)val;
+        }
+        case ENKI_LAW: {
+            enki_law* law = ENKI_AS(enki_law, val);
             for(size_t k = 0; k < 8; k++) {
-                enki_vector_push_u8(out, (((uint8_t)law->arity_s >> (8 * k)) & 0xFF));
+                enki_vector_push_u8_or_throw(i, out, (uint8_t)((law->arity_s >> (8 * k)) & 0xFF));
             }
-            enki_serialize(i, law->name_v, out);
-            enki_serialize(i, law->body_v, out);
-            for(size_t k = 0; k < 8; k++) {
-                enki_vector_push_u8(out, (((uint8_t)law->n_const_s >> (8 * k)) & 0xFF));
-            }
-            for(size_t k = 0; k < law->n_const_s; k++) {
-                enki_serialize(i, law->const_table_v[k], out);
-            }
+            enki_pin_serialize(i, law->name_v, out);
+            enki_pin_serialize(i, law->body_v, out);
             break;
-        case ENKI_APP:
-            enki_app* app = (enki_app*)val;
-            enki_serialize(i, app->fn, out);
+        }
+        case ENKI_APP: {
+            enki_app* app = ENKI_AS(enki_app, val);
+            enki_pin_serialize(i, app->fn_v, out);
             for(size_t k = 0; k < 8; k++) {
-                enki_vector_push_u8(out, (((uint8_t)app->n_args_s >> (8 * k)) & 0xFF));
+                enki_vector_push_u8_or_throw(i, out, (uint8_t)((app->n_args_s >> (8 * k)) & 0xFF));
             }
             for(size_t k = 0; k < app->n_args_s; k++) {
-                enki_serialize(i, app->args[k], out);
+                enki_pin_serialize(i, app->args_v[k], out);
             }
             break; 
-        default: break;
+        }
+        default:
+            enki_interp_throw(i, ENKI_ERROR_BAD_TAG, val);
     }
 }
-void enki_save_pin(enki_interpreter* i, enki_value val, uint8_t* hash_b) {
-    if(!IS_PTR(val)) exit(1);
-    enki_value_header* h = (enki_value_header*)ENKI_TO_PTR(val);
-    if(h->kind != ENKI_PIN) exit(1);
-    enki_pin* pin = (enki_pin*)ENKI_TO_PTR(val);
-    enki_vector* out_subpins_v = enki_vector_create_sized(i->sys_a, sizeof(enki_value));
-    enki_collect_subpins(pin->inner, out_subpins_v);
+void enki_pin_save_root(enki_interpreter* i, enki_value val) {
+    uint8_t hash_b[32]; 
+    enki_pin_save(i, val, hash_b);
+    uint8_t key[32] = "root";
+    enki_error st = i->store.write(&i->store, key, hash_b, 32);
+    if(st != ENKI_ERROR_OK) enki_interp_throw(i, (int)st, val);
+}
+enki_value enki_pin_load_root(enki_interpreter* i) {
+    uint8_t key[32] = "root";
+    size_t n_out;
+    uint8_t hash_b[32];
+    enki_error st = i->store.read(&i->store, key, hash_b, 32, &n_out);
+    if(st != ENKI_ERROR_OK) enki_interp_throw(i, (int)st, 0);
+    if(n_out != 32) enki_interp_throw(i, ENKI_ERROR_BAD_PIN, 0);
+    uint8_t hash_copy_b[32];
+    memcpy(hash_copy_b, hash_b, 32);
+    return enki_pin_load(i, hash_copy_b);
+}
+static enki_vector* enki_pin_build(enki_interpreter* i, enki_value val, uint8_t* hash_b) {
+    if(!IS_PTR(val)) {
+        enki_interp_throw(i, ENKI_ERROR_TYPE, val);
+    }
+    enki_value_header* h = ENKI_AS(enki_value_header, val);
+    if(h->kind_b != ENKI_PIN) {
+        enki_interp_throw(i, ENKI_ERROR_TYPE, val);
+    }
+    enki_pin* pin = ENKI_AS(enki_pin, val);
+    enki_vector* out_subpins_v = enki_vector_create_sized_or_throw(i,
+        enki_arena_as_allocator(i->scratch_a), sizeof(enki_value));
+    enki_pin_collect_subpins(i, pin->inner_v, out_subpins_v);
     size_t n_subpins_s = enki_vector_len(out_subpins_v);
     enki_value* subpins_v = (enki_value*)enki_vector_data(out_subpins_v);
-    uint8_t sub_hashes[n_subpins_s][32];
+    enki_vector* out_v = enki_vector_create_sized_or_throw(i,
+        enki_arena_as_allocator(i->scratch_a), sizeof(uint8_t));
+    enki_vector_push_u8_or_throw(i, out_v, VERSION);
+    for (size_t k = 0; k < 8; k++) {
+        enki_vector_push_u8_or_throw(i, out_v, (uint8_t)((n_subpins_s >> (8 * k)) & 0xFF));
+    }
     for(size_t k = 0; k < n_subpins_s; k++) {
         uint8_t hash[32];
-        enki_save_pin(i, subpins_v[k], hash);
+        enki_pin_save(i, subpins_v[k], hash); // not sure...
         for(size_t j = 0; j < 32; j++) {
-            sub_hashes[k][j] = hash[j];
+            enki_vector_push_u8_or_throw(i, out_v, hash[j]);
         }
     }
-    enki_vector* out_inner_v = enki_vector_create_sized(i->sys_a, sizeof(uint8_t));
-    enki_serialize(pin->inner, out_inner_v);
+    enki_vector* out_inner_v = enki_vector_create_sized_or_throw(i,
+        enki_arena_as_allocator(i->scratch_a), sizeof(uint8_t));
+    enki_pin_serialize(i, pin->inner_v, out_inner_v);
     size_t n_inner_s = enki_vector_len(out_inner_v);
     uint8_t* inner_v = (uint8_t*)enki_vector_data(out_inner_v);
-    size_t n_out = 1 + 8 + (32 * n_subpins_s) + n_inner_s;
-    uint8_t out[n_out];
-    out[0] = 0; // TEMPORARY for now 
-    for (size_t k = 0; k < 8; k++) {
-        out[k + 1] = (n_subpins_s >> (8 * k));
-    }
-    for (size_t k = 0; k < n_subpins_s; k++) {
-        for (size_t j = 0; j < 32; j++) {
-            out[(k * 32) + j + 1 + 8] = sub_hashes[k][j];
-        }
-    }
     for (size_t k = 0; k < n_inner_s; k++) {
-        out[(n_out - n_inner_s) + k] = inner_v[k];
-    }
-    SHA256(out, n_out, hash_b);
-    i->store->write(i->store, hash_b, out, n_out);
-    enki_vector_destroy(out_inner_v);
-    enki_vector_destroy(out_subpins_v);
+       enki_vector_push_u8_or_throw(i, out_v, inner_v[k]);
+    } 
+    SHA256(enki_vector_data(out_v), enki_vector_len(out_v), hash_b);
+    return out_v;
 }
-enki_value enki_load_pin(enki_interpreter* i, uint8_t* hash) {
+void enki_pin_hash(enki_interpreter* i, enki_value val, uint8_t* hash_b) {
+    enki_pin_build(i, val, hash_b);
+}
+void enki_pin_save(enki_interpreter* i, enki_value val, uint8_t* hash_b) {
+    enki_vector* out_v = enki_pin_build(i, val, hash_b);
+    enki_pin* pin = ENKI_AS(enki_pin, val);
+    memcpy(pin->hash_b, hash_b, 32);
+    uint8_t* out = enki_vector_data(out_v);
+    size_t n_out = enki_vector_len(out_v);
+    enki_error st = i->store.write(&i->store, hash_b, out, n_out);
+    if(st != ENKI_ERROR_OK) {
+        enki_interp_throw(i, (int)st, val);
+    }
+}
+enki_value enki_pin_load(enki_interpreter* i, uint8_t* hash) {
     size_t off = 0;
-    uint8_t* out = i->store->read(i->store, hash);
-    uint8_t ver = out[0]; // do something with later 
+    size_t n_out;
+    enki_error st = i->store.size(&i->store, hash, &n_out);
+    if(st != ENKI_ERROR_OK) {
+        enki_interp_throw(i, (int)st, 0);
+    }
+    uint8_t* out = enki_arena_alloc(i->scratch_a, n_out);
+    if(!out) {
+        enki_interp_throw(i, ENKI_ERROR_OOM, 0);
+    }
+    st = i->store.read(&i->store, hash, out, n_out, &n_out);
+    if(st != ENKI_ERROR_OK) {
+        enki_interp_throw(i, (int)st, 0);
+    }
+    if(n_out < 1) {
+        enki_interp_throw(i, ENKI_ERROR_BAD_PIN, 0);
+    }
+    uint8_t ver = out[0]; 
+    if(ver != VERSION) {
+        enki_interp_throw(i, ENKI_ERROR_BAD_PIN, 0);
+    }
     off += 1;
+    if(off > n_out || n_out - off < 8) {
+        enki_interp_throw(i, ENKI_ERROR_BOUNDS, 0);
+    }
     size_t n_subpins_s = 0;
     for(size_t k = 0; k < 8; k++) {
         n_subpins_s |= ((size_t)out[off] << (k * 8));
@@ -340,51 +298,59 @@ enki_value enki_load_pin(enki_interpreter* i, uint8_t* hash) {
     }
     size_t res_base = i->sp;
     size_t n = sizeof(enki_pin) + (n_subpins_s * sizeof(enki_value));
-    enki_pin* pin = i->gc->alloc(n);
+    enki_pin* pin = i->gc->alloc(i->gc, n, _Alignof(enki_pin));
     pin->n_subpins_s = n_subpins_s;
     pin->h.size_s = n;
     pin->h.state_b = NF;
     pin->h.kind_b = ENKI_PIN;
     memcpy(pin->hash_b, hash, 32);
-    i->stack[i->sp++] = PTR_TO_ENKI(pin);
+    i->stack_v[i->sp++] = PTR_TO_ENKI(pin);
     for(size_t k = 0; k < n_subpins_s; k++) {
         uint8_t hash_b[32];
+        if(off > n_out || n_out - off < 32)  {
+            enki_interp_throw(i, ENKI_ERROR_BOUNDS, 0);
+        }
         memcpy(hash_b, (out + off), 32);
-        enki_value v = enki_load_pin(i, hash_b);
-        pin = (enki_pin*)ENKI_TO_PTR(i->stack[res_base]);
+        enki_value v = enki_pin_load(i, hash_b);
+        pin = ENKI_AS(enki_pin, i->stack_v[res_base]);
         pin->subpins_v[k] = v;
         off += 32;
     }
-    enki_value inner = enki_deserialize(i, out, &off);
-    pin = (enki_pin*)ENKI_TO_PTR(i->stack[res_base]);
+    if(off >= n_out)  {
+        enki_interp_throw(i, ENKI_ERROR_BOUNDS, 0);
+    }
+    enki_value inner = enki_pin_deserialize(i, out, n_out, &off);
+    pin = ENKI_AS(enki_pin, i->stack_v[res_base]);
     pin->inner_v = inner;
-    i->stack[res_base] = PTR_TO_ENKI(pin);
+    i->stack_v[res_base] = PTR_TO_ENKI(pin);
     i->sp = res_base;
     return PTR_TO_ENKI(pin);
 }
-void enki_collect_subpins(enki_value inner, enki_vector* subpins_v) {
+void enki_pin_collect_subpins(enki_interpreter* i, enki_value inner, enki_vector* subpins_v) {
     if(!IS_PTR(inner)) return;
-    enki_value_header* h = (enki_value_header*)ENKI_TO_PTR(inner);
+    enki_value_header* h = ENKI_AS(enki_value_header, inner);
     switch(h->kind_b) {
         case ENKI_NAT: return;
-        case ENKI_LAW:
-            enki_law* law = (enki_law*)ENKI_TO_PTR(inner);
-            enki_collect_subpins(law->name_v, subpins_v);
-            enki_collect_subpins(law->body_v, subpins_v);
+        case ENKI_LAW: {
+            enki_law* law = ENKI_AS(enki_law, inner);
+            enki_pin_collect_subpins(i, law->name_v, subpins_v);
+            enki_pin_collect_subpins(i, law->body_v, subpins_v);
             for(size_t k = 0; k < law->n_const_s; k++) {
-                enki_collect_subpins(law->args_v[k], subpins_v);
+                enki_pin_collect_subpins(i, ENKI_LAW_CONSTS(law)[k], subpins_v);
             }
             return;
+        }
         case ENKI_PIN:
-            enki_vector_push_copy(subpins_v, &inner);
+            enki_vector_push_copy_or_throw(i, subpins_v, &inner);
             return;
-        case ENKI_APP:
-            enki_app* app = (enki_app*)ENKI_TO_PTR(inner);
-            enki_collect_subpins(app->fn_v, subpins_v);
+        case ENKI_APP: {
+            enki_app* app = ENKI_AS(enki_app, inner);
+            enki_pin_collect_subpins(i, app->fn_v, subpins_v);
             for(size_t k = 0; k < app->n_args_s; k++) {
-                enki_collect_subpins(law->args_v[k], subpins_v);
+                enki_pin_collect_subpins(i, app->args_v[k], subpins_v);
             }
             return;
+        }
         default:  break;
     }
 }

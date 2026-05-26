@@ -1,5 +1,7 @@
 #include "enki/allocator.h"
+#include "test_interp.h"
 #include "enki/interp.h"
+#include "enki/nat.h"
 #include "enki/value.h"
 
 #include <criterion/criterion.h>
@@ -8,13 +10,13 @@ static enki_interpreter* fixture_interp;
 
 static void setup(void)
 {
-    fixture_interp = enki_create_interp(enki_allocator_system(), 1024 * 1024, 0);
+    fixture_interp = enki_test_interp_create(1024 * 1024, 0);
     cr_assert_not_null(fixture_interp);
 }
 
 static void teardown(void)
 {
-    enki_destroy(fixture_interp);
+    enki_test_interp_destroy(fixture_interp);
     fixture_interp = NULL;
 }
 

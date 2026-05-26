@@ -47,7 +47,7 @@ typedef struct enki_allocator {
 /**
  * Returns an allocator_a backed by malloc, realloc, and free.
  */
-enki_allocator enki_allocator_system(void);
+const enki_allocator* enki_allocator_system(void);
 
 #ifdef __cplusplus
 }
