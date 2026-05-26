@@ -11,6 +11,7 @@
 enki_value enki_nat_alloc(enki_gc* gc, mp_limb_t* out, size_t n_limbs_s);
 enki_value enki_nat_alloc_big(enki_gc* gc, size_t n_limbs_s, mp_limb_t limbs[]);
 bool enki_nat_is_zero(enki_value x_v);
+uint8_t* enki_nat_to_bytes(enki_interpreter* i, enki_value a, size_t* len);
 int enki_nat_cmp(enki_value a_v, enki_value b_v);
 enki_value enki_nat_eq(enki_value a_v, enki_value b_v);
 enki_value enki_nat_ne(enki_value a_v, enki_value b_v);

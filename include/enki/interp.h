@@ -9,6 +9,7 @@
 #define STACK_MAX 8192
 #define FRAME_MAX 1024
 #define HANDLER_MAX 1024
+#define FD_MAX 1024
 
 typedef enum {
     NO_OP              = 0x00,
@@ -156,6 +157,11 @@ typedef struct {
     size_t res_base_s;
 } enki_handler;
 
+typedef struct {
+    int fd_table[FD_MAX];
+    int next_fd_handle;
+}
+
 typedef struct enki_interpreter {
     size_t sp;
     enki_value stack_v[STACK_MAX];
@@ -172,6 +178,7 @@ typedef struct enki_interpreter {
     enki_arena* scratch_a;
     size_t hp;
     enki_handler handler_v[HANDLER_MAX];
+
 } enki_interpreter;
 
 int enki_interp_run(enki_interpreter* i);
