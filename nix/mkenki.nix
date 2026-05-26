@@ -5,6 +5,7 @@
   gnumake,
   pkg-config,
   criterion,
+  gmp,
   compiler,
   cc,
   extraNativeBuildInputs ? [],
@@ -28,6 +29,8 @@ stdenv.mkDerivation {
 
   buildInputs = [
     criterion
+    gmp
+
   ];
 
   dontConfigure = true;
