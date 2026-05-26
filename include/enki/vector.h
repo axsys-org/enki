@@ -131,6 +131,8 @@ enki_status enki_vector_reserve(enki_vector* vector, size_t capacity_s);
  */
 enki_status enki_vector_shrink(enki_vector* vector);
 
+extern enki_allocator sys_a;
+
 #ifdef __cplusplus
 }
 #endif

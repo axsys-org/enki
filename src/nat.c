@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
 #include <gmp.h>
 
@@ -272,17 +273,18 @@ enki_value enki_nat_bytes(enki_gc* gc, enki_value a_v) {
 
 static size_t enki_cat_met_bytes(enki_value a_v) {
   size_t wid_s =  __builtin_clzll(a_v);
-  return (4 - (wid_s/8));
+  return (8 - (wid_s /8));
 }
 
 size_t enki_bat_met_bytes(enki_value a_v) {
-  if (a_v == 0) { return 0; }
-  if (!IS_PTR(a_v)) { return enki_cat_met_bytes(a_v);
-  }
-  if( ((obj_header*)a_v)->kind_b != ENKI_BIG_NAT ) { return 0; }
+  if (a_v == 0) {
+    return 0; }
+  if (!IS_PTR(a_v)) { return enki_cat_met_bytes(a_v); }
+  if ( ((obj_header*)a_v)->kind_b != ENKI_BIG_NAT ) { return 0; }
   enki_nat* nat = ((enki_nat*)a_v);
   size_t ret_s = (nat->n_limbs_s - 1) * 8;
-  return ret_s + enki_cat_met_bytes(nat->limbs[nat->n_limbs_s]);
+  ret_s += enki_cat_met_bytes(nat->limbs[nat->n_limbs_s - 1]);
+  return ret_s;
 }
 enki_value enki_nat_trunc(enki_gc* gc, enki_value width_v, enki_value a_v) {
     if(IS_PTR(width_v)) exit(1); // temp

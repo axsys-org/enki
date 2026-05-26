@@ -47,22 +47,23 @@ static const char_class char_classes[256] = {
     /* 0xF0     */ 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
 };
 
-wisp_rt* wisp_rt_alloc(enki_allocator sys_a)
+wisp_rt* wisp_rt_alloc(enki_allocator* loc_a)
 {
-    wisp_rt* rt = ea_alloc(sys_a, sizeof(wisp_rt));
+    wisp_rt* rt = ea_calloc(loc_a, wisp_rt, 1);
 
-    rt->gc = enki_gc_create(sys_a, 1 << 10, NULL);
+    rt->gc = enki_gc_create(*loc_a, 1 << 14, NULL);
+    rt->loc_a = &sys_a;
     rt->env = NULL;
     rt->err_f = 0; //
     rt->msg_c = NULL;
     return rt;
 }
 
-void wisp_rt_free(enki_allocator sys_a, wisp_rt* rt)
+void wisp_rt_free(enki_allocator* loc_a, wisp_rt* rt)
 {
     enki_gc_destroy(rt->gc);
     free(rt->msg_c);
-    ea_free(sys_a, rt);
+    ea_free(loc_a, rt);
 }
 
 static char_class wisp_class(char c)
@@ -108,7 +109,7 @@ static bool wisp_eat(char** str)
 static char* _val_to_key(wisp_rt* rt, enki_value val_v)
 {
   UNUSED(rt);
-  return enki_pvalue(val_v);
+  return enki_pvalue(rt->loc_a, val_v);
 
   // if (IS_PTR(val_v)) { wisp_fail(rt, "bigint keys unimplemented"); }
   // // XX: too lazy to do bigint
@@ -119,9 +120,9 @@ static char* _val_to_key(wisp_rt* rt, enki_value val_v)
 
 static void _wisp_fail_with_val(wisp_rt* rt, char* msg_c, enki_value val_v)
 {
-  char* key_c = enki_print_value(EA_TMP_ALLOC, val_v, NULL);
+  char* key_c = enki_pvalue(rt->loc_a, val_v);
   size_t str_s = strlen(msg_c) + strlen(key_c) + 5;
-  char* str_c = ea_alloc(EA_TMP_ALLOC, str_s);
+  char* str_c = ea_calloc(rt->loc_a, char, str_s);
   snprintf(str_c, str_s, "%s: %s\n", msg_c, key_c);
   wisp_fail(rt, str_c);
 }
@@ -235,7 +236,7 @@ static enki_value _wisp_parse_num(wisp_rt* rt, char* str_c, size_t str_s)
 {
   // 10^18 < 2^63
   if ( str_s < 18 ) {
-    char* buf_c = ea_alloc(EA_TMP_ALLOC, str_s);
+    char* buf_c = ea_calloc(rt->loc_a, char, str_s);
     strncpy(buf_c, str_c, str_s);
     buf_c[str_s] = 0;
     return strtoll(buf_c, NULL, 10);
@@ -368,7 +369,7 @@ static wisp_env_entry* wisp_getenv(wisp_rt* rt, enki_value val_v)
 
 static void wisp_putenv(wisp_rt* rt, enki_value key_v, bool mac_f, enki_value val_v)
 {
-  wisp_env_entry* ent = ea_alloc(EA_TMP_ALLOC, sizeof(wisp_env_entry));
+  wisp_env_entry* ent = ea_calloc(rt->loc_a, wisp_env_entry, 1);
   ent->mac_f = mac_f;
   ent->val_v = val_v;
   char* key_c = _val_to_key(rt, key_v);
@@ -377,27 +378,27 @@ static void wisp_putenv(wisp_rt* rt, enki_value key_v, bool mac_f, enki_value va
 }
 
 
-static enki_value env_to_bst_inner(
-  wisp_rt* rt,
-  enki_bst_node* node
-) {
-  if (node == NULL ) {
-    return 0;
-  }
+// static enki_value env_to_bst_inner(
+//   wisp_rt* rt,
+//   enki_bst_node* node
+// ) {
+//   if (node == NULL ) {
+//     return 0;
+//   }
+//
+//   enki_value macro_v = node->macro ? MOTE_MACRO : MOTE_VALUE;
+//   enki_value l_v = env_to_bst_inner(rt, node->left);
+//   enki_value r_v = env_to_bst_inner(rt, node->right);
+//
+//   return enki_alloc_quin(rt->gc, node->key, macro_v, node->value, l_v, r_v);
+// }
 
-  enki_value macro_v = node->macro ? MOTE_MACRO : MOTE_VALUE;
-  enki_value l_v = env_to_bst_inner(rt, node->left);
-  enki_value r_v = env_to_bst_inner(rt, node->right);
-
-  return enki_alloc_quin(rt->gc, node->key, macro_v, node->value, l_v, r_v);
-}
-
-static enki_value env_to_bst(
-  wisp_rt* rt,
-  enki_bst_tree* tree
-) {
-  return env_to_bst_inner(rt, tree->root);
-}
+// static enki_value env_to_bst(
+//   wisp_rt* rt,
+//   enki_bst_tree* tree
+// ) {
+//   return env_to_bst_inner(rt, tree->root);
+// }
 
 
 
@@ -437,31 +438,35 @@ static enki_value wisp_app(
   size_t exp_s,
   enki_value* exp_v
 ) {
-  enki_interpreter interp;
-  memset(&interp, 0, sizeof(interp));
-  interp.gc = rt->gc;
-  interp.sys_a = enki_allocator_system();
-
-  enki_interpreter* old_root = rt->gc->root;
-  rt->gc->root = &interp;
-
-  for (size_t i = 0; i < exp_s; i++) {
-    interp.stack_v[interp.sp++] = wisp_eval(rt, exp_v[i]);
-  }
-
-  enki_value res_v = 0;
-  if (interp.sp == 1) {
-    res_v = interp.stack_v[0];
-  } else if (interp.sp > 1) {
-    enki_apply(&interp, interp.sp - 1);
-    while (!interp.halted && interp.law != NULL) {
-      enki_step(&interp);
-    }
-    res_v = interp.sp == 0 ? 0 : interp.stack_v[0];
-  }
-
-  rt->gc->root = old_root;
-  return _wisp_quote(rt, res_v);
+  UNUSED(rt);
+  UNUSED(exp_s);
+  UNUSED(exp_v);
+  return 0;
+  // enki_interpreter interp;
+  // memset(&interp, 0, sizeof(interp));
+  // interp.gc = rt->gc;
+  // interp.sys_a = enki_allocator_system();
+  //
+  // enki_interpreter* old_root = rt->gc->root;
+  // rt->gc->root = &interp;
+  //
+  // for (size_t i = 0; i < exp_s; i++) {
+  //   interp.stack_v[interp.sp++] = wisp_eval(rt, exp_v[i]);
+  // }
+  //
+  // enki_value res_v = 0;
+  // if (interp.sp == 1) {
+  //   res_v = interp.stack_v[0];
+  // } else if (interp.sp > 1) {
+  //   enki_apply(&interp, interp.sp - 1);
+  //   while (!interp.halted && interp.law != NULL) {
+  //     enki_step(&interp);
+  //   }
+  //   res_v = interp.sp == 0 ? 0 : interp.stack_v[0];
+  // }
+  //
+  // rt->gc->root = old_root;
+  // return _wisp_quote(rt, res_v);
 }
 
 static void wisp_parse_bind(
@@ -651,18 +656,18 @@ static void wisp_emit_expr(wisp_emit_ctx* ctx, enki_value bod_v)
   enki_vector_push_u8(ctx->bc_v, (uint8_t)(app->n_args_s - 1));
 }
 
-static enki_value wisp_compile_expr(
-  wisp_rt* rt,
-  size_t loc_s,
-  wisp_local* loc,
-  enki_value bod_v
-) {
-  UNUSED(rt);
-  UNUSED(loc_s);
-  UNUSED(loc);
-  UNUSED(bod_v);
-  return 0;
-}
+// static enki_value wisp_compile_expr(
+//   wisp_rt* rt,
+//   size_t loc_s,
+//   wisp_local* loc,
+//   enki_value bod_v
+// ) {
+//   UNUSED(rt);
+//   UNUSED(loc_s);
+//   UNUSED(loc);
+//   UNUSED(bod_v);
+//   return 0;
+// }
 
 static enki_value wisp_law(
   wisp_rt* rt,
@@ -689,7 +694,7 @@ static enki_value wisp_law(
   enki_value* arg_v = app->args_v + 1;
 
   size_t loc_s = arg_s + bin_s + 1;
-  wisp_local* loc = ea_alloc(EA_TMP_ALLOC, sizeof(wisp_local) * loc_s);
+  wisp_local* loc = ea_calloc(rt->loc_a, wisp_local, loc_s);
   loc[0].nam_v = nam_v;
   loc[0].idx_q = 0;
   loc[0].exp_v = 0;
@@ -822,11 +827,11 @@ static bool is_sys_macro(uint64_t mac_q)
 {
   return (
       (mac_q == MOTE_HBIND) ||
-(mac_q == MOTE_HLAW ) ||
-(mac_q == MOTE_HPIN       ) ||
-(mac_q == MOTE_HAPP  ) ||
-(mac_q == MOTE_HEXPORT)
-);
+      (mac_q == MOTE_HLAW ) ||
+      (mac_q == MOTE_HPIN ) ||
+      (mac_q == MOTE_HAPP ) ||
+      (mac_q == MOTE_HEXPORT)
+  );
 }
 
 
@@ -837,10 +842,13 @@ static enki_value _wisp_macroexpand(
     wisp_local* loc,
     enki_value val_v
 ) {
+
   if (!IS_PTR(val_v)) { return val_v; }
   enki_value_header* val = ENKI_TO_PTR(val_v);
   if (val->kind_b != ENKI_APP ) { return val_v; }
+
   enki_app* app = (enki_app*)val;
+  // Quoted forms
   if (app->fn_v != 0 ) { return val_v; }
 
   if (app->n_args_s == 3 && wisp_is_juxt(app->args_v[0]) && app->args_v[1] == '#' &&
@@ -901,6 +909,4 @@ enki_value wisp_eval(wisp_rt* rt, enki_value val_v) {
 
 
 
-static void _wisp_unbound(wisp_rt* rt, enki_value val_v) {
-  _wisp_fail_with_val(rt, "unbound", val_v);
-}
+

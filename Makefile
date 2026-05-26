@@ -7,17 +7,16 @@ AR ?= ar
 VALID_BUILD_TYPES := debug release asan ubsan tsan coverage
 
 BASE_CPPFLAGS := -Iinclude -Itests/support -Itests/property/vendor/theft -isystem /opt/homebrew/include
-BASE_CFLAGS := -std=c11 -MMD -MP
+BASE_CFLAGS := -std=c23 -MMD -MP
 
-WARN_COMMON := -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wstrict-prototypes \
+WARN_COMMON := -Wall -Wextra  \
+	-Wpedantic -Wshadow -Wconversion -Wstrict-prototypes \
 	-Wmissing-prototypes -Wold-style-definition -Wnull-dereference \
-	 -Wdouble-promotion -Werror -Wno-sign-conversion
+	-Wdouble-promotion -Werror \
+	-Wno-sign-conversion -Wno-char-subscripts -Wno-unused-function
 
 
-CC_VERSION := $(shell $(CC) --version 2>/dev/null)
-IS_CLANG := $(findstring clang,$(CC_VERSION))
-IS_GNU := $(findstring GCC,$(CC_VERSION))
-WARN_CFLAGS := $(if $(or $(IS_CLANG),$(IS_GNU)),$(WARN_COMMON),)
+WARN_CFLAGS = $(WARN_COMMON)
 
 HARDEN_CFLAGS := -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3 -fstack-protector-strong
 
@@ -38,6 +37,10 @@ BUILD_LDFLAGS_coverage := --coverage
 ifeq ($(filter $(BUILD_TYPE),$(VALID_BUILD_TYPES)),)
 $(error BUILD_TYPE must be one of $(VALID_BUILD_TYPES))
 endif
+
+APP_DIR := app
+APP_SRCS := $(wildcard $(APP_DIR)/*.c)
+APP_BINS := $(patsubst $(APP_DIR)/%.c,$(BUILD_DIR)/bin/%,$(APP_SRCS))
 
 CPPFLAGS_ALL := $(BASE_CPPFLAGS) $(CPPFLAGS)
 CFLAGS_ALL := $(BASE_CFLAGS) $(WARN_CFLAGS) $(BUILD_CFLAGS_$(BUILD_TYPE)) $(CFLAGS)
@@ -94,9 +97,15 @@ COVERAGE_HTML_DIR := $(BUILD_DIR)/html
 LCOV_IGNORE_ERRORS ?= --ignore-errors inconsistent,inconsistent,mismatch,mismatch,gcov,gcov,unused,unused
 
 .PHONY: all lib install test test-binaries test-unit test-property fuzz fuzz-bin coverage tidy \
-	format format-check compile-commands compile-commands-fallback compiler-detection clean distclean
+	format format-check compile-commands compile-commands-fallback clean distclean
 
-all: lib
+all: lib bin
+
+bin: $(APP_BINS)
+
+$(BUILD_DIR)/bin/%: $(APP_DIR)/%.c $(LIB)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS_ALL) $(CFLAGS_ALL) $< $(LIB) $(LDFLAGS_ALL) -o $@
 
 lib: $(LIB)
 
@@ -167,7 +176,7 @@ coverage:
 
 tidy:
 	@test -f compile_commands.json || \
-		{ echo "compile_commands.json missing; run 'make compile-commands' first"; exit 2; }
+		{ echo "compile_commands.json missing; run bear first"; exit 2; }
 	clang-tidy --quiet -p . $(TIDY_FILES_ABS) --warnings-as-errors='*'
 
 format:
@@ -178,35 +187,7 @@ format-check:
 	clang-format --dry-run --Werror $(FORMAT_FILES)
 	@if command -v treefmt >/dev/null 2>&1; then treefmt --fail-on-change; fi
 
-compile-commands:
-	@if command -v bear >/dev/null 2>&1; then \
-		bear --output compile_commands.bear.json -- \
-			$(MAKE) BUILD_TYPE=$(BUILD_TYPE) CC=$(CC) clean test-binaries fuzz-bin || true; \
-	fi
-	$(MAKE) BUILD_TYPE=$(BUILD_TYPE) CC=$(CC) compile-commands-fallback
 
-compile-commands-fallback:
-	@printf '[\n' > compile_commands.json
-	@first=1; \
-	for src in $(TIDY_FILES); do \
-		flags="$(CPPFLAGS_ALL) $(CFLAGS_ALL)"; \
-		case "$$src" in \
-			tests/unit/*) flags="$(CPPFLAGS_ALL) $(CRITERION_CFLAGS) $(CFLAGS_ALL)" ;; \
-			tests/fuzz/*) flags="$(CPPFLAGS_ALL) $(BASE_CFLAGS) $(WARN_CFLAGS) $(BUILD_CFLAGS_asan) $(FUZZ_CFLAGS)" ;; \
-		esac; \
-		if [ "$$first" -eq 0 ]; then printf ',\n' >> compile_commands.json; fi; \
-		first=0; \
-		printf '  {"directory":"%s","command":"%s %s -c %s","file":"%s"}' \
-			'$(CURDIR)' '$(CC)' "$$flags" '$(CURDIR)'/"$$src" '$(CURDIR)'/"$$src" \
-			>> compile_commands.json; \
-	done
-	@printf '\n]\n' >> compile_commands.json
-
-compiler-detection:
-	@printf 'CC=%s\n' '$(CC)'
-	@printf 'GNU_OR_CLANG_WARNINGS=%s\n' '$(if $(WARN_CFLAGS),yes,no)'
-	@printf 'BUILD_TYPE=%s\n' '$(BUILD_TYPE)'
-	@printf 'CFLAGS=%s\n' '$(CFLAGS_ALL)'
 
 clean:
 	rm -rf $(BUILD_DIR)

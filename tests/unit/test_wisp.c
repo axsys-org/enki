@@ -1,6 +1,7 @@
 #include <criterion/criterion.h>
 #include <enki/interp.h>
 #include <enki/wisp.h>
+#include <enki/vector.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -8,12 +9,12 @@ static wisp_rt* rt;
 
 static void setup(void)
 {
-    rt = wisp_rt_alloc(enki_allocator_system());
+    rt = wisp_rt_alloc(&sys_a);
 }
 
 static void teardown(void)
 {
-    wisp_rt_free(enki_allocator_system(), rt);
+    wisp_rt_free(&sys_a, rt);
 }
 
 TestSuite(wisp, .init = setup, .fini = teardown);
@@ -226,7 +227,7 @@ Test(wisp, parse_errors)
 Test(wisp, bind_law_and_apply_it)
 {
     cr_assert_eq(eval_input("(#bind add 5)"), 5);
-    enki_value law_v = eval_input("(#bind plus (#law \"plus\" (plus x y) (add x y)))");
+    enki_value law_v = eval_input("(#bind add (#law \"add\" (add x y) ((#pin \"B\") (\"Add\" x y))))");
     cr_assert(IS_PTR(law_v));
     cr_assert_eq(((obj_header*)ENKI_TO_PTR(law_v))->kind_b, ENKI_LAW);
 

@@ -27,12 +27,12 @@ static void assert_prints(enki_value value_v, const char* expected_c)
 {
     size_t expected_s = strlen(expected_c);
     size_t out_s = 0;
-    char* out_c = enki_print_value(fixture_allocator, value_v, &out_s);
+    char* out_c = enki_print_value(&fixture_allocator, value_v, &out_s);
 
     cr_assert_not_null(out_c);
-    //fprintf(stderr, "want: %s have %s \n", expected_c, out_c);
+    fprintf(stderr, "want: %s have %s \n", expected_c, out_c);
     if ( out_s != expected_s ) {
-      //fprintf(stderr, "len: %lu have %lu \n", expected_s, out_s);
+      fprintf(stderr, "len: %lu have %lu \n", expected_s, out_s);
     }
     cr_assert_eq(out_s, expected_s);
     cr_assert_eq(memcmp(out_c, expected_c, expected_s), 0);

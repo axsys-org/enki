@@ -15,6 +15,7 @@ typedef struct test_allocator_state {
     size_t alloc_calls;
     size_t realloc_calls;
     size_t free_calls;
+    enki_allocator allocator;
 } test_allocator_state;
 
 static int test_allocator_should_fail(test_allocator_state* state)
@@ -63,25 +64,22 @@ static void test_free(void* ctx, void* ptr)
     free(ptr);
 }
 
-static enki_allocator make_test_allocator(test_allocator_state* state, int with_realloc)
+static enki_allocator* make_test_allocator(test_allocator_state* state, int with_realloc)
 {
-    enki_allocator allocator;
-
     memset(state, 0, sizeof(*state));
     state->fail_after = -1;
 
-    allocator.ctx = state;
-    allocator.alloc = test_alloc;
-    allocator.realloc = with_realloc ? test_realloc : NULL;
-    allocator.free = test_free;
+    state->allocator.ctx = state;
+    state->allocator.alloc = test_alloc;
+    state->allocator.realloc = with_realloc ? test_realloc : NULL;
+    state->allocator.free = test_free;
 
-    return allocator;
+    return &state->allocator;
 }
 
 static void init_builder(enki_string_builder* sb, test_allocator_state* state)
 {
-    enki_allocator allocator = make_test_allocator(state, 1);
-    enki_sb_init(sb, allocator);
+    enki_sb_init(sb, make_test_allocator(state, 1));
 
     cr_assert(!enki_sb_failed(sb));
     cr_assert_eq(enki_sb_piece_count(sb), 0);
@@ -99,7 +97,7 @@ static void assert_build_bytes(enki_string_builder* sb,
     cr_assert_eq(memcmp(got, expected, expected_len), 0);
     cr_assert_eq(got[expected_len], '\0');
 
-    sb->allocator.free(sb->allocator.ctx, got);
+    sb->allocator->free(sb->allocator->ctx, got);
 }
 
 static void assert_build_cstr(enki_string_builder* sb, const char* expected)
@@ -124,7 +122,7 @@ Test(enki_string_builder, empty_builder_builds_empty_string)
     cr_assert_eq(len, 0);
     cr_assert_eq(out[0], '\0');
 
-    sb.allocator.free(sb.allocator.ctx, out);
+    sb.allocator->free(sb.allocator->ctx, out);
     enki_sb_free(&sb);
 }
 
@@ -259,7 +257,7 @@ Test(enki_string_builder, growth_uses_realloc_when_available)
 Test(enki_string_builder, growth_falls_back_to_alloc_copy_free_without_realloc)
 {
     test_allocator_state state;
-    enki_allocator allocator;
+    enki_allocator* allocator;
     enki_string_builder sb;
     char expected[21];
     size_t i;
@@ -537,7 +535,7 @@ Test(enki_string_builder, build_with_allocator_uses_requested_output_allocator)
     test_allocator_state builder_state;
     test_allocator_state output_state;
 
-    enki_allocator output_allocator;
+    enki_allocator* output_allocator;
     enki_string_builder sb;
 
     size_t len = 999;
@@ -557,7 +555,7 @@ Test(enki_string_builder, build_with_allocator_uses_requested_output_allocator)
 
     cr_assert_eq(output_state.alloc_calls, 1);
 
-    output_allocator.free(output_allocator.ctx, out);
+    output_allocator->free(output_allocator->ctx, out);
     enki_sb_free(&sb);
 }
 
@@ -569,7 +567,7 @@ Test(enki_string_builder, bad_allocator_initializes_as_failed)
 
     memset(&bad_allocator, 0, sizeof(bad_allocator));
 
-    enki_sb_init(&sb, bad_allocator);
+    enki_sb_init(&sb, &bad_allocator);
 
     cr_assert(enki_sb_failed(&sb));
     cr_assert(!enki_sb_append_lit(&sb, "nope"));

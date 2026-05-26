@@ -264,6 +264,7 @@
               pkgs.gmp
               pkgs.lcov
               pkgs.gcovr
+              pkgs.compiledb
               pkgs.pkg-config
               pkgs.alejandra
               pkgs.mdformat

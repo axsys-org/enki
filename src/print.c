@@ -3,21 +3,23 @@
 #include <enki/string_builder.h>
 #include <enki/util.h>
 
-static void enki_print_value_sb(enki_allocator cat_a, enki_string_builder* sb, enki_value val_v);
+static void enki_print_value_sb(enki_allocator* cat_a, enki_string_builder* sb, enki_value val_v);
 
 static char buf_is_print(char* buf_c, size_t buf_s)
 {
     for (size_t i = 0; i < buf_s; i++) {
         if (!isprint((unsigned char)buf_c[i])) {
-            return false;
+          fprintf(stderr, "found %u not char\n", buf_c[i]);
+          return false;
         }
     }
     return true;
 }
 
-static void enki_print_bat(enki_allocator cat_a, enki_string_builder* sb, enki_nat* nat)
+static void enki_print_bat(enki_allocator* cat_a, enki_string_builder* sb, enki_nat* nat)
 {
-    size_t byt_s = enki_bat_met_bytes((enki_value)nat);
+    size_t byt_s = enki_bat_met_bytes(PTR_TO_ENKI(nat));
+    fprintf(stderr, "met: %lu\n", byt_s);
     if (buf_is_print((char*)nat->limbs, byt_s)) {
         enki_sb_append_lit(sb, "\"");
         enki_sb_append_ref(sb, (const char*)nat->limbs, byt_s);
@@ -33,7 +35,7 @@ static void enki_print_bat(enki_allocator cat_a, enki_string_builder* sb, enki_n
     }
 }
 
-static void enki_print_app(enki_allocator cat_a, enki_string_builder* sb, enki_app* app)
+static void enki_print_app(enki_allocator* cat_a, enki_string_builder* sb, enki_app* app)
 {
     enki_sb_append_lit(sb, "(");
     enki_print_value_sb(cat_a, sb, app->fn_v);
@@ -72,7 +74,7 @@ static void enki_print_direct_text(enki_string_builder* sb, uint64_t dir_q)
     enki_sb_append_lit(sb, "\"");
 }
 
-static void enki_print_value_sb(enki_allocator cat_a, enki_string_builder* sb, enki_value val_v)
+static void enki_print_value_sb(enki_allocator* cat_a, enki_string_builder* sb, enki_value val_v)
 {
     if (!IS_PTR(val_v)) {
         if (direct_is_print(val_v)) {
@@ -101,7 +103,7 @@ static void enki_print_value_sb(enki_allocator cat_a, enki_string_builder* sb, e
     }
 }
 
-char* enki_print_value(enki_allocator cat_a, enki_value val_v, size_t* out_s)
+char* enki_print_value(enki_allocator* cat_a, enki_value val_v, size_t* out_s)
 {
   size_t def_s = 0;
   if (out_s == NULL ) {

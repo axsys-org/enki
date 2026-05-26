@@ -81,6 +81,13 @@ static enki_status resize_storage(enki_vector* vector, size_t capacity_s)
     return ENKI_OK;
 }
 
+enki_allocator sys_a = (enki_allocator){
+    .ctx = NULL,
+    .alloc = system_alloc,
+    .realloc = system_realloc,
+    .free = system_free,
+};
+
 enki_allocator enki_allocator_system(void)
 {
     return (enki_allocator){
@@ -90,6 +97,7 @@ enki_allocator enki_allocator_system(void)
         .free = system_free,
     };
 }
+
 
 enki_vector* enki_vector_create(enki_allocator allocator_a)
 {
