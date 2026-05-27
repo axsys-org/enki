@@ -3,6 +3,7 @@
 #include <enki/print.h>
 #include <enki/vector.h>
 #include <enki/wisp.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -100,6 +101,23 @@ static enki_value eval_input(char* input_c)
     char* cur_c = input_c;
     enki_value value_v = wisp_parse(rt, &cur_c);
     return wisp_eval(rt, value_v);
+}
+
+static size_t env_positive_size(const char* name_c, size_t default_s)
+{
+    const char* value_c = getenv(name_c);
+    if (value_c == NULL || value_c[0] == '\0') {
+        return default_s;
+    }
+
+    char* end_c = NULL;
+    errno = 0;
+    unsigned long parsed_l = strtoul(value_c, &end_c, 10);
+    cr_assert_eq(errno, 0, "invalid %s: %s", name_c, value_c);
+    cr_assert_neq(end_c, value_c, "invalid %s: %s", name_c, value_c);
+    cr_assert_eq(*end_c, '\0', "invalid %s: %s", name_c, value_c);
+    cr_assert_gt(parsed_l, 0, "%s must be greater than zero", name_c);
+    return (size_t)parsed_l;
 }
 
 static void assert_parse_fails(char* input_c, const char* expected_msg_c)
@@ -259,7 +277,7 @@ Test(wisp, law_self_resolves_through_plan_treewalk)
     cr_assert_eq(eval_input("(#app selfer 99)"), law_v);
 }
 
-Test(wisp, recursive_plan_program_validates_extended_snippet)
+static void bind_extended_plan_program(void)
 {
     cr_assert_eq(
         assert_law(eval_input("(#bind inc (#law \"inc\" (inc x) ((#pin \"B\") (\"Inc\" x))))"))
@@ -293,9 +311,22 @@ Test(wisp, recursive_plan_program_validates_extended_snippet)
         assert_law(eval_input("(#bind inc (#law \"inc\" (inc x) ((#pin \"B\") (\"Inc\" x))))"))
             ->bc_len_s,
         0);
+}
 
+Test(wisp, recursive_plan_program_validates_extended_snippet)
+{
+    bind_extended_plan_program();
     cr_assert_eq(eval_input("(inc 41)"), 42);
     cr_assert_eq(eval_input("(dec 5)"), 4);
     cr_assert_eq(eval_input("(add 5 8)"), 13);
-    cr_assert_eq(eval_input("(fib 5)"), 5);
+
+    size_t fib_runs_s = env_positive_size("ENKI_WISP_FIB5_RUNS", 1);
+    for (size_t i = 0; i < fib_runs_s; i++) {
+        if (i > 0) {
+            wisp_rt_free(&sys_a, rt);
+            rt = wisp_rt_alloc(&sys_a);
+            bind_extended_plan_program();
+        }
+        cr_assert_eq(eval_input("(fib 5)"), 5);
+    }
 }

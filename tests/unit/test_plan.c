@@ -54,6 +54,16 @@ static enki_value strnat(const char* str_c)
     return enki_alloc_cstrnat(fixture_interp->gc, (char*)str_c);
 }
 
+static enki_value body_const(enki_value val_v)
+{
+    return app1(0, val_v);
+}
+
+static enki_value body_apply(enki_value fn_v, enki_value arg_v)
+{
+    return app2(0, fn_v, arg_v);
+}
+
 TestSuite(plan, .init = setup, .fini = teardown);
 
 Test(plan, pinned_op66_add_evaluates_row)
@@ -98,6 +108,26 @@ Test(plan, partial_app_spines_flatten_before_reduce)
     cr_assert_eq(enki_plan_apply(&fixture_plan, partial_v, 1, &arg_v, &out_v), ENKI_ERROR_OK);
 
     cr_assert_eq(out_v, 42);
+}
+
+Test(plan, self_tail_call_reuses_law_frame)
+{
+    enki_value pin_b = pin_nat(66);
+    enki_value eq_row_v = body_apply(body_apply(body_const(strnat("Eq")), 1), body_const(0));
+    enki_value eq_v = body_apply(body_const(pin_b), eq_row_v);
+    enki_value dec_row_v = body_apply(body_const(strnat("Dec")), 1);
+    enki_value dec_v = body_apply(body_const(pin_b), dec_row_v);
+    enki_value tail_v = body_apply(0, dec_v);
+    enki_value if_row_v =
+        body_apply(body_apply(body_apply(body_const(strnat("If")), eq_v), body_const(0)), tail_v);
+    enki_value body_v = body_apply(body_const(pin_b), if_row_v);
+    enki_value law_v = enki_law_alloc(fixture_interp->gc, 1, 0, body_v, 0, 0, NULL, NULL);
+    enki_value arg_v = 256;
+    enki_value out_v = 0;
+
+    cr_assert_eq(enki_plan_apply(&fixture_plan, law_v, 1, &arg_v, &out_v), ENKI_ERROR_OK);
+
+    cr_assert_eq(out_v, 0);
 }
 
 Test(plan, op0_pin_pins_whnf_value)

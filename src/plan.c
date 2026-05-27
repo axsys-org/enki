@@ -34,6 +34,9 @@ typedef struct {
 } enki_plan_row;
 
 static enki_error plan_eval_whnf_inner(enki_plan* plan, enki_value val_v, enki_value* out_v);
+static enki_error plan_eval_whnf_tail(enki_plan* plan, enki_value val_v, enki_value self_v,
+                                      enki_law* law, enki_value* env_v, bool* tail_call_f,
+                                      enki_value* out_v);
 static enki_error plan_eval_nf_inner(enki_plan* plan, enki_value val_v, enki_value* out_v);
 static enki_error plan_apply_inner(enki_plan* plan, enki_value fn_v, size_t n_args_s,
                                    const enki_value* args_v, enki_value* out_v);
@@ -156,6 +159,20 @@ static void plan_spine_fill(enki_value val_v, enki_value* args_v, size_t* cursor
     plan_spine_fill(app->fn_v, args_v, cursor_s);
     memcpy(args_v + *cursor_s, app->args_v, app->n_args_s * sizeof(enki_value));
     *cursor_s += app->n_args_s;
+}
+
+static bool plan_rebind_tail_call(enki_value val_v, enki_value self_v, enki_law* law,
+                                  enki_value* env_v)
+{
+    if (!plan_is_kind(val_v, ENKI_APP))
+        return false;
+    if (plan_spine_head(val_v) != self_v)
+        return false;
+    if (plan_spine_count(val_v) != law->arity_s)
+        return false;
+    size_t cursor_s = 0;
+    plan_spine_fill(val_v, env_v + 1, &cursor_s);
+    return cursor_s == law->arity_s;
 }
 
 static enki_error plan_spine_open(enki_plan* plan, enki_value val_v, enki_plan_spine* out)
@@ -1312,7 +1329,17 @@ static enki_error plan_apply_law(enki_plan* plan, enki_value self_v, enki_law* l
     env_v[0] = self_v;
     if (n_args_s > 0)
         memcpy(env_v + 1, args_v, n_args_s * sizeof(enki_value));
-    enki_error err = plan_run_body(plan, n_args_s, env_v, law->body_v, out_v);
+    enki_error err = ENKI_ERROR_OK;
+    for (;;) {
+        enki_value body_v = 0;
+        err = plan_run_body(plan, n_args_s, env_v, law->body_v, &body_v);
+        if (err != ENKI_ERROR_OK)
+            break;
+        bool tail_call_f = false;
+        err = plan_eval_whnf_tail(plan, body_v, self_v, law, env_v, &tail_call_f, out_v);
+        if (err != ENKI_ERROR_OK || !tail_call_f)
+            break;
+    }
     free(env_v);
     return err;
 }
@@ -1382,9 +1409,19 @@ static enki_error plan_arity_value(enki_plan* plan, enki_value val_v, size_t* ou
     }
 }
 
-static enki_error plan_eval_whnf_inner(enki_plan* plan, enki_value val_v, enki_value* out_v)
+static enki_error plan_eval_whnf_loop(enki_plan* plan, enki_value val_v, enki_value self_v,
+                                      enki_law* tail_law, enki_value* tail_env_v,
+                                      bool* tail_call_f, enki_value* out_v)
 {
+    if (tail_call_f != NULL)
+        *tail_call_f = false;
     for (;;) {
+        if (tail_law != NULL && plan_rebind_tail_call(val_v, self_v, tail_law, tail_env_v)) {
+            if (tail_call_f != NULL)
+                *tail_call_f = true;
+            *out_v = val_v;
+            return ENKI_ERROR_OK;
+        }
         if (!IS_PTR(val_v)) {
             *out_v = val_v;
             return ENKI_ERROR_OK;
@@ -1454,6 +1491,18 @@ static enki_error plan_eval_whnf_inner(enki_plan* plan, enki_value val_v, enki_v
             return plan_fail(plan, ENKI_ERROR_BAD_TAG, val_v);
         }
     }
+}
+
+static enki_error plan_eval_whnf_inner(enki_plan* plan, enki_value val_v, enki_value* out_v)
+{
+    return plan_eval_whnf_loop(plan, val_v, 0, NULL, NULL, NULL, out_v);
+}
+
+static enki_error plan_eval_whnf_tail(enki_plan* plan, enki_value val_v, enki_value self_v,
+                                      enki_law* law, enki_value* env_v, bool* tail_call_f,
+                                      enki_value* out_v)
+{
+    return plan_eval_whnf_loop(plan, val_v, self_v, law, env_v, tail_call_f, out_v);
 }
 
 static enki_error plan_eval_nf_inner(enki_plan* plan, enki_value val_v, enki_value* out_v)
