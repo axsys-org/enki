@@ -1,11 +1,11 @@
 #include <criterion/criterion.h>
 #include <enki/interp.h>
-#include <enki/wisp.h>
-#include <enki/vector.h>
 #include <enki/print.h>
+#include <enki/vector.h>
+#include <enki/wisp.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdio.h>
 
 static wisp_rt* rt;
 
@@ -67,6 +67,14 @@ static enki_app* assert_app(enki_value value_v, enki_value fn_v, size_t n_args_s
 static enki_app* assert_row(enki_value value_v, size_t n_args_s)
 {
     return assert_app(value_v, 0, n_args_s);
+}
+
+static enki_law* assert_law(enki_value value_v)
+{
+    cr_assert(IS_PTR(value_v));
+    obj_header* header = ENKI_TO_PTR(value_v);
+    cr_assert_eq(header->kind_b, ENKI_LAW);
+    return (enki_law*)header;
 }
 
 static enki_app* assert_quote(enki_value value_v, const char* expected_c)
@@ -229,29 +237,65 @@ Test(wisp, parse_errors)
 Test(wisp, bind_law_and_apply_it)
 {
     cr_assert_eq(eval_input("(#bind add 5)"), 5);
-    enki_value law_v = eval_input("(#bind add (#law \"add\" (add x y) ((#pin \"B\") (\"Add\" x y))))");
-    fprintf(stderr, "law: %s\n", enki_pvalue(&sys_a, law_v));
-    fflush(stderr);
+    enki_value law_v =
+        eval_input("(#bind add (#law \"add\" (add x y) ((#pin \"B\") (\"Add\" x y))))");
 
     cr_assert(IS_PTR(law_v));
     cr_assert_eq(((obj_header*)ENKI_TO_PTR(law_v))->kind_b, ENKI_LAW);
 
     enki_value ret_v = eval_input("(add 20 22)");
-    fprintf(stderr, "added: %s\n", enki_pvalue(&sys_a, ret_v));
-    fflush(stderr);
     cr_assert_eq(ret_v, 42);
 }
 
-Test(wisp, law_self_is_pick_zero)
+Test(wisp, law_self_resolves_through_plan_treewalk)
 {
     enki_value law_v = eval_input("(#bind selfer (#law \"selfer\" (selfer x) selfer))");
     cr_assert(IS_PTR(law_v));
     cr_assert_eq(((obj_header*)ENKI_TO_PTR(law_v))->kind_b, ENKI_LAW);
 
     enki_law* law = (enki_law*)ENKI_TO_PTR(law_v);
-    uint8_t* bc_b = ENKI_LAW_BC(law);
-    cr_assert_eq(bc_b[0], OP_PICK);
-    cr_assert_eq(bc_b[1], 0);
+    cr_assert_eq(law->bc_len_s, 0);
 
     cr_assert_eq(eval_input("(#app selfer 99)"), law_v);
+}
+
+Test(wisp, recursive_plan_program_validates_extended_snippet)
+{
+    cr_assert_eq(
+        assert_law(eval_input("(#bind inc (#law \"inc\" (inc x) ((#pin \"B\") (\"Inc\" x))))"))
+            ->bc_len_s,
+        0);
+    cr_assert_eq(assert_law(eval_input("(#bind if (#law \"if\" (if cond then else) "
+                                       "((#pin \"B\") (\"If\" cond then else))))"))
+                     ->bc_len_s,
+                 0);
+    cr_assert_eq(
+        assert_law(eval_input("(#bind eq (#law \"eq\" (eq a b) ((#pin \"B\") (\"Eq\" a b))))"))
+            ->bc_len_s,
+        0);
+    cr_assert_eq(assert_law(eval_input("(#bind dechelp (#law \"dechelp\" (dechelp count x) "
+                                       "(if (eq (inc count) x) count (dechelp (inc count) x))))"))
+                     ->bc_len_s,
+                 0);
+    cr_assert_eq(
+        assert_law(eval_input("(#bind dec (#law \"dec\" (dec x) (dechelp 0 x)))"))->bc_len_s,
+        0);
+    cr_assert_eq(assert_law(eval_input("(#bind add (#law \"add\" (add a b) "
+                                       "(if (eq 0 a) b (add (dec a) (inc b)))))"))
+                     ->bc_len_s,
+                 0);
+    cr_assert_eq(assert_law(eval_input("(#bind fib (#law \"fib\" (fib n) "
+                                       "(if (eq n 1) 1 (if (eq n 2) 1 "
+                                       "(add (fib (dec n)) (fib (dec (dec n))))))))"))
+                     ->bc_len_s,
+                 0);
+    cr_assert_eq(
+        assert_law(eval_input("(#bind inc (#law \"inc\" (inc x) ((#pin \"B\") (\"Inc\" x))))"))
+            ->bc_len_s,
+        0);
+
+    cr_assert_eq(eval_input("(inc 41)"), 42);
+    cr_assert_eq(eval_input("(dec 5)"), 4);
+    cr_assert_eq(eval_input("(add 5 8)"), 13);
+    cr_assert_eq(eval_input("(fib 5)"), 5);
 }
