@@ -29,6 +29,7 @@ typedef enum {
     ENKI_LAW,
     ENKI_APP,
     ENKI_BIG_NAT,
+    ENKI_IND,
     ENKI_FWD,
     ENKI_CONT,
 } TAGS;
@@ -39,7 +40,7 @@ typedef enum {
 #define LAW ENKI_LAW
 #define APP ENKI_APP
 #define NAT ENKI_NAT
-
+#define IND ENKI_IND
 typedef enum {
     WHNF,
     NF,
@@ -84,6 +85,19 @@ typedef struct {
     size_t n_args_s;
     enki_value args_v[];
 }  enki_app;
+
+typedef enki_app enki_ind;
+
+static inline enki_value enki_value_unind(enki_value val_v)
+{
+    while(IS_PTR(val_v)) {
+        enki_value_header* h = ENKI_AS(enki_value_header, val_v);
+        if(h->kind_b != ENKI_IND) return val_v;
+        enki_ind* ind = ENKI_AS(enki_ind, val_v);
+        val_v = ind->fn_v;
+    }
+    return val_v;
+}
 
 typedef struct {
     obj_header h;

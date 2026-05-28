@@ -37,6 +37,7 @@ void op0_elim(enki_interpreter* i) {
     enki_value a = i->stack_v[i->sp - 3];
     enki_value z = i->stack_v[i->sp - 2];
     enki_value n = i->stack_v[i->sp - 1];
+    o = enki_value_unind(o);
     
     if(!IS_PTR(o)) {
         if(o == 0) {

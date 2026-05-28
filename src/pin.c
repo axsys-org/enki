@@ -134,6 +134,7 @@ enki_value enki_pin_deserialize(enki_interpreter* i, uint8_t* buff, size_t n_buf
 }
 
 void enki_pin_serialize(enki_interpreter* i, enki_value val, enki_vector* out) {
+    val = enki_value_unind(val);
 
     if(!IS_PTR(val)) {
         enki_vector_push_u8_or_throw(i, out, ENKI_NAT);
@@ -327,6 +328,7 @@ enki_value enki_pin_load(enki_interpreter* i, uint8_t* hash) {
     return PTR_TO_ENKI(pin);
 }
 void enki_pin_collect_subpins(enki_interpreter* i, enki_value inner, enki_vector* subpins_v) {
+    inner = enki_value_unind(inner);
     if(!IS_PTR(inner)) return;
     enki_value_header* h = ENKI_AS(enki_value_header, inner);
     switch(h->kind_b) {

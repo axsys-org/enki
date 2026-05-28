@@ -57,6 +57,11 @@ void enki_trace_value(enki_gc* gc, void* obj) {
           }
           break;
         }
+        case ENKI_IND: {
+          enki_app* ind_v = obj;
+          ind_v->fn_v = gc->copy(gc, ind_v->fn_v);
+          break;
+        }
         case ENKI_NAT:
           break;
         default:

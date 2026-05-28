@@ -1,4 +1,6 @@
 #pragma once
+#include <stddef.h>
+#include <stdint.h>
 #include <stdbool.h>
 #include <setjmp.h>
 #include "enki/arena.h"
@@ -142,6 +144,41 @@ typedef enum {
     OP66_PRINT_REX,
 } enki_op66_sub;
 
+#define ENKI_OP66_COUNT ((size_t)OP66_PRINT_REX + 1)
+
+typedef struct {
+    uint64_t interp_step_s;
+    uint64_t law_enter_s;
+
+    uint64_t apply_s;
+    uint64_t apply_row_s;
+    uint64_t apply_exact_s;
+    uint64_t apply_under_s;
+    uint64_t apply_over_s;
+    uint64_t apply_op_s;
+
+    uint64_t whnf_s;
+    uint64_t whnf_immediate_s;
+    uint64_t whnf_nat_s;
+    uint64_t whnf_pin_s;
+    uint64_t whnf_law_s;
+    uint64_t whnf_app_whnf_s;
+    uint64_t whnf_app_thunk_s;
+
+    uint64_t op66_s[ENKI_OP66_COUNT];
+
+    uint64_t nat_tmp_alloc_s;
+    uint64_t nat_tmp_bytes_s;
+    uint64_t nat_heap_alloc_s;
+    uint64_t nat_heap_bytes_s;
+    uint64_t nat_normalize_s;
+    uint64_t nat_requested_limbs_s;
+    uint64_t nat_final_limbs_s;
+    uint64_t nat_trimmed_limbs_s;
+    uint64_t nat_immediate_result_s;
+    uint64_t nat_big_result_s;
+} enki_stats;
+
 typedef struct {
     enki_value law;
     size_t pc;
@@ -175,6 +212,7 @@ typedef struct enki_interpreter {
     int error_code;
     enki_value error_v;
     enki_arena* scratch_a;
+    enki_stats stats;
 } enki_interpreter;
 
 int enki_interp_run(enki_interpreter* i);
@@ -185,6 +223,7 @@ void enki_interp_destroy(enki_interpreter* i);
 void enki_interp_enter_call(enki_interpreter* i, enki_value fn_v, size_t n_args_s,
     enki_value* args_v);
 void enki_interp_dispatch_op(enki_interpreter* i, uint8_t group);
+void enki_stats_reset(enki_interpreter* i);
 enki_interpreter* enki_interp_create(const enki_allocator* loc_a, size_t heap,
     const char* store_path_s, size_t store_size_s, size_t scratch_size_s);
 void enki_interp_throw(enki_interpreter* i, int error_code, enki_value val);

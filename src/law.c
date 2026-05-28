@@ -28,6 +28,7 @@ enki_value enki_law_alloc(enki_gc* gc, size_t arity_s, enki_value name_v, enki_v
 }
 
 void enki_law_enter(size_t arity_s, enki_value val_v, enki_interpreter* i) {
+    i->stats.law_enter_s++;
     
     if(i->cp > 0) {
         i->call_stack_v[i->cp - 1].pc = i->pc;
@@ -71,6 +72,7 @@ static void enki_law_push_const(enki_interpreter* i, enki_vector* bc_b, enki_vec
 }
 
 static void enki_law_compile_value(enki_interpreter* i, enki_value body_v, size_t depth_s, enki_vector* bc_b, enki_vector* const_table_v) {
+  body_v = enki_value_unind(body_v);
   if(body_v != 0 && !IS_PTR(body_v) && body_v <= depth_s) {
     size_t index = (depth_s - body_v);
     if(index > 255) {
@@ -134,6 +136,7 @@ static void enki_law_compile_value(enki_interpreter* i, enki_value body_v, size_
   }
 }
 static bool enki_law_is_letrec(enki_value body_v, enki_value* v, enki_value* k) {
+    body_v = enki_value_unind(body_v);
     if(!IS_PTR(body_v)) return false;
     enki_value_header* h = ENKI_AS(enki_value_header, body_v);
     if(h->kind_b != ENKI_APP) return false;

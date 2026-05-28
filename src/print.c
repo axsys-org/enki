@@ -308,6 +308,9 @@ static void enki_print_value_sb(const enki_allocator* cat_a, enki_string_builder
         case ENKI_APP:
             enki_print_app(cat_a, sb, (enki_app*)h);
             return;
+        case ENKI_IND:
+            enki_print_value_sb(cat_a, sb, ((enki_ind*)h)->fn_v);
+            return;
         case ENKI_PIN:
             enki_sb_append_lit(sb, "<");
             enki_print_value_sb(cat_a, sb, ((enki_pin*)h)->inner_v);

@@ -10,24 +10,51 @@
 
 enki_value enki_eval_whnf(enki_interpreter* i, enki_value val_v) {
     while(1) {
-        if(!IS_PTR(val_v)) return val_v;
+        i->stats.whnf_s++;
+        if(!IS_PTR(val_v)) {
+            i->stats.whnf_immediate_s++;
+            return val_v;
+        }
         enki_value_header* h = ENKI_AS(enki_value_header, val_v);
         if(h->kind_b == NAT) {
+            i->stats.whnf_nat_s++;
             h->state_b = NF;
             return val_v;
         }
-        else if(h->kind_b == PIN || h->kind_b == LAW) {
+        else if(h->kind_b == PIN) {
+            i->stats.whnf_pin_s++;
             h->state_b = WHNF;
             return val_v;
         }
+        else if(h->kind_b == LAW) {
+            i->stats.whnf_law_s++;
+            h->state_b = WHNF;
+            return val_v;
+        }
+        if(h->kind_b == IND) {
+            enki_app* ind = ENKI_AS(enki_app, val_v);
+            val_v = ind->fn_v;
+            continue;
+        }
         else if(h->kind_b == APP) {
-            if(h->state_b != THUNK) return val_v;
+            if(h->state_b != THUNK) {
+                i->stats.whnf_app_whnf_s++;
+                return val_v;
+            }
+            i->stats.whnf_app_thunk_s++;
+            
+            // root app 
+            size_t root_sp = i->sp;
+            i->stack_v[root_sp] = val_v;
+            i->sp++;
+
             size_t base_sp = i->sp;
             size_t base_cp = i->cp;
             enki_app* app = ENKI_AS(enki_app, val_v);
             size_t arity_s = enki_app_arity(app->fn_v);
+            size_t total_args_s = app->n_args_s;
             i->stack_v[base_sp] = app->fn_v;
-            i->sp++;
+            i->sp = base_sp + 1;
             for(size_t k = 0; k < arity_s; k++) {
                 i->stack_v[i->sp++] = app->args_v[k];
             }
@@ -36,8 +63,9 @@ enki_value enki_eval_whnf(enki_interpreter* i, enki_value val_v) {
                 enki_interp_step(i);
                 enki_arena_reset(i->scratch_a);
             }
-            size_t leftover_count_s = app->n_args_s - arity_s;
+            size_t leftover_count_s = total_args_s - arity_s;
             if(leftover_count_s > 0) {
+                app = ENKI_AS(enki_app, i->stack_v[root_sp]);
                 i->sp = base_sp + 1;
                 for(size_t k = 0; k < leftover_count_s; k++) {
                     i->stack_v[i->sp++] = app->args_v[k + arity_s];
@@ -48,8 +76,13 @@ enki_value enki_eval_whnf(enki_interpreter* i, enki_value val_v) {
                     enki_arena_reset(i->scratch_a);
                 }
             }
+            app = ENKI_AS(enki_app, i->stack_v[root_sp]);
+            app->h.state_b = WHNF;
+            app->h.kind_b = IND;
+            app->n_args_s = 0;
+            app->fn_v = i->stack_v[base_sp];
             val_v = i->stack_v[base_sp];
-            i->sp = base_sp;
+            i->sp = root_sp;
             continue;
         }
         return val_v;

@@ -1,4 +1,5 @@
 #include <stdlib.h>
+#include <string.h>
 
 #include "enki/interp.h"
 #include "enki/app.h"
@@ -25,6 +26,7 @@ enki_interpreter* enki_interp_create(const enki_allocator* loc_a, size_t heap,
     i->cp = 0;
     i->sp = 0;
     i->hp = 0;
+    enki_stats_reset(i);
     i->scratch_a = enki_arena_create(loc_a, scratch_size_s);
     if(!i->scratch_a) {
         enki_gc_destroy(i->gc);
@@ -39,6 +41,9 @@ enki_interpreter* enki_interp_create(const enki_allocator* loc_a, size_t heap,
         ea_abort("failed to init store");
     }
     return i;
+}
+void enki_stats_reset(enki_interpreter* i) {
+    memset(&i->stats, 0, sizeof(i->stats));
 }
 void enki_interp_destroy(enki_interpreter* i) {
     if(i->gc) enki_gc_destroy(i->gc);
@@ -116,6 +121,9 @@ static void enki_interp_dispatch_op0(enki_interpreter* i, uint8_t sub_t) {
 }
 
 static void enki_interp_dispatch_op66(enki_interpreter* i, uint8_t sub_b) {
+    if(sub_b < ENKI_OP66_COUNT) {
+        i->stats.op66_s[sub_b]++;
+    }
     switch (sub_b) {
         case OP66_INC:        op66_inc(i);         break;
         case OP66_DEC:        op66_dec(i);         break;
@@ -220,7 +228,7 @@ static void enki_interp_dispatch_op66(enki_interpreter* i, uint8_t sub_b) {
 }
 
 void enki_interp_dispatch_op(enki_interpreter* i, uint8_t group) {
-    enki_value row_v = i->stack_v[i->sp - 1];
+    enki_value row_v = enki_value_unind(i->stack_v[i->sp - 1]);
     if(!IS_PTR(row_v)) {
         enki_interp_throw(i, ENKI_ERROR_BAD_TAG, row_v);
     }
@@ -248,6 +256,7 @@ void enki_interp_dispatch_op(enki_interpreter* i, uint8_t group) {
 }
 
 void enki_interp_step(enki_interpreter* i) {
+    i->stats.interp_step_s++;
     uint8_t op_b = i->bc_b[i->pc++];
     switch (op_b) {
         case OP_APPLY_WIDE: {

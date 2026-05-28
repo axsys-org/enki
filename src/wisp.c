@@ -87,7 +87,9 @@ static enki_value _wisp_plan_apply(wisp_rt* rt, size_t val_s, enki_value* val_v)
     enki_error err = enki_plan_apply(&plan, val_v[0], val_s - 1, &val_v[1], &res_v);
     uint64_t end_ns = wisp_now_ns();
     uint64_t elapsed_ns = end_ns >= start_ns ? end_ns - start_ns : 0;
-    fprintf(stderr, "wisp apply %zu arg(s): %" PRIu64 " ns\n", val_s - 1, elapsed_ns);
+    fprintf(stderr, "wisp apply %zu arg(s): %" PRIu64 " ns, %" PRIu64
+                    " WHNF eval(s), %" PRIu64 " apply(s)\n",
+            val_s - 1, elapsed_ns, plan.whnf_eval_s, plan.apply_s);
 
     if (err != ENKI_ERROR_OK) {
         char msg_c[64];

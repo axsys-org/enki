@@ -1320,6 +1320,7 @@ static enki_error plan_apply_law(enki_plan* plan, enki_value self_v, enki_law* l
 static enki_error plan_reduce_exact(enki_plan* plan, enki_value fn_v, size_t n_args_s,
                                     const enki_value* args_v, enki_value* out_v)
 {
+    plan->apply_s++;
     if (plan_is_kind(fn_v, ENKI_LAW)) {
         return plan_apply_law(plan, fn_v, ENKI_AS(enki_law, fn_v), n_args_s, args_v, out_v);
     }
@@ -1384,6 +1385,7 @@ static enki_error plan_arity_value(enki_plan* plan, enki_value val_v, size_t* ou
 
 static enki_error plan_eval_whnf_inner(enki_plan* plan, enki_value val_v, enki_value* out_v)
 {
+    plan->whnf_eval_s++;
     for (;;) {
         if (!IS_PTR(val_v)) {
             *out_v = val_v;
@@ -1507,6 +1509,7 @@ static enki_error plan_eval_nf_inner(enki_plan* plan, enki_value val_v, enki_val
 static enki_error plan_apply_inner(enki_plan* plan, enki_value fn_v, size_t n_args_s,
                                    const enki_value* args_v, enki_value* out_v)
 {
+    plan->apply_s++;
     if (n_args_s == 0)
         return plan_eval_whnf_inner(plan, fn_v, out_v);
     enki_value app_v = 0;
@@ -1523,6 +1526,8 @@ void enki_plan_init(enki_plan* plan, enki_gc* gc)
     plan->gc = gc;
     plan->error = ENKI_ERROR_OK;
     plan->error_v = 0;
+    plan->whnf_eval_s = 0;
+    plan->apply_s = 0;
 }
 
 void enki_plan_clear_error(enki_plan* plan)

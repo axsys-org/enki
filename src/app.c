@@ -36,6 +36,10 @@ size_t enki_app_arity(enki_value val_v) {
             if(fn_arity_s <= app->n_args_s) return 0;
             return fn_arity_s - app->n_args_s;
         }
+        case IND: {
+            enki_app* app = ENKI_AS(enki_app, val_v);
+            return enki_app_arity(app->fn_v);
+        }
         default:
             return 0;
     }
@@ -66,6 +70,11 @@ static void enki_app_open_spine(enki_value head_v,
                 return;
             }
             *arity_s = fn_arity - app->n_args_s;
+            return;
+        }
+        case IND: {
+            enki_app* app = ENKI_AS(enki_app, head_v);
+            enki_app_open_spine(app->fn_v, fn_v, arity_s, old_args_s, old_args_v);
             return;
         }
         case PIN: {
@@ -118,10 +127,12 @@ static enki_value enki_app_build_flat(
 }
 
 void enki_app_apply(enki_interpreter* i, size_t n_args_s) {
+    i->stats.apply_s++;
     size_t fn_index_i = i->sp - (n_args_s + 1);
     size_t arg_index_i = fn_index_i + 1;
     enki_value head_v = i->stack_v[fn_index_i];
-    if(!IS_PTR(head_v)) {        
+    if(!IS_PTR(head_v)) {
+        i->stats.apply_row_s++;
         enki_value row = enki_alloc_row(i->gc, head_v, n_args_s,
             &i->stack_v[arg_index_i]);
         enki_app_fold(i, row, fn_index_i);
@@ -133,13 +144,16 @@ void enki_app_apply(enki_interpreter* i, size_t n_args_s) {
     enki_value fn_v;
     enki_app_open_spine(head_v, &fn_v, &arity_s, &old_args_s, &old_args_v);
     if(arity_s == n_args_s) {
+        i->stats.apply_exact_s++;
         if(!IS_PTR(fn_v)) {
+            i->stats.apply_op_s++;
             enki_interp_dispatch_op(i, (uint8_t)fn_v);
             return;
         }
         enki_value_header* h = ENKI_AS(enki_value_header, fn_v);
         switch(h->kind_b) {
             case NAT:
+                i->stats.apply_op_s++;
                 enki_interp_dispatch_op(i, (uint8_t)fn_v); return;
             case LAW:
                 size_t call_arity_s = n_args_s + old_args_s;
@@ -159,6 +173,12 @@ void enki_app_apply(enki_interpreter* i, size_t n_args_s) {
                 enki_interp_throw(i, ENKI_ERROR_BAD_TAG, fn_v);
         }
         return;
+    }
+    if(arity_s > n_args_s) {
+        i->stats.apply_under_s++;
+    }
+    else {
+        i->stats.apply_over_s++;
     }
     enki_value app_v = enki_app_build_flat(
         i,

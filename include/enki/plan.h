@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stddef.h>
+#include <stdint.h>
 
 #include "enki/error.h"
 #include "enki/gc.h"
@@ -10,6 +11,8 @@ typedef struct enki_plan {
     enki_gc* gc;
     enki_error error;
     enki_value error_v;
+    uint64_t whnf_eval_s;
+    uint64_t apply_s;
 } enki_plan;
 
 void enki_plan_init(enki_plan* plan, enki_gc* gc);
