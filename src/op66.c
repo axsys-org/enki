@@ -183,7 +183,8 @@ void op66_cmp(enki_interpreter* i) {
     enki_value a = i->stack_v[i->sp - 2];
     enki_value b = i->stack_v[i->sp - 1];
     i->sp--;
-    i->stack_v[i->sp - 1] = (enki_value)enki_nat_cmp(a, b);
+    int cmp = enki_nat_cmp(a, b);
+    i->stack_v[i->sp - 1] = (cmp < 0) ? (enki_value)0 : (cmp == 0 ? (enki_value)1 : (enki_value)2);
 }
 void op66_lsh(enki_interpreter* i) {
     enki_value a = i->stack_v[i->sp - 2];

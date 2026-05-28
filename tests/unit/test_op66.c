@@ -121,6 +121,28 @@ Test(op66, eq_is_nat_equality_without_forcing)
     cr_assert_eq(fixture_interp->stack_v[0], 1);
 }
 
+Test(op66, cmp_maps_ordering_to_plan_nat_shape)
+{
+    fixture_interp->stack_v[0] = 2;
+    fixture_interp->stack_v[1] = 3;
+    fixture_interp->sp = 2;
+    op66_cmp(fixture_interp);
+    cr_assert_eq(fixture_interp->sp, 1);
+    cr_assert_eq(fixture_interp->stack_v[0], 0);
+
+    fixture_interp->stack_v[0] = 3;
+    fixture_interp->stack_v[1] = 3;
+    fixture_interp->sp = 2;
+    op66_cmp(fixture_interp);
+    cr_assert_eq(fixture_interp->stack_v[0], 1);
+
+    fixture_interp->stack_v[0] = 4;
+    fixture_interp->stack_v[1] = 3;
+    fixture_interp->sp = 2;
+    op66_cmp(fixture_interp);
+    cr_assert_eq(fixture_interp->stack_v[0], 2);
+}
+
 Test(op66, direct_inc_and_dec_update_top_of_stack)
 {
     fixture_interp->stack_v[0] = 41;
