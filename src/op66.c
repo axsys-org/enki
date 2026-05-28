@@ -136,6 +136,12 @@ done:
     return res_v;
 }
 void op66_eq(enki_interpreter* i) {
+    enki_value a = i->stack_v[i->sp - 2];
+    enki_value b = i->stack_v[i->sp - 1];
+    i->sp--;
+    i->stack_v[i->sp - 1] = enki_nat_eq(a, b);
+}
+void op66_equal(enki_interpreter* i) {
     i->stack_v[i->sp - 2] = enki_eval_nf(i, i->stack_v[i->sp - 2]);
     i->stack_v[i->sp - 1] = enki_eval_nf(i, i->stack_v[i->sp - 1]);
     enki_value a = i->stack_v[i->sp - 2];

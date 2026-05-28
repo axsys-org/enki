@@ -220,7 +220,7 @@ static void enki_interp_dispatch_op66(enki_interpreter* i, uint8_t sub_b) {
         case OP66_SAVE:       op66_save(i);        break;
         case OP66_LOAD:       op66_load(i);        break;
         case OP66_TRACE:      return;
-        case OP66_EQUAL:      op66_eq(i);          break;
+        case OP66_EQUAL:      op66_equal(i);       break;
         case OP66_PARSE_REX:  return; // TODO: liam
         case OP66_PRINT_REX:  return; // TODO: liam
         default: enki_interp_throw(i, ENKI_ERROR_BAD_TAG, sub_b);

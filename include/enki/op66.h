@@ -14,6 +14,7 @@ void op66_div(enki_interpreter* i);
 void op66_mod(enki_interpreter* i);
 enki_value op66_structural_eq(enki_interpreter* i, enki_value a, enki_value b);
 void op66_eq(enki_interpreter* i);
+void op66_equal(enki_interpreter* i);
 void op66_ne(enki_interpreter* i);
 void op66_gt(enki_interpreter* i);
 void op66_ge(enki_interpreter* i);

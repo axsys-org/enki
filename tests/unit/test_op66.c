@@ -84,7 +84,7 @@ Test(op66, structural_eq_compares_apps_laws_and_pins)
     cr_assert_eq(op66_structural_eq(fixture_interp, pin_a, pin_b), 1);
 }
 
-Test(op66, eq_forces_before_structural_compare)
+Test(op66, equal_forces_before_structural_compare)
 {
     uint8_t bc_b[] = {
         OP_PICK, 0,
@@ -102,6 +102,18 @@ Test(op66, eq_forces_before_structural_compare)
     fixture_interp->sp = 2;
     fixture_interp->cp = 0;
     fixture_interp->halted = false;
+
+    op66_equal(fixture_interp);
+
+    cr_assert_eq(fixture_interp->sp, 1);
+    cr_assert_eq(fixture_interp->stack_v[0], 1);
+}
+
+Test(op66, eq_is_nat_equality_without_forcing)
+{
+    fixture_interp->stack_v[0] = 42;
+    fixture_interp->stack_v[1] = 42;
+    fixture_interp->sp = 2;
 
     op66_eq(fixture_interp);
 

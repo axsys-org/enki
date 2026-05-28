@@ -165,6 +165,17 @@ typedef struct {
     uint64_t whnf_app_whnf_s;
     uint64_t whnf_app_thunk_s;
 
+    uint64_t gc_alloc_s;
+    uint64_t gc_alloc_bytes_s;
+    uint64_t gc_locked_alloc_s;
+    uint64_t gc_locked_alloc_bytes_s;
+    uint64_t gc_alloc_fail_s;
+    uint64_t gc_collect_s;
+    uint64_t gc_copy_s;
+    uint64_t gc_copy_bytes_s;
+    uint64_t gc_live_bytes_s;
+    uint64_t gc_high_water_bytes_s;
+
     uint64_t op66_s[ENKI_OP66_COUNT];
 
     uint64_t nat_tmp_alloc_s;
