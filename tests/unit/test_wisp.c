@@ -6,17 +6,25 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 static wisp_rt* rt;
 
 static void setup(void)
 {
+    (void)mkdir("./snap", 0700);
+    (void)unlink("./snap/data.mdb");
+    (void)unlink("./snap/lock.mdb");
     rt = wisp_rt_alloc(&sys_a);
 }
 
 static void teardown(void)
 {
+    enki_store_close(&rt->i->store);
     wisp_rt_free(&sys_a, rt);
+    (void)unlink("./snap/data.mdb");
+    (void)unlink("./snap/lock.mdb");
 }
 
 TestSuite(wisp, .init = setup, .fini = teardown);

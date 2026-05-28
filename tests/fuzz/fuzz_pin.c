@@ -43,7 +43,7 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size)
     }
 
     i->sp = 0;
-    i->fp = 0;
+    i->cp = 0;
     i->halted = false;
     i->has_error_jmp = true;
     if(setjmp(i->error_jmp) == 0) {

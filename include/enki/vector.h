@@ -99,6 +99,11 @@ void* enki_vector_get(const enki_vector* vector, size_t index_i);
 void* enki_vector_get_slot(const enki_vector* vector, size_t index_i);
 
 /**
+ * Returns a pointer to the last element slot.
+ */
+void* enki_vector_top_slot(const enki_vector* vector);
+
+/**
  * Replaces the item_v at the requested index_i.
  */
 enki_status enki_vector_set(enki_vector* vector, size_t index_i, void* item_v);

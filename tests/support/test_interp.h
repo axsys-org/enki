@@ -48,11 +48,11 @@ static void enki_test_make_store(void)
 
 static enki_interpreter* enki_test_interp_create(size_t heap_s, enki_value law)
 {
+    (void)law;
     enki_test_make_store();
     return enki_interp_create(
         enki_allocator_system(),
         heap_s,
-        law,
         enki_test_store_path_s,
         ENKI_TEST_STORE_SIZE_S,
         ENKI_TEST_SCRATCH_SIZE_S);

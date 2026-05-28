@@ -7,7 +7,7 @@
 #include "enki/store.h"
 
 #define STACK_MAX 8192
-#define FRAME_MAX 1024
+#define CALL_MAX 1024
 #define HANDLER_MAX 1024
 
 typedef enum {
@@ -147,11 +147,10 @@ typedef struct {
     size_t pc;
     size_t res_base_s;
     size_t arg_base_s;
-    enki_value cont_v;
-} enki_frame;
+} enki_call;
 
 typedef struct {
-    size_t fp;
+    size_t cp;
     size_t sp;
     size_t res_base_s;
 } enki_handler;
@@ -159,8 +158,14 @@ typedef struct {
 typedef struct enki_interpreter {
     size_t sp;
     enki_value stack_v[STACK_MAX];
-    size_t fp;
-    enki_frame frame[FRAME_MAX];
+    size_t cp;
+    enki_call call_stack_v[CALL_MAX];
+    size_t hp;
+    enki_handler handler_v[HANDLER_MAX];
+    uint8_t* bc_b;
+    enki_value* const_table_v;
+    size_t pc;
+    size_t arg_base_s;
     enki_gc* gc;
     enki_allocator our_a;
     bool halted;
@@ -170,16 +175,16 @@ typedef struct enki_interpreter {
     int error_code;
     enki_value error_v;
     enki_arena* scratch_a;
-    size_t hp;
-    enki_handler handler_v[HANDLER_MAX];
 } enki_interpreter;
 
 int enki_interp_run(enki_interpreter* i);
-void enki_interp_reset(enki_interpreter* i);
 void enki_interp_push(enki_interpreter* i, enki_value val_v);
 void enki_interp_step(enki_interpreter* i);
 void enki_interp_halt(enki_interpreter* i);
 void enki_interp_destroy(enki_interpreter* i);
-enki_interpreter* enki_interp_create(const enki_allocator* sys_a, size_t heap,
-   enki_value law, const char* store_path_s, size_t store_size_s, size_t scratch_size_s);
+void enki_interp_enter_call(enki_interpreter* i, enki_value fn_v, size_t n_args_s,
+    enki_value* args_v);
+void enki_interp_dispatch_op(enki_interpreter* i, uint8_t group);
+enki_interpreter* enki_interp_create(const enki_allocator* loc_a, size_t heap,
+    const char* store_path_s, size_t store_size_s, size_t scratch_size_s);
 void enki_interp_throw(enki_interpreter* i, int error_code, enki_value val);

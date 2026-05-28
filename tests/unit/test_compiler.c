@@ -77,15 +77,12 @@ static bool bytecode_contains_wide(uint8_t* bc_b, size_t bc_len_s, uint8_t op_b,
 
 static void run_compiled(enki_value law)
 {
-    fixture_interp->frame[0].law = law;
-    fixture_interp->frame[0].pc = 0;
-    fixture_interp->frame[0].res_base_s = 0;
-    fixture_interp->frame[0].arg_base_s = 0;
-    fixture_interp->frame[0].cont_v = 0;
-    fixture_interp->sp = 0;
-    fixture_interp->fp = 0;
+    fixture_interp->stack_v[0] = law;
+    fixture_interp->sp = 1;
+    fixture_interp->cp = 0;
     fixture_interp->halted = false;
 
+    enki_law_enter(0, law, fixture_interp);
     enki_interp_run(fixture_interp);
 }
 

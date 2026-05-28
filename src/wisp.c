@@ -21,7 +21,7 @@
 wisp_rt* wisp_rt_alloc(const enki_allocator* loc_a)
 {
     wisp_rt* rt = ea_calloc(loc_a, wisp_rt, 1);
-    rt->i = enki_interp_create(loc_a, WISP_HEAP_SIZE, 0, "./snap", WISP_STORE_SIZE,
+    rt->i = enki_interp_create(loc_a, WISP_HEAP_SIZE, "./snap", WISP_STORE_SIZE,
                                WISP_SCRATCH_SIZE);
     rt->gc = rt->i->gc;
     rt->loc_a = &sys_a;

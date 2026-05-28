@@ -271,6 +271,15 @@ void* enki_vector_get_slot(const enki_vector* vector, size_t index_i)
     return slot_at(vector, index_i);
 }
 
+void* enki_vector_top_slot(const enki_vector* vector)
+{
+    if (vector == NULL || vector->len_s == 0) {
+        return NULL;
+    }
+
+    return slot_at(vector, vector->len_s - 1);
+}
+
 enki_status enki_vector_set(enki_vector* vector, size_t index_i, void* item_v)
 {
     if (vector == NULL) {

@@ -9,7 +9,7 @@
 
 #define ENKI_BC_WIDE_MAX   UINT16_MAX
 
-enki_value enki_law_alloc(enki_gc* gc, size_t arity_s, enki_value name_v, enki_value body_v,
+enki_value enki_law_alloc(enki_gc* gc, size_t arity_s, enki_value name_v, enki_value body_v, 
     size_t bc_len_s, size_t n_const_s, uint8_t* bc_b, enki_value* const_table_v) {
     size_t n = sizeof(enki_law) + bc_len_s + (n_const_s * sizeof(enki_value));
     enki_law* new = (enki_law*)enki_gc_alloc_locked(gc, n, _Alignof(enki_law));
@@ -28,26 +28,36 @@ enki_value enki_law_alloc(enki_gc* gc, size_t arity_s, enki_value name_v, enki_v
 }
 
 void enki_law_enter(size_t arity_s, enki_value val_v, enki_interpreter* i) {
-    enki_frame f;
+    
+    if(i->cp > 0) {
+        i->call_stack_v[i->cp - 1].pc = i->pc;
+        i->call_stack_v[i->cp - 1].arg_base_s = i->arg_base_s;
+    }
+
+    enki_call call;
     size_t call_width_s = arity_s + 1; // head_v + all the args_v
-    f.pc = 0;
-    f.law = val_v;
-    f.res_base_s = i->sp - call_width_s;
-    f.arg_base_s = f.res_base_s + 1;
-    f.cont_v = 0;
-    i->fp += 1; // go to next frame and set it
-    i->frame[i->fp] = f;
+    call.pc = 0;
+    call.res_base_s = i->sp - call_width_s;
+    call.arg_base_s = call.res_base_s + 1;
+    call.law = val_v;
+    i->call_stack_v[i->cp++] = call;
+
+    enki_law* law = ENKI_AS(enki_law, val_v); 
+    i->bc_b = ENKI_LAW_BC(law);
+    i->const_table_v = ENKI_LAW_CONSTS(law);
+    i->pc = 0;
+    i->arg_base_s = call.arg_base_s;
 }
 
 static void enki_law_compile_value(enki_interpreter* i, enki_value body_v, size_t depth_s, enki_vector* bc_b, enki_vector* const_table_v);
 
 static void enki_law_compile_args(enki_interpreter* i, enki_app* app, size_t depth_s, enki_vector* bc_b, enki_vector* const_table_v) {
-   for(size_t k = 0; k < app->n_args_s; k++) {
+   for(size_t k = 0; k < app->n_args_s; k++) { 
       enki_law_compile_value(i, app->args_v[k], depth_s, bc_b, const_table_v);
     }
 }
 static void enki_law_push_const(enki_interpreter* i, enki_vector* bc_b, enki_vector* const_table_v, enki_value val) {
-    size_t n_const_s = enki_vector_len(const_table_v);
+    size_t n_const_s = enki_vector_len(const_table_v);  
     enki_vector_push_copy_or_throw(i, const_table_v, &val);
     if(n_const_s > 255) {
         if(n_const_s > ENKI_BC_WIDE_MAX) abort();
@@ -81,20 +91,20 @@ static void enki_law_compile_value(enki_interpreter* i, enki_value body_v, size_
   }
   else {
     enki_app* app = (enki_app*)ptr;
-    // [0 x] case
+    // [0 x] case 
     if(app->fn_v == 0 && app->n_args_s == 1) {
         enki_law_push_const(i, bc_b, const_table_v, app->args_v[0]);
         return;
     }
-    // [0 f x] case
-    else if(app->fn_v == 0 && app->n_args_s == 2) {
+    // [0 f x] case 
+    else if(app->fn_v == 0 && app->n_args_s == 2) {  
         enki_law_compile_value(i, app->args_v[0], depth_s, bc_b, const_table_v);
         enki_law_compile_value(i, app->args_v[1], depth_s, bc_b, const_table_v);
         enki_vector_push_u8_or_throw(i, bc_b, OP_APPLY);
         enki_vector_push_u8_or_throw(i, bc_b, (uint8_t)1);
         return;
     }
-    // is it a primitive with proper arity? if not do a generic apply
+    // is it a primitive with proper arity? if not do a generic apply 
     else if(!IS_PTR(app->fn_v) && app->fn_v <= MAX_PRIM_ID) {
         enki_prim_spec spec = ENKI_PRIMS[app->fn_v];
         if(app->n_args_s == spec.arity_s) {
@@ -118,6 +128,7 @@ static void enki_law_compile_value(enki_interpreter* i, enki_value body_v, size_
             enki_vector_push_u8_or_throw(i, bc_b, (uint8_t)(n_args >> 8));
             return;
         }
+
         enki_vector_push_u8_or_throw(i, bc_b, OP_APPLY);
         enki_vector_push_u8_or_throw(i, bc_b, (uint8_t)app->n_args_s);
   }
@@ -146,20 +157,4 @@ void enki_law_compile(enki_interpreter* i, enki_value body_v, size_t arity_s, en
     }
     enki_law_compile_value(i, body_v, depth, bc_b, const_table_v);
     enki_vector_push_u8_or_throw(i, bc_b, OP_RETURN);
-}
-
-enki_value enki_law_build(enki_interpreter* i, enki_value arity, enki_value name_v, enki_value body_v)
-{
-  enki_vector* bc_v = enki_vector_create_sized_or_throw(i,
-  enki_arena_as_allocator(i->scratch_a), sizeof(uint8_t));
-  enki_vector* const_v = enki_vector_create_sized_or_throw(i,
-  enki_arena_as_allocator(i->scratch_a), sizeof(enki_value));
-  enki_law_compile(i, body_v, (size_t)arity, bc_v, const_v);
-  size_t bc_len_s = enki_vector_len(bc_v);
-  uint8_t* bc_b = (uint8_t*)enki_vector_data(bc_v);
-  size_t n_const_s = enki_vector_len(const_v);
-  enki_value* const_table_v = (enki_value*)enki_vector_data(const_v);
-  enki_value law = enki_law_alloc(i->gc, (size_t)arity, name_v, body_v, bc_len_s, n_const_s,
-        bc_b, const_table_v);
-  return law;
 }

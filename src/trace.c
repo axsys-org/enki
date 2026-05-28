@@ -9,11 +9,17 @@ void enki_trace_interp(enki_interpreter* i) {
     for(size_t k = 0; k < i->sp; k++) {
         i->stack_v[k] = i->gc->copy(i->gc, i->stack_v[k]);
     } 
-    for(size_t k = 0; k <= i->fp; k++) {
-        enki_frame* f = &i->frame[k];
-        if(f->cont_v != 0) f->cont_v = i->gc->copy(i->gc, f->cont_v);
-        if(f->law != 0) f->law = i->gc->copy(i->gc, f->law);
-    }  
+    for(size_t k = 0; k < i->cp; k++) {
+        if(i->call_stack_v[k].law != 0) {
+            i->call_stack_v[k].law = i->gc->copy(i->gc, i->call_stack_v[k].law);
+        }
+    }
+    if(i->error_v != 0) i->error_v = i->gc->copy(i->gc, i->error_v);
+    if(i->cp > 0) {
+        enki_law* law = ENKI_AS(enki_law, i->call_stack_v[i->cp - 1].law);
+        i->bc_b = ENKI_LAW_BC(law);
+        i->const_table_v = ENKI_LAW_CONSTS(law);
+    }
 }
 
 void enki_trace_value(enki_gc* gc, void* obj) {

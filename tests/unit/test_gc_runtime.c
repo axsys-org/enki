@@ -96,7 +96,7 @@ static void assert_leaf(enki_value value_v, enki_value fn_v, enki_value arg)
 
 static void run_until_base_frame(void)
 {
-    while(fixture_interp->fp > 0 && !fixture_interp->halted) {
+    while(fixture_interp->cp > 0 && !fixture_interp->halted) {
         enki_interp_step(fixture_interp);
     }
 }
@@ -212,10 +212,9 @@ Test(gc_runtime, trace_copies_all_runtime_tags)
     fixture_interp->stack_v[1] = cont->args_v[1];
     fixture_interp->stack_v[2] = cont->args_v[2];
     fixture_interp->stack_v[3] = cont->args_v[3];
-    fixture_interp->sp = 4;
-    fixture_interp->frame[0].cont_v = cont_v;
-    fixture_interp->frame[0].law = fixture_interp->stack_v[1];
-    fixture_interp->fp = 0;
+    fixture_interp->stack_v[4] = cont_v;
+    fixture_interp->sp = 5;
+    fixture_interp->cp = 0;
 
     stress_alloc(80);
     enki_gc_collect(fixture_interp->gc);
@@ -228,8 +227,8 @@ Test(gc_runtime, trace_copies_all_runtime_tags)
     cr_assert_eq((ENKI_AS(enki_value_header, fixture_interp->stack_v[1]))->kind_b, ENKI_LAW);
     cr_assert_eq((ENKI_AS(enki_value_header, fixture_interp->stack_v[2]))->kind_b, ENKI_APP);
     cr_assert_eq((ENKI_AS(enki_value_header, fixture_interp->stack_v[3]))->kind_b, ENKI_NAT);
-    cr_assert(IS_PTR(fixture_interp->frame[0].cont_v));
-    cr_assert_eq((ENKI_AS(enki_value_header, fixture_interp->frame[0].cont_v))->kind_b, ENKI_CONT);
+    cr_assert(IS_PTR(fixture_interp->stack_v[4]));
+    cr_assert_eq((ENKI_AS(enki_value_header, fixture_interp->stack_v[4]))->kind_b, ENKI_CONT);
 }
 
 Test(gc_runtime, row_preserves_pointer_list_elements_across_gc)
@@ -383,12 +382,12 @@ Test(gc_runtime, law_application_survives_gc_during_primitive_allocation)
     fixture_interp->stack_v[0] = law;
     fixture_interp->stack_v[1] = 70;
     fixture_interp->sp = 2;
-    fixture_interp->fp = 0;
+    fixture_interp->cp = 0;
     fixture_interp->halted = false;
 
     stress_alloc(40);
     enki_app_apply(fixture_interp, 1);
-    while(fixture_interp->fp > 0 && !fixture_interp->halted) {
+    while(fixture_interp->cp > 0 && !fixture_interp->halted) {
         enki_interp_step(fixture_interp);
     }
 
@@ -457,7 +456,7 @@ Test(gc_runtime, partial_application_preserves_old_and_new_pointer_args_across_g
     assert_leaf(extended->args_v[1], 20, 21);
 }
 
-Test(gc_runtime, continuation_preserves_extra_args_across_gc)
+Test(gc_runtime, flat_thunk_preserves_extra_args_across_gc)
 {
     uint8_t id_bc_b[] = {
         OP_PICK, 0,
@@ -478,17 +477,24 @@ Test(gc_runtime, continuation_preserves_extra_args_across_gc)
     fixture_interp->stack_v[1] = bex_law;
     fixture_interp->stack_v[2] = 70;
     fixture_interp->sp = 3;
-    fixture_interp->fp = 0;
+    fixture_interp->cp = 0;
     fixture_interp->halted = false;
 
     stress_alloc(40);
     enki_app_apply(fixture_interp, 2);
-    run_until_base_frame();
     stress_alloc(40);
     enki_gc_collect(fixture_interp->gc);
 
     cr_assert_eq(fixture_interp->sp, 1);
-    cr_assert_eq(enki_nat_bits(fixture_interp->gc, fixture_interp->stack_v[0]), 71);
+    cr_assert(IS_PTR(fixture_interp->stack_v[0]));
+    enki_app* thunk = ENKI_AS(enki_app, fixture_interp->stack_v[0]);
+    cr_assert_eq(thunk->h.state_b, THUNK);
+    cr_assert_eq(thunk->n_args_s, 2);
+    cr_assert(IS_PTR(thunk->fn_v));
+    cr_assert(IS_PTR(thunk->args_v[0]));
+    cr_assert_eq(thunk->args_v[1], 70);
+    cr_assert_eq(enki_nat_bits(fixture_interp->gc,
+            enki_eval_whnf(fixture_interp, fixture_interp->stack_v[0])), 71);
 }
 
 Test(gc_runtime, nat_pointer_operands_survive_primitive_allocation_gc)

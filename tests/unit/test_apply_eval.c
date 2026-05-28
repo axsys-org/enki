@@ -37,7 +37,7 @@ static enki_value make_law_with_consts(size_t arity_s, uint8_t* bc_b, size_t bc_
 
 static void run_until_base_frame(void)
 {
-    while(fixture_interp->fp > 0 && !fixture_interp->halted) {
+    while(fixture_interp->cp > 0 && !fixture_interp->halted) {
         enki_interp_step(fixture_interp);
     }
 }
@@ -58,7 +58,7 @@ Test(apply_eval, exact_law_application_runs_law_body)
     fixture_interp->stack_v[1] = 20;
     fixture_interp->stack_v[2] = 22;
     fixture_interp->sp = 3;
-    fixture_interp->fp = 0;
+    fixture_interp->cp = 0;
     fixture_interp->halted = false;
 
     enki_app_apply(fixture_interp, 2);
@@ -105,7 +105,7 @@ Test(apply_eval, partial_app_can_be_completed_later)
     fixture_interp->stack_v[0] = law;
     fixture_interp->stack_v[1] = 20;
     fixture_interp->sp = 2;
-    fixture_interp->fp = 0;
+    fixture_interp->cp = 0;
     fixture_interp->halted = false;
 
     enki_app_apply(fixture_interp, 1);
@@ -120,7 +120,7 @@ Test(apply_eval, partial_app_can_be_completed_later)
     cr_assert_eq(fixture_interp->stack_v[0], 42);
 }
 
-Test(apply_eval, over_application_uses_continuation)
+Test(apply_eval, over_application_builds_flat_thunk)
 {
     uint8_t id_bc[] = {
         OP_PICK, 0,
@@ -138,17 +138,23 @@ Test(apply_eval, over_application_uses_continuation)
     fixture_interp->stack_v[1] = inc;
     fixture_interp->stack_v[2] = 41;
     fixture_interp->sp = 3;
-    fixture_interp->fp = 0;
+    fixture_interp->cp = 0;
     fixture_interp->halted = false;
 
     enki_app_apply(fixture_interp, 2);
-    run_until_base_frame();
 
     cr_assert_eq(fixture_interp->sp, 1);
-    cr_assert_eq(fixture_interp->stack_v[0], 42);
+    cr_assert(IS_PTR(fixture_interp->stack_v[0]));
+    enki_app* thunk = ENKI_AS(enki_app, fixture_interp->stack_v[0]);
+    cr_assert_eq(thunk->h.state_b, THUNK);
+    cr_assert_eq(thunk->fn_v, id);
+    cr_assert_eq(thunk->n_args_s, 2);
+    cr_assert_eq(thunk->args_v[0], inc);
+    cr_assert_eq(thunk->args_v[1], 41);
+    cr_assert_eq(enki_eval_whnf(fixture_interp, fixture_interp->stack_v[0]), 42);
 }
 
-Test(apply_eval, over_application_of_two_arity_law_uses_continuation)
+Test(apply_eval, over_application_of_two_arity_law_builds_flat_thunk)
 {
     uint8_t choose_bc[] = {
         OP_PICK, 0,
@@ -167,17 +173,24 @@ Test(apply_eval, over_application_of_two_arity_law_uses_continuation)
     fixture_interp->stack_v[2] = 0;
     fixture_interp->stack_v[3] = 41;
     fixture_interp->sp = 4;
-    fixture_interp->fp = 0;
+    fixture_interp->cp = 0;
     fixture_interp->halted = false;
 
     enki_app_apply(fixture_interp, 3);
-    run_until_base_frame();
 
     cr_assert_eq(fixture_interp->sp, 1);
-    cr_assert_eq(fixture_interp->stack_v[0], 42);
+    cr_assert(IS_PTR(fixture_interp->stack_v[0]));
+    enki_app* thunk = ENKI_AS(enki_app, fixture_interp->stack_v[0]);
+    cr_assert_eq(thunk->h.state_b, THUNK);
+    cr_assert_eq(thunk->fn_v, choose);
+    cr_assert_eq(thunk->n_args_s, 3);
+    cr_assert_eq(thunk->args_v[0], inc);
+    cr_assert_eq(thunk->args_v[1], 0);
+    cr_assert_eq(thunk->args_v[2], 41);
+    cr_assert_eq(enki_eval_whnf(fixture_interp, fixture_interp->stack_v[0]), 42);
 }
 
-Test(apply_eval, over_application_of_partial_app_uses_continuation)
+Test(apply_eval, over_application_of_partial_app_builds_flat_thunk)
 {
     uint8_t choose_bc[] = {
         OP_PICK, 0,
@@ -198,17 +211,24 @@ Test(apply_eval, over_application_of_partial_app_uses_continuation)
     fixture_interp->stack_v[1] = 0;
     fixture_interp->stack_v[2] = 41;
     fixture_interp->sp = 3;
-    fixture_interp->fp = 0;
+    fixture_interp->cp = 0;
     fixture_interp->halted = false;
 
     enki_app_apply(fixture_interp, 2);
-    run_until_base_frame();
 
     cr_assert_eq(fixture_interp->sp, 1);
-    cr_assert_eq(fixture_interp->stack_v[0], 42);
+    cr_assert(IS_PTR(fixture_interp->stack_v[0]));
+    enki_app* thunk = ENKI_AS(enki_app, fixture_interp->stack_v[0]);
+    cr_assert_eq(thunk->h.state_b, THUNK);
+    cr_assert_eq(thunk->fn_v, choose);
+    cr_assert_eq(thunk->n_args_s, 3);
+    cr_assert_eq(thunk->args_v[0], inc);
+    cr_assert_eq(thunk->args_v[1], 0);
+    cr_assert_eq(thunk->args_v[2], 41);
+    cr_assert_eq(enki_eval_whnf(fixture_interp, fixture_interp->stack_v[0]), 42);
 }
 
-Test(apply_eval, continuation_applies_multiple_extra_args)
+Test(apply_eval, flat_thunk_applies_multiple_extra_args_when_forced)
 {
     uint8_t id_bc[] = {
         OP_PICK, 0,
@@ -228,14 +248,21 @@ Test(apply_eval, continuation_applies_multiple_extra_args)
     fixture_interp->stack_v[2] = 20;
     fixture_interp->stack_v[3] = 22;
     fixture_interp->sp = 4;
-    fixture_interp->fp = 0;
+    fixture_interp->cp = 0;
     fixture_interp->halted = false;
 
     enki_app_apply(fixture_interp, 3);
-    run_until_base_frame();
 
     cr_assert_eq(fixture_interp->sp, 1);
-    cr_assert_eq(fixture_interp->stack_v[0], 42);
+    cr_assert(IS_PTR(fixture_interp->stack_v[0]));
+    enki_app* thunk = ENKI_AS(enki_app, fixture_interp->stack_v[0]);
+    cr_assert_eq(thunk->h.state_b, THUNK);
+    cr_assert_eq(thunk->fn_v, id);
+    cr_assert_eq(thunk->n_args_s, 3);
+    cr_assert_eq(thunk->args_v[0], add);
+    cr_assert_eq(thunk->args_v[1], 20);
+    cr_assert_eq(thunk->args_v[2], 22);
+    cr_assert_eq(enki_eval_whnf(fixture_interp, fixture_interp->stack_v[0]), 42);
 }
 
 Test(apply_eval, eval_whnf_forces_app_thunk_to_outer_value)
@@ -451,7 +478,7 @@ Test(apply_eval, sap_forces_arg_applies_function_and_forces_result)
     fixture_interp->stack_v[0] = inc;
     fixture_interp->stack_v[1] = 41;
     fixture_interp->sp = 2;
-    fixture_interp->fp = 0;
+    fixture_interp->cp = 0;
     fixture_interp->halted = false;
 
     op66_sap(fixture_interp);
@@ -476,7 +503,7 @@ Test(apply_eval, sap_can_apply_partial_function)
     fixture_interp->stack_v[0] = partial_v;
     fixture_interp->stack_v[1] = 22;
     fixture_interp->sp = 2;
-    fixture_interp->fp = 0;
+    fixture_interp->cp = 0;
     fixture_interp->halted = false;
 
     op66_sap(fixture_interp);
@@ -499,7 +526,7 @@ Test(apply_eval, sap2_forces_args_applies_function_twice_and_forces_result)
     fixture_interp->stack_v[1] = 20;
     fixture_interp->stack_v[2] = 22;
     fixture_interp->sp = 3;
-    fixture_interp->fp = 0;
+    fixture_interp->cp = 0;
     fixture_interp->halted = false;
 
     op66_sap2(fixture_interp);

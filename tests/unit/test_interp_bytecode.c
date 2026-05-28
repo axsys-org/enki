@@ -26,14 +26,30 @@ static void run_law(uint8_t* bc_b, size_t bc_len_s, enki_value* consts_v, size_t
     enki_value law = enki_law_alloc(
         fixture_interp->gc, 0, 0, 0, bc_len_s, n_const_s, bc_b, consts_v);
 
-    fixture_interp->frame[0].law = law;
-    fixture_interp->frame[0].pc = 0;
-    fixture_interp->frame[0].res_base_s = 0;
-    fixture_interp->frame[0].arg_base_s = 0;
-    fixture_interp->frame[0].cont_v = 0;
+    fixture_interp->stack_v[0] = law;
+    fixture_interp->sp = 1;
+    fixture_interp->cp = 0;
     fixture_interp->halted = false;
-    fixture_interp->fp = 0;
 
+    enki_law_enter(0, law, fixture_interp);
+    enki_interp_run(fixture_interp);
+}
+
+static void run_law_with_args(uint8_t* bc_b, size_t bc_len_s, enki_value* consts_v,
+    size_t n_const_s, size_t arity_s, enki_value* args_v)
+{
+    enki_value law = enki_law_alloc(
+        fixture_interp->gc, arity_s, 0, 0, bc_len_s, n_const_s, bc_b, consts_v);
+
+    fixture_interp->stack_v[0] = law;
+    for(size_t k = 0; k < arity_s; k++) {
+        fixture_interp->stack_v[k + 1] = args_v[k];
+    }
+    fixture_interp->sp = arity_s + 1;
+    fixture_interp->cp = 0;
+    fixture_interp->halted = false;
+
+    enki_law_enter(arity_s, law, fixture_interp);
     enki_interp_run(fixture_interp);
 }
 
@@ -84,9 +100,8 @@ Test(interp_bytecode, pick_reads_from_arg_base)
         OP_RETURN,
     };
 
-    fixture_interp->stack_v[0] = 1234;
-    fixture_interp->sp = 1;
-    run_law(bc_b, sizeof(bc_b), NULL, 0);
+    enki_value args_v[] = {1234};
+    run_law_with_args(bc_b, sizeof(bc_b), NULL, 0, 1, args_v);
 
     cr_assert_eq(fixture_interp->sp, 1);
     cr_assert_eq(fixture_interp->stack_v[0], 1234);
@@ -142,9 +157,9 @@ Test(interp_bytecode, pick_wide_reads_two_byte_stack_index)
         OP_RETURN,
     };
 
-    fixture_interp->stack_v[300] = 9001;
-    fixture_interp->sp = 301;
-    run_law(bc_b, sizeof(bc_b), NULL, 0);
+    enki_value args_v[301] = {0};
+    args_v[300] = 9001;
+    run_law_with_args(bc_b, sizeof(bc_b), NULL, 0, 301, args_v);
 
     cr_assert_eq(fixture_interp->sp, 1);
     cr_assert_eq(fixture_interp->stack_v[0], 9001);

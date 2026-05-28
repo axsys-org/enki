@@ -880,11 +880,11 @@ void op66_seq3(enki_interpreter* i) {
 }
 
 static enki_value op66_apply_whnf(enki_interpreter* i, size_t n_args_s) {
-    size_t base_fp_s = i->fp;
+    size_t base_cp_s = i->cp;
     size_t res_base_s = i->sp - (n_args_s + 1);
 
     enki_app_apply(i, n_args_s);
-    while(i->fp > base_fp_s && !i->halted) {
+    while(i->cp > base_cp_s && !i->halted) {
         enki_interp_step(i);
     }
 
@@ -959,7 +959,7 @@ void op66_load(enki_interpreter* i) {
 void op66_try(enki_interpreter* i) {
     enki_handler hdlr;
     hdlr.sp = i->sp - 1;
-    hdlr.fp = i->fp;
+    hdlr.cp = i->cp;
     hdlr.res_base_s = i->sp - 2;
     i->handler_v[i->hp++] = hdlr;
     enki_app_apply(i, 1);

@@ -26,15 +26,12 @@ static int run_law(uint8_t* bc_b, size_t bc_len_s, enki_value* consts_v, size_t 
 {
     enki_value law = enki_law_alloc(
         fixture_interp->gc, 0, 0, 0, bc_len_s, n_const_s, bc_b, consts_v);
-    fixture_interp->frame[0].law = law;
-    fixture_interp->frame[0].pc = 0;
-    fixture_interp->frame[0].res_base_s = 0;
-    fixture_interp->frame[0].arg_base_s = 0;
-    fixture_interp->frame[0].cont_v = 0;
-    fixture_interp->sp = 0;
-    fixture_interp->fp = 0;
+    fixture_interp->stack_v[0] = law;
+    fixture_interp->sp = 1;
+    fixture_interp->cp = 0;
     fixture_interp->halted = false;
 
+    enki_law_enter(0, law, fixture_interp);
     return enki_interp_run(fixture_interp);
 }
 
@@ -57,6 +54,7 @@ Test(error, interp_run_catches_divide_by_zero)
 Test(error, interp_run_catches_stack_underflow)
 {
     uint8_t bc_b[] = {
+        OP_POP,
         OP_DUP,
         OP_RETURN,
     };

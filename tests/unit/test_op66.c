@@ -100,7 +100,7 @@ Test(op66, eq_forces_before_structural_compare)
     fixture_interp->stack_v[0] = thunk_v;
     fixture_interp->stack_v[1] = 42;
     fixture_interp->sp = 2;
-    fixture_interp->fp = 0;
+    fixture_interp->cp = 0;
     fixture_interp->halted = false;
 
     op66_eq(fixture_interp);
@@ -170,11 +170,12 @@ Test(op66, bytecode_dispatch_runs_op66_add)
     enki_value law = enki_law_alloc(
         fixture_interp->gc, 0, 0, 0, sizeof(bc_b), 2, bc_b, consts_v);
 
-    fixture_interp->frame[0].law = law;
     fixture_interp->halted = false;
-    fixture_interp->sp = 0;
-    fixture_interp->fp = 0;
+    fixture_interp->stack_v[0] = law;
+    fixture_interp->sp = 1;
+    fixture_interp->cp = 0;
 
+    enki_law_enter(0, law, fixture_interp);
     enki_interp_run(fixture_interp);
 
     cr_assert_eq(fixture_interp->sp, 1);
