@@ -138,6 +138,15 @@ void enki_app_apply(enki_interpreter* i, size_t n_args_s) {
         enki_app_fold(i, row, fn_index_i);
         return;
     }
+    enki_value_header* head_h = ENKI_AS(enki_value_header, head_v);
+    if(head_h->kind_b == ENKI_LAW) {
+        enki_law* law = ENKI_AS(enki_law, head_v);
+        if(law->arity_s == n_args_s) {
+            i->stats.apply_exact_s++;
+            enki_law_enter(n_args_s, head_v, i);
+            return;
+        }
+    }
     size_t arity_s;
     size_t old_args_s;
     enki_value* old_args_v = NULL;
@@ -157,13 +166,15 @@ void enki_app_apply(enki_interpreter* i, size_t n_args_s) {
                 enki_interp_dispatch_op(i, (uint8_t)fn_v); return;
             case LAW:
                 size_t call_arity_s = n_args_s + old_args_s;
-                for(size_t k = n_args_s; k > 0; k--) {
-                    size_t idx_i = k - 1;
-                    i->stack_v[arg_index_i + old_args_s + idx_i] =
-                        i->stack_v[arg_index_i + idx_i];
-                }
-                for(size_t k = 0; k < old_args_s; k++) {
-                    i->stack_v[arg_index_i + k] = old_args_v[k];
+                if(old_args_s > 0) {
+                    for(size_t k = n_args_s; k > 0; k--) {
+                        size_t idx_i = k - 1;
+                        i->stack_v[arg_index_i + old_args_s + idx_i] =
+                            i->stack_v[arg_index_i + idx_i];
+                    }
+                    for(size_t k = 0; k < old_args_s; k++) {
+                        i->stack_v[arg_index_i + k] = old_args_v[k];
+                    }
                 }
                 i->sp = arg_index_i + call_arity_s;
                 i->stack_v[fn_index_i] = head_v; // self stays as original head/pin/partial

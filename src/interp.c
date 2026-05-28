@@ -7,6 +7,7 @@
 #include "enki/gc.h"
 #include "enki/util.h"
 #include "enki/law.h"
+#include "enki/nat.h"
 #include "enki/op66.h"
 #include "enki/op0.h"
 
@@ -125,20 +126,90 @@ static void enki_interp_dispatch_op66(enki_interpreter* i, uint8_t sub_b) {
         i->stats.op66_s[sub_b]++;
     }
     switch (sub_b) {
-        case OP66_INC:        op66_inc(i);         break;
-        case OP66_DEC:        op66_dec(i);         break;
-        case OP66_ADD:        op66_add(i);         break;
-        case OP66_SUB:        op66_sub(i);         break;
-        case OP66_MUL:        op66_mul(i);         break;
+        case OP66_INC: {
+            enki_value a = i->stack_v[i->sp - 1];
+            i->stack_v[i->sp - 1] = enki_nat_inc(i->gc, a);
+            break;
+        }
+        case OP66_DEC: {
+            enki_value a = i->stack_v[i->sp - 1];
+            i->stack_v[i->sp - 1] = enki_nat_dec(i->gc, a);
+            break;
+        }
+        case OP66_ADD: {
+            enki_value a = i->stack_v[i->sp - 2];
+            enki_value b = i->stack_v[i->sp - 1];
+            i->sp--;
+            i->stack_v[i->sp - 1] = enki_nat_add(i->gc, a, b);
+            break;
+        }
+        case OP66_SUB: {
+            enki_value a = i->stack_v[i->sp - 2];
+            enki_value b = i->stack_v[i->sp - 1];
+            i->sp--;
+            i->stack_v[i->sp - 1] = enki_nat_sub(i->gc, a, b);
+            break;
+        }
+        case OP66_MUL: {
+            enki_value a = i->stack_v[i->sp - 2];
+            enki_value b = i->stack_v[i->sp - 1];
+            i->sp--;
+            i->stack_v[i->sp - 1] = enki_nat_mul(i->gc, a, b);
+            break;
+        }
         case OP66_DIV:        op66_div(i);         break;
         case OP66_MOD:        op66_mod(i);         break;
-        case OP66_EQ:         op66_eq(i);          break;
-        case OP66_NE:         op66_ne(i);          break;
-        case OP66_LT:         op66_lt(i);          break;
-        case OP66_LE:         op66_le(i);          break;
-        case OP66_GT:         op66_gt(i);          break;
-        case OP66_GE:         op66_ge(i);          break;
-        case OP66_CMP:        op66_cmp(i);         break;
+        case OP66_EQ: {
+            enki_value a = i->stack_v[i->sp - 2];
+            enki_value b = i->stack_v[i->sp - 1];
+            i->sp--;
+            i->stack_v[i->sp - 1] = enki_nat_eq(a, b);
+            break;
+        }
+        case OP66_NE: {
+            enki_value a = i->stack_v[i->sp - 2];
+            enki_value b = i->stack_v[i->sp - 1];
+            i->sp--;
+            i->stack_v[i->sp - 1] = enki_nat_ne(a, b);
+            break;
+        }
+        case OP66_LT: {
+            enki_value a = i->stack_v[i->sp - 2];
+            enki_value b = i->stack_v[i->sp - 1];
+            i->sp--;
+            i->stack_v[i->sp - 1] = enki_nat_lt(a, b);
+            break;
+        }
+        case OP66_LE: {
+            enki_value a = i->stack_v[i->sp - 2];
+            enki_value b = i->stack_v[i->sp - 1];
+            i->sp--;
+            i->stack_v[i->sp - 1] = enki_nat_le(a, b);
+            break;
+        }
+        case OP66_GT: {
+            enki_value a = i->stack_v[i->sp - 2];
+            enki_value b = i->stack_v[i->sp - 1];
+            i->sp--;
+            i->stack_v[i->sp - 1] = enki_nat_gt(a, b);
+            break;
+        }
+        case OP66_GE: {
+            enki_value a = i->stack_v[i->sp - 2];
+            enki_value b = i->stack_v[i->sp - 1];
+            i->sp--;
+            i->stack_v[i->sp - 1] = enki_nat_ge(a, b);
+            break;
+        }
+        case OP66_CMP: {
+            enki_value a = i->stack_v[i->sp - 2];
+            enki_value b = i->stack_v[i->sp - 1];
+            int cmp = enki_nat_cmp(a, b);
+            i->sp--;
+            i->stack_v[i->sp - 1] =
+                (cmp < 0) ? (enki_value)0 : (cmp == 0 ? (enki_value)1 : (enki_value)2);
+            break;
+        }
         case OP66_RSH:        op66_rsh(i);         break;
         case OP66_LSH:        op66_lsh(i);         break;
         case OP66_TEST:       op66_test(i);        break;
@@ -206,8 +277,22 @@ static void enki_interp_dispatch_op66(enki_interpreter* i, uint8_t sub_b) {
         case OP66_OR:         op66_or(i);          break;
         case OP66_NOR:        op66_nor(i);         break;
         case OP66_AND:        op66_and(i);         break;
-        case OP66_IF:         op66_if(i);          break;
-        case OP66_IFZ:        op66_ifz(i);         break;
+        case OP66_IF: {
+            enki_value c = i->stack_v[i->sp - 3];
+            enki_value t = i->stack_v[i->sp - 2];
+            enki_value e = i->stack_v[i->sp - 1];
+            i->sp -= 2;
+            i->stack_v[i->sp - 1] = (c != 0) ? t : e;
+            break;
+        }
+        case OP66_IFZ: {
+            enki_value c = i->stack_v[i->sp - 3];
+            enki_value t = i->stack_v[i->sp - 2];
+            enki_value e = i->stack_v[i->sp - 1];
+            i->sp -= 2;
+            i->stack_v[i->sp - 1] = (c == 0) ? t : e;
+            break;
+        }
         case OP66_SEQ:        op66_seq(i);         break;
         case OP66_SEQ2:       op66_seq2(i);        break;
         case OP66_SEQ3:       op66_seq3(i);        break;
@@ -349,7 +434,123 @@ void enki_interp_step(enki_interpreter* i) {
         }
         case OP_OP66: {
             uint8_t sub_b = i->bc_b[i->pc++];
-            enki_interp_dispatch_op66(i, sub_b);
+            switch(sub_b) {
+                case OP66_INC: {
+                    i->stats.op66_s[sub_b]++;
+                    enki_value a = i->stack_v[i->sp - 1];
+                    i->stack_v[i->sp - 1] = enki_nat_inc(i->gc, a);
+                    break;
+                }
+                case OP66_DEC: {
+                    i->stats.op66_s[sub_b]++;
+                    enki_value a = i->stack_v[i->sp - 1];
+                    i->stack_v[i->sp - 1] = enki_nat_dec(i->gc, a);
+                    break;
+                }
+                case OP66_ADD: {
+                    i->stats.op66_s[sub_b]++;
+                    enki_value a = i->stack_v[i->sp - 2];
+                    enki_value b = i->stack_v[i->sp - 1];
+                    i->sp--;
+                    i->stack_v[i->sp - 1] = enki_nat_add(i->gc, a, b);
+                    break;
+                }
+                case OP66_SUB: {
+                    i->stats.op66_s[sub_b]++;
+                    enki_value a = i->stack_v[i->sp - 2];
+                    enki_value b = i->stack_v[i->sp - 1];
+                    i->sp--;
+                    i->stack_v[i->sp - 1] = enki_nat_sub(i->gc, a, b);
+                    break;
+                }
+                case OP66_MUL: {
+                    i->stats.op66_s[sub_b]++;
+                    enki_value a = i->stack_v[i->sp - 2];
+                    enki_value b = i->stack_v[i->sp - 1];
+                    i->sp--;
+                    i->stack_v[i->sp - 1] = enki_nat_mul(i->gc, a, b);
+                    break;
+                }
+                case OP66_EQ: {
+                    i->stats.op66_s[sub_b]++;
+                    enki_value a = i->stack_v[i->sp - 2];
+                    enki_value b = i->stack_v[i->sp - 1];
+                    i->sp--;
+                    i->stack_v[i->sp - 1] = enki_nat_eq(a, b);
+                    break;
+                }
+                case OP66_NE: {
+                    i->stats.op66_s[sub_b]++;
+                    enki_value a = i->stack_v[i->sp - 2];
+                    enki_value b = i->stack_v[i->sp - 1];
+                    i->sp--;
+                    i->stack_v[i->sp - 1] = enki_nat_ne(a, b);
+                    break;
+                }
+                case OP66_LT: {
+                    i->stats.op66_s[sub_b]++;
+                    enki_value a = i->stack_v[i->sp - 2];
+                    enki_value b = i->stack_v[i->sp - 1];
+                    i->sp--;
+                    i->stack_v[i->sp - 1] = enki_nat_lt(a, b);
+                    break;
+                }
+                case OP66_LE: {
+                    i->stats.op66_s[sub_b]++;
+                    enki_value a = i->stack_v[i->sp - 2];
+                    enki_value b = i->stack_v[i->sp - 1];
+                    i->sp--;
+                    i->stack_v[i->sp - 1] = enki_nat_le(a, b);
+                    break;
+                }
+                case OP66_GT: {
+                    i->stats.op66_s[sub_b]++;
+                    enki_value a = i->stack_v[i->sp - 2];
+                    enki_value b = i->stack_v[i->sp - 1];
+                    i->sp--;
+                    i->stack_v[i->sp - 1] = enki_nat_gt(a, b);
+                    break;
+                }
+                case OP66_GE: {
+                    i->stats.op66_s[sub_b]++;
+                    enki_value a = i->stack_v[i->sp - 2];
+                    enki_value b = i->stack_v[i->sp - 1];
+                    i->sp--;
+                    i->stack_v[i->sp - 1] = enki_nat_ge(a, b);
+                    break;
+                }
+                case OP66_CMP: {
+                    i->stats.op66_s[sub_b]++;
+                    enki_value a = i->stack_v[i->sp - 2];
+                    enki_value b = i->stack_v[i->sp - 1];
+                    int cmp = enki_nat_cmp(a, b);
+                    i->sp--;
+                    i->stack_v[i->sp - 1] =
+                        (cmp < 0) ? (enki_value)0 : (cmp == 0 ? (enki_value)1 : (enki_value)2);
+                    break;
+                }
+                case OP66_IF: {
+                    i->stats.op66_s[sub_b]++;
+                    enki_value c = i->stack_v[i->sp - 3];
+                    enki_value t = i->stack_v[i->sp - 2];
+                    enki_value e = i->stack_v[i->sp - 1];
+                    i->sp -= 2;
+                    i->stack_v[i->sp - 1] = (c != 0) ? t : e;
+                    break;
+                }
+                case OP66_IFZ: {
+                    i->stats.op66_s[sub_b]++;
+                    enki_value c = i->stack_v[i->sp - 3];
+                    enki_value t = i->stack_v[i->sp - 2];
+                    enki_value e = i->stack_v[i->sp - 1];
+                    i->sp -= 2;
+                    i->stack_v[i->sp - 1] = (c == 0) ? t : e;
+                    break;
+                }
+                default:
+                    enki_interp_dispatch_op66(i, sub_b);
+                    break;
+            }
             break;
         }
         default:
