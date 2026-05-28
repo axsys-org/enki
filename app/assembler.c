@@ -4,6 +4,8 @@
 #include <setjmp.h>
 #include <enki/wisp.h>
 #include <enki/print.h>
+#include <enki/gc.h>
+#include <enki/interp.h>
 
 wisp_rt* rt = NULL;
 
@@ -49,6 +51,7 @@ int main()
       // printf("parsed: %s\n", enki_print_value(EA_TMP_ALLOC, val_v, NULL));
       enki_value eve_v = wisp_eval(rt, val_v);
       printf(">> %s\n", enki_print_value(loc_a, eve_v, NULL));
+      // enki_gc_collect(rt->i->gc);
     }
   }
   return 0;

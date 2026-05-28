@@ -14,7 +14,7 @@
 #include <time.h>
 
 #define MOTE_JUXT ea_s4('J', 'U', 'X', 'T')
-#define WISP_HEAP_SIZE ((size_t)1 << 27)
+#define WISP_HEAP_SIZE ((size_t)1 << 30)
 #define WISP_STORE_SIZE ((size_t)1 << 14)
 #define WISP_SCRATCH_SIZE ((size_t)1 << 24)
 

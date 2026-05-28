@@ -206,6 +206,38 @@ static void flatten_calls(
 }
 
 
+static void print_call_quote(
+    const enki_allocator* cat_a,
+    enki_string_builder* sb,
+    enki_value val_v
+) {
+  enki_law* law = NULL;
+  if ( !IS_PTR(val_v) ) {
+    enki_print_value_sb(cat_a, sb, val_v);
+    return;
+  }
+  obj_header* h = (obj_header*)(ENKI_TO_PTR(val_v));
+  if ( h->kind_b == ENKI_LAW ) {
+    law = (enki_law*)h;
+    enki_sb_append_lit(sb, "@");
+    enki_print_value_sb(cat_a, sb, law->name_v);
+    return;
+  } else if ( h->kind_b == ENKI_PIN ) {
+    enki_pin* pin = (enki_pin*)h;
+
+    if ( IS_PTR(pin->inner_v)
+        && ((obj_header*)(ENKI_TO_PTR(pin->inner_v)))->kind_b == ENKI_LAW ) {
+      enki_sb_append_lit(sb, "<");
+      print_call_quote(cat_a, sb, pin->inner_v);
+      enki_sb_append_lit(sb, ">");
+      return;
+    }
+  }
+  enki_print_value_sb(cat_a, sb, val_v);
+}
+
+
+
 static void print_calls(
     const enki_allocator* cat_a,
     enki_string_builder* sb,
@@ -221,7 +253,7 @@ static void print_calls(
 
   app = ENKI_TO_APP(val_v);
   if (app != NULL && app->fn_v == 0 && app->n_args_s == 1) {
-    enki_print_value_sb(cat_a, sb, app->args_v[0]);
+    print_call_quote(cat_a, sb, app->args_v[0]);
   } else if (app != NULL && app->fn_v == 0 && app->n_args_s == 2) {
     flatten_calls(cat_a, sb, dep_s, self_v, app);
   } else {
