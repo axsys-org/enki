@@ -14,7 +14,7 @@ WARN_COMMON := -Wall -Wextra  \
 	-Wpedantic -Wshadow -Wconversion -Wstrict-prototypes \
 	-Wmissing-prototypes -Wold-style-definition -Wnull-dereference \
 	-Wdouble-promotion -Werror \
-	-Wno-sign-conversion -Wno-char-subscripts -Wno-unused-function
+	-Wno-sign-conversion -Wno-char-subscripts -Wno-unused-function -Wno-gnu-label-as-value
 
 
 WARN_CFLAGS = $(WARN_COMMON)
