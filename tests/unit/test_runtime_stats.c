@@ -14,6 +14,15 @@
 #include <criterion/criterion.h>
 #include <stdint.h>
 
+static uint64_t wisp_now_ns(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+        return 0;
+    }
+    return ((uint64_t)ts.tv_sec * 1000000000ULL) + (uint64_t)ts.tv_nsec;
+}
+
 static enki_interpreter* fixture_interp;
 
 static void setup(void)
@@ -552,7 +561,7 @@ Test(runtime_stats, eval_whnf_ind_cache_prevents_second_thunk_apply)
     uint64_t second_step_delta_s = fixture_interp->stats.interp_step_s - first_steps_s;
     uint64_t second_thunk_delta_s = fixture_interp->stats.whnf_app_thunk_s - first_thunk_s;
 
-    cr_log_info(
+    fprintf(stderr,
         "eval thunk cache stats: first_whnf=%llu first_apply=%llu first_steps=%llu "
         "second_whnf_delta=%llu second_apply_delta=%llu second_step_delta=%llu "
         "second_thunk_delta=%llu",
@@ -667,6 +676,7 @@ Test(runtime_stats, eval_bytecode_factorial_uses_eval_whnf_without_exploding)
     ENKI_LAW_CONSTS(ENKI_AS(enki_law, else_law))[0] = fac;
 
     enki_stats_reset(fixture_interp);
+    uint64_t sin_q = wisp_now_ns();
 
     fixture_interp->stack_v[0] = fac;
     fixture_interp->stack_v[1] = 8;
@@ -677,11 +687,14 @@ Test(runtime_stats, eval_bytecode_factorial_uses_eval_whnf_without_exploding)
     enki_app_apply(fixture_interp, 1);
     run_until_base_frame();
     enki_value result_v = enki_eval_whnf(fixture_interp, fixture_interp->stack_v[0]);
+    uint64_t dex_q = wisp_now_ns();
 
-    cr_log_info(
-        "eval fac 8 stats: result=%llu whnf=%llu whnf_thunk=%llu apply=%llu "
+
+    fprintf(stderr,
+        "eval fac 8 stats: time %llu ns, result=%llu whnf=%llu whnf_thunk=%llu apply=%llu "
         "exact=%llu under=%llu over=%llu steps=%llu law_enter=%llu op66_force=%llu "
         "op66_mul=%llu nat_tmp=%llu nat_heap=%llu",
+        (dex_q - sin_q),
         (unsigned long long)result_v,
         (unsigned long long)fixture_interp->stats.whnf_s,
         (unsigned long long)fixture_interp->stats.whnf_app_thunk_s,

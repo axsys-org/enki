@@ -72,9 +72,9 @@ typedef struct er_law {
     er_val name_v;
     er_val body_v;
     uint32_t ari_d;
-    // uint32_t bc_len_ds;
-    // uint32_t const;
     uint32_t start_d;
+    uint32_t frame_d;
+    uint32_t let_off_d[];
 } er_law;
 
 typedef struct er_app {
@@ -90,6 +90,8 @@ typedef enum er_execf {
   ER_CALL, // -> [f, ...args]
 //  ER_CALL_LET, // -> [num-let, f, ...args]
   ER_XPRIM, // [op-set, arg]
+  ER_HOLE,
+  ER_SUSP, // -> [pc, frame]
 } er_execf;
 
 typedef struct er_thk {
@@ -106,40 +108,15 @@ er_pin* er_pin_alloc(const enki_allocator* allocator, size_t sub_s);
 er_val er_pin_init(er_pin* pin, const uint8_t hash_b[32], er_val val_v, size_t sub_s,
     const er_val sub_v[]);
 
-er_law* er_law_alloc(const enki_allocator* allocator);
-er_val er_law_init(er_law* law, er_val name_v, er_val body_v, uint32_t arity_d);
+er_law* er_law_alloc(const enki_allocator* allocator, size_t n_lets);
+er_val er_law_init(er_law* law, er_val name_v, er_val body_v, uint32_t ari_d,
+    uint32_t frame_d, size_t n_lets, const uint32_t let_off_d[]);
 
 er_app* er_app_alloc(const enki_allocator* allocator, size_t arg_s);
 er_val er_app_init(er_app* app, er_val fn_v, size_t arg_s, const er_val arg_v[]);
 
 er_thk* er_thk_alloc(const enki_allocator* allocator, size_t arg_s);
-er_val er_thk_init(er_thk* thk, er_execf fun, er_val* arg_v);
-
-typedef enum er_kontt {
-  er_kontt_halt = 0,
-  er_kontt_ret,
-  er_kontt_upd,
-  er_kontt_hed,
-  er_kontt_over,
-} er_kontt;
-
-typedef union er_kword {
-  void* lab;
-  er_val val_v;
-  er_val* ref;
-  uintptr_t u;
-  uint32_t pc;
-} er_kword;
-
-struct _er_kont;
-struct _er_kont {
-  er_kontt typ;
-  struct _er_kont* nex;
-  er_val val_v;
-  uint64_t num_q;
-};
-
-typedef struct _er_kont er_kont;
+er_val er_thk_init(er_thk* thk, er_execf fun, size_t arg_s, const er_val arg_v[]);
 
 er_val er_eval(const enki_allocator* loc_a, er_val val_v);
 er_thk* er_app_weld(const enki_allocator* allocator, er_val sin_v, er_val dex_v);
@@ -152,14 +129,13 @@ er_thk* er_app_weld(const enki_allocator* allocator, er_val sin_v, er_val dex_v)
 typedef enum {
   OP_PUSH_VAR,
   OP_PUSH_LIT,
-  OP_PUSH_THK_TYP,
-  OP_MK_THK,
   OP_MK_APP,
+  OP_MK_CALL,
   OP_FORCE,
+  OP_DROP,
+  OP_JUMP_IF_ZERO,
   OP_ADD_NAT,
   OP_RET,
-  OP_LET_ALLOC,
-  OP_LET_BIND,
   OP_COUNT
 } er_optag;
 
@@ -195,3 +171,12 @@ typedef struct {
 
 er_val
 plan_eval(er_vm *vm, er_val val_v);
+
+#define PLAN_CH(c) ((uint64_t)(uint8_t)(c))
+#define PLAN_S1(a) ((er_val)PLAN_CH(a))
+#define PLAN_S2(a, b) ((er_val)(PLAN_CH(a) | (PLAN_CH(b) << 8u)))
+#define PLAN_S3(a, b, c) ((er_val)(PLAN_S2(a, b) | (PLAN_CH(c) << 16u)))
+#define PLAN_S4(a, b, c, d) ((er_val)(PLAN_S3(a, b, c) | (PLAN_CH(d) << 24u)))
+#define PLAN_S5(a, b, c, d, e) ((er_val)(PLAN_S4(a, b, c, d) | (PLAN_CH(e) << 32u)))
+#define PLAN_S6(a, b, c, d, e, f) ((er_val)(PLAN_S5(a, b, c, d, e) | (PLAN_CH(f) << 40u)))
+#define PLAN_S7(a, b, c, d, e, f, g) ((er_val)(PLAN_S6(a, b, c, d, e, f) | (PLAN_CH(g) << 48u)))

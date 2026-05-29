@@ -9,6 +9,7 @@
 #include "enki/nat.h"
 #include "enki/op66.h"
 #include "enki/profile.h"
+#include "enki/run.h"
 #include "enki/value.h"
 #include "enki/wisp.h"
 
@@ -30,6 +31,8 @@ typedef struct {
 static const profile_workload_info workload_info_v[] = {
     {"bytecode_fac", "bytecode recursion + apply/eval + force",
      "call-frame churn, WHNF forcing, thunk cache misses, small nat ops"},
+    {"planvm_fac", "PLAN VM recursive factorial using %66 primop-set calls",
+     "PLAN VM call frames, direct bytecode recursion, primitive Sub/Mul dispatch"},
     {"bytecode_tinyops", "bytecode tiny primitive loop",
      "dispatch overhead when nat ops are immediate fast paths"},
     {"bytecode_thunk_fresh", "fresh oversaturated thunk each iteration",
@@ -167,6 +170,170 @@ static enki_value run_fac(enki_interpreter* i, enki_value fac_v, enki_value n_v)
     return enki_eval_whnf(i, run_law1(i, fac_v, n_v));
 }
 
+typedef struct {
+    uint8_t* data_b;
+    size_t off_s;
+    size_t cap_s;
+    enki_allocator allocator;
+} planvm_arena;
+
+typedef struct {
+    er_op code_v[27];
+    er_val fact_v;
+    er_val prim66_v;
+} planvm_fac_program;
+
+static void* planvm_arena_alloc(void* ctx, size_t size_s)
+{
+    planvm_arena* arena = (planvm_arena*)ctx;
+    size_s = (size_s + 7u) & ~(size_t)7u;
+    if (arena->off_s > arena->cap_s || size_s > arena->cap_s - arena->off_s) {
+        return NULL;
+    }
+    void* ptr = arena->data_b + arena->off_s;
+    arena->off_s += size_s;
+    return ptr;
+}
+
+static void planvm_arena_free(void* ctx, void* ptr)
+{
+    (void)ctx;
+    (void)ptr;
+}
+
+static bool planvm_arena_init(planvm_arena* arena, size_t cap_s)
+{
+    arena->data_b = malloc(cap_s);
+    if (arena->data_b == NULL) {
+        return false;
+    }
+    arena->off_s = 0;
+    arena->cap_s = cap_s;
+    arena->allocator = (enki_allocator){
+        .ctx = arena,
+        .alloc = planvm_arena_alloc,
+        .realloc = NULL,
+        .free = planvm_arena_free,
+    };
+    return true;
+}
+
+static void planvm_arena_reset(planvm_arena* arena)
+{
+    arena->off_s = 0;
+}
+
+static void planvm_arena_destroy(planvm_arena* arena)
+{
+    free(arena->data_b);
+    arena->data_b = NULL;
+    arena->off_s = 0;
+    arena->cap_s = 0;
+}
+
+static er_val planvm_make_prim66(void)
+{
+    er_pin* pin = er_pin_alloc(enki_allocator_system(), 0);
+    if (pin == NULL) {
+        return 0;
+    }
+    return er_pin_init(pin, NULL, 66, 0, NULL);
+}
+
+static er_val planvm_make_law(uint32_t arity_d, uint32_t start_d, uint32_t frame_d)
+{
+    er_law* law = er_law_alloc(enki_allocator_system(), 0);
+    if (law == NULL) {
+        return 0;
+    }
+    er_val law_v = er_law_init(law, 0, 0, arity_d, frame_d, 0, NULL);
+    if (law_v != 0) {
+        law->start_d = start_d;
+    }
+    return law_v;
+}
+
+static er_val planvm_make_call2(const enki_allocator* allocator, er_val fun_v, er_val a_v,
+    er_val b_v)
+{
+    er_val args_v[] = {fun_v, a_v, b_v};
+    er_thk* thk = er_thk_alloc(allocator, 3);
+    if (thk == NULL) {
+        return 0;
+    }
+    return er_thk_init(thk, ER_CALL, 3, args_v);
+}
+
+static bool planvm_build_fac(planvm_fac_program* program)
+{
+    enum {
+        BASE_PC = 24,
+    };
+    er_val prim66_v = planvm_make_prim66();
+    er_val fact_v = planvm_make_law(2, 0, 3);
+    if (prim66_v == 0 || fact_v == 0) {
+        return false;
+    }
+
+    *program = (planvm_fac_program){
+        .code_v = {
+            [0] = {.tag = OP_PUSH_VAR, .as.slot = 1},
+            [1] = {.tag = OP_FORCE},
+            [2] = {.tag = OP_JUMP_IF_ZERO, .as.u32 = BASE_PC},
+
+            [3] = {.tag = OP_PUSH_VAR, .as.slot = 0},
+            [4] = {.tag = OP_PUSH_LIT, .as.lit_v = prim66_v},
+            [5] = {.tag = OP_PUSH_LIT, .as.lit_v = PLAN_S3('S', 'u', 'b')},
+            [6] = {.tag = OP_PUSH_VAR, .as.slot = 1},
+            [7] = {.tag = OP_FORCE},
+            [8] = {.tag = OP_PUSH_LIT, .as.lit_v = 1},
+            [9] = {.tag = OP_MK_APP, .as.u32 = 3},
+            [10] = {.tag = OP_MK_CALL, .as.u32 = 2},
+            [11] = {.tag = OP_FORCE},
+
+            [12] = {.tag = OP_PUSH_LIT, .as.lit_v = prim66_v},
+            [13] = {.tag = OP_PUSH_LIT, .as.lit_v = PLAN_S3('M', 'u', 'l')},
+            [14] = {.tag = OP_PUSH_VAR, .as.slot = 2},
+            [15] = {.tag = OP_FORCE},
+            [16] = {.tag = OP_PUSH_VAR, .as.slot = 1},
+            [17] = {.tag = OP_FORCE},
+            [18] = {.tag = OP_MK_APP, .as.u32 = 3},
+            [19] = {.tag = OP_MK_CALL, .as.u32 = 2},
+            [20] = {.tag = OP_FORCE},
+
+            [21] = {.tag = OP_MK_CALL, .as.u32 = 3},
+            [22] = {.tag = OP_FORCE},
+            [23] = {.tag = OP_RET},
+
+            [24] = {.tag = OP_PUSH_VAR, .as.slot = 2},
+            [25] = {.tag = OP_FORCE},
+            [26] = {.tag = OP_RET},
+        },
+        .fact_v = fact_v,
+        .prim66_v = prim66_v,
+    };
+    return true;
+}
+
+static er_val planvm_run_fac(planvm_fac_program* program, planvm_arena* arena, er_val n_v)
+{
+    er_val dstack_v[1024] = {0};
+    er_kon kstack_v[4096] = {0};
+    er_val call_v = planvm_make_call2(&arena->allocator, program->fact_v, n_v, 1);
+    if (call_v == 0) {
+        return er_bad;
+    }
+    er_vm vm = {
+        .code = program->code_v,
+        .loc_a = &arena->allocator,
+        .dstack = dstack_v,
+        .dsp = dstack_v,
+        .kbase = kstack_v,
+        .ksp = kstack_v,
+    };
+    return plan_eval(&vm, call_v);
+}
+
 static enki_value make_oversat_thunk(enki_interpreter* i, enki_value add_v, enki_value x_v)
 {
     i->stack_v[0] = add_v;
@@ -214,7 +381,7 @@ static void print_interp_result(const char* workload_c, size_t n, enki_value las
 
 static int run_bytecode_fac(size_t n, double seconds)
 {
-    enki_interpreter* i = enki_test_interp_create(2ULL * 1024 * 1024 * 1024, 0);
+    enki_interpreter* i = enki_test_interp_create(128 * 1024 * 1024, 0);
     enki_value fac_v = build_fac(i);
     size_t iterations_s = 0;
     enki_value last_v = 0;
@@ -232,6 +399,46 @@ static int run_bytecode_fac(size_t n, double seconds)
     print_interp_result("bytecode_fac", n, last_v, iterations_s, i);
     enki_test_interp_destroy(i);
     return 0;
+}
+
+static int run_planvm_fac(size_t n, double seconds)
+{
+    planvm_fac_program program;
+    planvm_arena arena;
+    if (!planvm_build_fac(&program)) {
+        fprintf(stderr, "failed to build planvm factorial program\n");
+        return 1;
+    }
+    if (!planvm_arena_init(&arena, 64 * 1024 * 1024)) {
+        fprintf(stderr, "failed to allocate planvm arena\n");
+        return 1;
+    }
+
+    size_t iterations_s = 0;
+    er_val last_v = 0;
+    size_t peak_s = 0;
+    double end_s = now_s() + seconds;
+
+    while(now_s() < end_s) {
+        ENKI_PROFILE_ZONE("profile_iteration");
+        planvm_arena_reset(&arena);
+        last_v = planvm_run_fac(&program, &arena, (er_val)n);
+        if(arena.off_s > peak_s) {
+            peak_s = arena.off_s;
+        }
+        iterations_s++;
+        ENKI_PROFILE_FRAME("profile_runtime");
+        ENKI_PROFILE_PLOT_I("iterations", (int64_t)iterations_s);
+    }
+
+    printf("profile_runtime: workload=planvm_fac n=%zu result=%llu iterations=%zu "
+           "arena_peak_bytes=%zu\n",
+        n,
+        (unsigned long long)last_v,
+        iterations_s,
+        peak_s);
+    planvm_arena_destroy(&arena);
+    return last_v == er_bad ? 1 : 0;
 }
 
 static int run_bytecode_tinyops(size_t n, double seconds)
@@ -471,6 +678,7 @@ static void print_workloads(void)
 static int run_workload(const char* workload_c, size_t n, double seconds)
 {
     if(strcmp(workload_c, "bytecode_fac") == 0) return run_bytecode_fac(n, seconds);
+    if(strcmp(workload_c, "planvm_fac") == 0) return run_planvm_fac(n, seconds);
     if(strcmp(workload_c, "bytecode_tinyops") == 0) return run_bytecode_tinyops(n, seconds);
     if(strcmp(workload_c, "bytecode_thunk_fresh") == 0) return run_bytecode_thunk_fresh(n, seconds);
     if(strcmp(workload_c, "bytecode_thunk_cached") == 0) return run_bytecode_thunk_cached(n, seconds);
