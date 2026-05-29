@@ -9,6 +9,7 @@
 #include "enki/gc.h"
 #include "enki/interp.h"
 #include "enki/nat.h"
+#include "enki/profile.h"
 #include "enki/util.h"
 #include "enki/value.h"
 #define ENKI_SMALL_MAX ((enki_value)((UINT64_C(1) << 63) - 1))
@@ -102,6 +103,7 @@ static void view_of_nat(enki_value a_v, enki_nat_view* v) {
     v->n_limbs_s = 1;
 }
 int enki_nat_cmp(enki_value a_v, enki_value b_v) {
+    ENKI_PROFILE_ZONE("enki_nat_cmp");
     if(!IS_PTR(a_v) && !IS_PTR(b_v)) return a_v < b_v ? -1 : (a_v > b_v ? 1 : 0);
     enki_nat_view a_nv;
     enki_nat_view b_nv;
@@ -146,6 +148,7 @@ enki_value enki_nat_ge(enki_value a_v, enki_value b_v) {
     return (enki_nat_gt(a_v, b_v) || (enki_nat_eq(a_v, b_v))) ? (enki_value)1 : (enki_value)0;
 }
 enki_value enki_nat_inc(enki_gc* gc, enki_value a_v) {
+    ENKI_PROFILE_ZONE("enki_nat_inc");
     if(!IS_PTR(a_v) && a_v < ENKI_SMALL_MAX) return a_v + 1;
     enki_nat_view a_nv;
     view_of_nat(a_v, &a_nv);
@@ -156,6 +159,7 @@ enki_value enki_nat_inc(enki_gc* gc, enki_value a_v) {
     return enki_nat_alloc(gc, out, a_nv.n_limbs_s + 1);
 }
 enki_value enki_nat_dec(enki_gc* gc, enki_value a_v) {
+    ENKI_PROFILE_ZONE("enki_nat_dec");
     if(!IS_PTR(a_v)) return a_v == 0 ? 0 : a_v - 1;
     enki_nat_view a_nv;
     view_of_nat(a_v, &a_nv);
@@ -165,6 +169,7 @@ enki_value enki_nat_dec(enki_gc* gc, enki_value a_v) {
     return enki_nat_alloc(gc, out, a_nv.n_limbs_s);   
 }
 enki_value enki_nat_add(enki_gc* gc, enki_value a_v, enki_value b_v) {
+    ENKI_PROFILE_ZONE("enki_nat_add");
     if(!IS_PTR(a_v) && !IS_PTR(b_v) && a_v <= ENKI_SMALL_MAX - b_v) return a_v + b_v;
     enki_nat_view a_nv;
     enki_nat_view b_nv;
@@ -186,6 +191,7 @@ enki_value enki_nat_add(enki_gc* gc, enki_value a_v, enki_value b_v) {
     return enki_nat_alloc(gc, out, n_s);
 }
 enki_value enki_nat_sub(enki_gc* gc, enki_value a_v, enki_value b_v) {
+    ENKI_PROFILE_ZONE("enki_nat_sub");
     if(!IS_PTR(a_v) && !IS_PTR(b_v)) return a_v > b_v ? a_v - b_v : 0;
     enki_nat_view a_nv;
     enki_nat_view b_nv;
@@ -199,6 +205,7 @@ enki_value enki_nat_sub(enki_gc* gc, enki_value a_v, enki_value b_v) {
     return enki_nat_alloc(gc, out, a_nv.n_limbs_s);
 }
 enki_value enki_nat_mul(enki_gc* gc, enki_value a_v, enki_value b_v) {
+    ENKI_PROFILE_ZONE("enki_nat_mul");
     if(!IS_PTR(a_v) && !IS_PTR(b_v) && (a_v == 0 || b_v <= ENKI_SMALL_MAX / a_v)) return a_v * b_v;
     enki_nat_view a_nv;
     enki_nat_view b_nv;
@@ -216,6 +223,7 @@ enki_value enki_nat_mul(enki_gc* gc, enki_value a_v, enki_value b_v) {
     return enki_nat_alloc(gc, out, n_s);
 }
 enki_value enki_nat_div(enki_gc* gc, enki_value a_v, enki_value b_v) {
+    ENKI_PROFILE_ZONE("enki_nat_div");
     if(!IS_PTR(a_v) && !IS_PTR(b_v) && b_v != 0) return a_v / b_v;
     enki_nat_view a_nv;
     enki_nat_view b_nv;
@@ -232,6 +240,7 @@ enki_value enki_nat_div(enki_gc* gc, enki_value a_v, enki_value b_v) {
     return enki_nat_alloc(gc, Q, q_len_s);
 }
 enki_value enki_nat_mod(enki_gc* gc, enki_value a_v, enki_value b_v) {
+    ENKI_PROFILE_ZONE("enki_nat_mod");
     if(!IS_PTR(a_v) && !IS_PTR(b_v) && b_v != 0) return a_v % b_v;
     enki_nat_view a_nv;
     enki_nat_view b_nv;
@@ -249,6 +258,7 @@ enki_value enki_nat_mod(enki_gc* gc, enki_value a_v, enki_value b_v) {
 }
 // lower bits to higher posistions 
 enki_value enki_nat_lsh(enki_gc* gc, enki_value a_v, enki_value shift_v) {
+    ENKI_PROFILE_ZONE("enki_nat_lsh");
     if(!IS_PTR(a_v) && !IS_PTR(shift_v) && shift_v < 63 && a_v <= (ENKI_SMALL_MAX >> shift_v)) return a_v << shift_v;
     enki_nat_view a_nv;
     view_of_nat(a_v, &a_nv);
@@ -269,6 +279,7 @@ enki_value enki_nat_lsh(enki_gc* gc, enki_value a_v, enki_value shift_v) {
 }
 // higher order bits to lower positions 
 enki_value enki_nat_rsh(enki_gc* gc, enki_value a_v, enki_value shift_v) {
+    ENKI_PROFILE_ZONE("enki_nat_rsh");
     if(!IS_PTR(a_v) && !IS_PTR(shift_v)) return shift_v >= 63 ? 0 : a_v >> shift_v;
     enki_nat_view a_nv;
     view_of_nat(a_v, &a_nv);

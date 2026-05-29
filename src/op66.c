@@ -7,6 +7,7 @@
 #include "enki/interp.h"
 #include "enki/op66.h"
 #include "enki/pin.h"
+#include "enki/profile.h"
 #include "enki/value.h"
 
 void op66_inc(enki_interpreter* i) {
@@ -142,6 +143,7 @@ void op66_eq(enki_interpreter* i) {
     i->stack_v[i->sp - 1] = enki_nat_eq(a, b);
 }
 void op66_equal(enki_interpreter* i) {
+    ENKI_PROFILE_ZONE("op66_equal");
     i->stack_v[i->sp - 2] = enki_eval_nf(i, i->stack_v[i->sp - 2]);
     i->stack_v[i->sp - 1] = enki_eval_nf(i, i->stack_v[i->sp - 1]);
     enki_value a = i->stack_v[i->sp - 2];
@@ -941,14 +943,23 @@ void op66_sap2(enki_interpreter* i) {
 }
 
 void op66_force(enki_interpreter* i) {
-    enki_value x = i->stack_v[i->sp - 1];
+    ENKI_PROFILE_ZONE("op66_force");
+    enki_value x = enki_value_unind(i->stack_v[i->sp - 1]);
+    i->stack_v[i->sp - 1] = x;
+    if(!IS_PTR(x)) return;
+
+    enki_value_header* h = ENKI_AS(enki_value_header, x);
+    if(h->kind_b == ENKI_NAT) {
+        h->state_b = NF;
+        return;
+    }
 
     x = enki_eval_nf(i, x);
-
     i->stack_v[i->sp - 1] = x;
 }
 
 void op66_deepseq(enki_interpreter* i) {
+    ENKI_PROFILE_ZONE("op66_deepseq");
     (void)enki_eval_nf(i, i->stack_v[i->sp - 2]);
     enki_value y = i->stack_v[i->sp - 1];
 

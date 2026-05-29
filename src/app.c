@@ -10,6 +10,7 @@
 #include "enki/value.h"
 #include "enki/util.h"
 #include "enki/print.h"
+#include "enki/profile.h"
 
 size_t enki_app_arity(enki_value val_v) {
     if(!IS_PTR(val_v)) return 0;
@@ -126,7 +127,41 @@ static enki_value enki_app_build_flat(
     return PTR_TO_ENKI(new_app);
 }
 
+static void enki_app_fold_law_app(enki_interpreter* i, enki_value fn_v, size_t fn_index_i,
+    size_t arg_index_i, size_t n_args_s, uint8_t state_b)
+{
+    size_t n = sizeof(enki_app) + (n_args_s * sizeof(enki_value));
+    enki_app* app = (enki_app*)i->gc->alloc(i->gc, n, _Alignof(enki_app));
+    if(!app) return;
+    app->h.size_s = n;
+    app->h.kind_b = ENKI_APP;
+    app->h.state_b = state_b;
+    app->fn_v = fn_v;
+    app->n_args_s = n_args_s;
+    switch(n_args_s) {
+        case 4:
+            app->args_v[3] = i->stack_v[arg_index_i + 3];
+            [[fallthrough]];
+        case 3:
+            app->args_v[2] = i->stack_v[arg_index_i + 2];
+            [[fallthrough]];
+        case 2:
+            app->args_v[1] = i->stack_v[arg_index_i + 1];
+            [[fallthrough]];
+        case 1:
+            app->args_v[0] = i->stack_v[arg_index_i];
+            break;
+        case 0:
+            break;
+        default:
+            memcpy(app->args_v, &i->stack_v[arg_index_i], n_args_s * sizeof(enki_value));
+            break;
+    }
+    enki_app_fold(i, PTR_TO_ENKI(app), fn_index_i);
+}
+
 void enki_app_apply(enki_interpreter* i, size_t n_args_s) {
+    ENKI_PROFILE_ZONE("enki_app_apply");
     i->stats.apply_s++;
     size_t fn_index_i = i->sp - (n_args_s + 1);
     size_t arg_index_i = fn_index_i + 1;
@@ -145,6 +180,37 @@ void enki_app_apply(enki_interpreter* i, size_t n_args_s) {
             i->stats.apply_exact_s++;
             enki_law_enter(n_args_s, head_v, i);
             return;
+        }
+        if(law->arity_s > n_args_s) {
+            i->stats.apply_under_s++;
+            enki_app_fold_law_app(i, head_v, fn_index_i, arg_index_i, n_args_s, WHNF);
+            return;
+        }
+        i->stats.apply_over_s++;
+        enki_app_fold_law_app(i, head_v, fn_index_i, arg_index_i, n_args_s, THUNK);
+        return;
+    }
+    else if(head_h->kind_b == ENKI_PIN) {
+        enki_pin* pin = ENKI_AS(enki_pin, head_v);
+        enki_value inner_v = pin->inner_v;
+        if(IS_PTR(inner_v)) {
+            enki_value_header* inner_h = ENKI_AS(enki_value_header, inner_v);
+            if(inner_h->kind_b == ENKI_LAW) {
+                enki_law* law = ENKI_AS(enki_law, inner_v);
+                if(law->arity_s == n_args_s) {
+                    i->stats.apply_exact_s++;
+                    enki_law_enter(n_args_s, inner_v, i);
+                    return;
+                }
+                if(law->arity_s > n_args_s) {
+                    i->stats.apply_under_s++;
+                    enki_app_fold_law_app(i, head_v, fn_index_i, arg_index_i, n_args_s, WHNF);
+                    return;
+                }
+                i->stats.apply_over_s++;
+                enki_app_fold_law_app(i, head_v, fn_index_i, arg_index_i, n_args_s, THUNK);
+                return;
+            }
         }
     }
     size_t arity_s;

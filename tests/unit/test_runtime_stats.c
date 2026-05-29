@@ -542,7 +542,7 @@ Test(runtime_stats, eval_whnf_ind_cache_prevents_second_thunk_apply)
     cr_assert_eq(first_v, 42);
     cr_assert_eq(thunk->h.kind_b, ENKI_IND);
     cr_assert_eq(thunk->fn_v, 42);
-    cr_assert_gt(first_apply_s, 0);
+    cr_assert_eq(first_apply_s, 0);
     cr_assert_gt(first_steps_s, 0);
     cr_assert_eq(first_thunk_s, 1);
 

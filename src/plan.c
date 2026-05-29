@@ -9,6 +9,7 @@
 #include "enki/law.h"
 #include "enki/nat.h"
 #include "enki/pin.h"
+#include "enki/profile.h"
 #include "enki/value.h"
 
 #define PLAN_CH(c) ((uint64_t)(uint8_t)(c))
@@ -1303,6 +1304,7 @@ static enki_error plan_run_body(enki_plan* plan, size_t depth_s, const enki_valu
 static enki_error plan_apply_law(enki_plan* plan, enki_value self_v, enki_law* law, size_t n_args_s,
                                  const enki_value* args_v, enki_value* out_v)
 {
+    ENKI_PROFILE_ZONE("plan_apply_law");
     if (n_args_s != law->arity_s)
         return plan_fail(plan, ENKI_ERROR_BOUNDS, (enki_value)n_args_s);
     size_t env_s = n_args_s + 1;
@@ -1385,6 +1387,7 @@ static enki_error plan_arity_value(enki_plan* plan, enki_value val_v, size_t* ou
 
 static enki_error plan_eval_whnf_inner(enki_plan* plan, enki_value val_v, enki_value* out_v)
 {
+    ENKI_PROFILE_ZONE("plan_eval_whnf_inner");
     plan->whnf_eval_s++;
     for (;;) {
         if (!IS_PTR(val_v)) {
@@ -1460,6 +1463,7 @@ static enki_error plan_eval_whnf_inner(enki_plan* plan, enki_value val_v, enki_v
 
 static enki_error plan_eval_nf_inner(enki_plan* plan, enki_value val_v, enki_value* out_v)
 {
+    ENKI_PROFILE_ZONE("plan_eval_nf_inner");
     enki_error err = plan_eval_whnf_inner(plan, val_v, &val_v);
     if (err != ENKI_ERROR_OK)
         return err;
@@ -1509,6 +1513,7 @@ static enki_error plan_eval_nf_inner(enki_plan* plan, enki_value val_v, enki_val
 static enki_error plan_apply_inner(enki_plan* plan, enki_value fn_v, size_t n_args_s,
                                    const enki_value* args_v, enki_value* out_v)
 {
+    ENKI_PROFILE_ZONE("plan_apply_inner");
     plan->apply_s++;
     if (n_args_s == 0)
         return plan_eval_whnf_inner(plan, fn_v, out_v);
@@ -1557,6 +1562,7 @@ enki_error enki_plan_eval_nf(enki_plan* plan, enki_value val_v, enki_value* out_
 enki_error enki_plan_apply(enki_plan* plan, enki_value fn_v, size_t n_args_s,
                            const enki_value* args_v, enki_value* out_v)
 {
+    ENKI_PROFILE_ZONE("enki_plan_apply");
     if (plan == NULL || plan->gc == NULL || out_v == NULL)
         return ENKI_ERROR_TYPE;
     if (n_args_s > 0 && args_v == NULL)

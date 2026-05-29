@@ -1,4 +1,5 @@
 BUILD_TYPE ?= debug
+PROFILE ?=
 CC ?= cc
 PREFIX ?= /usr/local
 BUILD_DIR ?= build/$(BUILD_TYPE)
@@ -46,11 +47,18 @@ CPPFLAGS_ALL := $(BASE_CPPFLAGS) $(CPPFLAGS)
 CFLAGS_ALL := $(BASE_CFLAGS) $(WARN_CFLAGS) $(BUILD_CFLAGS_$(BUILD_TYPE)) $(CFLAGS)
 LDFLAGS_ALL := $(BUILD_LDFLAGS_$(BUILD_TYPE)) $(LDFLAGS) -L/opt/homebrew/lib -lgmp -llmdb -lcrypto
 
+ifeq ($(PROFILE),tracy)
+CPPFLAGS_ALL += -I/opt/homebrew/opt/tracy/include/tracy
+CFLAGS_ALL += -DTRACY_ENABLE
+LDFLAGS_ALL += -L/opt/homebrew/opt/tracy/lib -Wl,-rpath,/opt/homebrew/opt/tracy/lib -lTracyClient
+endif
+
 SRC_DIR := src
 INCLUDE_DIR := include
 UNIT_DIR := tests/unit
 PROPERTY_DIR := tests/property
 FUZZ_DIR := tests/fuzz
+PERF_DIR := tests/perf
 VENDOR_THEFT_DIR := tests/property/vendor/theft
 
 SRCS := $(wildcard $(SRC_DIR)/*.c)
@@ -60,6 +68,7 @@ UNIT_SRCS := $(filter-out $(TSAN_UNIT_SRCS),$(wildcard $(UNIT_DIR)/*.c))
 PROPERTY_SRCS := $(wildcard $(PROPERTY_DIR)/*.c)
 THEFT_SRCS := $(wildcard $(VENDOR_THEFT_DIR)/*.c)
 FUZZ_SRCS := $(wildcard $(FUZZ_DIR)/*.c)
+PERF_SRCS := $(wildcard $(PERF_DIR)/*.c)
 
 LIB_OBJS := $(patsubst %.c,$(BUILD_DIR)/%.o,$(SRCS))
 UNIT_BINS := $(patsubst %.c,$(BUILD_DIR)/%,$(UNIT_SRCS))
@@ -67,6 +76,7 @@ TSAN_UNIT_BINS := $(patsubst %.c,$(BUILD_DIR)/%,$(TSAN_UNIT_SRCS))
 PROPERTY_BINS := $(patsubst %.c,$(BUILD_DIR)/%,$(PROPERTY_SRCS))
 THEFT_OBJS := $(patsubst %.c,$(BUILD_DIR)/%.o,$(THEFT_SRCS))
 FUZZ_BINS := $(patsubst %.c,$(BUILD_DIR)/%,$(FUZZ_SRCS))
+PERF_BINS := $(patsubst %.c,$(BUILD_DIR)/%,$(PERF_SRCS))
 LIB := $(BUILD_DIR)/lib/libenki.a
 
 UNAME_S := $(shell uname -s 2>/dev/null)
@@ -96,7 +106,7 @@ LCOV_FILTERED_INFO := $(BUILD_DIR)/coverage/enki.filtered.info
 COVERAGE_HTML_DIR := $(BUILD_DIR)/html
 LCOV_IGNORE_ERRORS ?= --ignore-errors inconsistent,inconsistent,mismatch,mismatch,gcov,gcov,unused,unused
 
-.PHONY: all lib install test test-binaries test-unit test-property fuzz fuzz-bin coverage tidy \
+.PHONY: all lib install test test-binaries test-unit test-property fuzz fuzz-bin perf-binaries coverage tidy \
 	format format-check compile-commands compile-commands-fallback clean distclean
 
 all: lib bin
@@ -140,6 +150,10 @@ $(BUILD_DIR)/tests/fuzz/%: tests/fuzz/%.c $(LIB_OBJS)
 	$(CC) $(CPPFLAGS_ALL) $(BASE_CFLAGS) $(WARN_CFLAGS) $(BUILD_CFLAGS_asan) \
 		$(FUZZ_CFLAGS) $< $(LIB_OBJS) $(LDFLAGS_ALL) -o $@
 
+$(BUILD_DIR)/tests/perf/%: tests/perf/%.c $(LIB_OBJS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS_ALL) $(CFLAGS_ALL) $< $(LIB_OBJS) $(LDFLAGS_ALL) -o $@
+
 install: lib
 	install -d $(PREFIX)/lib $(PREFIX)/include/enki
 	install -m 0644 $(LIB) $(PREFIX)/lib/libenki.a
@@ -165,6 +179,8 @@ fuzz-bin: $(FUZZ_BINS)
 
 fuzz: $(FUZZ_BINS)
 	@set -eu; for fuzz_bin in $(FUZZ_BINS); do "$$fuzz_bin" $(FUZZ_ARGS); done
+
+perf-binaries: $(PERF_BINS)
 
 coverage:
 	$(MAKE) BUILD_TYPE=coverage test

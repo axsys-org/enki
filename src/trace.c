@@ -14,6 +14,11 @@ void enki_trace_interp(enki_interpreter* i) {
             i->call_stack_v[k].law = i->gc->copy(i->gc, i->call_stack_v[k].law);
         }
     }
+    for(size_t k = 0; k < i->up; k++) {
+        if(i->update_v[k].thunk_v != 0) {
+            i->update_v[k].thunk_v = i->gc->copy(i->gc, i->update_v[k].thunk_v);
+        }
+    }
     if(i->error_v != 0) i->error_v = i->gc->copy(i->gc, i->error_v);
     if(i->cp > 0) {
         enki_law* law = ENKI_AS(enki_law, i->call_stack_v[i->cp - 1].law);

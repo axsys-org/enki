@@ -5,6 +5,7 @@
 #include "enki/gc.h"
 #include "enki/interp.h"
 #include "enki/law.h"
+#include "enki/profile.h"
 #include "enki/value.h"
 
 #define ENKI_BC_WIDE_MAX   UINT16_MAX
@@ -28,6 +29,7 @@ enki_value enki_law_alloc(enki_gc* gc, size_t arity_s, enki_value name_v, enki_v
 }
 
 void enki_law_enter(size_t arity_s, enki_value val_v, enki_interpreter* i) {
+    ENKI_PROFILE_ZONE("enki_law_enter");
     i->stats.law_enter_s++;
     
     if(i->cp > 0) {
@@ -41,11 +43,14 @@ void enki_law_enter(size_t arity_s, enki_value val_v, enki_interpreter* i) {
     call.res_base_s = i->sp - call_width_s;
     call.arg_base_s = call.res_base_s + 1;
     call.law = val_v;
-    i->call_stack_v[i->cp++] = call;
 
     enki_law* law = ENKI_AS(enki_law, val_v); 
-    i->bc_b = ENKI_LAW_BC(law);
-    i->const_table_v = ENKI_LAW_CONSTS(law);
+    call.bc_b = ENKI_LAW_BC(law);
+    call.const_table_v = ENKI_LAW_CONSTS(law);
+    i->call_stack_v[i->cp++] = call;
+
+    i->bc_b = call.bc_b;
+    i->const_table_v = call.const_table_v;
     i->pc = 0;
     i->arg_base_s = call.arg_base_s;
 }

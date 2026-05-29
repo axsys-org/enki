@@ -3,6 +3,7 @@
 
 #include "enki/interp.h"
 #include "enki/app.h"
+#include "enki/eval.h"
 #include "enki/value.h"
 #include "enki/gc.h"
 #include "enki/util.h"
@@ -10,6 +11,315 @@
 #include "enki/nat.h"
 #include "enki/op66.h"
 #include "enki/op0.h"
+#include "enki/pin.h"
+#include "enki/profile.h"
+
+static bool enki_interp_force_top(enki_interpreter* i);
+static bool enki_interp_finish_update(enki_interpreter* i);
+
+static bool enki_interp_apply_inline_op66(enki_interpreter* i, size_t fn_index_i,
+    uint8_t sub_b)
+{
+    if(sub_b < ENKI_OP66_COUNT) {
+        i->stats.op66_s[sub_b]++;
+    }
+
+    switch(sub_b) {
+        case OP66_INC: {
+            enki_value a = i->stack_v[fn_index_i + 1];
+            i->stack_v[fn_index_i] = enki_nat_inc(i->gc, a);
+            i->sp = fn_index_i + 1;
+            return true;
+        }
+        case OP66_DEC: {
+            enki_value a = i->stack_v[fn_index_i + 1];
+            i->stack_v[fn_index_i] = enki_nat_dec(i->gc, a);
+            i->sp = fn_index_i + 1;
+            return true;
+        }
+        case OP66_ADD: {
+            enki_value a = i->stack_v[fn_index_i + 1];
+            enki_value b = i->stack_v[fn_index_i + 2];
+            i->stack_v[fn_index_i] = enki_nat_add(i->gc, a, b);
+            i->sp = fn_index_i + 1;
+            return true;
+        }
+        case OP66_SUB: {
+            enki_value a = i->stack_v[fn_index_i + 1];
+            enki_value b = i->stack_v[fn_index_i + 2];
+            i->stack_v[fn_index_i] = enki_nat_sub(i->gc, a, b);
+            i->sp = fn_index_i + 1;
+            return true;
+        }
+        case OP66_MUL: {
+            enki_value a = i->stack_v[fn_index_i + 1];
+            enki_value b = i->stack_v[fn_index_i + 2];
+            i->stack_v[fn_index_i] = enki_nat_mul(i->gc, a, b);
+            i->sp = fn_index_i + 1;
+            return true;
+        }
+        case OP66_EQ: {
+            enki_value a = i->stack_v[fn_index_i + 1];
+            enki_value b = i->stack_v[fn_index_i + 2];
+            i->stack_v[fn_index_i] = enki_nat_eq(a, b);
+            i->sp = fn_index_i + 1;
+            return true;
+        }
+        default:
+            return false;
+    }
+}
+
+static bool enki_interp_try_inline_exact_law(enki_interpreter* i, enki_value law_v,
+    size_t fn_index_i)
+{
+    enki_law* law = ENKI_AS(enki_law, law_v);
+    uint8_t* bc_b = ENKI_LAW_BC(law);
+
+    if(law->arity_s == 1 && law->bc_len_s == 3 &&
+        bc_b[0] == OP_PICK && bc_b[1] == 0 && bc_b[2] == OP_RETURN) {
+        i->stack_v[fn_index_i] = i->stack_v[fn_index_i + 1];
+        i->sp = fn_index_i + 1;
+        return true;
+    }
+
+    if(law->arity_s == 1 && law->bc_len_s == 5 &&
+        bc_b[0] == OP_PICK && bc_b[1] == 0 &&
+        bc_b[2] == OP_OP66 && bc_b[4] == OP_RETURN) {
+        return enki_interp_apply_inline_op66(i, fn_index_i, bc_b[3]);
+    }
+
+    if(law->arity_s == 2 && law->bc_len_s == 7 &&
+        bc_b[0] == OP_PICK && bc_b[1] == 0 &&
+        bc_b[2] == OP_PICK && bc_b[3] == 1 &&
+        bc_b[4] == OP_OP66 && bc_b[6] == OP_RETURN) {
+        return enki_interp_apply_inline_op66(i, fn_index_i, bc_b[5]);
+    }
+
+    return false;
+}
+
+static bool enki_interp_is_identity_law(enki_value law_v)
+{
+    enki_law* law = ENKI_AS(enki_law, law_v);
+    uint8_t* bc_b = ENKI_LAW_BC(law);
+    return law->arity_s == 1 && law->bc_len_s == 3 &&
+        bc_b[0] == OP_PICK && bc_b[1] == 0 && bc_b[2] == OP_RETURN;
+}
+
+static void enki_interp_enter_law_frame(enki_interpreter* i, size_t arity_s,
+    enki_value law_v)
+{
+    i->stats.law_enter_s++;
+
+    if(i->cp > 0) {
+        i->call_stack_v[i->cp - 1].pc = i->pc;
+        i->call_stack_v[i->cp - 1].arg_base_s = i->arg_base_s;
+    }
+
+    enki_call call;
+    size_t call_width_s = arity_s + 1;
+    call.pc = 0;
+    call.res_base_s = i->sp - call_width_s;
+    call.arg_base_s = call.res_base_s + 1;
+    call.law = law_v;
+
+    enki_law* law = ENKI_AS(enki_law, law_v);
+    call.bc_b = ENKI_LAW_BC(law);
+    call.const_table_v = ENKI_LAW_CONSTS(law);
+    i->call_stack_v[i->cp++] = call;
+
+    i->bc_b = call.bc_b;
+    i->const_table_v = call.const_table_v;
+    i->pc = 0;
+    i->arg_base_s = call.arg_base_s;
+}
+
+static inline bool enki_interp_try_enter_exact_law(enki_interpreter* i, size_t n_args_s)
+{
+    size_t fn_index_i = i->sp - (n_args_s + 1);
+    enki_value head_v = i->stack_v[fn_index_i];
+    if(!IS_PTR(head_v)) return false;
+
+    enki_value enter_v = head_v;
+    enki_value_header* h = ENKI_AS(enki_value_header, head_v);
+    if(h->kind_b == ENKI_PIN) {
+        enki_pin* pin = ENKI_AS(enki_pin, head_v);
+        enter_v = pin->inner_v;
+        if(!IS_PTR(enter_v)) return false;
+        h = ENKI_AS(enki_value_header, enter_v);
+    }
+
+    if(h->kind_b != ENKI_LAW) return false;
+
+    enki_law* law = ENKI_AS(enki_law, enter_v);
+    if(law->arity_s != n_args_s) return false;
+
+    i->stats.apply_s++;
+    i->stats.apply_exact_s++;
+    if(enki_interp_try_inline_exact_law(i, enter_v, fn_index_i)) {
+        return true;
+    }
+    enki_interp_enter_law_frame(i, n_args_s, enter_v);
+    return true;
+}
+
+static bool enki_interp_top_trivial_nf(enki_interpreter* i)
+{
+    enki_value x = enki_value_unind(i->stack_v[i->sp - 1]);
+    i->stack_v[i->sp - 1] = x;
+    if(!IS_PTR(x)) return true;
+
+    enki_value_header* h = ENKI_AS(enki_value_header, x);
+    if(h->kind_b == ENKI_NAT) {
+        h->state_b = NF;
+        return true;
+    }
+
+    return false;
+}
+
+static bool enki_interp_try_fuse_apply(enki_interpreter* i)
+{
+    uint8_t op_b = i->bc_b[i->pc];
+    size_t arg_c;
+    if(op_b == OP_APPLY) {
+        arg_c = i->bc_b[i->pc + 1];
+        i->pc += 2;
+    }
+    else if(op_b == OP_APPLY_WIDE) {
+        uint8_t lo = i->bc_b[i->pc + 1];
+        uint8_t hi = i->bc_b[i->pc + 2];
+        arg_c = ((size_t)hi << 8) | lo;
+        i->pc += 3;
+    }
+    else {
+        return false;
+    }
+
+    if(enki_interp_try_enter_exact_law(i, arg_c)) {
+        return true;
+    }
+    enki_app_apply(i, arg_c);
+    return true;
+}
+
+static bool enki_interp_try_fuse_op66(enki_interpreter* i)
+{
+    if(i->bc_b[i->pc] != OP_OP66) return false;
+    uint8_t sub_b = i->bc_b[i->pc + 1];
+
+    switch(sub_b) {
+        case OP66_INC: {
+            i->pc += 2;
+            i->stats.op66_s[sub_b]++;
+            enki_value a = i->stack_v[i->sp - 1];
+            i->stack_v[i->sp - 1] = enki_nat_inc(i->gc, a);
+            return true;
+        }
+        case OP66_DEC: {
+            i->pc += 2;
+            i->stats.op66_s[sub_b]++;
+            enki_value a = i->stack_v[i->sp - 1];
+            i->stack_v[i->sp - 1] = enki_nat_dec(i->gc, a);
+            return true;
+        }
+        case OP66_ADD: {
+            i->pc += 2;
+            i->stats.op66_s[sub_b]++;
+            enki_value a = i->stack_v[i->sp - 2];
+            enki_value b = i->stack_v[i->sp - 1];
+            i->sp--;
+            i->stack_v[i->sp - 1] = enki_nat_add(i->gc, a, b);
+            return true;
+        }
+        case OP66_SUB: {
+            i->pc += 2;
+            i->stats.op66_s[sub_b]++;
+            enki_value a = i->stack_v[i->sp - 2];
+            enki_value b = i->stack_v[i->sp - 1];
+            i->sp--;
+            i->stack_v[i->sp - 1] = enki_nat_sub(i->gc, a, b);
+            return true;
+        }
+        case OP66_MUL: {
+            i->pc += 2;
+            i->stats.op66_s[sub_b]++;
+            enki_value a = i->stack_v[i->sp - 2];
+            enki_value b = i->stack_v[i->sp - 1];
+            i->sp--;
+            i->stack_v[i->sp - 1] = enki_nat_mul(i->gc, a, b);
+            return true;
+        }
+        case OP66_EQ: {
+            i->pc += 2;
+            i->stats.op66_s[sub_b]++;
+            enki_value a = i->stack_v[i->sp - 2];
+            enki_value b = i->stack_v[i->sp - 1];
+            i->sp--;
+            i->stack_v[i->sp - 1] = enki_nat_eq(a, b);
+            return true;
+        }
+        case OP66_NE: {
+            i->pc += 2;
+            i->stats.op66_s[sub_b]++;
+            enki_value a = i->stack_v[i->sp - 2];
+            enki_value b = i->stack_v[i->sp - 1];
+            i->sp--;
+            i->stack_v[i->sp - 1] = enki_nat_ne(a, b);
+            return true;
+        }
+        case OP66_LT: {
+            i->pc += 2;
+            i->stats.op66_s[sub_b]++;
+            enki_value a = i->stack_v[i->sp - 2];
+            enki_value b = i->stack_v[i->sp - 1];
+            i->sp--;
+            i->stack_v[i->sp - 1] = enki_nat_lt(a, b);
+            return true;
+        }
+        case OP66_LE: {
+            i->pc += 2;
+            i->stats.op66_s[sub_b]++;
+            enki_value a = i->stack_v[i->sp - 2];
+            enki_value b = i->stack_v[i->sp - 1];
+            i->sp--;
+            i->stack_v[i->sp - 1] = enki_nat_le(a, b);
+            return true;
+        }
+        case OP66_GT: {
+            i->pc += 2;
+            i->stats.op66_s[sub_b]++;
+            enki_value a = i->stack_v[i->sp - 2];
+            enki_value b = i->stack_v[i->sp - 1];
+            i->sp--;
+            i->stack_v[i->sp - 1] = enki_nat_gt(a, b);
+            return true;
+        }
+        case OP66_GE: {
+            i->pc += 2;
+            i->stats.op66_s[sub_b]++;
+            enki_value a = i->stack_v[i->sp - 2];
+            enki_value b = i->stack_v[i->sp - 1];
+            i->sp--;
+            i->stack_v[i->sp - 1] = enki_nat_ge(a, b);
+            return true;
+        }
+        case OP66_CMP: {
+            i->pc += 2;
+            i->stats.op66_s[sub_b]++;
+            enki_value a = i->stack_v[i->sp - 2];
+            enki_value b = i->stack_v[i->sp - 1];
+            int cmp = enki_nat_cmp(a, b);
+            i->sp--;
+            i->stack_v[i->sp - 1] =
+                (cmp < 0) ? (enki_value)0 : (cmp == 0 ? (enki_value)1 : (enki_value)2);
+            return true;
+        }
+        default:
+            return false;
+    }
+}
 
 enki_interpreter* enki_interp_create(const enki_allocator* loc_a, size_t heap,
     const char* store_path_s, size_t store_size_s, size_t scratch_size_s) {
@@ -27,6 +337,7 @@ enki_interpreter* enki_interp_create(const enki_allocator* loc_a, size_t heap,
     i->cp = 0;
     i->sp = 0;
     i->hp = 0;
+    i->up = 0;
     enki_stats_reset(i);
     i->scratch_a = enki_arena_create(loc_a, scratch_size_s);
     if(!i->scratch_a) {
@@ -70,9 +381,8 @@ void enki_interp_throw(enki_interpreter* i, int error_code, enki_value val) {
         i->cp = hdlr.cp;
         if(i->cp > 0) {
             enki_call* call = &i->call_stack_v[i->cp - 1];
-            enki_law* law = ENKI_AS(enki_law, call->law);
-            i->bc_b = ENKI_LAW_BC(law);
-            i->const_table_v = ENKI_LAW_CONSTS(law);
+            i->bc_b = call->bc_b;
+            i->const_table_v = call->const_table_v;
             i->pc = call->pc;
             i->arg_base_s = call->arg_base_s;
         }
@@ -83,6 +393,8 @@ void enki_interp_throw(enki_interpreter* i, int error_code, enki_value val) {
     abort();
 }
 int enki_interp_run(enki_interpreter* i) {
+    ENKI_PROFILE_THREAD("enki main");
+    ENKI_PROFILE_ZONE("enki_interp_run");
     i->has_error_jmp = true;
     if(setjmp(i->error_jmp) == 0) {
         while (!i->halted) {
@@ -298,7 +610,20 @@ static void enki_interp_dispatch_op66(enki_interpreter* i, uint8_t sub_b) {
         case OP66_SEQ3:       op66_seq3(i);        break;
         case OP66_SAP:        op66_sap(i);         break;
         case OP66_SAP2:       op66_sap2(i);        break;
-        case OP66_FORCE:      op66_force(i);       break;
+        case OP66_FORCE: {
+            i->stats.op66_s[sub_b]++;
+            if(enki_interp_top_trivial_nf(i)) {
+                break;
+            }
+            if(enki_interp_force_top(i)) {
+                return;
+            }
+            if(enki_interp_top_trivial_nf(i)) {
+                break;
+            }
+            i->stack_v[i->sp - 1] = enki_eval_nf(i, i->stack_v[i->sp - 1]);
+            break;
+        }       
         case OP66_DEEPSEQ:    op66_deepseq(i);     break;
         case OP66_TRY:        op66_try(i);         break;
         case OP66_THROW:      op66_throw(i);       break;
@@ -341,6 +666,7 @@ void enki_interp_dispatch_op(enki_interpreter* i, uint8_t group) {
 }
 
 void enki_interp_step(enki_interpreter* i) {
+    ENKI_PROFILE_ZONE("enki_interp_step");
     i->stats.interp_step_s++;
     uint8_t op_b = i->bc_b[i->pc++];
     switch (op_b) {
@@ -348,11 +674,17 @@ void enki_interp_step(enki_interpreter* i) {
             uint8_t lo = i->bc_b[i->pc++];
             uint8_t hi = i->bc_b[i->pc++];
             size_t arg_c = ((size_t)hi << 8) | lo;
+            if(enki_interp_try_enter_exact_law(i, arg_c)) {
+                break;
+            }
             enki_app_apply(i, arg_c);
             break;
         }
         case OP_APPLY: {
             uint8_t arg_c = i->bc_b[i->pc++];
+            if(enki_interp_try_enter_exact_law(i, arg_c)) {
+                break;
+            }
             enki_app_apply(i, arg_c);
             break;
         }
@@ -363,12 +695,24 @@ void enki_interp_step(enki_interpreter* i) {
             size_t stack_i = i->arg_base_s + pick_i;
             i->stack_v[i->sp] = i->stack_v[stack_i];
             i->sp++;
+            if(enki_interp_try_fuse_apply(i)) {
+                break;
+            }
+            if(enki_interp_try_fuse_op66(i)) {
+                break;
+            }
             break;
         }
         case OP_PICK: {
             size_t idx_i = i->arg_base_s + (size_t)i->bc_b[i->pc++];
             i->stack_v[i->sp] = i->stack_v[idx_i];
             i->sp++;
+            if(enki_interp_try_fuse_apply(i)) {
+                break;
+            }
+            if(enki_interp_try_fuse_op66(i)) {
+                break;
+            }
             break;
         }
         case OP_RETURN: {
@@ -378,6 +722,16 @@ void enki_interp_step(enki_interpreter* i) {
             i->sp = curr->res_base_s;
             i->stack_v[i->sp] = ret;
             i->cp--;
+            if(i->cp > 0) {
+                enki_call* caller = &i->call_stack_v[i->cp - 1];
+                i->bc_b = caller->bc_b;
+                i->const_table_v = caller->const_table_v;
+                i->pc = caller->pc;
+                i->arg_base_s = caller->arg_base_s;
+            }
+            if(enki_interp_finish_update(i)) {
+                return;
+            }
             if(i->hp > 0) {
                 enki_handler hdlr = i->handler_v[i->hp - 1];
                 if(hdlr.cp == i->cp) {
@@ -393,12 +747,6 @@ void enki_interp_step(enki_interpreter* i) {
                 i->halted = true;
                 return;
             }
-            enki_call* caller = &i->call_stack_v[i->cp - 1];
-            enki_law* law = ENKI_AS(enki_law, caller->law);
-            i->bc_b = ENKI_LAW_BC(law);
-            i->const_table_v = ENKI_LAW_CONSTS(law);
-            i->pc = caller->pc;
-            i->arg_base_s = caller->arg_base_s;
             break;
         }
         case NO_OP:
@@ -409,12 +757,24 @@ void enki_interp_step(enki_interpreter* i) {
             size_t idx_i = ((size_t)hi << 8) | lo;
             i->stack_v[i->sp] = i->const_table_v[idx_i];
             i->sp++;
+            if(enki_interp_try_fuse_apply(i)) {
+                break;
+            }
+            if(enki_interp_try_fuse_op66(i)) {
+                break;
+            }
             break;
         }
         case OP_PUSH_CONST: {
             uint8_t idx_i = i->bc_b[i->pc++];
             i->stack_v[i->sp] = i->const_table_v[idx_i];
             i->sp++;
+            if(enki_interp_try_fuse_apply(i)) {
+                break;
+            }
+            if(enki_interp_try_fuse_op66(i)) {
+                break;
+            }
             break;
         }
         case OP_POP:
@@ -556,4 +916,144 @@ void enki_interp_step(enki_interpreter* i) {
         default:
             enki_interp_throw(i, ENKI_ERROR_BAD_TAG, op_b);
     }
+}
+
+
+static void enki_interp_cache_thunk(enki_update* u, enki_value result_v)
+{
+    enki_app* thunk = ENKI_AS(enki_app, u->thunk_v);
+    thunk->h.kind_b = ENKI_IND;
+    thunk->h.state_b = WHNF;
+    thunk->n_args_s = 0;
+    thunk->fn_v = result_v;
+}
+
+static bool enki_interp_enter_force_law(enki_interpreter* i, enki_app* app,
+    size_t arity_s, size_t base_sp)
+{
+    enki_value self_v = app->fn_v;
+    enki_value enter_v = app->fn_v;
+
+    if(!IS_PTR(enter_v)) return false;
+
+    enki_value_header* h = ENKI_AS(enki_value_header, enter_v);
+    if(h->kind_b == ENKI_PIN) {
+        enki_pin* pin = ENKI_AS(enki_pin, enter_v);
+        if(!IS_PTR(pin->inner_v)) return false;
+        enki_value_header* ih = ENKI_AS(enki_value_header, pin->inner_v);
+        if(ih->kind_b != ENKI_LAW) return false;
+        enter_v = pin->inner_v;
+    }
+    else if(h->kind_b != ENKI_LAW) {
+        return false;
+    }
+
+    if(enki_interp_is_identity_law(enter_v) && app->n_args_s > 0) {
+        i->stack_v[base_sp] = app->args_v[0];
+        i->sp = base_sp + 1;
+        return enki_interp_finish_update(i);
+    }
+
+    i->stack_v[base_sp] = self_v;
+    i->sp = base_sp + 1;
+    for(size_t k = 0; k < arity_s; k++) {
+        i->stack_v[i->sp++] = app->args_v[k];
+    }
+
+    enki_interp_enter_law_frame(i, arity_s, enter_v);
+    return true;
+}
+
+
+static bool enki_interp_force_top(enki_interpreter* i)
+{
+    size_t result_slot_s = i->sp - 1;
+    enki_value val_v = enki_value_unind(i->stack_v[result_slot_s]);
+    i->stack_v[result_slot_s] = val_v;
+
+    if(!IS_PTR(val_v)) return false;
+
+    enki_value_header* h = ENKI_AS(enki_value_header, val_v);
+    if(h->kind_b != ENKI_APP || h->state_b != THUNK) {
+        return false;
+    }
+
+    enki_app* app = ENKI_AS(enki_app, val_v);
+    size_t arity_s = enki_app_arity(app->fn_v);
+
+    if(i->up >= UPDATE_MAX) {
+        enki_interp_throw(i, ENKI_ERROR_BOUNDS, val_v);
+    }
+
+    enki_update* u = &i->update_v[i->up++];
+    u->kind_b = ENKI_UPDATE_FORCE;
+    u->phase_b = 0;
+    u->thunk_v = val_v;
+    u->result_slot_s = result_slot_s;
+    u->base_cp_s = i->cp;
+    u->arity_s = arity_s;
+    u->total_args_s = app->n_args_s;
+
+    if(enki_interp_enter_force_law(i, app, arity_s, result_slot_s)) {
+        return true;
+    }
+
+    i->stack_v[result_slot_s] = app->fn_v;
+    i->sp = result_slot_s + 1;
+    for(size_t k = 0; k < arity_s; k++) {
+        i->stack_v[i->sp++] = app->args_v[k];
+    }
+
+    enki_app_apply(i, arity_s);
+    return true;
+}
+
+static bool enki_interp_finish_update(enki_interpreter* i)
+{
+    while(i->up > 0) {
+        enki_update* u = &i->update_v[i->up - 1];
+        if(u->kind_b != ENKI_UPDATE_FORCE || u->base_cp_s != i->cp) {
+            return false;
+        }
+
+        enki_value result_v = i->stack_v[u->result_slot_s];
+        enki_app* thunk = ENKI_AS(enki_app, u->thunk_v);
+        size_t leftover_s = u->total_args_s - u->arity_s;
+
+        if(u->phase_b == 0 && leftover_s > 0) {
+            u->phase_b = 1;
+
+            i->stack_v[u->result_slot_s] = result_v;
+            i->sp = u->result_slot_s + 1;
+
+            for(size_t k = 0; k < leftover_s; k++) {
+                i->stack_v[i->sp++] = thunk->args_v[u->arity_s + k];
+            }
+
+            if(!enki_interp_try_enter_exact_law(i, leftover_s)) {
+                enki_app_apply(i, leftover_s);
+            }
+
+            if(i->cp > u->base_cp_s) {
+                return true;
+            }
+
+            continue;
+        }
+
+        enki_interp_cache_thunk(u, result_v);
+        i->stack_v[u->result_slot_s] = result_v;
+        i->sp = u->result_slot_s + 1;
+        size_t result_slot_s = u->result_slot_s;
+        i->up--;
+        if(enki_interp_force_top(i)) {
+            return true;
+        }
+        if(!enki_interp_top_trivial_nf(i)) {
+            i->stack_v[result_slot_s] = enki_eval_nf(i, i->stack_v[result_slot_s]);
+        }
+        i->sp = result_slot_s;
+    }
+
+    return false;
 }

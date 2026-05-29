@@ -5,10 +5,51 @@
 #include "enki/app.h"
 #include "enki/eval.h"
 #include "enki/interp.h"
+#include "enki/law.h"
 #include "enki/pin.h"
+#include "enki/profile.h"
 #include "enki/value.h"
 
+static void run_to_base_cp(enki_interpreter* i, size_t base_cp)
+{
+    while(i->cp > base_cp) {
+        enki_interp_step(i);
+        enki_arena_reset(i->scratch_a);
+    }
+}
+
+static bool force_enter_law_direct(enki_interpreter* i, enki_app* app, size_t arity_s, size_t base_sp)
+{
+    enki_value enter_v = app->fn_v;
+    enki_value self_v = app->fn_v;
+
+    if(!IS_PTR(enter_v)) return false;
+
+    enki_value_header* h = ENKI_AS(enki_value_header, enter_v);
+    if(h->kind_b == PIN) {
+        enki_pin* pin = ENKI_AS(enki_pin, enter_v);
+        if(!IS_PTR(pin->inner_v)) return false;
+        enki_value_header* ih = ENKI_AS(enki_value_header, pin->inner_v);
+        if(ih->kind_b != LAW) return false;
+        enter_v = pin->inner_v;
+    }
+    else if(h->kind_b != LAW) {
+        return false;
+    }
+
+    i->stack_v[base_sp] = self_v;
+    i->sp = base_sp + 1;
+    for(size_t k = 0; k < arity_s; k++) {
+        i->stack_v[i->sp++] = app->args_v[k];
+    }
+
+    enki_law_enter(arity_s, enter_v, i);
+    return true;
+}
+
+
 enki_value enki_eval_whnf(enki_interpreter* i, enki_value val_v) {
+    ENKI_PROFILE_ZONE("enki_eval_whnf");
     while(1) {
         i->stats.whnf_s++;
         if(!IS_PTR(val_v)) {
@@ -53,16 +94,20 @@ enki_value enki_eval_whnf(enki_interpreter* i, enki_value val_v) {
             enki_app* app = ENKI_AS(enki_app, val_v);
             size_t arity_s = enki_app_arity(app->fn_v);
             size_t total_args_s = app->n_args_s;
-            i->stack_v[base_sp] = app->fn_v;
-            i->sp = base_sp + 1;
-            for(size_t k = 0; k < arity_s; k++) {
-                i->stack_v[i->sp++] = app->args_v[k];
+            
+            if(force_enter_law_direct(i, app, arity_s, base_sp)) {
+                run_to_base_cp(i, base_cp);
             }
-            enki_app_apply(i, arity_s);
-            while(i->cp > base_cp) {
-                enki_interp_step(i);
-                enki_arena_reset(i->scratch_a);
+            else {
+                i->stack_v[base_sp] = app->fn_v;
+                i->sp = base_sp + 1;
+                for(size_t k = 0; k < arity_s; k++) {
+                    i->stack_v[i->sp++] = app->args_v[k];
+                }
+                enki_app_apply(i, arity_s);
+                run_to_base_cp(i, base_cp);
             }
+
             size_t leftover_count_s = total_args_s - arity_s;
             if(leftover_count_s > 0) {
                 app = ENKI_AS(enki_app, i->stack_v[root_sp]);
@@ -71,10 +116,7 @@ enki_value enki_eval_whnf(enki_interpreter* i, enki_value val_v) {
                     i->stack_v[i->sp++] = app->args_v[k + arity_s];
                 }
                 enki_app_apply(i, leftover_count_s);
-                while(i->cp > base_cp) {
-                    enki_interp_step(i);
-                    enki_arena_reset(i->scratch_a);
-                }
+                run_to_base_cp(i, base_cp);
             }
             app = ENKI_AS(enki_app, i->stack_v[root_sp]);
             app->h.state_b = WHNF;
@@ -90,6 +132,7 @@ enki_value enki_eval_whnf(enki_interpreter* i, enki_value val_v) {
 }
 
 enki_value enki_eval_nf(enki_interpreter* i, enki_value x) {
+    ENKI_PROFILE_ZONE("enki_eval_nf");
     x = enki_eval_whnf(i, x);
     if(!IS_PTR(x)) return x;
     enki_value_header* h = ENKI_AS(enki_value_header, x);

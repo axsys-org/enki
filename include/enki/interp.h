@@ -11,6 +11,21 @@
 #define STACK_MAX 8192
 #define CALL_MAX 1024
 #define HANDLER_MAX 1024
+#define UPDATE_MAX 1024
+
+typedef enum {
+    ENKI_UPDATE_FORCE = 1,
+} enki_update_kind;
+
+typedef struct {
+    enki_update_kind kind_b;
+    uint8_t phase_b;
+    enki_value thunk_v;
+    size_t result_slot_s;
+    size_t base_cp_s;
+    size_t arity_s;
+    size_t total_args_s;
+} enki_update;
 
 typedef enum {
     NO_OP              = 0x00,
@@ -192,6 +207,8 @@ typedef struct {
 
 typedef struct {
     enki_value law;
+    uint8_t* bc_b;
+    enki_value* const_table_v;
     size_t pc;
     size_t res_base_s;
     size_t arg_base_s;
@@ -210,6 +227,8 @@ typedef struct enki_interpreter {
     enki_call call_stack_v[CALL_MAX];
     size_t hp;
     enki_handler handler_v[HANDLER_MAX];
+    size_t up;
+    enki_update update_v[UPDATE_MAX];
     uint8_t* bc_b;
     enki_value* const_table_v;
     size_t pc;

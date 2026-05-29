@@ -5,6 +5,7 @@
 #include <enki/motes.h>
 #include <enki/plan.h>
 #include <enki/print.h>
+#include <enki/profile.h>
 #include <enki/util.h>
 #include <enki/vector.h>
 #include <enki/wisp.h>
@@ -74,6 +75,7 @@ static uint64_t wisp_now_ns(void)
 
 static enki_value _wisp_plan_apply(wisp_rt* rt, size_t val_s, enki_value* val_v)
 {
+    ENKI_PROFILE_ZONE("_wisp_plan_apply");
     assert(val_s > 0);
     if (val_s == 1) {
         return val_v[0];
@@ -346,6 +348,7 @@ static enki_value _wisp_parse_atom(wisp_rt* rt, char** str_c)
 
 enki_value wisp_parse(wisp_rt* rt, char** str_c)
 {
+    ENKI_PROFILE_ZONE("wisp_parse");
     char* cur_c = *str_c;
     if (wisp_eat(&cur_c)) {
         wisp_fail(rt, "Reached EOF");
@@ -677,6 +680,7 @@ static bool is_sys_macro(uint64_t mac_q)
 
 static enki_value _wisp_macroexpand(wisp_rt* rt, size_t loc_s, wisp_local* loc, enki_value val_v)
 {
+    ENKI_PROFILE_ZONE("_wisp_macroexpand");
 
     if (!IS_PTR(val_v)) {
         return val_v;
@@ -718,6 +722,7 @@ static enki_value _wisp_apple(wisp_rt* rt, size_t val_s, enki_value* val_v)
 
 static enki_value _wisp_thunk(wisp_rt* rt, enki_value val_v)
 {
+    ENKI_PROFILE_ZONE("_wisp_thunk");
     if (val_v == 0) {
         return 0;
     }
@@ -752,6 +757,7 @@ static enki_value _wisp_thunk(wisp_rt* rt, enki_value val_v)
 
 enki_value wisp_eval(wisp_rt* rt, enki_value val_v)
 {
+    ENKI_PROFILE_ZONE("wisp_eval");
     enki_value exp_v = _wisp_macroexpand(rt, 0, NULL, val_v);
     enki_value thk_v = _wisp_thunk(rt, exp_v);
     return thk_v;

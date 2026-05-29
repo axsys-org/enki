@@ -5,6 +5,7 @@
 
 #include "enki/gc.h"
 #include "enki/interp.h"
+#include "enki/profile.h"
 #include "enki/trace.h"
 #include "enki/value.h"
 
@@ -50,6 +51,7 @@ void enki_gc_destroy(enki_gc* gc) {
 }
 
 void* enki_gc_alloc(enki_gc* gc, size_t size_s, size_t align_s) {
+    ENKI_PROFILE_ZONE("enki_gc_alloc");
     if (!gc) abort();
     void* new = enki_arena_alloc_aligned(gc->active_a, size_s, align_s);
     if (!new) {
@@ -74,6 +76,7 @@ void* enki_gc_alloc(enki_gc* gc, size_t size_s, size_t align_s) {
 }
 
 void* enki_gc_alloc_locked(enki_gc* gc, size_t size_s, size_t align_s) {
+    ENKI_PROFILE_ZONE("enki_gc_alloc_locked");
     if(!gc) abort();
     enki_gc_lock(gc);
     void* new = enki_arena_alloc_aligned(gc->active_a, size_s, align_s);
@@ -92,6 +95,7 @@ void* enki_gc_alloc_locked(enki_gc* gc, size_t size_s, size_t align_s) {
 }
 
 enki_value enki_gc_copy(enki_gc* gc, enki_value val_v) {
+    ENKI_PROFILE_ZONE("enki_gc_copy");
     if(!IS_PTR(val_v)) return val_v;
     enki_value_header* h = ENKI_AS(enki_value_header, val_v);
     if(h->kind_b == ENKI_FRWD) {
@@ -113,6 +117,7 @@ enki_value enki_gc_copy(enki_gc* gc, enki_value val_v) {
 }
 
 void enki_gc_collect(enki_gc* gc) {
+    ENKI_PROFILE_ZONE("enki_gc_collect");
     if (!gc) return;
     gc->root->stats.gc_collect_s++;
     if(gc->lock_depth > 0) {
