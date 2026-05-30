@@ -271,34 +271,19 @@ typedef struct {
   size_t n_caps;
 } enki_msg;
 
+typedef enum {
+  ENKI_ACTOR_RUNNABLE,
+  ENKI_ACTOR_BLOCKED,
+  ENKI_ACTOR_DONE,
+} actor_state;
+
 typedef struct enki_actor {
   enki_interpreter* i;
-  pthread_cond_t cv;
-  pthread_mutex_t mu;
   ms_queue inbox;
   size_t next_handle;
   struct enki_actor* handles[HANDLES_MAX];
-  pthread_t thread;
+  actor_state state;
 } enki_actor;
-
-typedef struct {
-  enki_actor* actor;
-  enki_value fn;
-} enki_actor_thread_ctx;
-
-static void* enki_actor_thread_main(void* arg) {
-
-  enki_actor_thread_ctx* ctx = arg;
-  enki_actor* actor = ctx->actor;
-  enki_value fn = ctx->fn;
-  enki_interpreter* i = actor->i;
-  i->our_a.free(i->our_a.ctx, ctx);
-
-  enki_value arg0 = 0;
-  enki_interp_enter_call(i, fn, 1, &arg0);
-  enki_interp_run(i);
-  return NULL;
-}
 
 void op82_spawn(enki_interpreter* i) {
   enki_value fn = i->stack_v[i->sp - 1];
@@ -319,47 +304,39 @@ void op82_spawn(enki_interpreter* i) {
   );
 
   child_i->actor = child;
+  child_i->scheduler = i->scheduler;
   child->i = child_i;
- 
-  child_i->actor = child;
-  child->i = child_i;
-  if(pthread_cond_init(&child->cv, NULL) != 0) {
-    enki_interp_throw(i, ENKI_ERROR_IO, 0);
-  }
-  if(pthread_mutex_init(&child->mu, NULL) != 0) {
-    enki_interp_throw(i, ENKI_ERROR_IO, 0);
-  }
-  child->inbox = enki_init_mailbox();
+  enki_init_mailbox(&child->inbox);
   child->handles[0] = child;
   child->next_handle = 1;
-  enki_actor_thread_ctx* ctx = child_i->our_a.alloc(child_i->our_a.ctx, sizeof(*ctx));
-  if(ctx == NULL) enki_interp_throw(i, ENKI_ERROR_OOM, 0);
+  child->state = ENKI_ACTOR_RUNNABLE;
+  enki_value arg0 = 0;
+  enki_interp_enter_call(child_i, fn, 1, &arg0);
 
-  ctx->actor = child;
-  ctx->fn = fn;
-  pthread_t tid;
-  if(pthread_create(&tid, NULL, enki_actor_thread_main, ctx) != 0) {
-    i->our_a.free(i->our_a.ctx, ctx);
-    enki_interp_throw(i, ENKI_ERROR_IO, 0);
-  }
-  pthread_detach(tid);
   size_t hdl = curr->next_handle++;
   curr->handles[hdl] = child;
+
+  enki_scheduler_enqueue(i->scheduler, child);
+
   i->stack_v[i->sp - 1] = (enki_value)hdl;
 }
 
-
-
-void op82_send() {
-Send h msg:
-
-Look up h in sender’s actor handle table.
-Get target enki_actor*.
-Push message { msg, no caps } into target inbox.
-Signal target inbox condvar.
-Return 0.
-
+void op82_send(enki_interpreter* i) {
+  enki_value hdl = i->stack_v[i->sp - 2];
+  enki_value msg = i->stack_v[i->sp - 1];
+  enki_actor* curr = i->actor;
+  if(IS_PTR(hdl)) enki_interp_throw(i, ENKI_ERROR_TYPE, hdl);
+  if(hdl >= HANDLES_MAX) enki_interp_throw(i, ENKI_ERROR_BOUNDS, hdl);
+  enki_actor* target = curr->handles[(size_t)hdl];
+  enki_msg_push(target->inbox, msg);
+  if(target->state == ENKI_ACTOR_BLOCKED) {
+    taget->state = ENKI_ACTOR_RUNNABLE;
+    enki_scheduler_enqueue(i->scheduler, target);
+  }
+  i->sp--;
+  i->stack_v[i->sp - 2] = 0;
 }
+
 void op82_send_caps() {
 Resolve h in sender table to target actor.
 Interpret caps_row as a row of numeric handles.
