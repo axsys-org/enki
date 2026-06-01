@@ -3,9 +3,6 @@
 #include <errno.h>
 #include <setjmp.h>
 #include <enki/wisp.h>
-#include <enki/print.h>
-#include <enki/gc.h>
-#include <enki/interp.h>
 
 wisp_rt* rt = NULL;
 
@@ -47,11 +44,11 @@ int main()
       printf("Failed to evaluate: %s\n", rt->msg_c);
       continue;
     } else {
-      enki_value val_v = wisp_parse(rt, &txt_c);
-      // printf("parsed: %s\n", enki_print_value(EA_TMP_ALLOC, val_v, NULL));
-      enki_value eve_v = wisp_eval(rt, val_v);
-      printf(">> %s\n", enki_print_value(loc_a, eve_v, NULL));
-      // enki_gc_collect(rt->i->gc);
+      er_val val_v = wisp_parse(rt, &txt_c);
+      er_val eve_v = wisp_eval(rt, val_v);
+      char* out_c = wisp_print_value(rt, eve_v, NULL);
+      printf(">> %s\n", out_c);
+      loc_a->free(loc_a->ctx, out_c);
     }
   }
   return 0;

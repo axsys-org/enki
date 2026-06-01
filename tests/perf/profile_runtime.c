@@ -730,7 +730,7 @@ static int run_op66_rows(size_t n, double seconds)
     return 0;
 }
 
-static enki_value wisp_eval_text(wisp_rt* rt, const char* input_c)
+static er_val wisp_eval_text(wisp_rt* rt, const char* input_c)
 {
     char* cur_c = (char*)input_c;
     rt->err_f = 1;
@@ -738,8 +738,8 @@ static enki_value wisp_eval_text(wisp_rt* rt, const char* input_c)
         fprintf(stderr, "wisp error: %s\n", rt->msg_c ? rt->msg_c : "(no message)");
         exit(1);
     }
-    enki_value parsed_v = wisp_parse(rt, &cur_c);
-    enki_value res_v = wisp_eval(rt, parsed_v);
+    er_val parsed_v = wisp_parse(rt, &cur_c);
+    er_val res_v = wisp_eval(rt, parsed_v);
     rt->err_f = 0;
     return res_v;
 }
@@ -775,19 +775,20 @@ static int run_wisp_plan_fib(size_t n, double seconds)
     snprintf(query_c, sizeof(query_c), "(fib %zu)", n);
 
     size_t iterations_s = 0;
-    enki_value last_v = 0;
+    er_val last_v = 0;
     double end_s = now_s() + seconds;
     while(now_s() < end_s) {
         ENKI_PROFILE_ZONE("profile_iteration");
         last_v = wisp_eval_text(rt, query_c);
-        enki_arena_reset(rt->i->scratch_a);
         iterations_s++;
-        maybe_collect_interp(rt->i);
         ENKI_PROFILE_FRAME("profile_runtime");
         ENKI_PROFILE_PLOT_I("iterations", (int64_t)iterations_s);
     }
 
-    print_interp_result("wisp_plan_fib", n, last_v, iterations_s, rt->i);
+    char* out_c = wisp_print_value(rt, last_v, NULL);
+    printf("profile_runtime: workload=wisp_plan_fib n=%zu result=%s iterations=%zu\n",
+           n, out_c, iterations_s);
+    sys_a.free(sys_a.ctx, out_c);
     wisp_rt_free(&sys_a, rt);
     return 0;
 }

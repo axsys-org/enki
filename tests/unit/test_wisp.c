@@ -1,47 +1,42 @@
 #include <criterion/criterion.h>
-#include <enki/interp.h>
-#include <enki/print.h>
-#include <enki/vector.h>
+#include <enki/run.h>
 #include <enki/wisp.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 static wisp_rt* rt;
 
 static void setup(void)
 {
-    (void)mkdir("./snap", 0700);
-    (void)unlink("./snap/data.mdb");
-    (void)unlink("./snap/lock.mdb");
     rt = wisp_rt_alloc(&sys_a);
 }
 
 static void teardown(void)
 {
-    enki_store_close(&rt->i->store);
     wisp_rt_free(&sys_a, rt);
-    (void)unlink("./snap/data.mdb");
-    (void)unlink("./snap/lock.mdb");
 }
 
 TestSuite(wisp, .init = setup, .fini = teardown);
 
-static enki_value small_strnat(const char* str_c)
+static er_val small_strnat(const char* str_c)
 {
     size_t str_s = strlen(str_c);
     cr_assert_lt(str_s, 8);
-    return enki_alloc_strnat(rt->gc, (char*)str_c, str_s);
+    er_val out_v = 0;
+    for (size_t i = 0; i < str_s; i++) {
+        out_v |= ((er_val)(uint8_t)str_c[i]) << (i * 8u);
+    }
+    return out_v;
 }
 
-static void assert_small_strnat(enki_value value_v, const char* expected_c)
+static void assert_small_strnat(er_val value_v, const char* expected_c)
 {
     cr_assert_eq(value_v, small_strnat(expected_c));
 }
 
-static void assert_strnat_bytes(enki_value value_v, const char* expected_c)
+static void assert_strnat_bytes(er_val value_v, const char* expected_c)
 {
     size_t expected_s = strlen(expected_c);
 
@@ -50,52 +45,46 @@ static void assert_strnat_bytes(enki_value value_v, const char* expected_c)
         return;
     }
 
-    cr_assert(IS_PTR(value_v));
-    obj_header* header = ENKI_TO_PTR(value_v);
-    cr_assert_eq(header->kind_b, ENKI_BIG_NAT);
+    er_bat* bat = er_outt(er_tag_bat, value_v);
+    cr_assert_not_null(bat);
 
-    enki_nat* nat = (enki_nat*)header;
-    size_t expected_limbs_s = (expected_s + sizeof(mp_limb_t) - 1u) / sizeof(mp_limb_t);
-    cr_assert_eq(nat->n_limbs_s, expected_limbs_s);
-    cr_assert_eq(memcmp(nat->limbs, expected_c, expected_s), 0);
+    size_t expected_limbs_s = (expected_s + sizeof(uint64_t) - 1u) / sizeof(uint64_t);
+    cr_assert_eq(bat->lim_s, expected_limbs_s);
+    cr_assert_eq(memcmp(bat->lim_q, expected_c, expected_s), 0);
 }
 
-static enki_app* assert_app(enki_value value_v, enki_value fn_v, size_t n_args_s)
+static er_app* assert_app(er_val value_v, er_val fn_v, size_t arg_s)
 {
-    cr_assert(IS_PTR(value_v));
-    obj_header* header = ENKI_TO_PTR(value_v);
-    cr_assert_eq(header->kind_b, ENKI_APP);
-
-    enki_app* app = (enki_app*)header;
+    er_app* app = er_outt(er_tag_app, value_v);
+    cr_assert_not_null(app);
     cr_assert_eq(app->fn_v, fn_v);
-    cr_assert_eq(app->n_args_s, n_args_s);
+    cr_assert_eq(app->arg_s, arg_s);
     return app;
 }
 
-static enki_app* assert_row(enki_value value_v, size_t n_args_s)
+static er_app* assert_row(er_val value_v, size_t arg_s)
 {
-    return assert_app(value_v, 0, n_args_s);
+    return assert_app(value_v, 0, arg_s);
 }
 
-static enki_law* assert_law(enki_value value_v)
+static er_law* assert_law(er_val value_v)
 {
-    cr_assert(IS_PTR(value_v));
-    obj_header* header = ENKI_TO_PTR(value_v);
-    cr_assert_eq(header->kind_b, ENKI_LAW);
-    return (enki_law*)header;
+    er_law* law = er_outt(er_tag_law, value_v);
+    cr_assert_not_null(law);
+    return law;
 }
 
-static enki_app* assert_quote(enki_value value_v, const char* expected_c)
+static er_app* assert_quote(er_val value_v, const char* expected_c)
 {
-    enki_app* quote = assert_app(value_v, 1, 1);
-    assert_strnat_bytes(quote->args_v[0], expected_c);
+    er_app* quote = assert_app(value_v, 1, 1);
+    assert_strnat_bytes(quote->arg_v[0], expected_c);
     return quote;
 }
 
-static enki_value parse_input(char* input_c, char** rest_c)
+static er_val parse_input(char* input_c, char** rest_c)
 {
     char* cur_c = input_c;
-    enki_value value_v = wisp_parse(rt, &cur_c);
+    er_val value_v = wisp_parse(rt, &cur_c);
 
     if (rest_c) {
         *rest_c = cur_c;
@@ -103,10 +92,10 @@ static enki_value parse_input(char* input_c, char** rest_c)
     return value_v;
 }
 
-static enki_value eval_input(char* input_c)
+static er_val eval_input(char* input_c)
 {
     char* cur_c = input_c;
-    enki_value value_v = wisp_parse(rt, &cur_c);
+    er_val value_v = wisp_parse(rt, &cur_c);
     return wisp_eval(rt, value_v);
 }
 
@@ -131,11 +120,11 @@ static void assert_parse_fails(char* input_c, const char* expected_msg_c)
 Test(wisp, parse_str)
 {
     char* rest_c = NULL;
-    enki_value law_v = parse_input("\"law\" tail", &rest_c);
+    er_val law_v = parse_input("\"law\" tail", &rest_c);
     assert_quote(law_v, "law");
     cr_assert_str_eq(rest_c, " tail");
 
-    enki_value ind_v = parse_input("\"testing indirect nat parsing\"", &rest_c);
+    er_val ind_v = parse_input("\"testing indirect nat parsing\"", &rest_c);
     assert_quote(ind_v, "testing indirect nat parsing");
     cr_assert_str_eq(rest_c, "");
 }
@@ -143,7 +132,7 @@ Test(wisp, parse_str)
 Test(wisp, parse_symbol_stops_at_delimiter)
 {
     char* rest_c = NULL;
-    enki_value value_v = parse_input("foo bar", &rest_c);
+    er_val value_v = parse_input("foo bar", &rest_c);
 
     assert_small_strnat(value_v, "foo");
     cr_assert_str_eq(rest_c, " bar");
@@ -152,43 +141,43 @@ Test(wisp, parse_symbol_stops_at_delimiter)
 Test(wisp, parse_parenthesized_row)
 {
     char* rest_c = NULL;
-    enki_app* row = assert_row(parse_input("(add x y)", &rest_c), 3);
+    er_app* row = assert_row(parse_input("(add x y)", &rest_c), 3);
 
-    assert_small_strnat(row->args_v[0], "add");
-    assert_small_strnat(row->args_v[1], "x");
-    assert_small_strnat(row->args_v[2], "y");
+    assert_small_strnat(row->arg_v[0], "add");
+    assert_small_strnat(row->arg_v[1], "x");
+    assert_small_strnat(row->arg_v[2], "y");
     cr_assert_str_eq(rest_c, "");
 }
 
 Test(wisp, parse_nested_form)
 {
     char* rest_c = NULL;
-    enki_app* outer = assert_row(parse_input("((#pin \"B\") (\"Up\" i v r))", &rest_c), 2);
+    er_app* outer = assert_row(parse_input("((#pin \"B\") (\"Up\" i v r))", &rest_c), 2);
 
-    enki_app* pin_row = assert_row(outer->args_v[0], 2);
-    assert_small_strnat(pin_row->args_v[0], "#pin");
-    assert_quote(pin_row->args_v[1], "B");
+    er_app* pin_row = assert_row(outer->arg_v[0], 2);
+    assert_small_strnat(pin_row->arg_v[0], "#pin");
+    assert_quote(pin_row->arg_v[1], "B");
 
-    enki_app* up_row = assert_row(outer->args_v[1], 4);
-    assert_quote(up_row->args_v[0], "Up");
-    assert_small_strnat(up_row->args_v[1], "i");
-    assert_small_strnat(up_row->args_v[2], "v");
-    assert_small_strnat(up_row->args_v[3], "r");
+    er_app* up_row = assert_row(outer->arg_v[1], 4);
+    assert_quote(up_row->arg_v[0], "Up");
+    assert_small_strnat(up_row->arg_v[1], "i");
+    assert_small_strnat(up_row->arg_v[2], "v");
+    assert_small_strnat(up_row->arg_v[3], "r");
     cr_assert_str_eq(rest_c, "");
 }
 
 Test(wisp, parse_brackets_and_braces)
 {
     char* rest_c = NULL;
-    enki_app* bracket = assert_row(parse_input("[a b]", &rest_c), 3);
-    assert_small_strnat(bracket->args_v[0], "BRAK");
-    assert_small_strnat(bracket->args_v[1], "a");
-    assert_small_strnat(bracket->args_v[2], "b");
+    er_app* bracket = assert_row(parse_input("[a b]", &rest_c), 3);
+    assert_small_strnat(bracket->arg_v[0], "BRAK");
+    assert_small_strnat(bracket->arg_v[1], "a");
+    assert_small_strnat(bracket->arg_v[2], "b");
     cr_assert_str_eq(rest_c, "");
 
-    enki_app* brace = assert_row(parse_input("{x}", &rest_c), 2);
-    assert_small_strnat(brace->args_v[0], "CURL");
-    assert_small_strnat(brace->args_v[1], "x");
+    er_app* brace = assert_row(parse_input("{x}", &rest_c), 2);
+    assert_small_strnat(brace->arg_v[0], "CURL");
+    assert_small_strnat(brace->arg_v[1], "x");
     cr_assert_str_eq(rest_c, "");
 }
 
@@ -198,38 +187,38 @@ Test(wisp, parse_empty_containers)
     cr_assert_eq(parse_input("()", &rest_c), 0);
     cr_assert_str_eq(rest_c, "");
 
-    enki_app* empty_bracket = assert_row(parse_input("[]", &rest_c), 1);
-    assert_small_strnat(empty_bracket->args_v[0], "BRAK");
+    er_app* empty_bracket = assert_row(parse_input("[]", &rest_c), 1);
+    assert_small_strnat(empty_bracket->arg_v[0], "BRAK");
     cr_assert_str_eq(rest_c, "");
 }
 
 Test(wisp, parse_juxtaposition)
 {
     char* rest_c = NULL;
-    enki_app* juxt = assert_app(parse_input("foo(bar baz)", &rest_c), 0, 3);
+    er_app* juxt = assert_app(parse_input("foo(bar baz)", &rest_c), 0, 3);
 
-    assert_small_strnat(juxt->args_v[0], "JUXT");
-    assert_small_strnat(juxt->args_v[1], "foo");
+    assert_small_strnat(juxt->arg_v[0], "JUXT");
+    assert_small_strnat(juxt->arg_v[1], "foo");
 
-    enki_app* args = assert_row(juxt->args_v[2], 2);
-    assert_small_strnat(args->args_v[0], "bar");
-    assert_small_strnat(args->args_v[1], "baz");
+    er_app* args = assert_row(juxt->arg_v[2], 2);
+    assert_small_strnat(args->arg_v[0], "bar");
+    assert_small_strnat(args->arg_v[1], "baz");
     cr_assert_str_eq(rest_c, "");
 
-    enki_app* empty_juxt = assert_app(parse_input("foo()", &rest_c), 0, 3);
-    assert_small_strnat(empty_juxt->args_v[0], "JUXT");
-    assert_small_strnat(empty_juxt->args_v[1], "foo");
-    cr_assert_eq(empty_juxt->args_v[2], 0);
+    er_app* empty_juxt = assert_app(parse_input("foo()", &rest_c), 0, 3);
+    assert_small_strnat(empty_juxt->arg_v[0], "JUXT");
+    assert_small_strnat(empty_juxt->arg_v[1], "foo");
+    cr_assert_eq(empty_juxt->arg_v[2], 0);
     cr_assert_str_eq(rest_c, "");
 }
 
 Test(wisp, parse_comments_and_whitespace)
 {
     char* rest_c = NULL;
-    enki_app* row = assert_row(parse_input(" ; before\n(foo ; inside\n bar)", &rest_c), 2);
+    er_app* row = assert_row(parse_input(" ; before\n(foo ; inside\n bar)", &rest_c), 2);
 
-    assert_small_strnat(row->args_v[0], "foo");
-    assert_small_strnat(row->args_v[1], "bar");
+    assert_small_strnat(row->arg_v[0], "foo");
+    assert_small_strnat(row->arg_v[1], "bar");
     cr_assert_str_eq(rest_c, "");
 }
 
@@ -245,62 +234,44 @@ Test(wisp, parse_errors)
 Test(wisp, bind_law_and_apply_it)
 {
     cr_assert_eq(eval_input("(#bind add 5)"), 5);
-    enki_value law_v =
+    er_val law_v =
         eval_input("(#bind add (#law \"add\" (add x y) ((#pin \"B\") (\"Add\" x y))))");
 
-    cr_assert(IS_PTR(law_v));
-    cr_assert_eq(((obj_header*)ENKI_TO_PTR(law_v))->kind_b, ENKI_LAW);
-
-    enki_value ret_v = eval_input("(add 20 22)");
-    cr_assert_eq(ret_v, 42);
+    cr_assert_not_null(assert_law(law_v));
+    cr_assert_eq(eval_input("(add 20 22)"), 42);
 }
 
-Test(wisp, law_self_resolves_through_plan_treewalk)
+Test(wisp, recursive_program_validates_extended_snippet)
 {
-    enki_value law_v = eval_input("(#bind selfer (#law \"selfer\" (selfer x) selfer))");
-    cr_assert(IS_PTR(law_v));
-    cr_assert_eq(((obj_header*)ENKI_TO_PTR(law_v))->kind_b, ENKI_LAW);
-
-    enki_law* law = (enki_law*)ENKI_TO_PTR(law_v);
-    cr_assert_eq(law->bc_len_s, 0);
-
-    cr_assert_eq(eval_input("(#app selfer 99)"), law_v);
-}
-
-Test(wisp, recursive_plan_program_validates_extended_snippet)
-{
-    cr_assert_eq(
-        assert_law(eval_input("(#bind inc (#law \"inc\" (inc x) ((#pin \"B\") (\"Inc\" x))))"))
-            ->bc_len_s,
-        0);
-    cr_assert_eq(assert_law(eval_input("(#bind if (#law \"if\" (if cond then else) "
+    cr_assert_gt(assert_law(eval_input("(#bind inc (#law \"inc\" (inc x) "
+                                       "((#pin \"B\") (\"Inc\" x))))"))
+                     ->bc_s,
+                 0);
+    cr_assert_gt(assert_law(eval_input("(#bind if (#law \"if\" (if cond then else) "
                                        "((#pin \"B\") (\"If\" cond then else))))"))
-                     ->bc_len_s,
+                     ->bc_s,
                  0);
-    cr_assert_eq(
-        assert_law(eval_input("(#bind eq (#law \"eq\" (eq a b) ((#pin \"B\") (\"Eq\" a b))))"))
-            ->bc_len_s,
-        0);
-    cr_assert_eq(assert_law(eval_input("(#bind dechelp (#law \"dechelp\" (dechelp count x) "
-                                       "(if (eq (inc count) x) count (dechelp (inc count) x))))"))
-                     ->bc_len_s,
+    cr_assert_gt(assert_law(eval_input("(#bind eq (#law \"eq\" (eq a b) "
+                                       "((#pin \"B\") (\"Eq\" a b))))"))
+                     ->bc_s,
                  0);
-    cr_assert_eq(
-        assert_law(eval_input("(#bind dec (#law \"dec\" (dec x) (dechelp 0 x)))"))->bc_len_s,
-        0);
-    cr_assert_eq(assert_law(eval_input("(#bind add (#law \"add\" (add a b) "
+    cr_assert_gt(assert_law(eval_input("(#bind dechelp (#law \"dechelp\" (dechelp count x) "
+                                       "(if (eq (inc count) x) count "
+                                       "(dechelp (inc count) x))))"))
+                     ->bc_s,
+                 0);
+    cr_assert_gt(assert_law(eval_input("(#bind dec (#law \"dec\" (dec x) (dechelp 0 x)))"))
+                     ->bc_s,
+                 0);
+    cr_assert_gt(assert_law(eval_input("(#bind add (#law \"add\" (add a b) "
                                        "(if (eq 0 a) b (add (dec a) (inc b)))))"))
-                     ->bc_len_s,
+                     ->bc_s,
                  0);
-    cr_assert_eq(assert_law(eval_input("(#bind fib (#law \"fib\" (fib n) "
+    cr_assert_gt(assert_law(eval_input("(#bind fib (#law \"fib\" (fib n) "
                                        "(if (eq n 1) 1 (if (eq n 2) 1 "
                                        "(add (fib (dec n)) (fib (dec (dec n))))))))"))
-                     ->bc_len_s,
+                     ->bc_s,
                  0);
-    cr_assert_eq(
-        assert_law(eval_input("(#bind inc (#law \"inc\" (inc x) ((#pin \"B\") (\"Inc\" x))))"))
-            ->bc_len_s,
-        0);
 
     cr_assert_eq(eval_input("(inc 41)"), 42);
     cr_assert_eq(eval_input("(dec 5)"), 4);

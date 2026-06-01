@@ -356,6 +356,45 @@ static er_val er_app_make(const enki_allocator* loc_a, er_val fn_v, size_t arg_s
     return er_app_init(app, fn_v, arg_s, arg_v);
 }
 
+er_val er_eval(const enki_allocator* loc_a, er_val val_v)
+{
+    if (loc_a == NULL || loc_a->alloc == NULL || loc_a->free == NULL) {
+        return er_bad;
+    }
+
+    enum {
+        ER_EVAL_DSTACK_S = 65536,
+        ER_EVAL_KSTACK_S = 262144,
+    };
+
+    er_val* dstack_v = loc_a->alloc(loc_a->ctx, ER_EVAL_DSTACK_S * sizeof(er_val));
+    er_kon* kstack_v = loc_a->alloc(loc_a->ctx, ER_EVAL_KSTACK_S * sizeof(er_kon));
+    if (dstack_v == NULL || kstack_v == NULL) {
+        if (dstack_v != NULL) {
+            loc_a->free(loc_a->ctx, dstack_v);
+        }
+        if (kstack_v != NULL) {
+            loc_a->free(loc_a->ctx, kstack_v);
+        }
+        return er_bad;
+    }
+
+    er_vm vm = {
+        .code = NULL,
+        .loc_a = loc_a,
+        .dstack = dstack_v,
+        .dsp = dstack_v,
+        .kbase = kstack_v,
+        .ksp = kstack_v,
+        .b_count = 0,
+        .k_count = 0,
+    };
+    er_val out_v = plan_eval(&vm, val_v);
+    loc_a->free(loc_a->ctx, kstack_v);
+    loc_a->free(loc_a->ctx, dstack_v);
+    return out_v;
+}
+
 static er_val er_app_take(const enki_allocator* loc_a, er_app* old, size_t arg_s)
 {
     if (old == NULL) {
