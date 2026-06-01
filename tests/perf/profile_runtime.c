@@ -444,9 +444,7 @@ static enki_value make_oversat_thunk(enki_interpreter* i, enki_value add_v, enki
 
 static void maybe_collect_interp(enki_interpreter* i)
 {
-    if(i->gc->active_a->off_o > (16 * 1024 * 1024)) {
-        enki_gc_collect(i->gc);
-    }
+    (void)i;
 }
 
 static void print_interp_result(const char* workload_c, size_t n, enki_value last_v,

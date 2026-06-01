@@ -1,3 +1,4 @@
+#include "enki/gc.h"
 #include "enki/run.h"
 
 #include <criterion/criterion.h>
@@ -171,6 +172,111 @@ static er_val make_app_value(er_val fn_v, size_t arg_s, const er_val arg_v[])
     er_val app_v = er_app_init(app, fn_v, arg_s, arg_v);
     cr_assert_eq(er_get_tag(app_v), er_tag_app);
     return app_v;
+}
+
+typedef struct er_gc_test_root {
+    er_val val_v;
+} er_gc_test_root;
+
+static void trace_er_gc_test_root(enki_gc* gc, void* root_p)
+{
+    er_gc_test_root* root = root_p;
+    root->val_v = enki_gc_copy(gc, root->val_v);
+}
+
+static er_val make_gc_app_value(const enki_allocator* loc_a, er_val fn_v, size_t arg_s,
+                                const er_val arg_v[])
+{
+    er_app* app = er_app_alloc(loc_a, arg_s);
+    cr_assert_not_null(app);
+    er_val app_v = er_app_init(app, fn_v, arg_s, arg_v);
+    cr_assert_eq(er_get_tag(app_v), er_tag_app);
+    return app_v;
+}
+
+Test(run_gc, collect_moves_nested_er_values)
+{
+    enki_gc* gc = enki_gc_create(enki_allocator_system(), 4096, NULL);
+    cr_assert_not_null(gc);
+    const enki_allocator* loc_a = enki_gc_as_allocator(gc);
+
+    er_val child_arg_v[] = {11, 22};
+    er_val child_v = make_gc_app_value(loc_a, 7, 2, child_arg_v);
+    er_app* old_child = er_outt(er_tag_app, child_v);
+    er_val root_arg_v[] = {child_v, 33};
+    er_val root_v = make_gc_app_value(loc_a, 9, 2, root_arg_v);
+    er_app* old_root = er_outt(er_tag_app, root_v);
+
+    er_gc_test_root root = {.val_v = root_v};
+    enki_gc_set_trace_root(gc, &root, trace_er_gc_test_root);
+    enki_gc_collect(gc);
+
+    er_app* moved_root = er_outt(er_tag_app, root.val_v);
+    cr_assert_not_null(moved_root);
+    cr_assert_neq(moved_root, old_root);
+    cr_assert_eq(moved_root->fn_v, 9);
+    cr_assert_eq(moved_root->arg_s, 2);
+    cr_assert_eq(moved_root->arg_v[1], 33);
+
+    er_app* moved_child = er_outt(er_tag_app, moved_root->arg_v[0]);
+    cr_assert_not_null(moved_child);
+    cr_assert_neq(moved_child, old_child);
+    cr_assert_eq(moved_child->fn_v, 7);
+    cr_assert_eq(moved_child->arg_s, 2);
+    cr_assert_eq(moved_child->arg_v[0], 11);
+    cr_assert_eq(moved_child->arg_v[1], 22);
+
+    enki_gc_destroy(gc);
+}
+
+Test(run_gc, eval_gc_forces_moved_thunk)
+{
+    enki_gc* gc = enki_gc_create(enki_allocator_system(), 4096, NULL);
+    cr_assert_not_null(gc);
+    const enki_allocator* loc_a = enki_gc_as_allocator(gc);
+
+    er_val answer_v = 1234;
+    er_thk* thk = er_thk_alloc(loc_a, 1);
+    cr_assert_not_null(thk);
+    er_val thk_v = er_thk_init(thk, ER_XDONE, 1, &answer_v);
+    cr_assert_eq(er_get_tag(thk_v), er_tag_thk);
+
+    er_gc_test_root root = {.val_v = thk_v};
+    enki_gc_set_trace_root(gc, &root, trace_er_gc_test_root);
+    enki_gc_collect(gc);
+
+    cr_assert_eq(er_eval_gc(gc, root.val_v), answer_v);
+    enki_gc_destroy(gc);
+}
+
+Test(run_gc, compiled_law_survives_collection_before_eval)
+{
+    enki_gc* gc = enki_gc_create(enki_allocator_system(), 16384, NULL);
+    cr_assert_not_null(gc);
+    const enki_allocator* loc_a = enki_gc_as_allocator(gc);
+
+    er_val add_v = er_law_make(loc_a, PLAN_S3('A', 'd', 'd'), 0, 2);
+    cr_assert_eq(er_get_tag(add_v), er_tag_law);
+
+    er_val add_arg_v[] = {add_v, 10};
+    er_val add_10_v = make_gc_app_value(loc_a, 0, 2, add_arg_v);
+    er_val body_arg_v[] = {add_10_v, 32};
+    er_val body_v = make_gc_app_value(loc_a, 0, 2, body_arg_v);
+    er_val law_v = er_law_make(loc_a, 0, body_v, 0);
+    cr_assert_eq(er_get_tag(law_v), er_tag_law);
+
+    er_gc_test_root root = {.val_v = law_v};
+    enki_gc_set_trace_root(gc, &root, trace_er_gc_test_root);
+    enki_gc_collect(gc);
+
+    er_val call_arg_v[] = {root.val_v};
+    er_thk* thk = er_thk_alloc(loc_a, 1);
+    cr_assert_not_null(thk);
+    er_val call_v = er_thk_init(thk, ER_CALL, 1, call_arg_v);
+    cr_assert_eq(er_get_tag(call_v), er_tag_thk);
+
+    cr_assert_eq(er_eval_gc(gc, call_v), 42);
+    enki_gc_destroy(gc);
 }
 
 static er_val make_plan_call_expr(er_val f_v, er_val x_v)

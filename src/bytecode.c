@@ -5,6 +5,8 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "enki/gc.h"
+#include "enki/profile.h"
 #include "enki/run_ops.h"
 
 typedef struct er_bc_code {
@@ -499,6 +501,7 @@ static bool er_bc_compile_call_tail(er_bc_code* code, uint32_t fun_ari_d, size_t
 static bool er_bc_compile_label(er_bc_compiler* c, size_t depth_s, uint32_t ari_d,
                                 uint32_t label_d, er_val body_v)
 {
+    ENKI_PROFILE_ZONE("er_bc_compile_label");
     er_bc_code code = {.loc_a = c->loc_a, .ok_f = true};
     if (!er_bc_compile_expr(c, depth_s, ari_d, body_v, &code) || !er_bc_emit(&code, OP_RET)) {
         er_bc_code_free(&code);
@@ -515,6 +518,7 @@ static bool er_bc_compile_label(er_bc_compiler* c, size_t depth_s, uint32_t ari_
 static bool er_bc_compile_if(er_bc_compiler* c, size_t depth_s, uint32_t ari_d,
                              const er_val* arg_v, er_bc_code* code)
 {
+    ENKI_PROFILE_ZONE("er_bc_compile_if");
     if (!er_bc_compile_expr(c, depth_s, ari_d, arg_v[0], code)) {
         return false;
     }
@@ -531,6 +535,7 @@ static bool er_bc_compile_prim_call(er_bc_compiler* c, size_t depth_s, uint32_t 
                                     const er_bc_prim* prim, er_val f_v, const er_val* arg_v,
                                     size_t arg_s, er_bc_code* code)
 {
+    ENKI_PROFILE_ZONE("er_bc_compile_prim_call");
     if (prim->if_f && arg_s == 3) {
         return er_bc_compile_if(c, depth_s, ari_d, arg_v, code);
     }
@@ -555,6 +560,7 @@ static bool er_bc_compile_plain_call(er_bc_compiler* c, size_t depth_s, uint32_t
                                      er_val f_v, const er_val* arg_v, size_t arg_s,
                                      er_bc_code* code)
 {
+    ENKI_PROFILE_ZONE("er_bc_compile_plain_call");
     if (f_v == 0) {
         return er_bc_emit(code, OP_PUSH_SELF) &&
                er_bc_compile_args(c, depth_s, ari_d, arg_v, arg_s, code) &&
@@ -580,6 +586,7 @@ static bool er_bc_compile_plain_call(er_bc_compiler* c, size_t depth_s, uint32_t
 static bool er_bc_compile_call(er_bc_compiler* c, size_t depth_s, uint32_t ari_d, er_val f_v,
                                er_val x_v, er_bc_code* code)
 {
+    ENKI_PROFILE_ZONE("er_bc_compile_call");
     er_bc_vals lifted;
     if (!er_bc_lift_call(c, f_v, x_v, &lifted)) {
         er_bc_vals_free(&lifted);
@@ -609,6 +616,7 @@ static bool er_bc_compile_call(er_bc_compiler* c, size_t depth_s, uint32_t ari_d
 static bool er_bc_compile_expr(er_bc_compiler* c, size_t depth_s, uint32_t ari_d, er_val body_v,
                                er_bc_code* code)
 {
+    ENKI_PROFILE_ZONE("er_bc_compile_expr");
     if (er_bc_is_var(depth_s, body_v)) {
         return er_bc_emit_var(code, body_v);
     }
@@ -624,7 +632,13 @@ static bool er_bc_compile_expr(er_bc_compiler* c, size_t depth_s, uint32_t ari_d
 
 er_val er_law_compile(const enki_allocator* loc_a, er_val nam_v, er_val bod_v, uint32_t ari_d)
 {
+    ENKI_PROFILE_ZONE("er_law_compile");
     if (loc_a == NULL || loc_a->alloc == NULL || loc_a->free == NULL) {
+        return 0;
+    }
+    enki_gc* gc = enki_gc_from_allocator(loc_a);
+    const enki_allocator* work_a = gc == NULL ? loc_a : enki_gc_parent_allocator(gc);
+    if (work_a == NULL || work_a->alloc == NULL || work_a->free == NULL) {
         return 0;
     }
 
@@ -644,13 +658,13 @@ er_val er_law_compile(const enki_allocator* loc_a, er_val nam_v, er_val bod_v, u
     er_val* lets_v = NULL;
     er_op** code_v = NULL;
     er_bc_compiler c = {
-        .loc_a = loc_a,
+        .loc_a = work_a,
         .next_label_d = (uint32_t)let_s + 1,
         .ok_f = true,
     };
 
     if (let_s > 0) {
-        lets_v = loc_a->alloc(loc_a->ctx, let_s * sizeof(er_val));
+        lets_v = work_a->alloc(work_a->ctx, let_s * sizeof(er_val));
         if (lets_v == NULL) {
             goto cleanup;
         }
@@ -677,7 +691,7 @@ er_val er_law_compile(const enki_allocator* loc_a, er_val nam_v, er_val bod_v, u
     if (!c.ok_f || bc_s == 0) {
         goto cleanup;
     }
-    code_v = loc_a->alloc(loc_a->ctx, bc_s * sizeof(er_op*));
+    code_v = work_a->alloc(work_a->ctx, bc_s * sizeof(er_op*));
     if (code_v == NULL) {
         goto cleanup;
     }
@@ -692,10 +706,10 @@ er_val er_law_compile(const enki_allocator* loc_a, er_val nam_v, er_val bod_v, u
 
 cleanup:
     if (code_v != NULL) {
-        loc_a->free(loc_a->ctx, code_v);
+        work_a->free(work_a->ctx, code_v);
     }
     if (lets_v != NULL) {
-        loc_a->free(loc_a->ctx, lets_v);
+        work_a->free(work_a->ctx, lets_v);
     }
     er_bc_compiler_free(&c, law_v == 0);
     return law_v;

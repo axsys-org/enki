@@ -7,6 +7,8 @@
 
 #include <enki/allocator.h>
 
+typedef struct enki_gc enki_gc;
+
 // yes if [v] is indirect
 #define er_is_ptr(v) (((v) & (UINT64_C(1) << 63)) != 0)
 #define er_is_cat(v) (!er_is_ptr(v))
@@ -229,6 +231,10 @@ typedef struct {
   er_kon *ksp;
   uint64_t b_count;
   uint64_t k_count;
+
+  er_val* gc_rp;
+  er_val gc_tmp_v[8];
+  size_t gc_tmp_s;
 } er_vm;
 
 
@@ -236,11 +242,29 @@ typedef struct {
 er_val
 plan_eval(er_vm *vm, er_val val_v);
 
+er_val er_eval_gc(enki_gc* gc, er_val val_v);
+
+#ifndef PLAN_CH
 #define PLAN_CH(c) ((uint64_t)(uint8_t)(c))
+#endif
+#ifndef PLAN_S1
 #define PLAN_S1(a) ((er_val)PLAN_CH(a))
+#endif
+#ifndef PLAN_S2
 #define PLAN_S2(a, b) ((er_val)(PLAN_CH(a) | (PLAN_CH(b) << 8u)))
+#endif
+#ifndef PLAN_S3
 #define PLAN_S3(a, b, c) ((er_val)(PLAN_S2(a, b) | (PLAN_CH(c) << 16u)))
+#endif
+#ifndef PLAN_S4
 #define PLAN_S4(a, b, c, d) ((er_val)(PLAN_S3(a, b, c) | (PLAN_CH(d) << 24u)))
+#endif
+#ifndef PLAN_S5
 #define PLAN_S5(a, b, c, d, e) ((er_val)(PLAN_S4(a, b, c, d) | (PLAN_CH(e) << 32u)))
+#endif
+#ifndef PLAN_S6
 #define PLAN_S6(a, b, c, d, e, f) ((er_val)(PLAN_S5(a, b, c, d, e) | (PLAN_CH(f) << 40u)))
+#endif
+#ifndef PLAN_S7
 #define PLAN_S7(a, b, c, d, e, f, g) ((er_val)(PLAN_S6(a, b, c, d, e, f) | (PLAN_CH(g) << 48u)))
+#endif

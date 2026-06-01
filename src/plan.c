@@ -12,14 +12,30 @@
 #include "enki/profile.h"
 #include "enki/value.h"
 
+#ifndef PLAN_CH
 #define PLAN_CH(c) ((uint64_t)(uint8_t)(c))
+#endif
+#ifndef PLAN_S1
 #define PLAN_S1(a) ((enki_value)PLAN_CH(a))
+#endif
+#ifndef PLAN_S2
 #define PLAN_S2(a, b) ((enki_value)(PLAN_CH(a) | (PLAN_CH(b) << 8u)))
+#endif
+#ifndef PLAN_S3
 #define PLAN_S3(a, b, c) ((enki_value)(PLAN_S2(a, b) | (PLAN_CH(c) << 16u)))
+#endif
+#ifndef PLAN_S4
 #define PLAN_S4(a, b, c, d) ((enki_value)(PLAN_S3(a, b, c) | (PLAN_CH(d) << 24u)))
+#endif
+#ifndef PLAN_S5
 #define PLAN_S5(a, b, c, d, e) ((enki_value)(PLAN_S4(a, b, c, d) | (PLAN_CH(e) << 32u)))
+#endif
+#ifndef PLAN_S6
 #define PLAN_S6(a, b, c, d, e, f) ((enki_value)(PLAN_S5(a, b, c, d, e) | (PLAN_CH(f) << 40u)))
+#endif
+#ifndef PLAN_S7
 #define PLAN_S7(a, b, c, d, e, f, g) ((enki_value)(PLAN_S6(a, b, c, d, e, f) | (PLAN_CH(g) << 48u)))
+#endif
 
 typedef struct {
     enki_value head_v;

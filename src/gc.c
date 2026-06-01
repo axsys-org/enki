@@ -1,26 +1,115 @@
-#include <stdio.h>
+#include <stddef.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stddef.h>
 
 #include "enki/gc.h"
-#include "enki/interp.h"
 #include "enki/profile.h"
-#include "enki/trace.h"
-#include "enki/value.h"
 
-static size_t enki_gc_align_offset(size_t off_o) {
-    size_t align_s = _Alignof(enki_value_header);
-    return (off_o + align_s - 1) & ~(align_s - 1);
+static bool enki_gc_is_known_tag(er_val val_v)
+{
+    switch (er_get_tag(val_v)) {
+    case er_tag_bat:
+    case er_tag_pin:
+    case er_tag_law:
+    case er_tag_app:
+    case er_tag_thk:
+        return true;
+    default:
+        return false;
+    }
 }
 
-enki_gc* enki_gc_create(const enki_allocator* loc_a, size_t cap_s, enki_interpreter* root) {
-    if(!loc_a) return NULL;
+static size_t enki_gc_obj_size(const er_head* h)
+{
+    return h->siz_s & ~(size_t)0x3u;
+}
+
+static er_val* enki_gc_forward_slot(er_head* h)
+{
+    return (er_val*)((unsigned char*)h + sizeof(er_head));
+}
+
+static void enki_gc_work_reset(enki_gc* gc)
+{
+    gc->work_s = 0;
+    gc->work_i = 0;
+}
+
+static void enki_gc_work_push(enki_gc* gc, er_val val_v)
+{
+    if (gc->work_s == gc->work_cap_s) {
+        size_t next_s = gc->work_cap_s == 0 ? 256 : gc->work_cap_s * 2u;
+        if (next_s < gc->work_cap_s) {
+            abort();
+        }
+        er_val* next_v = gc->our_a.realloc != NULL
+                             ? gc->our_a.realloc(gc->our_a.ctx, gc->work_v,
+                                                 next_s * sizeof(er_val))
+                             : NULL;
+        if (next_v == NULL) {
+            next_v = gc->our_a.alloc(gc->our_a.ctx, next_s * sizeof(er_val));
+            if (next_v == NULL) {
+                abort();
+            }
+            if (gc->work_v != NULL) {
+                memcpy(next_v, gc->work_v, gc->work_s * sizeof(er_val));
+                gc->our_a.free(gc->our_a.ctx, gc->work_v);
+            }
+        }
+        gc->work_v = next_v;
+        gc->work_cap_s = next_s;
+    }
+    gc->work_v[gc->work_s++] = val_v;
+}
+
+static void* enki_gc_allocator_alloc(void* ctx, size_t size_s)
+{
+    return enki_gc_alloc((enki_gc*)ctx, size_s, _Alignof(er_head));
+}
+
+static void enki_gc_allocator_free(void* ctx, void* ptr)
+{
+    (void)ctx;
+    (void)ptr;
+}
+
+enki_gc* enki_gc_from_allocator(const enki_allocator* allocator)
+{
+    if (allocator == NULL || allocator->alloc != enki_gc_allocator_alloc) {
+        return NULL;
+    }
+    return (enki_gc*)allocator->ctx;
+}
+
+const enki_allocator* enki_gc_as_allocator(enki_gc* gc)
+{
+    return gc == NULL ? NULL : &gc->allocator_a;
+}
+
+const enki_allocator* enki_gc_parent_allocator(enki_gc* gc)
+{
+    return gc == NULL ? NULL : &gc->our_a;
+}
+
+enki_gc* enki_gc_create(const enki_allocator* loc_a, size_t cap_s, enki_interpreter* root)
+{
+    if (!loc_a) {
+        return NULL;
+    }
     enki_gc* gc = loc_a->alloc(loc_a->ctx, sizeof(enki_gc));
-    if (!gc) return NULL;
+    if (!gc) {
+        return NULL;
+    }
+    memset(gc, 0, sizeof(*gc));
     gc->our_a = *loc_a;
+    gc->allocator_a = (enki_allocator){
+        .ctx = gc,
+        .alloc = enki_gc_allocator_alloc,
+        .realloc = NULL,
+        .free = enki_gc_allocator_free,
+    };
     gc->cap_s = cap_s;
-    gc->lock_depth = 0;
     gc->root = root;
     gc->copy = enki_gc_copy;
     gc->alloc = enki_gc_alloc;
@@ -33,125 +122,201 @@ enki_gc* enki_gc_create(const enki_allocator* loc_a, size_t cap_s, enki_interpre
     return gc;
 }
 
-void enki_gc_lock(enki_gc* gc) {
-    if(!gc) abort();
+void enki_gc_set_trace_root(enki_gc* gc, void* root, enki_gc_trace_fn trace_fn)
+{
+    if (gc == NULL) {
+        return;
+    }
+    gc->trace_root = root;
+    gc->trace_fn = trace_fn;
+}
+
+void enki_gc_lock(enki_gc* gc)
+{
+    if (!gc) {
+        abort();
+    }
     gc->lock_depth++;
 }
 
-void enki_gc_unlock(enki_gc* gc) {
-    if(!gc || gc->lock_depth == 0) abort();
+void enki_gc_unlock(enki_gc* gc)
+{
+    if (!gc || gc->lock_depth == 0) {
+        abort();
+    }
     gc->lock_depth--;
 }
 
-void enki_gc_destroy(enki_gc* gc) {
-    if (!gc) return;
+void enki_gc_destroy(enki_gc* gc)
+{
+    if (!gc) {
+        return;
+    }
+    if (gc->work_v != NULL) {
+        gc->our_a.free(gc->our_a.ctx, gc->work_v);
+    }
     enki_arena_destroy(gc->idle_a);
     enki_arena_destroy(gc->active_a);
     gc->our_a.free(gc->our_a.ctx, gc);
 }
 
-void* enki_gc_alloc(enki_gc* gc, size_t size_s, size_t align_s) {
+void* enki_gc_alloc(enki_gc* gc, size_t size_s, size_t align_s)
+{
     ENKI_PROFILE_ZONE("enki_gc_alloc");
-    if (!gc) abort();
-    void* new = enki_arena_alloc_aligned(gc->active_a, size_s, align_s);
-    if (!new) {
-        if(gc->root != NULL) gc->root->stats.gc_alloc_fail_s++;
-        if(gc->lock_depth > 0 && gc->root != NULL) {
-            enki_interp_throw(gc->root, ENKI_ERROR_OOM, 0);
+    if (!gc) {
+        abort();
+    }
+    void* new_p = enki_arena_alloc_aligned(gc->active_a, size_s, align_s);
+    if (new_p == NULL) {
+        if (gc->lock_depth > 0) {
+            abort();
         }
-        if(gc->root != NULL) {
-            enki_gc_collect(gc);
-        }
-        new = enki_arena_alloc_aligned(gc->active_a, size_s, align_s);
-        if (!new) {
-            if(gc->root != NULL) {
-                gc->root->stats.gc_alloc_fail_s++;
-                enki_interp_throw(gc->root, ENKI_ERROR_OOM, 0);
-            }
+        enki_gc_collect(gc);
+        new_p = enki_arena_alloc_aligned(gc->active_a, size_s, align_s);
+        if (new_p == NULL) {
             abort();
         }
     }
-    if(gc->root != NULL) {
-        gc->root->stats.gc_alloc_s++;
-        gc->root->stats.gc_alloc_bytes_s += size_s;
-        size_t live_s = gc->active_a->off_o - sizeof(enki_arena);
-        if(live_s > gc->root->stats.gc_high_water_bytes_s) {
-            gc->root->stats.gc_high_water_bytes_s = live_s;
-        }
-    }
-    return new;
+    return new_p;
 }
 
-void* enki_gc_alloc_locked(enki_gc* gc, size_t size_s, size_t align_s) {
+void* enki_gc_alloc_locked(enki_gc* gc, size_t size_s, size_t align_s)
+{
     ENKI_PROFILE_ZONE("enki_gc_alloc_locked");
-    if(!gc) abort();
-    enki_gc_lock(gc);
-    void* new = enki_arena_alloc_aligned(gc->active_a, size_s, align_s);
-    enki_gc_unlock(gc);
-    if(!new) {
-        if(gc->root != NULL) {
-            gc->root->stats.gc_alloc_fail_s++;
-            enki_interp_throw(gc->root, ENKI_ERROR_OOM, 0);
-        }
+    if (!gc) {
         abort();
     }
-    if(gc->root != NULL) {
-        gc->root->stats.gc_locked_alloc_s++;
-        gc->root->stats.gc_locked_alloc_bytes_s += size_s;
-        size_t live_s = gc->active_a->off_o - sizeof(enki_arena);
-        if(live_s > gc->root->stats.gc_high_water_bytes_s) {
-            gc->root->stats.gc_high_water_bytes_s = live_s;
-        }
+    enki_gc_lock(gc);
+    void* new_p = enki_arena_alloc_aligned(gc->active_a, size_s, align_s);
+    enki_gc_unlock(gc);
+    if (!new_p) {
+        abort();
     }
-    return new;
+    return new_p;
 }
 
-enki_value enki_gc_copy(enki_gc* gc, enki_value val_v) {
+er_val enki_gc_copy(enki_gc* gc, er_val val_v)
+{
     ENKI_PROFILE_ZONE("enki_gc_copy");
-    if(!IS_PTR(val_v)) return val_v;
-    enki_value_header* h = ENKI_AS(enki_value_header, val_v);
-    if(h->kind_b == ENKI_FRWD) {
-        return PTR_TO_ENKI(*(void**)GET_PAYLOAD(val_v));
+    if (gc == NULL || er_is_cat(val_v)) {
+        return val_v;
     }
-    void* new = enki_arena_alloc_aligned(gc->active_a, h->size_s, _Alignof(enki_value_header));
-    if(!new) abort();
-    if(gc->root != NULL) {
-        gc->root->stats.gc_copy_s++;
-        gc->root->stats.gc_copy_bytes_s += h->size_s;
-        size_t live_s = gc->active_a->off_o - sizeof(enki_arena);
-        if(live_s > gc->root->stats.gc_high_water_bytes_s) {
-            gc->root->stats.gc_high_water_bytes_s = live_s;
-        }
+    if (!enki_gc_is_known_tag(val_v)) {
+        abort();
     }
-    void* payload = GET_PAYLOAD(val_v);
-    memcpy(new, ENKI_AS(void, val_v), h->size_s);
-    h->kind_b = ENKI_FRWD;
-    memcpy(payload, &new, sizeof(new));
-    return PTR_TO_ENKI(new);
+
+    er_head* h = er_outa(val_v);
+    if (h->raw.fwd_f) {
+        return *enki_gc_forward_slot(h);
+    }
+
+    size_t size_s = enki_gc_obj_size(h);
+    void* new_p = enki_arena_alloc_aligned(gc->active_a, size_s, _Alignof(er_head));
+    if (new_p == NULL) {
+        abort();
+    }
+    memcpy(new_p, h, size_s);
+
+    er_val new_v = er_into(er_get_tag(val_v), new_p);
+    h->raw.fwd_f = 1;
+    *enki_gc_forward_slot(h) = new_v;
+    enki_gc_work_push(gc, new_v);
+    return new_v;
 }
 
-void enki_gc_collect(enki_gc* gc) {
+static void enki_gc_trace_ref(enki_gc* gc, er_val* ref_v)
+{
+    if (ref_v != NULL && !er_is_cat(*ref_v) && enki_gc_is_known_tag(*ref_v)) {
+        *ref_v = enki_gc_copy(gc, *ref_v);
+    }
+}
+
+void enki_gc_trace_vm(enki_gc* gc, void* root)
+{
+    er_vm* vm = root;
+    if (gc == NULL || vm == NULL) {
+        return;
+    }
+
+    for (er_val* cur_v = vm->dstack; cur_v < vm->dsp; cur_v++) {
+        enki_gc_trace_ref(gc, cur_v);
+    }
+
+    for (er_kon* cur = vm->kbase; cur < vm->ksp; cur++) {
+        if (!er_is_cat(cur->val_v) && enki_gc_is_known_tag(cur->val_v)) {
+            cur->val_v = enki_gc_copy(gc, cur->val_v);
+        }
+    }
+
+    enki_gc_trace_ref(gc, vm->gc_rp);
+    for (size_t k = 0; k < vm->gc_tmp_s; k++) {
+        enki_gc_trace_ref(gc, &vm->gc_tmp_v[k]);
+    }
+}
+
+static void enki_gc_trace_object(enki_gc* gc, er_val val_v)
+{
+    switch (er_get_tag(val_v)) {
+    case er_tag_bat:
+        return;
+    case er_tag_pin: {
+        er_pin* pin = er_outa(val_v);
+        enki_gc_trace_ref(gc, &pin->val_v);
+        for (size_t k = 0; k < pin->sub_s; k++) {
+            enki_gc_trace_ref(gc, &pin->sub_v[k]);
+        }
+        return;
+    }
+    case er_tag_law: {
+        er_law* law = er_outa(val_v);
+        enki_gc_trace_ref(gc, &law->name_v);
+        enki_gc_trace_ref(gc, &law->body_v);
+        return;
+    }
+    case er_tag_app: {
+        er_app* app = er_outa(val_v);
+        enki_gc_trace_ref(gc, &app->fn_v);
+        for (size_t k = 0; k < app->arg_s; k++) {
+            enki_gc_trace_ref(gc, &app->arg_v[k]);
+        }
+        return;
+    }
+    case er_tag_thk: {
+        er_thk* thk = er_outa(val_v);
+        for (size_t k = 0; k < thk->arg_s; k++) {
+            enki_gc_trace_ref(gc, &thk->arg_v[k]);
+        }
+        return;
+    }
+    default:
+        abort();
+    }
+}
+
+void enki_gc_collect(enki_gc* gc)
+{
     ENKI_PROFILE_ZONE("enki_gc_collect");
-    if (!gc) return;
-    if (gc->root == NULL) return;
-    gc->root->stats.gc_collect_s++;
-    if(gc->lock_depth > 0) {
-        enki_interp_throw(gc->root, ENKI_ERROR_OOM, 0);
+    if (!gc) {
+        return;
     }
-    enki_arena* temp = gc->active_a;
+    if (gc->lock_depth > 0) {
+        abort();
+    }
+
+    enki_arena* from_a = gc->active_a;
     gc->active_a = gc->idle_a;
-    gc->idle_a = temp;
-    enki_trace_interp(gc->root);
-    size_t scan_o = sizeof(enki_arena);
-    while (scan_o < gc->active_a->off_o) {
-        void* obj = (gc->active_a->ptr + scan_o);
-        enki_value_header* h = obj;
-        enki_trace_value(gc, obj);
-        scan_o = enki_gc_align_offset(scan_o + h->size_s);
+    gc->idle_a = from_a;
+    enki_arena_reset(gc->active_a);
+    enki_gc_work_reset(gc);
+
+    if (gc->trace_fn != NULL) {
+        gc->trace_fn(gc, gc->trace_root);
     }
-    gc->root->stats.gc_live_bytes_s = gc->active_a->off_o - sizeof(enki_arena);
-    if(gc->root->stats.gc_live_bytes_s > gc->root->stats.gc_high_water_bytes_s) {
-        gc->root->stats.gc_high_water_bytes_s = gc->root->stats.gc_live_bytes_s;
+
+    while (gc->work_i < gc->work_s) {
+        enki_gc_trace_object(gc, gc->work_v[gc->work_i++]);
     }
+
     enki_arena_reset(gc->idle_a);
+    enki_gc_work_reset(gc);
 }

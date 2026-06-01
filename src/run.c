@@ -5,7 +5,9 @@
 #include <assert.h>
 
 #include "enki/bytecode.h"
+#include "enki/gc.h"
 #include "enki/interp.h"
+#include "enki/profile.h"
 #include "enki/run.h"
 #include "enki/run_ops.h"
 #include "enki/util.h"
@@ -65,6 +67,7 @@ static bool er_flex_fits(const er_head* h, size_t base_s, size_t count_s, size_t
 
 er_bat* er_bat_alloc(const enki_allocator* allocator, size_t lim_s)
 {
+    ENKI_PROFILE_ZONE("er_bat_alloc");
     size_t size_s = 0;
     if (!er_alloc_size(sizeof(er_bat), lim_s, sizeof(uint64_t), &size_s)) {
         return NULL;
@@ -113,6 +116,7 @@ static er_val er_bat_qword(const enki_allocator* loc_a, const uint64_t lim_q)
 
 er_pin* er_pin_alloc(const enki_allocator* allocator, size_t sub_s)
 {
+    ENKI_PROFILE_ZONE("er_pin_alloc");
     size_t size_s = 0;
     if (!er_alloc_size(sizeof(er_pin), sub_s, sizeof(er_val), &size_s)) {
         return NULL;
@@ -163,6 +167,7 @@ er_val er_pin_make(const enki_allocator* loc_a, er_val val_v)
 }
 er_law* er_law_alloc(const enki_allocator* allocator, size_t bc_s)
 {
+    ENKI_PROFILE_ZONE("er_law_alloc");
     size_t size_s = 0;
     if (!er_alloc_size(sizeof(er_law), bc_s, sizeof(er_op*), &size_s)) {
         return NULL;
@@ -224,6 +229,7 @@ er_val er_law_make(const enki_allocator* loc_a, er_val nam_v, er_val bod_v, uint
 
 er_app* er_app_alloc(const enki_allocator* allocator, size_t arg_s)
 {
+    ENKI_PROFILE_ZONE("er_app_alloc");
     size_t size_s = 0;
     if (!er_alloc_size(sizeof(er_app), arg_s, sizeof(er_val), &size_s)) {
         return NULL;
@@ -260,6 +266,7 @@ er_val er_app_init(er_app* app, er_val fn_v, size_t arg_s, const er_val arg_v[])
 
 er_thk* er_thk_alloc(const enki_allocator* allocator, size_t arg_s)
 {
+    ENKI_PROFILE_ZONE("er_thk_alloc");
     size_t siz_s = 0;
     if (!er_alloc_size(sizeof(er_thk), arg_s, sizeof(er_val), &siz_s)) {
         return NULL;
@@ -356,9 +363,12 @@ static er_val er_app_make(const enki_allocator* loc_a, er_val fn_v, size_t arg_s
     return er_app_init(app, fn_v, arg_s, arg_v);
 }
 
-er_val er_eval(const enki_allocator* loc_a, er_val val_v)
+static er_val er_eval_with_heap(const enki_allocator* heap_a, const enki_allocator* work_a,
+                                enki_gc* gc, er_val val_v)
 {
-    if (loc_a == NULL || loc_a->alloc == NULL || loc_a->free == NULL) {
+    ENKI_PROFILE_ZONE("er_eval");
+    if (heap_a == NULL || heap_a->alloc == NULL || heap_a->free == NULL ||
+        work_a == NULL || work_a->alloc == NULL || work_a->free == NULL) {
         return er_bad;
     }
 
@@ -367,32 +377,59 @@ er_val er_eval(const enki_allocator* loc_a, er_val val_v)
         ER_EVAL_KSTACK_S = 262144,
     };
 
-    er_val* dstack_v = loc_a->alloc(loc_a->ctx, ER_EVAL_DSTACK_S * sizeof(er_val));
-    er_kon* kstack_v = loc_a->alloc(loc_a->ctx, ER_EVAL_KSTACK_S * sizeof(er_kon));
+    er_val* dstack_v = work_a->alloc(work_a->ctx, ER_EVAL_DSTACK_S * sizeof(er_val));
+    er_kon* kstack_v = work_a->alloc(work_a->ctx, ER_EVAL_KSTACK_S * sizeof(er_kon));
     if (dstack_v == NULL || kstack_v == NULL) {
         if (dstack_v != NULL) {
-            loc_a->free(loc_a->ctx, dstack_v);
+            work_a->free(work_a->ctx, dstack_v);
         }
         if (kstack_v != NULL) {
-            loc_a->free(loc_a->ctx, kstack_v);
+            work_a->free(work_a->ctx, kstack_v);
         }
         return er_bad;
     }
 
     er_vm vm = {
         .code = NULL,
-        .loc_a = loc_a,
+        .loc_a = heap_a,
         .dstack = dstack_v,
         .dsp = dstack_v,
         .kbase = kstack_v,
         .ksp = kstack_v,
         .b_count = 0,
         .k_count = 0,
+        .gc_rp = NULL,
+        .gc_tmp_s = 0,
     };
+    void* old_root = NULL;
+    enki_gc_trace_fn old_trace = NULL;
+    if (gc != NULL) {
+        old_root = gc->trace_root;
+        old_trace = gc->trace_fn;
+        enki_gc_set_trace_root(gc, &vm, enki_gc_trace_vm);
+    }
     er_val out_v = plan_eval(&vm, val_v);
-    loc_a->free(loc_a->ctx, kstack_v);
-    loc_a->free(loc_a->ctx, dstack_v);
+    ENKI_PROFILE_PLOT_I("er_eval.bytecode_steps", (int64_t)vm.b_count);
+    ENKI_PROFILE_PLOT_I("er_eval.reductions", (int64_t)vm.k_count);
+    if (gc != NULL) {
+        enki_gc_set_trace_root(gc, old_root, old_trace);
+    }
+    work_a->free(work_a->ctx, kstack_v);
+    work_a->free(work_a->ctx, dstack_v);
     return out_v;
+}
+
+er_val er_eval(const enki_allocator* loc_a, er_val val_v)
+{
+    return er_eval_with_heap(loc_a, loc_a, NULL, val_v);
+}
+
+er_val er_eval_gc(enki_gc* gc, er_val val_v)
+{
+    if (gc == NULL) {
+        return er_bad;
+    }
+    return er_eval_with_heap(enki_gc_as_allocator(gc), enki_gc_parent_allocator(gc), gc, val_v);
 }
 
 static er_val er_app_take(const enki_allocator* loc_a, er_app* old, size_t arg_s)
@@ -588,6 +625,7 @@ __attribute__((noinline))
 er_val
 plan_eval(er_vm *vm, er_val val_v)
 {
+    ENKI_PROFILE_ZONE("plan_eval");
     er_op* code  = vm->code;
     er_law* code_law = NULL;
 
@@ -614,12 +652,12 @@ plan_eval(er_vm *vm, er_val val_v)
     er_val prim_name_v;
     int prim_op_i;
     size_t prim_op_s;
-    er_val prim_a_v;
-    er_val prim_b_v;
-    er_val prim_c_v;
-    er_val prim_d_v;
-    er_val prim_e_v;
-    er_val prim_f_v;
+    er_val prim_a_v = 0;
+    er_val prim_b_v = 0;
+    er_val prim_c_v = 0;
+    er_val prim_d_v = 0;
+    er_val prim_e_v = 0;
+    er_val prim_f_v = 0;
     er_optag prim_byte_op;
     size_t prim_need_s;
     er_prim_route prim_route;
@@ -757,6 +795,28 @@ plan_eval(er_vm *vm, er_val val_v)
 #define DPUSH(_r)      do { *dsp++ = (_r); } while (0)
 #define DPOP()         (*--dsp)
 
+#define GC_SYNC()                                     \
+    do {                                              \
+        vm->dsp = dsp;                                \
+        vm->ksp = ksp;                                \
+    } while (0)
+
+#define GC_ROOT_PRIMS()                               \
+    do {                                              \
+        vm->gc_tmp_v[0] = prim_a_v;                   \
+        vm->gc_tmp_v[1] = prim_b_v;                   \
+        vm->gc_tmp_v[2] = prim_c_v;                   \
+        vm->gc_tmp_v[3] = prim_d_v;                   \
+        vm->gc_tmp_v[4] = prim_e_v;                   \
+        vm->gc_tmp_v[5] = prim_f_v;                   \
+        vm->gc_tmp_s = 6;                             \
+    } while (0)
+
+#define GC_CLEAR_ROOTS()                              \
+    do {                                              \
+        vm->gc_tmp_s = 0;                             \
+    } while (0)
+
 #define DISPATCH()                                 \
     do {                                           \
         vm->b_count++;                              \
@@ -797,7 +857,11 @@ plan_eval(er_vm *vm, er_val val_v)
 #define RETURN(_r)                                 \
     do {                                           \
         r = (_r);                                  \
-        if (ksp == kbase) return r;                \
+        if (ksp == kbase) {                        \
+            ENKI_PROFILE_PLOT_I("plan_eval.bytecode_steps", (int64_t)vm->b_count); \
+            ENKI_PROFILE_PLOT_I("plan_eval.reductions", (int64_t)vm->k_count); \
+            return r;                              \
+        }                                          \
         void *dst = (--ksp)->lab;                  \
         goto *dst;                                 \
     } while (0)
@@ -825,7 +889,12 @@ plan_eval(er_vm *vm, er_val val_v)
 
 #define PRIM_DONE_VALUE(_v)                        \
     do {                                           \
+        ENKI_PROFILE_ZONE_BEGIN(enki_primop_zone, "plan_eval.primop_exec"); \
+        GC_SYNC();                                 \
+        GC_ROOT_PRIMS();                           \
         er_val prim_res_v = (_v);                  \
+        GC_CLEAR_ROOTS();                          \
+        ENKI_PROFILE_ZONE_END(enki_primop_zone);   \
         CHECK_PRIM(prim_res_v);                    \
         DPUSH(prim_res_v);                         \
         goto PRIM_DONE;                            \
@@ -860,6 +929,8 @@ plan_eval(er_vm *vm, er_val val_v)
      * Entry: eval root by forcing it.
      */
     r = val_v;
+    vm->gc_rp = &r;
+    vm->gc_tmp_s = 0;
     goto FORCE_ENTRY;
 
     // ---------------------------------------------------------------------
@@ -883,6 +954,7 @@ I_MK_APP: {
     }
     er_val* app_base = dsp - app_s;
     hd_v = app_base[0];
+    GC_SYNC();
     r = er_app_make(vm->loc_a, hd_v, app_s - 1, &app_base[1]);
     CHECK_ALLOC(r);
     dsp = app_base;
@@ -896,6 +968,7 @@ I_MK_CALL: {
       FAIL_ALLOC();
     }
     er_val* app_base = dsp - app_s;
+    GC_SYNC();
     r = er_thk_make_unk_app(vm->loc_a, app_s, app_base);
     CHECK_ALLOC(r);
     dsp = app_base;
@@ -912,6 +985,7 @@ I_CALLF: {
     er_val* call_base = dsp - call_s;
     size_t frame_s = er_call_frame_size(call_base[0], (uint32_t)arg_s);
     CHECK_ALLOC(frame_s);
+    GC_SYNC();
     r = er_thk_make_call_frame(vm->loc_a, frame_s, call_s, call_base);
     CHECK_ALLOC(r);
     dsp = call_base;
@@ -926,6 +1000,7 @@ I_CALLU: {
       FAIL_ALLOC();
     }
     er_val* call_base = dsp - call_s;
+    GC_SYNC();
     r = er_thk_make_unk_app(vm->loc_a, call_s, call_base);
     CHECK_ALLOC(r);
     dsp = call_base;
@@ -1257,7 +1332,7 @@ I_FORCE:
     // Force mode
     // ------------------------------------------------------------------
 
-FORCE_UNK_APP:
+FORCE_UNK_APP: {
     f = thk->arg_v[0];
     if ( !er_is_whnf(f) ) {
       thk->fun = ER_HOLE;
@@ -1274,10 +1349,12 @@ FORCE_UNK_APP:
         thk->fun = ER_CALL;
         goto FORCE_ENTRY;
       }
+      GC_SYNC();
       r = er_thk_take_call(vm->loc_a, thk, frame_s);
       CHECK_ALLOC(r);
       goto FORCE_ENTRY;
     } else if ( hav_d < wan_d ) {
+      GC_SYNC();
       r = er_app_make(vm->loc_a, f, thk->arg_s - 1, &thk->arg_v[1]);
       CHECK_ALLOC(r);
       goto FORCE_ENTRY;
@@ -1285,14 +1362,16 @@ FORCE_UNK_APP:
       split = wan_d;
       size_t frame_s = er_call_frame_size(f, wan_d);
       CHECK_ALLOC(frame_s);
+      GC_SYNC();
       r = er_thk_make_call_frame(vm->loc_a, frame_s, (size_t)wan_d + 1, thk->arg_v);
       CHECK_ALLOC(r);
       KPUSH_OVERAPP(er_into(er_tag_thk, thk), split);
       goto FORCE_ENTRY;
     }
+}
 
 
-FORCE_ENTRY:
+FORCE_ENTRY: {
     if( er_is_whnf(r) ) {
       RETURN(r);
     }
@@ -1314,8 +1393,9 @@ FORCE_ENTRY:
       default:
         assert("bad thk tag" && 0);
     }
+}
 
-PRIMOP:
+PRIMOP: {
     prim_force_f = true;
     if (prim_set == 66) {
         goto PRIM66_DECODE;
@@ -1324,8 +1404,9 @@ PRIMOP:
         goto PRIM0_DECODE;
     }
     FAIL_ALLOC();
+}
 
-PRIM0_DECODE:
+PRIM0_DECODE: {
     prim_row = er_outt(er_tag_app, prim_arg);
     if (prim_row == NULL) {
         FAIL_ALLOC();
@@ -1353,8 +1434,9 @@ PRIM0_DECODE:
         FAIL_ALLOC();
     }
     PRIM_SELECT(prim_route.tag, prim_route.arg_s);
+}
 
-PRIM66_DECODE:
+PRIM66_DECODE: {
     prim_row = er_outt(er_tag_app, prim_arg);
     prim_tag_v = prim_arg;
     prim_arg_v = NULL;
@@ -1468,21 +1550,24 @@ PRIM66_DECODE:
         FAIL_ALLOC();
     }
     PRIM_SELECT(prim_route.tag, prim_route.arg_s);
+}
 
-PRIM_ROUTE_DISPATCH:
+PRIM_ROUTE_DISPATCH: {
     prim_force_f = true;
     if (prim_byte_op >= OP_COUNT || dispatch[prim_byte_op] == NULL) {
         FAIL_ALLOC();
     }
     PRIM_PUSH_ARGS(prim_need_s);
     goto *dispatch[prim_byte_op];
+}
 
-PRIM_DONE:
+PRIM_DONE: {
     if (prim_force_f) {
       r = DPOP();
       goto FORCE_ENTRY;
     }
     DISPATCH();
+}
 
     // ---------------------------------------------------------------------
     // Saturated application entry
@@ -1532,6 +1617,7 @@ ENTER_CALL: {
 
     for (size_t i = 0; i < n_lets; i++) {
       size_t slot_s = (size_t)law->ari_d + 1 + i;
+      GC_SYNC();
       er_val susp_v = er_thk_make_susp(vm->loc_a, (uint32_t)i + 1, self_v);
       CHECK_ALLOC(susp_v);
       thk->arg_v[slot_s] = susp_v;
@@ -1665,11 +1751,15 @@ K_OVERAPP:
     {
       thk = er_outt(er_tag_thk, app);
       assert("bad overapp" && thk);
+      GC_SYNC();
       r = er_app_drop_coup(vm->loc_a, thk, r, split);
       CHECK_ALLOC(r);
         goto FORCE_ENTRY;
     }
 
+#undef GC_CLEAR_ROOTS
+#undef GC_ROOT_PRIMS
+#undef GC_SYNC
 #undef CHECK_ALLOC
 #undef PRIM_SELECT
 #undef PRIM_PUSH_ARGS

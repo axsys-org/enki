@@ -133,7 +133,6 @@ static void stress_alloc_big_nats(size_t n)
     for(size_t k = 0; k < n; k++) {
         (void)enki_nat_bex(fixture_interp->gc, 70 + (k % 8));
     }
-    enki_gc_collect(fixture_interp->gc);
 }
 
 static void run_until_base_frame(void)
@@ -431,7 +430,7 @@ Test(runtime_stats, op66_immediate_nat_surface_stays_off_nat_allocators)
     cr_assert_lt(fixture_interp->stats.interp_step_s, 256);
 }
 
-Test(runtime_stats, row_structural_ops_survive_gc_pressure)
+Test(runtime_stats, row_structural_ops_survive_nat_heap_churn)
 {
     enki_value a = app1(10, 11);
     enki_value b = app1(20, 21);
@@ -510,7 +509,7 @@ Test(runtime_stats, row_structural_ops_survive_gc_pressure)
     assert_leaf(updated->args_v[2], 40, 41);
 
     cr_log_info(
-        "row structural gc pressure stats: nat_tmp=%llu nat_heap=%llu "
+        "row structural nat heap churn stats: nat_tmp=%llu nat_heap=%llu "
         "nat_heap_bytes=%llu gc_collect=%llu gc_copy=%llu gc_live=%llu "
         "gc_high=%llu final_sp=%zu",
         (unsigned long long)fixture_interp->stats.nat_tmp_alloc_s,

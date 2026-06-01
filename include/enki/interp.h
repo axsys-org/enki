@@ -7,6 +7,7 @@
 #include "enki/error.h"
 #include "enki/gc.h"
 #include "enki/store.h"
+#include "enki/value.h"
 
 #define STACK_MAX 8192
 #define CALL_MAX 1024

@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "enki/interp.h"
+#include "enki/profile.h"
 
 #define EO_SMALL_MAX UINT64_C(0x7fffffffffffffff)
 #define EO_S8(a, b, c, d, e, f, g, h) \
@@ -49,6 +50,7 @@ static void eo_gmp_free(void* ptr, size_t size_s)
 
 static er_val eo_mpz_to_nat(const enki_allocator* loc_a, const mpz_t z)
 {
+    ENKI_PROFILE_ZONE("eo_mpz_to_nat");
     if (mpz_sgn(z) <= 0) {
         return 0;
     }
@@ -117,6 +119,7 @@ static bool eo_add_size(size_t a_s, size_t b_s, size_t* out_s)
 static er_val eo_app_make(const enki_allocator* loc_a, er_val fn_v, size_t arg_s,
                           const er_val arg_v[])
 {
+    ENKI_PROFILE_ZONE("eo_app_make");
     er_app* app = er_app_alloc(loc_a, arg_s);
     if (app == NULL) {
         return er_bad;
@@ -128,6 +131,7 @@ static er_val eo_app_make(const enki_allocator* loc_a, er_val fn_v, size_t arg_s
 static er_val eo_thk_app(const enki_allocator* loc_a, er_val fn_v, size_t arg_s,
                          const er_val arg_v[])
 {
+    ENKI_PROFILE_ZONE("eo_thk_app");
     if (arg_s == SIZE_MAX) {
         return er_bad;
     }
@@ -149,6 +153,7 @@ static er_val eo_thk_app(const enki_allocator* loc_a, er_val fn_v, size_t arg_s,
 static er_val eo_binary_nat(const enki_allocator* loc_a, er_val a_v, er_val b_v,
                             void (*op)(mpz_t out, const mpz_t a, const mpz_t b))
 {
+    ENKI_PROFILE_ZONE("eo_binary_nat");
     er_val out_v = 0;
     mpz_t a;
     mpz_t b;
@@ -174,16 +179,19 @@ static void eo_mpz_mul(mpz_t out, const mpz_t a, const mpz_t b)
 
 er_val eo_nat(er_val v)
 {
+    ENKI_PROFILE_ZONE("eo_nat");
     return eo_is_nat(v) ? v : 0;
 }
 
 er_val eo_add(const enki_allocator* loc_a, er_val a_v, er_val b_v)
 {
+    ENKI_PROFILE_ZONE("eo_add");
     return eo_binary_nat(loc_a, a_v, b_v, eo_mpz_add);
 }
 
 er_val eo_sub(const enki_allocator* loc_a, er_val a_v, er_val b_v)
 {
+    ENKI_PROFILE_ZONE("eo_sub");
     er_val out_v = 0;
     mpz_t a;
     mpz_t b;
@@ -199,11 +207,13 @@ er_val eo_sub(const enki_allocator* loc_a, er_val a_v, er_val b_v)
 
 er_val eo_mul(const enki_allocator* loc_a, er_val a_v, er_val b_v)
 {
+    ENKI_PROFILE_ZONE("eo_mul");
     return eo_binary_nat(loc_a, a_v, b_v, eo_mpz_mul);
 }
 
 er_val eo_div(const enki_allocator* loc_a, er_val a_v, er_val b_v)
 {
+    ENKI_PROFILE_ZONE("eo_div");
     er_val out_v = 0;
     mpz_t a;
     mpz_t b;
@@ -219,6 +229,7 @@ er_val eo_div(const enki_allocator* loc_a, er_val a_v, er_val b_v)
 
 er_val eo_mod(const enki_allocator* loc_a, er_val a_v, er_val b_v)
 {
+    ENKI_PROFILE_ZONE("eo_mod");
     er_val out_v = 0;
     mpz_t a;
     mpz_t b;
@@ -234,6 +245,7 @@ er_val eo_mod(const enki_allocator* loc_a, er_val a_v, er_val b_v)
 
 er_val eo_lsh(const enki_allocator* loc_a, er_val a_v, er_val b_v)
 {
+    ENKI_PROFILE_ZONE("eo_lsh");
     size_t shift_s = 0;
     if (!eo_nat_to_size(b_v, &shift_s)) {
         return 0;
@@ -253,6 +265,7 @@ er_val eo_lsh(const enki_allocator* loc_a, er_val a_v, er_val b_v)
 
 er_val eo_rsh(const enki_allocator* loc_a, er_val a_v, er_val b_v)
 {
+    ENKI_PROFILE_ZONE("eo_rsh");
     (void)loc_a;
     size_t shift_s = 0;
     if (!eo_nat_to_size(b_v, &shift_s)) {
@@ -273,6 +286,7 @@ er_val eo_rsh(const enki_allocator* loc_a, er_val a_v, er_val b_v)
 
 er_val eo_cmp(er_val a_v, er_val b_v)
 {
+    ENKI_PROFILE_ZONE("eo_cmp");
     er_val out_v = 0;
     mpz_t a;
     mpz_t b;
@@ -287,6 +301,7 @@ er_val eo_cmp(er_val a_v, er_val b_v)
 
 er_val eo_eq(er_val a_v, er_val b_v)
 {
+    ENKI_PROFILE_ZONE("eo_eq");
     er_val out_v = 0;
     mpz_t a;
     mpz_t b;
@@ -300,6 +315,7 @@ er_val eo_eq(er_val a_v, er_val b_v)
 
 er_val eo_le(er_val a_v, er_val b_v)
 {
+    ENKI_PROFILE_ZONE("eo_le");
     er_val out_v = 0;
     mpz_t a;
     mpz_t b;
@@ -313,6 +329,7 @@ er_val eo_le(er_val a_v, er_val b_v)
 
 er_val eo_test(er_val bit_v, er_val n_v)
 {
+    ENKI_PROFILE_ZONE("eo_test");
     size_t bit_s = 0;
     if (!eo_nat_to_size(bit_v, &bit_s)) {
         return 0;
@@ -330,6 +347,7 @@ er_val eo_test(er_val bit_v, er_val n_v)
 
 er_val eo_load(const enki_allocator* loc_a, er_val idx_v, er_val width_v, er_val n_v)
 {
+    ENKI_PROFILE_ZONE("eo_load");
     size_t idx_s = 0;
     size_t width_s = 0;
     size_t off_s = 0;
@@ -356,12 +374,14 @@ er_val eo_load(const enki_allocator* loc_a, er_val idx_v, er_val width_v, er_val
 
 er_val eo_loadn(const enki_allocator* loc_a, er_val width_v, er_val idx_v, er_val n_v)
 {
+    ENKI_PROFILE_ZONE("eo_loadn");
     return eo_load(loc_a, idx_v, width_v, n_v);
 }
 
 er_val eo_store(const enki_allocator* loc_a, er_val idx_v, er_val val_v, er_val width_v,
                 er_val n_v)
 {
+    ENKI_PROFILE_ZONE("eo_store");
     size_t idx_s = 0;
     size_t width_s = 0;
     size_t off_s = 0;
@@ -400,11 +420,13 @@ er_val eo_store(const enki_allocator* loc_a, er_val idx_v, er_val val_v, er_val 
 er_val eo_storen(const enki_allocator* loc_a, er_val width_v, er_val idx_v, er_val val_v,
                  er_val n_v)
 {
+    ENKI_PROFILE_ZONE("eo_storen");
     return eo_store(loc_a, idx_v, val_v, width_v, n_v);
 }
 
 er_val eo_trunc(const enki_allocator* loc_a, er_val width_v, er_val n_v)
 {
+    ENKI_PROFILE_ZONE("eo_trunc");
     size_t width_s = 0;
     if (!eo_nat_to_size(width_v, &width_s)) {
         return 0;
@@ -424,11 +446,13 @@ er_val eo_trunc(const enki_allocator* loc_a, er_val width_v, er_val n_v)
 
 er_val eo_truncn(const enki_allocator* loc_a, er_val width_v, er_val n_v)
 {
+    ENKI_PROFILE_ZONE("eo_truncn");
     return eo_trunc(loc_a, width_v, n_v);
 }
 
 er_val eo_met(er_val width_v, er_val n_v)
 {
+    ENKI_PROFILE_ZONE("eo_met");
     size_t width_s = 0;
     if (!eo_nat_to_size(width_v, &width_s) || width_s == 0 || !eo_is_nat(n_v)) {
         return 0;
@@ -447,91 +471,108 @@ er_val eo_met(er_val width_v, er_val n_v)
 
 er_val eo_inc(const enki_allocator* loc_a, er_val v)
 {
+    ENKI_PROFILE_ZONE("eo_inc");
     return eo_add(loc_a, v, 1);
 }
 
 er_val eo_dec(const enki_allocator* loc_a, er_val v)
 {
+    ENKI_PROFILE_ZONE("eo_dec");
     return eo_sub(loc_a, v, 1);
 }
 
 er_val eo_bex(const enki_allocator* loc_a, er_val bit_v)
 {
+    ENKI_PROFILE_ZONE("eo_bex");
     return eo_lsh(loc_a, 1, bit_v);
 }
 
 er_val eo_bits(er_val n_v)
 {
+    ENKI_PROFILE_ZONE("eo_bits");
     return eo_met(1, n_v);
 }
 
 er_val eo_bytes(er_val n_v)
 {
+    ENKI_PROFILE_ZONE("eo_bytes");
     return eo_met(8, n_v);
 }
 
 er_val eo_load8(const enki_allocator* loc_a, er_val idx_v, er_val n_v)
 {
+    ENKI_PROFILE_ZONE("eo_load8");
     return eo_load(loc_a, idx_v, 8, n_v);
 }
 
 er_val eo_store8(const enki_allocator* loc_a, er_val idx_v, er_val val_v, er_val n_v)
 {
+    ENKI_PROFILE_ZONE("eo_store8");
     return eo_store(loc_a, idx_v, val_v, 8, n_v);
 }
 
 er_val eo_trunc8(const enki_allocator* loc_a, er_val n_v)
 {
+    ENKI_PROFILE_ZONE("eo_trunc8");
     return eo_trunc(loc_a, 8, n_v);
 }
 
 er_val eo_trunc16(const enki_allocator* loc_a, er_val n_v)
 {
+    ENKI_PROFILE_ZONE("eo_trunc16");
     return eo_trunc(loc_a, 16, n_v);
 }
 
 er_val eo_trunc32(const enki_allocator* loc_a, er_val n_v)
 {
+    ENKI_PROFILE_ZONE("eo_trunc32");
     return eo_trunc(loc_a, 32, n_v);
 }
 
 er_val eo_trunc64(const enki_allocator* loc_a, er_val n_v)
 {
+    ENKI_PROFILE_ZONE("eo_trunc64");
     return eo_trunc(loc_a, 64, n_v);
 }
 
 er_val eo_nam(er_val law_v)
 {
+    ENKI_PROFILE_ZONE("eo_nam");
     er_law* law = er_outt(er_tag_law, law_v);
     return law == NULL ? 0 : law->name_v;
 }
 
 er_val eo_body(er_val law_v)
 {
+    ENKI_PROFILE_ZONE("eo_body");
     er_law* law = er_outt(er_tag_law, law_v);
     return law == NULL ? 0 : law->body_v;
 }
 
 er_val eo_unpin(er_val pin_v)
 {
+    ENKI_PROFILE_ZONE("eo_unpin");
     er_pin* pin = er_outt(er_tag_pin, pin_v);
     return pin == NULL ? 0 : pin->val_v;
 }
 
 er_val eo_sz(er_val row_v)
 {
+    ENKI_PROFILE_ZONE("eo_sz");
     er_app* app = er_outt(er_tag_app, row_v);
     return app == NULL ? 0 : (er_val)app->arg_s;
 }
 
 er_val eo_last(er_val row_v)
 {
+    ENKI_PROFILE_ZONE("eo_last");
     er_app* app = er_outt(er_tag_app, row_v);
     return app == NULL || app->arg_s == 0 ? 0 : app->arg_v[app->arg_s - 1];
 }
 
 er_val eo_init(const enki_allocator* loc_a, er_val row_v)
 {
+    ENKI_PROFILE_ZONE("eo_init");
     er_app* app = er_outt(er_tag_app, row_v);
     if (app == NULL || app->arg_s == 0) {
         return 0;
@@ -541,6 +582,7 @@ er_val eo_init(const enki_allocator* loc_a, er_val row_v)
 
 er_val eo_rep(const enki_allocator* loc_a, er_val hd_v, er_val item_v, er_val count_v)
 {
+    ENKI_PROFILE_ZONE("eo_rep");
     size_t count_s = 0;
     if (!eo_nat_to_size(count_v, &count_s)) {
         return 0;
@@ -561,6 +603,7 @@ er_val eo_rep(const enki_allocator* loc_a, er_val hd_v, er_val item_v, er_val co
 
 er_val eo_slice(const enki_allocator* loc_a, er_val off_v, er_val count_v, er_val row_v)
 {
+    ENKI_PROFILE_ZONE("eo_slice");
     size_t off_s = 0;
     size_t count_s = 0;
     er_app* row = er_outt(er_tag_app, row_v);
@@ -573,6 +616,7 @@ er_val eo_slice(const enki_allocator* loc_a, er_val off_v, er_val count_v, er_va
 
 er_val eo_weld(const enki_allocator* loc_a, er_val x_v, er_val y_v)
 {
+    ENKI_PROFILE_ZONE("eo_weld");
     er_app* x = er_outt(er_tag_app, x_v);
     er_app* y = er_outt(er_tag_app, y_v);
     size_t total_s = 0;
@@ -594,6 +638,7 @@ er_val eo_weld(const enki_allocator* loc_a, er_val x_v, er_val y_v)
 
 er_val eo_up(const enki_allocator* loc_a, er_val idx_v, er_val val_v, er_val row_v)
 {
+    ENKI_PROFILE_ZONE("eo_up");
     size_t idx_s = 0;
     er_app* row = er_outt(er_tag_app, row_v);
     if (row == NULL || !eo_nat_to_size(idx_v, &idx_s)) {
@@ -609,18 +654,21 @@ er_val eo_up(const enki_allocator* loc_a, er_val idx_v, er_val val_v, er_val row
 
 er_val eo_coup(const enki_allocator* loc_a, er_val hd_v, er_val row_v)
 {
+    ENKI_PROFILE_ZONE("eo_coup");
     er_app* row = er_outt(er_tag_app, row_v);
     return row == NULL ? 0 : eo_app_make(loc_a, hd_v, row->arg_s, row->arg_v);
 }
 
 er_val eo_hd(er_val row_v)
 {
+    ENKI_PROFILE_ZONE("eo_hd");
     er_app* row = er_outt(er_tag_app, row_v);
     return row == NULL ? 0 : row->fn_v;
 }
 
 er_val eo_ix(er_val idx_v, er_val row_v)
 {
+    ENKI_PROFILE_ZONE("eo_ix");
     size_t idx_s = 0;
     er_app* row = er_outt(er_tag_app, row_v);
     if (row == NULL || !eo_nat_to_size(idx_v, &idx_s) || idx_s >= row->arg_s) {
@@ -631,32 +679,38 @@ er_val eo_ix(er_val idx_v, er_val row_v)
 
 er_val eo_not(er_val v)
 {
+    ENKI_PROFILE_ZONE("eo_not");
     return v == 0 ? 1 : 0;
 }
 
 er_val eo_tru(er_val v)
 {
+    ENKI_PROFILE_ZONE("eo_tru");
     return v == 0 ? 0 : 1;
 }
 
 er_val eo_or(er_val a_v, er_val b_v)
 {
+    ENKI_PROFILE_ZONE("eo_or");
     return a_v != 0 || b_v != 0 ? 1 : 0;
 }
 
 er_val eo_and(er_val a_v, er_val b_v)
 {
+    ENKI_PROFILE_ZONE("eo_and");
     return a_v != 0 && b_v != 0 ? 1 : 0;
 }
 
 er_val eo_pin(const enki_allocator* loc_a, er_val v)
 {
+    ENKI_PROFILE_ZONE("eo_pin");
     er_val out_v = er_pin_make(loc_a, v);
     return out_v == 0 ? er_bad : out_v;
 }
 
 er_val eo_law(const enki_allocator* loc_a, er_val nam_v, er_val bod_v, er_val ari_v)
 {
+    ENKI_PROFILE_ZONE("eo_law");
     size_t ari_s = 0;
     if (!eo_nat_to_size(ari_v, &ari_s) || ari_s > UINT32_MAX - 1) {
         return 0;
@@ -668,6 +722,7 @@ er_val eo_law(const enki_allocator* loc_a, er_val nam_v, er_val bod_v, er_val ar
 er_val eo_elim(const enki_allocator* loc_a, er_val pin_f_v, er_val law_f_v, er_val app_f_v,
                er_val zero_v, er_val nat_f_v, er_val val_v)
 {
+    ENKI_PROFILE_ZONE("eo_elim");
     er_pin* pin = er_outt(er_tag_pin, val_v);
     if (pin != NULL) {
         return eo_thk_app(loc_a, pin_f_v, 1, &pin->val_v);
@@ -697,6 +752,7 @@ er_val eo_elim(const enki_allocator* loc_a, er_val pin_f_v, er_val law_f_v, er_v
 
 bool eo_op66_from_tag(er_val tag_v, int* out_op)
 {
+    ENKI_PROFILE_ZONE("eo_op66_from_tag");
     if (!er_is_cat(tag_v)) {
         return false;
     }
@@ -897,6 +953,7 @@ bool eo_op66_from_tag(er_val tag_v, int* out_op)
 
 er_val eo_exec_op66(const enki_allocator* loc_a, int op, size_t arg_s, const er_val arg_v[])
 {
+    ENKI_PROFILE_ZONE("eo_exec_op66");
     switch (op) {
     case OP66_NAME:
         return arg_s == 1 ? eo_nam(arg_v[0]) : 0;
@@ -996,6 +1053,7 @@ er_val eo_exec_op66(const enki_allocator* loc_a, int op, size_t arg_s, const er_
 static er_val eo_exec_op66_descriptor(const enki_allocator* loc_a, er_val tag_v, size_t arg_s,
                                       const er_val arg_v[], bool* handled_f)
 {
+    ENKI_PROFILE_ZONE("eo_exec_op66_descriptor");
     er_app* tag = er_outt(er_tag_app, tag_v);
     if (tag == NULL || tag->arg_s != 1) {
         *handled_f = false;
@@ -1038,6 +1096,7 @@ static er_val eo_exec_op66_descriptor(const enki_allocator* loc_a, er_val tag_v,
 
 er_val eo_exec_op66_app(const enki_allocator* loc_a, er_val row_v)
 {
+    ENKI_PROFILE_ZONE("eo_exec_op66_app");
     er_app* row = er_outt(er_tag_app, row_v);
     er_val tag_v = row_v;
     const er_val* arg_v = NULL;
@@ -1077,6 +1136,7 @@ er_val eo_exec_op66_app(const enki_allocator* loc_a, er_val row_v)
 
 er_val eo_exec_op0(const enki_allocator* loc_a, int op, size_t arg_s, const er_val arg_v[])
 {
+    ENKI_PROFILE_ZONE("eo_exec_op0");
     switch (op) {
     case OP0_PIN:
         return arg_s == 1 ? eo_pin(loc_a, arg_v[0]) : 0;
@@ -1094,6 +1154,7 @@ er_val eo_exec_op0(const enki_allocator* loc_a, int op, size_t arg_s, const er_v
 
 er_val eo_exec_op0_app(const enki_allocator* loc_a, er_val row_v)
 {
+    ENKI_PROFILE_ZONE("eo_exec_op0_app");
     er_app* row = er_outt(er_tag_app, row_v);
     if (row == NULL) {
         return er_bad;
