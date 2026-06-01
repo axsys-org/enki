@@ -24,6 +24,118 @@ static bool eo_is_nat(er_val v)
     return er_is_cat(v) || er_is_tag(er_tag_bat, v);
 }
 
+static er_val eo_limbs_to_nat(const enki_allocator* loc_a, size_t limb_s,
+                              const uint64_t limb_q[])
+{
+    while (limb_s > 0 && limb_q[limb_s - 1] == 0) {
+        limb_s--;
+    }
+    if (limb_s == 0) {
+        return 0;
+    }
+    if (limb_s == 1 && limb_q[0] <= EO_SMALL_MAX) {
+        return limb_q[0];
+    }
+
+    er_bat* bat = er_bat_alloc(loc_a, limb_s);
+    if (bat == NULL) {
+        return er_bad;
+    }
+    er_val out_v = er_bat_init(bat, limb_s, limb_q);
+    return out_v == 0 ? er_bad : out_v;
+}
+
+static er_val eo_u64_to_nat(const enki_allocator* loc_a, uint64_t n_q)
+{
+    return eo_limbs_to_nat(loc_a, 1, &n_q);
+}
+
+static void eo_mul_u64(uint64_t a_q, uint64_t b_q, uint64_t* lo_q, uint64_t* hi_q)
+{
+    const uint64_t mask_q = UINT64_C(0xffffffff);
+    uint64_t a_lo_q = a_q & mask_q;
+    uint64_t a_hi_q = a_q >> 32u;
+    uint64_t b_lo_q = b_q & mask_q;
+    uint64_t b_hi_q = b_q >> 32u;
+
+    uint64_t p0_q = a_lo_q * b_lo_q;
+    uint64_t p1_q = a_lo_q * b_hi_q;
+    uint64_t p2_q = a_hi_q * b_lo_q;
+    uint64_t p3_q = a_hi_q * b_hi_q;
+    uint64_t mid_q = (p0_q >> 32u) + (p1_q & mask_q) + (p2_q & mask_q);
+
+    *lo_q = (p0_q & mask_q) | (mid_q << 32u);
+    *hi_q = p3_q + (p1_q >> 32u) + (p2_q >> 32u) + (mid_q >> 32u);
+}
+
+static er_val eo_mul_cats(const enki_allocator* loc_a, er_val a_v, er_val b_v)
+{
+    if (a_v == 0 || b_v == 0) {
+        return 0;
+    }
+    if (b_v <= EO_SMALL_MAX / a_v) {
+        return a_v * b_v;
+    }
+
+    uint64_t limb_q[2] = {0, 0};
+    eo_mul_u64(a_v, b_v, &limb_q[0], &limb_q[1]);
+    return eo_limbs_to_nat(loc_a, 2, limb_q);
+}
+
+static er_val eo_lsh_cat(const enki_allocator* loc_a, er_val a_v, size_t shift_s)
+{
+    if (a_v == 0) {
+        return 0;
+    }
+    if (shift_s < 63 && a_v <= (EO_SMALL_MAX >> shift_s)) {
+        return a_v << shift_s;
+    }
+
+    size_t word_shift_s = shift_s / 64u;
+    unsigned int bit_shift_s = (unsigned int)(shift_s % 64u);
+    uint64_t low_q = a_v;
+    uint64_t high_q = 0;
+    size_t limb_s = word_shift_s + 1u;
+
+    if (bit_shift_s != 0) {
+        low_q = a_v << bit_shift_s;
+        high_q = a_v >> (64u - bit_shift_s);
+        if (high_q != 0) {
+            limb_s++;
+        }
+    }
+
+    er_bat* bat = er_bat_alloc(loc_a, limb_s);
+    if (bat == NULL) {
+        return er_bad;
+    }
+    er_val out_v = er_bat_init(bat, limb_s, NULL);
+    if (out_v == 0) {
+        return er_bad;
+    }
+    bat->lim_q[word_shift_s] = low_q;
+    if (high_q != 0) {
+        bat->lim_q[word_shift_s + 1u] = high_q;
+    }
+    return out_v;
+}
+
+static size_t eo_bits_cat(er_val n_v)
+{
+    return n_v == 0 ? 0 : 64u - (size_t)__builtin_clzll((unsigned long long)n_v);
+}
+
+static uint64_t eo_mask_below(size_t bit_s)
+{
+    if (bit_s == 0) {
+        return 0;
+    }
+    if (bit_s >= 64) {
+        return UINT64_MAX;
+    }
+    return (UINT64_C(1) << bit_s) - 1u;
+}
+
 static bool eo_nat_to_mpz(er_val v, mpz_t out)
 {
     if (er_is_cat(v)) {
@@ -60,20 +172,9 @@ static er_val eo_mpz_to_nat(const enki_allocator* loc_a, const mpz_t z)
     if (limb_s == 0) {
         return 0;
     }
-    if (limb_s == 1 && limb_q[0] <= EO_SMALL_MAX) {
-        er_val out_v = limb_q[0];
-        eo_gmp_free(limb_q, limb_s * sizeof(uint64_t));
-        return out_v;
-    }
-
-    er_bat* bat = er_bat_alloc(loc_a, limb_s);
-    if (bat == NULL) {
-        eo_gmp_free(limb_q, limb_s * sizeof(uint64_t));
-        return er_bad;
-    }
-    er_val out_v = er_bat_init(bat, limb_s, limb_q);
+    er_val out_v = eo_limbs_to_nat(loc_a, limb_s, limb_q);
     eo_gmp_free(limb_q, limb_s * sizeof(uint64_t));
-    return out_v == 0 ? er_bad : out_v;
+    return out_v;
 }
 
 static bool eo_nat_to_size(er_val v, size_t* out_s)
@@ -186,12 +287,21 @@ er_val eo_nat(er_val v)
 er_val eo_add(const enki_allocator* loc_a, er_val a_v, er_val b_v)
 {
     ENKI_PROFILE_ZONE("eo_add");
+    if (er_is_cat(a_v) && er_is_cat(b_v)) {
+        if (a_v <= EO_SMALL_MAX - b_v) {
+            return a_v + b_v;
+        }
+        return eo_u64_to_nat(loc_a, a_v + b_v);
+    }
     return eo_binary_nat(loc_a, a_v, b_v, eo_mpz_add);
 }
 
 er_val eo_sub(const enki_allocator* loc_a, er_val a_v, er_val b_v)
 {
     ENKI_PROFILE_ZONE("eo_sub");
+    if (er_is_cat(a_v) && er_is_cat(b_v)) {
+        return a_v >= b_v ? a_v - b_v : 0;
+    }
     er_val out_v = 0;
     mpz_t a;
     mpz_t b;
@@ -208,12 +318,18 @@ er_val eo_sub(const enki_allocator* loc_a, er_val a_v, er_val b_v)
 er_val eo_mul(const enki_allocator* loc_a, er_val a_v, er_val b_v)
 {
     ENKI_PROFILE_ZONE("eo_mul");
+    if (er_is_cat(a_v) && er_is_cat(b_v)) {
+        return eo_mul_cats(loc_a, a_v, b_v);
+    }
     return eo_binary_nat(loc_a, a_v, b_v, eo_mpz_mul);
 }
 
 er_val eo_div(const enki_allocator* loc_a, er_val a_v, er_val b_v)
 {
     ENKI_PROFILE_ZONE("eo_div");
+    if (er_is_cat(a_v) && er_is_cat(b_v)) {
+        return b_v == 0 ? 0 : a_v / b_v;
+    }
     er_val out_v = 0;
     mpz_t a;
     mpz_t b;
@@ -230,6 +346,9 @@ er_val eo_div(const enki_allocator* loc_a, er_val a_v, er_val b_v)
 er_val eo_mod(const enki_allocator* loc_a, er_val a_v, er_val b_v)
 {
     ENKI_PROFILE_ZONE("eo_mod");
+    if (er_is_cat(a_v) && er_is_cat(b_v)) {
+        return b_v == 0 ? 0 : a_v % b_v;
+    }
     er_val out_v = 0;
     mpz_t a;
     mpz_t b;
@@ -249,6 +368,9 @@ er_val eo_lsh(const enki_allocator* loc_a, er_val a_v, er_val b_v)
     size_t shift_s = 0;
     if (!eo_nat_to_size(b_v, &shift_s)) {
         return 0;
+    }
+    if (er_is_cat(a_v)) {
+        return eo_lsh_cat(loc_a, a_v, shift_s);
     }
 
     er_val out_v = 0;
@@ -271,6 +393,9 @@ er_val eo_rsh(const enki_allocator* loc_a, er_val a_v, er_val b_v)
     if (!eo_nat_to_size(b_v, &shift_s)) {
         return 0;
     }
+    if (er_is_cat(a_v)) {
+        return shift_s >= 63 ? 0 : a_v >> shift_s;
+    }
 
     er_val out_v = 0;
     mpz_t a;
@@ -287,6 +412,9 @@ er_val eo_rsh(const enki_allocator* loc_a, er_val a_v, er_val b_v)
 er_val eo_cmp(er_val a_v, er_val b_v)
 {
     ENKI_PROFILE_ZONE("eo_cmp");
+    if (er_is_cat(a_v) && er_is_cat(b_v)) {
+        return a_v < b_v ? 0 : (a_v == b_v ? 1 : 2);
+    }
     er_val out_v = 0;
     mpz_t a;
     mpz_t b;
@@ -302,6 +430,9 @@ er_val eo_cmp(er_val a_v, er_val b_v)
 er_val eo_eq(er_val a_v, er_val b_v)
 {
     ENKI_PROFILE_ZONE("eo_eq");
+    if (er_is_cat(a_v) && er_is_cat(b_v)) {
+        return a_v == b_v ? 1 : 0;
+    }
     er_val out_v = 0;
     mpz_t a;
     mpz_t b;
@@ -316,6 +447,9 @@ er_val eo_eq(er_val a_v, er_val b_v)
 er_val eo_le(er_val a_v, er_val b_v)
 {
     ENKI_PROFILE_ZONE("eo_le");
+    if (er_is_cat(a_v) && er_is_cat(b_v)) {
+        return a_v <= b_v ? 1 : 0;
+    }
     er_val out_v = 0;
     mpz_t a;
     mpz_t b;
@@ -333,6 +467,9 @@ er_val eo_test(er_val bit_v, er_val n_v)
     size_t bit_s = 0;
     if (!eo_nat_to_size(bit_v, &bit_s)) {
         return 0;
+    }
+    if (er_is_cat(n_v)) {
+        return bit_s < 63 && ((n_v >> bit_s) & 1u) != 0 ? 1 : 0;
     }
 
     er_val out_v = 0;
@@ -357,6 +494,13 @@ er_val eo_load(const enki_allocator* loc_a, er_val idx_v, er_val width_v, er_val
     }
     if (width_s == 0) {
         return 0;
+    }
+    if (er_is_cat(n_v)) {
+        if (off_s >= 63) {
+            return 0;
+        }
+        er_val shifted_v = n_v >> off_s;
+        return width_s >= 63 ? shifted_v : shifted_v & eo_mask_below(width_s);
     }
 
     er_val out_v = 0;
@@ -389,6 +533,17 @@ er_val eo_store(const enki_allocator* loc_a, er_val idx_v, er_val val_v, er_val 
     if (!eo_nat_to_size(idx_v, &idx_s) || !eo_nat_to_size(width_v, &width_s) ||
         !eo_mul_size(idx_s, width_s, &off_s) || !eo_add_size(off_s, width_s, &top_s)) {
         return 0;
+    }
+    if (er_is_cat(n_v) && er_is_cat(val_v)) {
+        if (width_s == 0) {
+            return n_v;
+        }
+        if (top_s <= 64) {
+            uint64_t low_q = n_v & eo_mask_below(off_s);
+            uint64_t mid_q = (val_v & eo_mask_below(width_s)) << off_s;
+            uint64_t high_q = n_v & ~eo_mask_below(top_s);
+            return eo_u64_to_nat(loc_a, high_q | mid_q | low_q);
+        }
     }
 
     er_val out_v = 0;
@@ -431,6 +586,9 @@ er_val eo_trunc(const enki_allocator* loc_a, er_val width_v, er_val n_v)
     if (!eo_nat_to_size(width_v, &width_s)) {
         return 0;
     }
+    if (er_is_cat(n_v)) {
+        return width_s >= 63 ? n_v : n_v & eo_mask_below(width_s);
+    }
 
     er_val out_v = 0;
     mpz_t n;
@@ -457,6 +615,10 @@ er_val eo_met(er_val width_v, er_val n_v)
     if (!eo_nat_to_size(width_v, &width_s) || width_s == 0 || !eo_is_nat(n_v)) {
         return 0;
     }
+    if (er_is_cat(n_v)) {
+        size_t bit_s = eo_bits_cat(n_v);
+        return bit_s == 0 ? 0 : (er_val)(((bit_s - 1u) / width_s) + 1u);
+    }
 
     mpz_t n;
     mpz_init(n);
@@ -466,18 +628,24 @@ er_val eo_met(er_val width_v, er_val n_v)
     }
     size_t bit_s = mpz_sizeinbase(n, 2);
     mpz_clear(n);
-    return (er_val)((bit_s + width_s - 1) / width_s);
+    return (er_val)(((bit_s - 1u) / width_s) + 1u);
 }
 
 er_val eo_inc(const enki_allocator* loc_a, er_val v)
 {
     ENKI_PROFILE_ZONE("eo_inc");
+    if (er_is_cat(v)) {
+        return v < EO_SMALL_MAX ? v + 1u : eo_u64_to_nat(loc_a, v + 1u);
+    }
     return eo_add(loc_a, v, 1);
 }
 
 er_val eo_dec(const enki_allocator* loc_a, er_val v)
 {
     ENKI_PROFILE_ZONE("eo_dec");
+    if (er_is_cat(v)) {
+        return v == 0 ? 0 : v - 1u;
+    }
     return eo_sub(loc_a, v, 1);
 }
 
