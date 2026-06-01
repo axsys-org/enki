@@ -49,6 +49,51 @@ typedef struct er_bc_prim {
 #define ER_BC_ROUTE(_name, _tag, _ari) \
     { .name_v = (_name), .tag = (_tag), .ari_d = (_ari), .if_f = false }
 
+static const er_bc_prim er_bc_prim_v[] = {
+    ER_BC_ROUTE(PLAN_S3('P', 'i', 'n'), OP_PIN, 1),
+    ER_BC_ROUTE(PLAN_S3('L', 'a', 'w'), OP_LAW, 3),
+    ER_BC_ROUTE(PLAN_S4('E', 'l', 'i', 'm'), OP_ELIM, 6),
+    ER_BC_ROUTE(PLAN_S3('N', 'a', 't'), OP_NAT, 1),
+    ER_BC_ROUTE(PLAN_S5('A', 'r', 'i', 't', 'y'), OP_ARI, 1),
+    ER_BC_ROUTE(PLAN_S4('N', 'a', 'm', 'e'), OP_NAM, 1),
+    ER_BC_ROUTE(PLAN_S4('B', 'o', 'd', 'y'), OP_BODY, 1),
+    ER_BC_ROUTE(PLAN_S5('U', 'n', 'p', 'i', 'n'), OP_UNPIN, 1),
+    ER_BC_ROUTE(PLAN_S2('S', 'z'), OP_SZ, 1),
+    ER_BC_ROUTE(PLAN_S4('L', 'a', 's', 't'), OP_LAST, 1),
+    ER_BC_ROUTE(PLAN_S4('I', 'n', 'i', 't'), OP_INIT, 1),
+    ER_BC_ROUTE(PLAN_S3('I', 'n', 'c'), OP_INC, 1),
+    ER_BC_ROUTE(PLAN_S3('D', 'e', 'c'), OP_DEC, 1),
+    ER_BC_ROUTE(PLAN_S3('A', 'd', 'd'), OP_ADD, 2),
+    ER_BC_ROUTE(PLAN_S3('S', 'u', 'b'), OP_SUB, 2),
+    ER_BC_ROUTE(PLAN_S3('R', 's', 'h'), OP_RSH, 2),
+    ER_BC_ROUTE(PLAN_S3('L', 's', 'h'), OP_LSH, 2),
+    ER_BC_ROUTE(PLAN_S3('D', 'i', 'v'), OP_DIV, 2),
+    ER_BC_ROUTE(PLAN_S3('M', 'u', 'l'), OP_MUL, 2),
+    ER_BC_ROUTE(PLAN_S3('M', 'o', 'd'), OP_MOD, 2),
+    ER_BC_ROUTE(PLAN_S4('T', 'e', 's', 't'), OP_TEST, 2),
+    ER_BC_ROUTE(PLAN_S7('L', 'o', 'a', 'd', 'V', 'a', 'r'), OP_LOAD, 3),
+    ER_BC_ROUTE(PLAN_S5('S', 't', 'o', 'r', 'e'), OP_STORE, 4),
+    ER_BC_ROUTE(PLAN_S5('T', 'r', 'u', 'n', 'c'), OP_TRUNC, 2),
+    ER_BC_ROUTE(PLAN_S4('B', 'i', 't', 's'), OP_BITS, 1),
+    ER_BC_ROUTE(PLAN_S5('B', 'y', 't', 'e', 's'), OP_BYTES, 1),
+    ER_BC_ROUTE(PLAN_S3('R', 'e', 'p'), OP_REP, 3),
+    ER_BC_ROUTE(PLAN_S5('S', 'l', 'i', 'c', 'e'), OP_SLICE, 3),
+    ER_BC_ROUTE(PLAN_S4('W', 'e', 'l', 'd'), OP_WELD, 2),
+    ER_BC_ROUTE(PLAN_S5('F', 'o', 'r', 'c', 'e'), OP_FORCE, 1),
+    ER_BC_ROUTE(PLAN_S2('U', 'p'), OP_UP, 3),
+    ER_BC_ROUTE(PLAN_S4('C', 'o', 'u', 'p'), OP_COUP, 2),
+    ER_BC_ROUTE(PLAN_S2('H', 'd'), OP_HD, 1),
+    ER_BC_ROUTE(PLAN_S2('I', 'x'), OP_IX, 2),
+    ER_BC_ROUTE(PLAN_S3('N', 'i', 'l'), OP_NOT, 1),
+    ER_BC_ROUTE(PLAN_S5('T', 'r', 'u', 't', 'h'), OP_TRU, 1),
+    ER_BC_ROUTE(PLAN_S2('O', 'r'), OP_OR, 2),
+    ER_BC_ROUTE(PLAN_S3('A', 'n', 'd'), OP_AND, 2),
+    {.name_v = PLAN_S2('I', 'f'), .tag = OP_COUNT, .ari_d = 3, .if_f = true},
+    ER_BC_ROUTE(PLAN_S2('E', 'q'), OP_EQ, 2),
+    ER_BC_ROUTE(PLAN_S2('L', 'e'), OP_LE, 2),
+    ER_BC_ROUTE(PLAN_S3('C', 'm', 'p'), OP_CMP, 2),
+};
+
 static bool er_bc_mul_size(size_t a_s, size_t b_s, size_t* out_s)
 {
     if (b_s != 0 && a_s > SIZE_MAX / b_s) {
@@ -324,6 +369,57 @@ static er_val er_bc_pull_const(er_val val_v)
     return val_v;
 }
 
+static const er_bc_prim* er_bc_prim_lookup(er_val key_v)
+{
+    for (size_t k = 0; k < sizeof(er_bc_prim_v) / sizeof(er_bc_prim_v[0]); k++) {
+        if (er_bc_prim_v[k].name_v == key_v) {
+            return &er_bc_prim_v[k];
+        }
+    }
+    return NULL;
+}
+
+static bool er_bc_direct_prim_wrapper_key(er_val law_v, er_val* key_v)
+{
+    er_law* law = er_outt(er_tag_law, law_v);
+    if (law == NULL) {
+        return false;
+    }
+
+    er_val cur_v = law->body_v;
+    er_val f_v = 0;
+    er_val x_v = 0;
+    size_t arg_s = 0;
+    while (er_bc_is_call(cur_v, &f_v, &x_v)) {
+        arg_s++;
+        if (arg_s > (size_t)law->ari_d || x_v != (er_val)((size_t)law->ari_d + 1u - arg_s)) {
+            return false;
+        }
+        cur_v = f_v;
+    }
+    if (arg_s != (size_t)law->ari_d) {
+        return false;
+    }
+
+    er_val prim_v = er_bc_pull_const(cur_v);
+    er_pin* pin = er_outt(er_tag_pin, prim_v);
+    if (pin != NULL) {
+        prim_v = pin->val_v;
+    }
+    er_law* prim_law = er_outt(er_tag_law, prim_v);
+    if (prim_law == NULL) {
+        return false;
+    }
+
+    const er_bc_prim* prim = er_bc_prim_lookup(prim_law->name_v);
+    if (prim == NULL || prim->ari_d != law->ari_d) {
+        return false;
+    }
+
+    *key_v = prim_law->name_v;
+    return true;
+}
+
 static uint32_t er_bc_arity(er_val val_v)
 {
     er_pin* pin;
@@ -360,6 +456,10 @@ static er_val er_bc_prim_key(er_val f_v)
 
     er_law* law = er_outt(er_tag_law, f_v);
     if (law != NULL) {
+        er_val key_v = 0;
+        if (er_bc_direct_prim_wrapper_key(f_v, &key_v)) {
+            return key_v;
+        }
         return law->name_v;
     }
 
@@ -376,58 +476,7 @@ static er_val er_bc_prim_key(er_val f_v)
 
 static const er_bc_prim* er_bc_prim_get(er_val f_v)
 {
-    static const er_bc_prim prim_v[] = {
-        ER_BC_ROUTE(PLAN_S3('P', 'i', 'n'), OP_PIN, 1),
-        ER_BC_ROUTE(PLAN_S3('L', 'a', 'w'), OP_LAW, 3),
-        ER_BC_ROUTE(PLAN_S4('E', 'l', 'i', 'm'), OP_ELIM, 6),
-        ER_BC_ROUTE(PLAN_S3('N', 'a', 't'), OP_NAT, 1),
-        ER_BC_ROUTE(PLAN_S5('A', 'r', 'i', 't', 'y'), OP_ARI, 1),
-        ER_BC_ROUTE(PLAN_S4('N', 'a', 'm', 'e'), OP_NAM, 1),
-        ER_BC_ROUTE(PLAN_S4('B', 'o', 'd', 'y'), OP_BODY, 1),
-        ER_BC_ROUTE(PLAN_S5('U', 'n', 'p', 'i', 'n'), OP_UNPIN, 1),
-        ER_BC_ROUTE(PLAN_S2('S', 'z'), OP_SZ, 1),
-        ER_BC_ROUTE(PLAN_S4('L', 'a', 's', 't'), OP_LAST, 1),
-        ER_BC_ROUTE(PLAN_S4('I', 'n', 'i', 't'), OP_INIT, 1),
-        ER_BC_ROUTE(PLAN_S3('I', 'n', 'c'), OP_INC, 1),
-        ER_BC_ROUTE(PLAN_S3('D', 'e', 'c'), OP_DEC, 1),
-        ER_BC_ROUTE(PLAN_S3('A', 'd', 'd'), OP_ADD, 2),
-        ER_BC_ROUTE(PLAN_S3('S', 'u', 'b'), OP_SUB, 2),
-        ER_BC_ROUTE(PLAN_S3('R', 's', 'h'), OP_RSH, 2),
-        ER_BC_ROUTE(PLAN_S3('L', 's', 'h'), OP_LSH, 2),
-        ER_BC_ROUTE(PLAN_S3('D', 'i', 'v'), OP_DIV, 2),
-        ER_BC_ROUTE(PLAN_S3('M', 'u', 'l'), OP_MUL, 2),
-        ER_BC_ROUTE(PLAN_S3('M', 'o', 'd'), OP_MOD, 2),
-        ER_BC_ROUTE(PLAN_S4('T', 'e', 's', 't'), OP_TEST, 2),
-        ER_BC_ROUTE(PLAN_S7('L', 'o', 'a', 'd', 'V', 'a', 'r'), OP_LOAD, 3),
-        ER_BC_ROUTE(PLAN_S5('S', 't', 'o', 'r', 'e'), OP_STORE, 4),
-        ER_BC_ROUTE(PLAN_S5('T', 'r', 'u', 'n', 'c'), OP_TRUNC, 2),
-        ER_BC_ROUTE(PLAN_S4('B', 'i', 't', 's'), OP_BITS, 1),
-        ER_BC_ROUTE(PLAN_S5('B', 'y', 't', 'e', 's'), OP_BYTES, 1),
-        ER_BC_ROUTE(PLAN_S3('R', 'e', 'p'), OP_REP, 3),
-        ER_BC_ROUTE(PLAN_S5('S', 'l', 'i', 'c', 'e'), OP_SLICE, 3),
-        ER_BC_ROUTE(PLAN_S4('W', 'e', 'l', 'd'), OP_WELD, 2),
-        ER_BC_ROUTE(PLAN_S5('F', 'o', 'r', 'c', 'e'), OP_FORCE, 1),
-        ER_BC_ROUTE(PLAN_S2('U', 'p'), OP_UP, 3),
-        ER_BC_ROUTE(PLAN_S4('C', 'o', 'u', 'p'), OP_COUP, 2),
-        ER_BC_ROUTE(PLAN_S2('H', 'd'), OP_HD, 1),
-        ER_BC_ROUTE(PLAN_S2('I', 'x'), OP_IX, 2),
-        ER_BC_ROUTE(PLAN_S3('N', 'i', 'l'), OP_NOT, 1),
-        ER_BC_ROUTE(PLAN_S5('T', 'r', 'u', 't', 'h'), OP_TRU, 1),
-        ER_BC_ROUTE(PLAN_S2('O', 'r'), OP_OR, 2),
-        ER_BC_ROUTE(PLAN_S3('A', 'n', 'd'), OP_AND, 2),
-        {.name_v = PLAN_S2('I', 'f'), .tag = OP_COUNT, .ari_d = 3, .if_f = true},
-        ER_BC_ROUTE(PLAN_S2('E', 'q'), OP_EQ, 2),
-        ER_BC_ROUTE(PLAN_S2('L', 'e'), OP_LE, 2),
-        ER_BC_ROUTE(PLAN_S3('C', 'm', 'p'), OP_CMP, 2),
-    };
-
-    er_val key_v = er_bc_prim_key(f_v);
-    for (size_t k = 0; k < sizeof(prim_v) / sizeof(prim_v[0]); k++) {
-        if (prim_v[k].name_v == key_v) {
-            return &prim_v[k];
-        }
-    }
-    return NULL;
+    return er_bc_prim_lookup(er_bc_prim_key(f_v));
 }
 
 static bool er_bc_compile_expr(er_bc_compiler* c, size_t depth_s, uint32_t ari_d, er_val body_v,

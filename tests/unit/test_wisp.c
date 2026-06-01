@@ -241,6 +241,23 @@ Test(wisp, bind_law_and_apply_it)
     cr_assert_eq(eval_input("(add 20 22)"), 42);
 }
 
+Test(wisp, numeric_pin66_wrapper_emits_direct_primitive_bytecode)
+{
+    cr_assert_not_null(
+        assert_law(eval_input("(#bind add (#law \"add\" (add x y) "
+                              "((#pin 66) (\"Add\" x y))))")));
+    er_law* law = assert_law(eval_input("(#law \"caller\" (caller ignored) (add 20 22))"));
+    er_op* code = law->bc_v[0];
+    cr_assert_not_null(code);
+
+    cr_assert_eq(code[0].tag, OP_PUSH_LIT);
+    cr_assert_eq(code[0].as.lit_v, 20);
+    cr_assert_eq(code[1].tag, OP_PUSH_LIT);
+    cr_assert_eq(code[1].as.lit_v, 22);
+    cr_assert_eq(code[2].tag, OP_ADD);
+    cr_assert_eq(code[3].tag, OP_RET);
+}
+
 Test(wisp, recursive_program_validates_extended_snippet)
 {
     cr_assert_gt(assert_law(eval_input("(#bind inc (#law \"inc\" (inc x) "

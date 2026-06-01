@@ -285,6 +285,11 @@ static er_val make_plan_call_expr(er_val f_v, er_val x_v)
     return make_app_value(0, 2, arg_v);
 }
 
+static er_val make_law_quote_expr(er_val val_v)
+{
+    return make_app_value(0, 1, &val_v);
+}
+
 static er_val make_prim_law(er_val name_v, uint32_t arity_d)
 {
     er_val law_v = er_law_make(enki_allocator_system(), name_v, 0, arity_d);
@@ -467,6 +472,34 @@ Test(run_vm, compiled_law_emits_direct_primitive_bytecode)
     cr_assert_eq(er_get_tag(law_v), er_tag_law);
     er_val call_v = make_call(law_v, 1);
 
+    cr_assert_eq(run_vm(NULL, call_v), 42);
+}
+
+Test(run_vm, compiled_law_inlines_simple_primitive_wrapper)
+{
+    er_val add_v = make_prim_law(PLAN_S3('A', 'd', 'd'), 2);
+    er_val wrapper_body_v =
+        make_plan_call_expr(make_plan_call_expr(make_law_quote_expr(add_v), 1), 2);
+    er_val wrapper_v = er_law_make(enki_allocator_system(), PLAN_S3('a', 'd', 'd'),
+                                   wrapper_body_v, 2);
+    cr_assert_eq(er_get_tag(wrapper_v), er_tag_law);
+
+    er_val body_v = make_plan_call_expr(make_plan_call_expr(wrapper_v, 10), 32);
+    er_val law_v = er_law_make(enki_allocator_system(), 0, body_v, 0);
+    cr_assert_eq(er_get_tag(law_v), er_tag_law);
+    er_law* law = er_outt(er_tag_law, law_v);
+    cr_assert_not_null(law);
+    er_op* code = law->bc_v[0];
+    cr_assert_not_null(code);
+
+    cr_assert_eq(code[0].tag, OP_PUSH_LIT);
+    cr_assert_eq(code[0].as.lit_v, 10);
+    cr_assert_eq(code[1].tag, OP_PUSH_LIT);
+    cr_assert_eq(code[1].as.lit_v, 32);
+    cr_assert_eq(code[2].tag, OP_ADD);
+    cr_assert_eq(code[3].tag, OP_RET);
+
+    er_val call_v = make_call(law_v, 1);
     cr_assert_eq(run_vm(NULL, call_v), 42);
 }
 
