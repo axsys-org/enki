@@ -117,6 +117,26 @@ static void assert_parse_fails(char* input_c, const char* expected_msg_c)
     rt->msg_c = NULL;
 }
 
+static void assert_eval_fails(char* input_c, const char* expected_prefix_c)
+{
+    char* cur_c = input_c;
+    rt->err_f = 1;
+
+    if (setjmp(rt->errjmp) == 0) {
+        er_val value_v = wisp_parse(rt, &cur_c);
+        (void)wisp_eval(rt, value_v);
+        rt->err_f = 0;
+        cr_assert_fail("expected eval failure");
+    }
+
+    rt->err_f = 0;
+    cr_assert_not_null(rt->msg_c);
+    cr_assert(strncmp(rt->msg_c, expected_prefix_c, strlen(expected_prefix_c)) == 0,
+              "expected prefix <%s>, got <%s>", expected_prefix_c, rt->msg_c);
+    free(rt->msg_c);
+    rt->msg_c = NULL;
+}
+
 Test(wisp, parse_str)
 {
     char* rest_c = NULL;
@@ -170,13 +190,13 @@ Test(wisp, parse_brackets_and_braces)
 {
     char* rest_c = NULL;
     er_app* bracket = assert_row(parse_input("[a b]", &rest_c), 3);
-    assert_small_strnat(bracket->arg_v[0], "BRAK");
+    assert_small_strnat(bracket->arg_v[0], "#brak");
     assert_small_strnat(bracket->arg_v[1], "a");
     assert_small_strnat(bracket->arg_v[2], "b");
     cr_assert_str_eq(rest_c, "");
 
     er_app* brace = assert_row(parse_input("{x}", &rest_c), 2);
-    assert_small_strnat(brace->arg_v[0], "CURL");
+    assert_small_strnat(brace->arg_v[0], "#curl");
     assert_small_strnat(brace->arg_v[1], "x");
     cr_assert_str_eq(rest_c, "");
 }
@@ -188,7 +208,7 @@ Test(wisp, parse_empty_containers)
     cr_assert_str_eq(rest_c, "");
 
     er_app* empty_bracket = assert_row(parse_input("[]", &rest_c), 1);
-    assert_small_strnat(empty_bracket->arg_v[0], "BRAK");
+    assert_small_strnat(empty_bracket->arg_v[0], "#brak");
     cr_assert_str_eq(rest_c, "");
 }
 
@@ -197,7 +217,7 @@ Test(wisp, parse_juxtaposition)
     char* rest_c = NULL;
     er_app* juxt = assert_app(parse_input("foo(bar baz)", &rest_c), 0, 3);
 
-    assert_small_strnat(juxt->arg_v[0], "JUXT");
+    assert_small_strnat(juxt->arg_v[0], "#juxt");
     assert_small_strnat(juxt->arg_v[1], "foo");
 
     er_app* args = assert_row(juxt->arg_v[2], 2);
@@ -206,7 +226,7 @@ Test(wisp, parse_juxtaposition)
     cr_assert_str_eq(rest_c, "");
 
     er_app* empty_juxt = assert_app(parse_input("foo()", &rest_c), 0, 3);
-    assert_small_strnat(empty_juxt->arg_v[0], "JUXT");
+    assert_small_strnat(empty_juxt->arg_v[0], "#juxt");
     assert_small_strnat(empty_juxt->arg_v[1], "foo");
     cr_assert_eq(empty_juxt->arg_v[2], 0);
     cr_assert_str_eq(rest_c, "");
@@ -224,28 +244,45 @@ Test(wisp, parse_comments_and_whitespace)
 
 Test(wisp, parse_errors)
 {
-    assert_parse_fails("(", "unclosed delimiter");
-    assert_parse_fails("(a]", "mismatched closing delimiter");
+    assert_parse_fails("(", "eof in list");
     assert_parse_fails(")", "unexpected closing delimiter");
-    assert_parse_fails("\"abc", "unclosed string");
-    assert_parse_fails(":", "invalid character");
+    assert_parse_fails("\"abc", "unterminated string");
+    assert_parse_fails("(a b", "eof in list");
+}
+
+Test(wisp, parser_accepts_plan_symbol_characters_and_any_closer)
+{
+    char* rest_c = NULL;
+    assert_small_strnat(parse_input("@module tail", &rest_c), "@module");
+    cr_assert_str_eq(rest_c, " tail");
+
+    assert_small_strnat(parse_input(": tail", &rest_c), ":");
+    cr_assert_str_eq(rest_c, " tail");
+
+    er_app* row = assert_row(parse_input("(a]", &rest_c), 1);
+    assert_small_strnat(row->arg_v[0], "a");
+    cr_assert_str_eq(rest_c, "");
 }
 
 Test(wisp, bind_law_and_apply_it)
 {
-    cr_assert_eq(eval_input("(#bind add 5)"), 5);
-    er_val law_v =
-        eval_input("(#bind add (#law \"add\" (add x y) ((#pin \"B\") (\"Add\" x y))))");
+    assert_small_strnat(eval_input("(#bind add 5)"), "add");
+    cr_assert_eq(eval_input("add"), 5);
 
+    assert_small_strnat(
+        eval_input("(#bind add (#law \"add\" (add x y) ((#pin \"B\") (\"Add\" x y))))"),
+        "add");
+    er_val law_v = eval_input("add");
     cr_assert_not_null(assert_law(law_v));
     cr_assert_eq(eval_input("(add 20 22)"), 42);
 }
 
 Test(wisp, numeric_pin66_wrapper_emits_direct_primitive_bytecode)
 {
-    cr_assert_not_null(
-        assert_law(eval_input("(#bind add (#law \"add\" (add x y) "
-                              "((#pin 66) (\"Add\" x y))))")));
+    assert_small_strnat(eval_input("(#bind add (#law \"add\" (add x y) "
+                                   "((#pin 66) (\"Add\" x y))))"),
+                        "add");
+    cr_assert_not_null(assert_law(eval_input("add")));
     er_law* law = assert_law(eval_input("(#law \"caller\" (caller ignored) (add 20 22))"));
     er_op* code = law->bc_v[0];
     cr_assert_not_null(code);
@@ -258,37 +295,71 @@ Test(wisp, numeric_pin66_wrapper_emits_direct_primitive_bytecode)
     cr_assert_eq(code[3].tag, OP_RET);
 }
 
+Test(wisp, macro_export_and_system_shadowing_match_plan_assembler)
+{
+    assert_small_strnat(eval_input("(#macro zap (#law \"zap\" (zap env form) 0))"), "zap");
+    cr_assert_eq(eval_input("(zap anything)"), 0);
+
+    assert_small_strnat(eval_input("(#bind a 1)"), "a");
+    assert_small_strnat(eval_input("(#bind b 2)"), "b");
+    cr_assert_eq(eval_input("(#export a)"), 0);
+    cr_assert_eq(eval_input("a"), 1);
+    assert_eval_fails("b", "unbound thk");
+}
+
+Test(wisp, long_nat_symbols_are_environment_and_local_keys)
+{
+    assert_strnat_bytes(eval_input("(#bind abcdefgh 9)"), "abcdefgh");
+    cr_assert_eq(eval_input("abcdefgh"), 9);
+
+    assert_strnat_bytes(
+        eval_input("(#bind abcdefgh (#law \"abcdefgh\" (abcdefgh longargx) longargx))"),
+        "abcdefgh");
+    cr_assert_eq(eval_input("(abcdefgh 55)"), 55);
+
+    assert_strnat_bytes(eval_input("(#bind abcdefgi 10)"), "abcdefgi");
+    cr_assert_eq(eval_input("(#export abcdefgh)"), 0);
+    cr_assert_not_null(assert_law(eval_input("abcdefgh")));
+    assert_eval_fails("abcdefgi", "unbound thk");
+}
+
+Test(wisp, env_values_shadow_system_macros)
+{
+    assert_small_strnat(eval_input("(#bind #pin 7)"), "#pin");
+    assert_eval_fails("(#pin 1)", "runtime error");
+}
+
 Test(wisp, recursive_program_validates_extended_snippet)
 {
-    cr_assert_gt(assert_law(eval_input("(#bind inc (#law \"inc\" (inc x) "
-                                       "((#pin \"B\") (\"Inc\" x))))"))
-                     ->bc_s,
-                 0);
-    cr_assert_gt(assert_law(eval_input("(#bind if (#law \"if\" (if cond then else) "
-                                       "((#pin \"B\") (\"If\" cond then else))))"))
-                     ->bc_s,
-                 0);
-    cr_assert_gt(assert_law(eval_input("(#bind eq (#law \"eq\" (eq a b) "
-                                       "((#pin \"B\") (\"Eq\" a b))))"))
-                     ->bc_s,
-                 0);
-    cr_assert_gt(assert_law(eval_input("(#bind dechelp (#law \"dechelp\" (dechelp count x) "
-                                       "(if (eq (inc count) x) count "
-                                       "(dechelp (inc count) x))))"))
-                     ->bc_s,
-                 0);
-    cr_assert_gt(assert_law(eval_input("(#bind dec (#law \"dec\" (dec x) (dechelp 0 x)))"))
-                     ->bc_s,
-                 0);
-    cr_assert_gt(assert_law(eval_input("(#bind add (#law \"add\" (add a b) "
-                                       "(if (eq 0 a) b (add (dec a) (inc b)))))"))
-                     ->bc_s,
-                 0);
-    cr_assert_gt(assert_law(eval_input("(#bind fib (#law \"fib\" (fib n) "
-                                       "(if (eq n 1) 1 (if (eq n 2) 1 "
-                                       "(add (fib (dec n)) (fib (dec (dec n))))))))"))
-                     ->bc_s,
-                 0);
+    assert_small_strnat(eval_input("(#bind inc (#law \"inc\" (inc x) "
+                                   "((#pin \"B\") (\"Inc\" x))))"),
+                        "inc");
+    cr_assert_gt(assert_law(eval_input("inc"))->bc_s, 0);
+    assert_small_strnat(eval_input("(#bind if (#law \"if\" (if cond then else) "
+                                   "((#pin \"B\") (\"If\" cond then else))))"),
+                        "if");
+    cr_assert_gt(assert_law(eval_input("if"))->bc_s, 0);
+    assert_small_strnat(eval_input("(#bind eq (#law \"eq\" (eq a b) "
+                                   "((#pin \"B\") (\"Eq\" a b))))"),
+                        "eq");
+    cr_assert_gt(assert_law(eval_input("eq"))->bc_s, 0);
+    assert_small_strnat(eval_input("(#bind dechelp (#law \"dechelp\" (dechelp count x) "
+                                   "(if (eq (inc count) x) count "
+                                   "(dechelp (inc count) x))))"),
+                        "dechelp");
+    cr_assert_gt(assert_law(eval_input("dechelp"))->bc_s, 0);
+    assert_small_strnat(eval_input("(#bind dec (#law \"dec\" (dec x) (dechelp 0 x)))"),
+                        "dec");
+    cr_assert_gt(assert_law(eval_input("dec"))->bc_s, 0);
+    assert_small_strnat(eval_input("(#bind add (#law \"add\" (add a b) "
+                                   "(if (eq 0 a) b (add (dec a) (inc b)))))"),
+                        "add");
+    cr_assert_gt(assert_law(eval_input("add"))->bc_s, 0);
+    assert_small_strnat(eval_input("(#bind fib (#law \"fib\" (fib n) "
+                                   "(if (eq n 1) 1 (if (eq n 2) 1 "
+                                   "(add (fib (dec n)) (fib (dec (dec n))))))))"),
+                        "fib");
+    cr_assert_gt(assert_law(eval_input("fib"))->bc_s, 0);
 
     cr_assert_eq(eval_input("(inc 41)"), 42);
     cr_assert_eq(eval_input("(dec 5)"), 4);

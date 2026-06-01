@@ -25,6 +25,8 @@ wisp_rt* wisp_rt_alloc(const enki_allocator* sys_a);
 void wisp_rt_free(const enki_allocator* sys_a, wisp_rt* rt);
 
 er_val wisp_parse(wisp_rt* rt, char** str);
+er_val wisp_macroexpand(wisp_rt* rt, er_val val_v);
+er_val wisp_thunk(wisp_rt* rt, er_val val_v);
 er_val wisp_eval(wisp_rt* rt, er_val val_v);
 char* wisp_print_value(wisp_rt* rt, er_val val_v, size_t* out_s);
 

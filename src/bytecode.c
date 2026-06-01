@@ -379,29 +379,28 @@ static const er_bc_prim* er_bc_prim_lookup(er_val key_v)
     return NULL;
 }
 
-static bool er_bc_direct_prim_wrapper_key(er_val law_v, er_val* key_v)
+static bool er_bc_call_head_with_local_args(er_val body_v, uint32_t ari_d, er_val* head_v)
 {
-    er_law* law = er_outt(er_tag_law, law_v);
-    if (law == NULL) {
-        return false;
-    }
-
-    er_val cur_v = law->body_v;
+    er_val cur_v = body_v;
     er_val f_v = 0;
     er_val x_v = 0;
     size_t arg_s = 0;
     while (er_bc_is_call(cur_v, &f_v, &x_v)) {
         arg_s++;
-        if (arg_s > (size_t)law->ari_d || x_v != (er_val)((size_t)law->ari_d + 1u - arg_s)) {
+        if (arg_s > (size_t)ari_d || x_v != (er_val)((size_t)ari_d + 1u - arg_s)) {
             return false;
         }
         cur_v = f_v;
     }
-    if (arg_s != (size_t)law->ari_d) {
+    if (arg_s != (size_t)ari_d) {
         return false;
     }
+    *head_v = er_bc_pull_const(cur_v);
+    return true;
+}
 
-    er_val prim_v = er_bc_pull_const(cur_v);
+static bool er_bc_prim_name_from_law_value(er_val prim_v, uint32_t ari_d, er_val* key_v)
+{
     er_pin* pin = er_outt(er_tag_pin, prim_v);
     if (pin != NULL) {
         prim_v = pin->val_v;
@@ -412,12 +411,52 @@ static bool er_bc_direct_prim_wrapper_key(er_val law_v, er_val* key_v)
     }
 
     const er_bc_prim* prim = er_bc_prim_lookup(prim_law->name_v);
-    if (prim == NULL || prim->ari_d != law->ari_d) {
+    if (prim == NULL || prim->ari_d != ari_d) {
         return false;
     }
 
     *key_v = prim_law->name_v;
     return true;
+}
+
+static bool er_bc_direct_prim_body_key(er_val body_v, uint32_t ari_d, er_val* key_v)
+{
+    er_val head_v = 0;
+    if (er_bc_call_head_with_local_args(body_v, ari_d, &head_v) &&
+        er_bc_prim_name_from_law_value(head_v, ari_d, key_v)) {
+        return true;
+    }
+
+    er_val pin_f_v = 0;
+    er_val row_v = 0;
+    if (!er_bc_is_call(body_v, &pin_f_v, &row_v)) {
+        return false;
+    }
+    er_pin* pin = er_outt(er_tag_pin, er_bc_pull_const(pin_f_v));
+    if (pin == NULL || pin->val_v != 66) {
+        return false;
+    }
+
+    er_val prim_name_v = 0;
+    if (!er_bc_call_head_with_local_args(row_v, ari_d, &prim_name_v)) {
+        return false;
+    }
+    const er_bc_prim* prim = er_bc_prim_lookup(prim_name_v);
+    if (prim == NULL || prim->ari_d != ari_d) {
+        return false;
+    }
+
+    *key_v = prim_name_v;
+    return true;
+}
+
+static bool er_bc_direct_prim_wrapper_key(er_val law_v, er_val* key_v)
+{
+    er_law* law = er_outt(er_tag_law, law_v);
+    if (law == NULL) {
+        return false;
+    }
+    return er_bc_direct_prim_body_key(law->body_v, law->ari_d, key_v);
 }
 
 static uint32_t er_bc_arity(er_val val_v)
@@ -605,6 +644,32 @@ static bool er_bc_compile_prim_call(er_bc_compiler* c, size_t depth_s, uint32_t 
            er_bc_emit_u32(code, OP_CALLU, (uint32_t)(arg_s - prim->ari_d));
 }
 
+static bool er_bc_compile_direct_prim_body(er_bc_compiler* c, size_t depth_s, uint32_t ari_d,
+                                           er_val body_v, er_bc_code* code, bool* done_f)
+{
+    enum { ER_BC_MAX_DIRECT_PRIM_ARITY = 8 };
+
+    *done_f = false;
+    er_val key_v = 0;
+    if (!er_bc_direct_prim_body_key(body_v, ari_d, &key_v)) {
+        return true;
+    }
+
+    const er_bc_prim* prim = er_bc_prim_lookup(key_v);
+    if (prim == NULL || prim->ari_d != ari_d || prim->ari_d > ER_BC_MAX_DIRECT_PRIM_ARITY) {
+        c->ok_f = false;
+        return false;
+    }
+
+    er_val arg_v[ER_BC_MAX_DIRECT_PRIM_ARITY];
+    for (uint32_t k = 0; k < prim->ari_d; k++) {
+        arg_v[k] = (er_val)k + 1u;
+    }
+
+    *done_f = true;
+    return er_bc_compile_prim_call(c, depth_s, ari_d, prim, key_v, arg_v, prim->ari_d, code);
+}
+
 static bool er_bc_compile_plain_call(er_bc_compiler* c, size_t depth_s, uint32_t ari_d,
                                      er_val f_v, const er_val* arg_v, size_t arg_s,
                                      er_bc_code* code)
@@ -623,13 +688,24 @@ static bool er_bc_compile_plain_call(er_bc_compiler* c, size_t depth_s, uint32_t
     }
 
     er_val lit_v = er_bc_pull_const(f_v);
-    if (er_bc_is_call(lit_v, &(er_val){0}, &(er_val){0}) || er_bc_is_var(depth_s, lit_v)) {
+    if (er_bc_is_call(lit_v, &(er_val){0}, &(er_val){0})) {
         c->ok_f = false;
         return false;
     }
+    uint32_t lit_ari_d = er_bc_arity(lit_v);
+    if (lit_ari_d == 0) {
+        if (arg_s > UINT32_MAX - 1u) {
+            code->ok_f = false;
+            return false;
+        }
+        return er_bc_emit_lit(code, lit_v) &&
+               er_bc_compile_args(c, depth_s, ari_d, arg_v, arg_s, code) &&
+               er_bc_emit_u32(code, OP_MK_APP, (uint32_t)arg_s + 1u);
+    }
+
     return er_bc_emit_lit(code, lit_v) &&
            er_bc_compile_args(c, depth_s, ari_d, arg_v, arg_s, code) &&
-           er_bc_compile_call_tail(code, er_bc_arity(lit_v), arg_s);
+           er_bc_compile_call_tail(code, lit_ari_d, arg_s);
 }
 
 static bool er_bc_compile_call(er_bc_compiler* c, size_t depth_s, uint32_t ari_d, er_val f_v,
@@ -666,6 +742,14 @@ static bool er_bc_compile_expr(er_bc_compiler* c, size_t depth_s, uint32_t ari_d
                                er_bc_code* code)
 {
     ENKI_PROFILE_ZONE("er_bc_compile_expr");
+    bool done_f = false;
+    if (!er_bc_compile_direct_prim_body(c, depth_s, ari_d, body_v, code, &done_f)) {
+        return false;
+    }
+    if (done_f) {
+        return true;
+    }
+
     if (er_bc_is_var(depth_s, body_v)) {
         return er_bc_emit_var(code, body_v);
     }
