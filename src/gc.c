@@ -55,22 +55,29 @@ void* enki_gc_alloc(enki_gc* gc, size_t size_s, size_t align_s) {
     if (!gc) abort();
     void* new = enki_arena_alloc_aligned(gc->active_a, size_s, align_s);
     if (!new) {
-        gc->root->stats.gc_alloc_fail_s++;
-        if(gc->lock_depth > 0) {
+        if(gc->root != NULL) gc->root->stats.gc_alloc_fail_s++;
+        if(gc->lock_depth > 0 && gc->root != NULL) {
             enki_interp_throw(gc->root, ENKI_ERROR_OOM, 0);
         }
-        enki_gc_collect(gc);
+        if(gc->root != NULL) {
+            enki_gc_collect(gc);
+        }
         new = enki_arena_alloc_aligned(gc->active_a, size_s, align_s);
         if (!new) {
-            gc->root->stats.gc_alloc_fail_s++;
-            enki_interp_throw(gc->root, ENKI_ERROR_OOM, 0);
+            if(gc->root != NULL) {
+                gc->root->stats.gc_alloc_fail_s++;
+                enki_interp_throw(gc->root, ENKI_ERROR_OOM, 0);
+            }
+            abort();
         }
     }
-    gc->root->stats.gc_alloc_s++;
-    gc->root->stats.gc_alloc_bytes_s += size_s;
-    size_t live_s = gc->active_a->off_o - sizeof(enki_arena);
-    if(live_s > gc->root->stats.gc_high_water_bytes_s) {
-        gc->root->stats.gc_high_water_bytes_s = live_s;
+    if(gc->root != NULL) {
+        gc->root->stats.gc_alloc_s++;
+        gc->root->stats.gc_alloc_bytes_s += size_s;
+        size_t live_s = gc->active_a->off_o - sizeof(enki_arena);
+        if(live_s > gc->root->stats.gc_high_water_bytes_s) {
+            gc->root->stats.gc_high_water_bytes_s = live_s;
+        }
     }
     return new;
 }
@@ -82,14 +89,19 @@ void* enki_gc_alloc_locked(enki_gc* gc, size_t size_s, size_t align_s) {
     void* new = enki_arena_alloc_aligned(gc->active_a, size_s, align_s);
     enki_gc_unlock(gc);
     if(!new) {
-        gc->root->stats.gc_alloc_fail_s++;
-        enki_interp_throw(gc->root, ENKI_ERROR_OOM, 0);
+        if(gc->root != NULL) {
+            gc->root->stats.gc_alloc_fail_s++;
+            enki_interp_throw(gc->root, ENKI_ERROR_OOM, 0);
+        }
+        abort();
     }
-    gc->root->stats.gc_locked_alloc_s++;
-    gc->root->stats.gc_locked_alloc_bytes_s += size_s;
-    size_t live_s = gc->active_a->off_o - sizeof(enki_arena);
-    if(live_s > gc->root->stats.gc_high_water_bytes_s) {
-        gc->root->stats.gc_high_water_bytes_s = live_s;
+    if(gc->root != NULL) {
+        gc->root->stats.gc_locked_alloc_s++;
+        gc->root->stats.gc_locked_alloc_bytes_s += size_s;
+        size_t live_s = gc->active_a->off_o - sizeof(enki_arena);
+        if(live_s > gc->root->stats.gc_high_water_bytes_s) {
+            gc->root->stats.gc_high_water_bytes_s = live_s;
+        }
     }
     return new;
 }
@@ -103,11 +115,13 @@ enki_value enki_gc_copy(enki_gc* gc, enki_value val_v) {
     }
     void* new = enki_arena_alloc_aligned(gc->active_a, h->size_s, _Alignof(enki_value_header));
     if(!new) abort();
-    gc->root->stats.gc_copy_s++;
-    gc->root->stats.gc_copy_bytes_s += h->size_s;
-    size_t live_s = gc->active_a->off_o - sizeof(enki_arena);
-    if(live_s > gc->root->stats.gc_high_water_bytes_s) {
-        gc->root->stats.gc_high_water_bytes_s = live_s;
+    if(gc->root != NULL) {
+        gc->root->stats.gc_copy_s++;
+        gc->root->stats.gc_copy_bytes_s += h->size_s;
+        size_t live_s = gc->active_a->off_o - sizeof(enki_arena);
+        if(live_s > gc->root->stats.gc_high_water_bytes_s) {
+            gc->root->stats.gc_high_water_bytes_s = live_s;
+        }
     }
     void* payload = GET_PAYLOAD(val_v);
     memcpy(new, ENKI_AS(void, val_v), h->size_s);
@@ -119,6 +133,7 @@ enki_value enki_gc_copy(enki_gc* gc, enki_value val_v) {
 void enki_gc_collect(enki_gc* gc) {
     ENKI_PROFILE_ZONE("enki_gc_collect");
     if (!gc) return;
+    if (gc->root == NULL) return;
     gc->root->stats.gc_collect_s++;
     if(gc->lock_depth > 0) {
         enki_interp_throw(gc->root, ENKI_ERROR_OOM, 0);

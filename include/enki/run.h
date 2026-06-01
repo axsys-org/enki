@@ -42,6 +42,8 @@ typedef uint64_t er_val;
 
 #define er_bad er_into(er_tag_bad, 0)
 
+typedef struct er_op er_op;
+
 typedef struct er_head_raw {
   uint64_t fwd_f: 1;
   uint64_t nf_f: 1;
@@ -68,13 +70,13 @@ typedef struct er_pin {
 } er_pin;
 
 typedef struct er_law {
-    er_head h;
-    er_val name_v;
-    er_val body_v;
-    uint32_t ari_d;
-    uint32_t start_d;
-    uint32_t frame_d;
-    uint32_t let_off_d[];
+  er_head h;
+  er_val name_v;
+  er_val body_v;
+  uint32_t ari_d;
+  uint32_t let_d; // size of letrec table
+  size_t bc_s; // number of bytecode labels
+  er_op* bc_v[]; // bytecode labels
 } er_law;
 
 typedef struct er_app {
@@ -107,10 +109,14 @@ er_val er_bat_init(er_bat* bat, size_t lim_s, const uint64_t lim_q[]);
 er_pin* er_pin_alloc(const enki_allocator* allocator, size_t sub_s);
 er_val er_pin_init(er_pin* pin, const uint8_t hash_b[32], er_val val_v, size_t sub_s,
     const er_val sub_v[]);
+er_val er_pin_make(const enki_allocator* loc_a, er_val val_v);
 
-er_law* er_law_alloc(const enki_allocator* allocator, size_t n_lets);
+er_law* er_law_alloc(const enki_allocator* allocator, size_t bc_s);
 er_val er_law_init(er_law* law, er_val name_v, er_val body_v, uint32_t ari_d,
-    uint32_t frame_d, size_t n_lets, const uint32_t let_off_d[]);
+    uint32_t let_d, size_t bc_s, er_op* const bc_v[]);
+er_val er_law_make_code(const enki_allocator* loc_a, er_val nam_v, er_val bod_v,
+    uint32_t ari_d, uint32_t let_d, size_t bc_s, er_op* const bc_v[]);
+er_val er_law_make(const enki_allocator* loc_a, er_val nam_v, er_val bod_v, uint32_t ari_d);
 
 er_app* er_app_alloc(const enki_allocator* allocator, size_t arg_s);
 er_val er_app_init(er_app* app, er_val fn_v, size_t arg_s, const er_val arg_v[]);
@@ -123,34 +129,90 @@ er_thk* er_app_weld(const enki_allocator* allocator, er_val sin_v, er_val dex_v)
 
 
 
-// Schematic C. Heap/vector helpers are intentionally abstracted.
-
 
 typedef enum {
   OP_PUSH_VAR,
   OP_PUSH_LIT,
   OP_MK_APP,
   OP_MK_CALL,
+  OP_CALLF,
+  OP_CALLU,
+  OP_PUSH_SELF,
   OP_FORCE,
   OP_DROP,
   OP_JUMP_IF_ZERO,
+  OP_JUMP_IF,
   OP_ADD_NAT,
+  OP_PIN,
+  OP_LAW,
+  OP_ELIM,
+  OP_INC,
+  OP_DEC,
+  OP_NAM,
+  OP_BODY,
+  OP_NAT,
+  OP_ARI,
+  OP_UNPIN,
+  OP_SZ,
+  OP_LAST,
+  OP_INIT,
+  OP_ADD,
+  OP_SUB,
+  OP_RSH,
+  OP_LSH,
+  OP_DIV,
+  OP_MUL,
+  OP_MOD,
+  OP_TEST,
+  OP_LOADN,
+  OP_LOAD,
+  OP_STOREN,
+  OP_STORE,
+  OP_TRUNCN,
+  OP_TRUNC,
+  OP_MET,
+  OP_MET_DYN,
+  OP_BEX,
+  OP_BITS,
+  OP_BYTES,
+  OP_LOAD8,
+  OP_STORE8,
+  OP_TRUNC8,
+  OP_TRUNC16,
+  OP_TRUNC32,
+  OP_TRUNC64,
+  OP_REP,
+  OP_SLICE,
+  OP_WELD,
+  OP_UP,
+  OP_COUP,
+  OP_HD,
+  OP_IX,
+  OP_NOT,
+  OP_TRU,
+  OP_OR,
+  OP_AND,
+  OP_EQ,
+  OP_LE,
+  OP_CMP,
   OP_RET,
   OP_COUNT
 } er_optag;
 
-typedef struct {
+struct er_op {
     er_optag tag;
     union {
         uint32_t   u32;
         uintptr_t  slot;
         er_val     lit_v;
     } as;
-} er_op;
+};
 
 typedef union {
     void      *lab;
     er_val    *ref;
+    er_op     *code;
+    er_law    *law;
     er_val    val_v;
     uintptr_t u;
     uint32_t  pc;
@@ -165,6 +227,8 @@ typedef struct {
 
   er_kon *kbase;
   er_kon *ksp;
+  uint64_t b_count;
+  uint64_t k_count;
 } er_vm;
 
 

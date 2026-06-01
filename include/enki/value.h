@@ -21,9 +21,9 @@ typedef struct enki_gc enki_gc;
 #define ENKI_LAW_BC(l)  ((l)->data_b + ((l)->n_const_s * sizeof(enki_value)))
 
 #define ENKI_TO_APP(v) \
-  ((IS_PTR(v) && ((obj_header*)v)->kind_b == ENKI_APP) ? (ENKI_TO_PTR(v)) : NULL)
+  ((IS_PTR(v) && ENKI_AS(obj_header, v)->kind_b == ENKI_APP) ? ENKI_AS(enki_app, v) : NULL)
 #define ENKI_TO_LAW(v) \
-  ((IS_PTR(v) && ((obj_header*)v)->kind_b == ENKI_LAW) ? (ENKI_TO_PTR(v)) : NULL)
+  ((IS_PTR(v) && ENKI_AS(obj_header, v)->kind_b == ENKI_LAW) ? ENKI_AS(enki_law, v) : NULL)
 typedef enum {
     ENKI_PIN,
     ENKI_LAW,
