@@ -920,7 +920,7 @@ er_val eo_law(const enki_allocator* loc_a, er_val nam_v, er_val bod_v, er_val ar
     if (!eo_nat_to_size(ari_v, &ari_s) || ari_s > UINT32_MAX - 1) {
         return 0;
     }
-    er_val out_v = er_law_make(loc_a, nam_v, bod_v, (uint32_t)ari_s);
+    er_val out_v = er_law_make(loc_a, nam_v, bod_v, (uint32_t)(ari_s + 1));
     return out_v == 0 ? er_bad : out_v;
 }
 

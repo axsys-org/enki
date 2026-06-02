@@ -1,4 +1,5 @@
 #include "enki/gc.h"
+#include "enki/interp.h"
 #include "enki/run.h"
 
 #include <criterion/criterion.h>
@@ -152,6 +153,15 @@ static er_val make_prim66(void)
     er_pin* pin = er_pin_alloc(enki_allocator_system(), 0);
     cr_assert_not_null(pin);
     er_val pin_v = er_pin_init(pin, NULL, 66, 0, NULL);
+    cr_assert_eq(er_get_tag(pin_v), er_tag_pin);
+    return pin_v;
+}
+
+static er_val make_prim0(void)
+{
+    er_pin* pin = er_pin_alloc(enki_allocator_system(), 0);
+    cr_assert_not_null(pin);
+    er_val pin_v = er_pin_init(pin, NULL, 0, 0, NULL);
     cr_assert_eq(er_get_tag(pin_v), er_tag_pin);
     return pin_v;
 }
@@ -566,6 +576,41 @@ Test(run_vm, direct_primop_bytecode_uses_data_stack)
     cr_assert_eq(run_vm(code, call_v), 42);
 }
 
+Test(run_vm, primop0_law_forces_arguments_to_whnf_and_increments_arity)
+{
+    er_val prim0_v = make_prim0();
+    er_val arity_v = make_done_thunk(2);
+    er_val name_v = make_done_thunk(11);
+    er_val body_arg_v[] = {make_done_thunk(42)};
+    er_val body_const_v = make_app_value(99, 1, body_arg_v);
+    er_val body_v = make_done_thunk(body_const_v);
+    er_op code[] = {
+        [0] = {.tag = OP_PUSH_LIT, .as.lit_v = prim0_v},
+        [1] = {.tag = OP_PUSH_LIT, .as.lit_v = OP0_LAW},
+        [2] = {.tag = OP_PUSH_LIT, .as.lit_v = arity_v},
+        [3] = {.tag = OP_PUSH_LIT, .as.lit_v = name_v},
+        [4] = {.tag = OP_PUSH_LIT, .as.lit_v = body_v},
+        [5] = {.tag = OP_MK_APP, .as.u32 = 4},
+        [6] = {.tag = OP_MK_CALL, .as.u32 = 2},
+        [7] = {.tag = OP_EVAL},
+        [8] = {.tag = OP_RET},
+    };
+    er_val law_v = make_law(0, code, 0, NULL);
+    er_val call_v = make_call(law_v, 1);
+
+    er_val result_v = run_vm(code, call_v);
+
+    er_law* made_law = er_outt(er_tag_law, result_v);
+    cr_assert_not_null(made_law);
+    cr_assert_eq(made_law->ari_d, 3);
+    cr_assert_eq(made_law->name_v, 11);
+    cr_assert_eq(made_law->body_v, body_const_v);
+    er_app* body_app = er_outt(er_tag_app, made_law->body_v);
+    cr_assert_not_null(body_app);
+    cr_assert_eq(body_app->h.raw.nf_f, 0);
+    cr_assert_eq(body_app->arg_v[0], body_arg_v[0]);
+}
+
 Test(run_vm, primop66_eq_returns_nat_boolean)
 {
     er_val prim66_v = make_prim66();
@@ -971,7 +1016,7 @@ Test(run_vm, compiled_primitive_evals_lower_stack_argument_before_opcode)
     cr_assert_eq(run_vm(NULL, call_v), 42);
 }
 
-Test(run_vm, compiled_law_primitive_forces_arguments_to_nf)
+Test(run_vm, compiled_law_primitive_forces_arguments_to_whnf_and_increments_arity)
 {
     er_val law_prim_v = make_prim_law(PLAN_S3('L', 'a', 'w'), 3);
     er_val name_v = make_done_thunk(11);
@@ -988,30 +1033,35 @@ Test(run_vm, compiled_law_primitive_forces_arguments_to_nf)
     cr_assert_not_null(code);
 
     size_t force_s = 0;
+    size_t eval_s = 0;
     bool saw_law_f = false;
     for (size_t k = 0; k < 32 && code[k].tag != OP_RET; k++) {
         if (code[k].tag == OP_FORCE) {
             force_s++;
+        }
+        if (code[k].tag == OP_EVAL) {
+            eval_s++;
         }
         if (code[k].tag == OP_LAW) {
             saw_law_f = true;
             break;
         }
     }
-    cr_assert_eq(force_s, 3);
+    cr_assert_eq(force_s, 0);
+    cr_assert_eq(eval_s, 3);
     cr_assert(saw_law_f);
 
     er_val call_v = make_call(outer_law_v, 1);
     er_val result_v = run_vm(NULL, call_v);
     er_law* made_law = er_outt(er_tag_law, result_v);
     cr_assert_not_null(made_law);
-    cr_assert_eq(made_law->ari_d, 0);
+    cr_assert_eq(made_law->ari_d, 1);
     cr_assert_eq(made_law->name_v, 11);
     cr_assert_eq(made_law->body_v, body_const_v);
     er_app* body_app = er_outt(er_tag_app, made_law->body_v);
     cr_assert_not_null(body_app);
-    cr_assert_eq(body_app->h.raw.nf_f, 1);
-    cr_assert_eq(body_app->arg_v[0], 42);
+    cr_assert_eq(body_app->h.raw.nf_f, 0);
+    cr_assert_eq(body_app->arg_v[0], body_arg_v[0]);
 }
 
 Test(run_vm, compiled_law_inlines_simple_primitive_wrapper)

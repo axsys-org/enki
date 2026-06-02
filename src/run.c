@@ -2016,9 +2016,9 @@ PRIM_ROUTE_DISPATCH: {
     }
     switch (prim_byte_op) {
     case OP_LAW:
-        PRIM_EVAL_STACK_NF(0);
-        PRIM_EVAL_STACK_NF(1);
-        PRIM_EVAL_STACK_NF(2);
+        PRIM_EVAL_STACK_WHNF(0);
+        PRIM_EVAL_STACK_WHNF(1);
+        PRIM_EVAL_STACK_WHNF(2);
         break;
     case OP_REP:
         PRIM_EVAL_STACK_WHNF(2);

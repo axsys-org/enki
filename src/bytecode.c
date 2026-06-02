@@ -82,7 +82,7 @@ typedef struct er_bc_prim {
 
 static const er_bc_prim er_bc_prim_v[] = {
     ER_BC_ROUTE1(PLAN_S3('P', 'i', 'n'), OP_PIN, 1, ER_BC_W),
-    ER_BC_ROUTE3(PLAN_S3('L', 'a', 'w'), OP_LAW, 3, ER_BC_N, ER_BC_N, ER_BC_N),
+    ER_BC_ROUTE3(PLAN_S3('L', 'a', 'w'), OP_LAW, 3, ER_BC_W, ER_BC_W, ER_BC_W),
     ER_BC_ROUTE6(PLAN_S4('E', 'l', 'i', 'm'), OP_ELIM, 6, ER_BC_W, ER_BC_W,
                  ER_BC_W, ER_BC_W, ER_BC_W, ER_BC_W),
     ER_BC_ROUTE1(PLAN_S3('N', 'a', 't'), OP_NAT, 1, ER_BC_W),
