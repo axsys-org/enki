@@ -941,7 +941,11 @@ er_val eo_elim(const enki_allocator* loc_a, er_val pin_f_v, er_val law_f_v, er_v
 
     er_app* app = er_outt(er_tag_app, val_v);
     if (app != NULL) {
-        er_val args_v[] = {app->fn_v, val_v};
+        er_val init_v = eo_init(loc_a, val_v);
+        if (init_v == er_bad) {
+            return er_bad;
+        }
+        er_val args_v[] = {init_v, eo_last(val_v)};
         return eo_thk_app(loc_a, app_f_v, 2, args_v);
     }
 

@@ -1,6 +1,7 @@
 #include "enki/gc.h"
 #include "enki/interp.h"
 #include "enki/run.h"
+#include "enki/run_ops.h"
 
 #include <criterion/criterion.h>
 #include <stdint.h>
@@ -182,6 +183,27 @@ static er_val make_app_value(er_val fn_v, size_t arg_s, const er_val arg_v[])
     er_val app_v = er_app_init(app, fn_v, arg_s, arg_v);
     cr_assert_eq(er_get_tag(app_v), er_tag_app);
     return app_v;
+}
+
+Test(run_ops, elim_app_case_receives_init_and_last)
+{
+    er_val app_args_v[] = {20, 30};
+    er_val app_v = make_app_value(10, 2, app_args_v);
+
+    er_val elim_v = eo_elim(enki_allocator_system(), 1, 2, 111, 4, 5, app_v);
+
+    er_thk* thunk = er_outt(er_tag_thk, elim_v);
+    cr_assert_not_null(thunk);
+    cr_assert_eq(thunk->fun, ER_XUNK_APP);
+    cr_assert_eq(thunk->arg_s, 3);
+    cr_assert_eq(thunk->arg_v[0], 111);
+    cr_assert_eq(thunk->arg_v[2], 30);
+
+    er_app* init = er_outt(er_tag_app, thunk->arg_v[1]);
+    cr_assert_not_null(init);
+    cr_assert_eq(init->fn_v, 10);
+    cr_assert_eq(init->arg_s, 1);
+    cr_assert_eq(init->arg_v[0], 20);
 }
 
 typedef struct er_gc_test_root {
