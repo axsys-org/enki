@@ -1005,9 +1005,6 @@ static er_val compile_expr(wisp_rt* rt, size_t loc_s, wisp_local* loc, er_val va
     if (app->arg_s == 3 && app->arg_v[0] == MOTE_HJUXT && app->arg_v[1] == (er_val)'#') {
         return wisp_eval(rt, app->arg_v[2]);
     }
-    if (app->arg_s == 2 && app->arg_v[0] == (er_val)'#') {
-        return wisp_eval(rt, app->arg_v[1]);
-    }
 
     er_val ret = recur(app->arg_v[0]);
     for (size_t i = 1; i < app->arg_s; i++) {
@@ -1061,13 +1058,19 @@ static er_val wisp_law(wisp_rt* rt, er_val tag_v, er_val sig_v, er_val bod_v,
         wisp_parse_bind(rt, bin_v[idx_s], &loc[i].nam_v, &loc[i].exp_v);
     }
 
-    er_val* let_v = NULL;
+    er_val* exp_v = NULL;
     for (size_t j = 0; j < bin_s; j++) {
-        er_val exp_v = _wisp_macroexpand(rt, loc_s, loc, loc[j + arg_s + 1u].exp_v);
-        arrpush(let_v, compile_expr(rt, loc_s, loc, exp_v));
+        arrpush(exp_v, _wisp_macroexpand(rt, loc_s, loc, loc[j + arg_s + 1u].exp_v));
     }
 
     er_val bod_exp_v = _wisp_macroexpand(rt, loc_s, loc, bod_v);
+
+    er_val* let_v = NULL;
+    for (size_t j = 0; j < bin_s; j++) {
+        arrpush(let_v, compile_expr(rt, loc_s, loc, exp_v[j]));
+    }
+    arrfree(exp_v);
+
     bod_exp_v = compile_expr(rt, loc_s, loc, bod_exp_v);
     for (size_t j = bin_s; j > 0; j--) {
         bod_exp_v = wisp_app2(rt, 1, let_v[j - 1u], bod_exp_v);
@@ -1084,6 +1087,9 @@ static er_val wisp_law(wisp_rt* rt, er_val tag_v, er_val sig_v, er_val bod_v,
 
 static er_val wisp_bind(wisp_rt* rt, er_val nam_v, er_val val_v, bool mac_f)
 {
+    if (!wisp_is_nat(nam_v)) {
+        _wisp_fail_with_val(rt, "bad env key", nam_v);
+    }
     er_val vel_v = wisp_eval(rt, val_v);
     wisp_putenv(rt, nam_v, mac_f, vel_v);
     return _wisp_quote(rt, nam_v);
@@ -1114,12 +1120,14 @@ static er_val wisp_export(wisp_rt* rt, size_t sym_s, const er_val sym_v[])
 static er_val _wisp_expand1(wisp_rt* rt, size_t loc_s, wisp_local* loc, uint64_t mac_q,
                             er_val val_v)
 {
+    (void)loc_s;
+    (void)loc;
+
     er_app* app = wisp_as_app(val_v);
     if (app == NULL) {
         wisp_fail(rt, "expected row expanding macro");
     }
 
-#define RECUR(x) _wisp_macroexpand(rt, loc_s, loc, x)
     switch (mac_q) {
     case MOTE_HBIND:
         if (app->arg_s != 3) {
@@ -1146,21 +1154,13 @@ static er_val _wisp_expand1(wisp_rt* rt, size_t loc_s, wisp_local* loc, uint64_t
         if (app->arg_s < 1) {
             _wisp_fail_with_val(rt, "invalid #app", val_v);
         }
-        er_val* args_v = NULL;
-        for (size_t i = 1; i < app->arg_s; i++) {
-            arrpush(args_v, RECUR(app->arg_v[i]));
-        }
-        size_t args_s = arrlen(args_v);
-        er_val ret_v = wisp_app(rt, args_s, args_v);
-        arrfree(args_v);
-        return ret_v;
+        return wisp_app(rt, app->arg_s - 1u, app->arg_v + 1);
     }
     case MOTE_HEXPORT:
         return wisp_export(rt, app->arg_s - 1u, app->arg_v + 1);
     default:
         _wisp_fail_with_val(rt, "unknown macro", mac_q);
     }
-#undef RECUR
     return 0;
 }
 

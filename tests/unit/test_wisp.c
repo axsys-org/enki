@@ -286,6 +286,11 @@ Test(wisp, law_body_hash_juxtaposition_splices_raw_expression)
     cr_assert_eq(eval_input("((#law \"caller\" (caller x) (#(id) x)) 42)"), 42);
 }
 
+Test(wisp, law_body_plain_hash_list_is_not_compile_time_eval)
+{
+    assert_eval_fails("(#law \"plain\" (plain x) (# 42))", "unbound");
+}
+
 Test(wisp, numeric_pin66_wrapper_emits_direct_primitive_bytecode)
 {
     assert_small_strnat(eval_input("(#bind add (#law \"add\" (add x y) "
@@ -332,6 +337,38 @@ Test(wisp, user_macro_results_are_forced_to_nf_before_syntax_interpretation)
     er_law* law = assert_law(eval_input("(make-law)"));
     cr_assert_eq(law->ari_d, 1);
     assert_strnat_bytes(law->name_v, "made");
+}
+
+Test(wisp, app_evaluates_raw_operands_in_order)
+{
+    assert_strnat_bytes(eval_input("(#bind choose (#law \"choose\" (choose x y) x))"), "choose");
+    assert_strnat_bytes(eval_input("(#bind current 1)"), "current");
+
+    cr_assert_eq(eval_input("(#app choose current (#bind current 2))"), 1);
+    cr_assert_eq(eval_input("current"), 2);
+}
+
+Test(wisp, bind_and_macro_validate_key_before_rhs_eval)
+{
+    assert_eval_fails("(#bind (0) (#bind bindleak 1))", "bad env key");
+    assert_eval_fails("bindleak", "unbound thk");
+
+    assert_eval_fails("(#macro (0) (#bind macroleak 2))", "bad env key");
+    assert_eval_fails("macroleak", "unbound thk");
+}
+
+Test(wisp, law_macroexpands_all_binds_and_body_before_compiling_binds)
+{
+    assert_strnat_bytes(
+        eval_input("(#macro install (#law \"install\" (install env form) "
+                   "(0 \"#macro\" \"late\" "
+                   "(0 \"#law\" (1 \"late\") (0 \"late\" \"env\" \"form\") (1 99)))))"),
+        "install");
+
+    er_val value_v = eval_input("((#law \"outer\" (outer install) "
+                                "tmp(#((install))) "
+                                "(late)) 0)");
+    cr_assert_not_null(assert_law(value_v));
 }
 
 Test(wisp, law_self_reference_is_usable_as_value)
