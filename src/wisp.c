@@ -244,14 +244,19 @@ static void _wisp_fail_with_val(wisp_rt* rt, const char* msg_c, er_val val_v)
     wisp_fail(rt, str_c);
 }
 
-static er_val _wisp_run_apply(wisp_rt* rt, size_t val_s, const er_val* val_v)
+static er_val _wisp_run_apply_mode(wisp_rt* rt, size_t val_s, const er_val* val_v,
+                                   er_eval_mode mode)
 {
     ENKI_PROFILE_ZONE("_wisp_run_apply");
     if (val_s == 0) {
         return 0;
     }
     if (val_s == 1) {
-        return val_v[0];
+        er_val out_v = mode == ER_EVAL_WHNF ? val_v[0] : er_eval_to(rt->loc_a, val_v[0], mode);
+        if (out_v == er_bad) {
+            _wisp_fail_with_val(rt, "runtime error", val_v[0]);
+        }
+        return out_v;
     }
 
     er_thk* thk = er_thk_alloc(rt->loc_a, val_s);
@@ -262,11 +267,16 @@ static er_val _wisp_run_apply(wisp_rt* rt, size_t val_s, const er_val* val_v)
     if (thk_v == 0) {
         wisp_fail(rt, "oom");
     }
-    er_val res_v = er_eval(rt->loc_a, thk_v);
+    er_val res_v = er_eval_to(rt->loc_a, thk_v, mode);
     if (res_v == er_bad) {
         _wisp_fail_with_val(rt, "runtime error", thk_v);
     }
     return res_v;
+}
+
+static er_val _wisp_run_apply(wisp_rt* rt, size_t val_s, const er_val* val_v)
+{
+    return _wisp_run_apply_mode(rt, val_s, val_v, ER_EVAL_WHNF);
 }
 
 // MARK: - Printing
@@ -886,7 +896,7 @@ static er_val wisp_expand_user(wisp_rt* rt, er_val mac_v, er_val val_v)
 {
     er_val env_v = wisp_env_value(rt);
     er_val args_v[] = {mac_v, env_v, val_v};
-    return _wisp_run_apply(rt, 3, args_v);
+    return _wisp_run_apply_mode(rt, 3, args_v, ER_EVAL_NF);
 }
 
 static er_val wisp_pin(wisp_rt* rt, er_val val_v)
@@ -991,6 +1001,12 @@ static er_val compile_expr(wisp_rt* rt, size_t loc_s, wisp_local* loc, er_val va
     }
     if (app->arg_s == 0) {
         return law_quote(0);
+    }
+    if (app->arg_s == 3 && app->arg_v[0] == MOTE_HJUXT && app->arg_v[1] == (er_val)'#') {
+        return wisp_eval(rt, app->arg_v[2]);
+    }
+    if (app->arg_s == 2 && app->arg_v[0] == (er_val)'#') {
+        return wisp_eval(rt, app->arg_v[1]);
     }
 
     er_val ret = recur(app->arg_v[0]);
@@ -1211,6 +1227,64 @@ static er_val _wisp_apple(wisp_rt* rt, size_t val_s, er_val* val_v)
     return _wisp_run_apply(rt, val_s, val_v);
 }
 
+static er_val _wisp_thunk(wisp_rt* rt, er_val val_v);
+static er_val _wisp_delay(wisp_rt* rt, er_val val_v);
+
+static er_val _wisp_delay_apply(wisp_rt* rt, size_t val_s, const er_val* val_v)
+{
+    if (val_s == 0) {
+        return 0;
+    }
+    if (val_s == 1) {
+        return val_v[0];
+    }
+    er_thk* thk = er_thk_alloc(rt->loc_a, val_s);
+    if (thk == NULL) {
+        wisp_fail(rt, "oom");
+    }
+    er_val thk_v = er_thk_init(thk, ER_XUNK_APP, val_s, val_v);
+    if (thk_v == 0) {
+        wisp_fail(rt, "oom");
+    }
+    return thk_v;
+}
+
+static er_val _wisp_delay(wisp_rt* rt, er_val val_v)
+{
+    if (val_v == 0) {
+        return 0;
+    }
+    if (wisp_is_nat(val_v)) {
+        wisp_env_entry* ent = wisp_getenv(rt, val_v);
+        if (!ent) {
+            _wisp_fail_with_val(rt, "unbound thk", val_v);
+        }
+        return ent->val_v;
+    }
+
+    er_app* app = wisp_as_app(val_v);
+    if (app == NULL) {
+        return val_v;
+    }
+    if (app->fn_v == 1 && app->arg_s == 1) {
+        return app->arg_v[0];
+    }
+    if (app->fn_v != 0) {
+        _wisp_fail_with_val(rt, "thunk: expected list", val_v);
+    }
+
+    er_val* nex_v = malloc(app->arg_s * sizeof(er_val));
+    if (nex_v == NULL && app->arg_s != 0) {
+        wisp_fail(rt, "oom");
+    }
+    for (size_t i = 0; i < app->arg_s; i++) {
+        nex_v[i] = _wisp_delay(rt, app->arg_v[i]);
+    }
+    er_val ret_v = _wisp_delay_apply(rt, app->arg_s, nex_v);
+    free(nex_v);
+    return ret_v;
+}
+
 static er_val _wisp_thunk(wisp_rt* rt, er_val val_v)
 {
     ENKI_PROFILE_ZONE("_wisp_thunk");
@@ -1241,7 +1315,7 @@ static er_val _wisp_thunk(wisp_rt* rt, er_val val_v)
         wisp_fail(rt, "oom");
     }
     for (size_t i = 0; i < app->arg_s; i++) {
-        nex_v[i] = _wisp_thunk(rt, app->arg_v[i]);
+        nex_v[i] = i == 0 ? _wisp_thunk(rt, app->arg_v[i]) : _wisp_delay(rt, app->arg_v[i]);
     }
     er_val ret_v = _wisp_apple(rt, app->arg_s, nex_v);
     free(nex_v);

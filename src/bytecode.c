@@ -30,6 +30,14 @@ typedef struct er_bc_label {
     bool set_f;
 } er_bc_label;
 
+typedef enum er_bc_eval_req {
+    ER_BC_EVAL_NONE = 0,
+    ER_BC_EVAL_WHNF,
+    ER_BC_EVAL_NF,
+} er_bc_eval_req;
+
+enum { ER_BC_MAX_PRIM_ARITY = 8 };
+
 typedef struct er_bc_compiler {
     const enki_allocator* loc_a;
     er_bc_label* label_v;
@@ -44,54 +52,87 @@ typedef struct er_bc_prim {
     er_optag tag;
     uint32_t ari_d;
     bool if_f;
+    er_bc_eval_req arg_eval_v[ER_BC_MAX_PRIM_ARITY];
 } er_bc_prim;
 
-#define ER_BC_ROUTE(_name, _tag, _ari) \
-    { .name_v = (_name), .tag = (_tag), .ari_d = (_ari), .if_f = false }
+#define ER_BC_L ER_BC_EVAL_NONE
+#define ER_BC_W ER_BC_EVAL_WHNF
+#define ER_BC_N ER_BC_EVAL_NF
+
+#define ER_BC_ROUTE_ARGS(_name, _tag, _ari, ...)                 \
+    {                                                            \
+        .name_v = (_name),                                       \
+        .tag = (_tag),                                           \
+        .ari_d = (_ari),                                         \
+        .if_f = false,                                           \
+        .arg_eval_v = {__VA_ARGS__},                             \
+    }
+#define ER_BC_ROUTE0(_name, _tag, _ari) \
+    ER_BC_ROUTE_ARGS(_name, _tag, _ari, ER_BC_L)
+#define ER_BC_ROUTE1(_name, _tag, _ari, _a0) \
+    ER_BC_ROUTE_ARGS(_name, _tag, _ari, _a0)
+#define ER_BC_ROUTE2(_name, _tag, _ari, _a0, _a1) \
+    ER_BC_ROUTE_ARGS(_name, _tag, _ari, _a0, _a1)
+#define ER_BC_ROUTE3(_name, _tag, _ari, _a0, _a1, _a2) \
+    ER_BC_ROUTE_ARGS(_name, _tag, _ari, _a0, _a1, _a2)
+#define ER_BC_ROUTE4(_name, _tag, _ari, _a0, _a1, _a2, _a3) \
+    ER_BC_ROUTE_ARGS(_name, _tag, _ari, _a0, _a1, _a2, _a3)
+#define ER_BC_ROUTE6(_name, _tag, _ari, _a0, _a1, _a2, _a3, _a4, _a5) \
+    ER_BC_ROUTE_ARGS(_name, _tag, _ari, _a0, _a1, _a2, _a3, _a4, _a5)
 
 static const er_bc_prim er_bc_prim_v[] = {
-    ER_BC_ROUTE(PLAN_S3('P', 'i', 'n'), OP_PIN, 1),
-    ER_BC_ROUTE(PLAN_S3('L', 'a', 'w'), OP_LAW, 3),
-    ER_BC_ROUTE(PLAN_S4('E', 'l', 'i', 'm'), OP_ELIM, 6),
-    ER_BC_ROUTE(PLAN_S3('N', 'a', 't'), OP_NAT, 1),
-    ER_BC_ROUTE(PLAN_S5('A', 'r', 'i', 't', 'y'), OP_ARI, 1),
-    ER_BC_ROUTE(PLAN_S4('N', 'a', 'm', 'e'), OP_NAM, 1),
-    ER_BC_ROUTE(PLAN_S4('B', 'o', 'd', 'y'), OP_BODY, 1),
-    ER_BC_ROUTE(PLAN_S5('U', 'n', 'p', 'i', 'n'), OP_UNPIN, 1),
-    ER_BC_ROUTE(PLAN_S2('S', 'z'), OP_SZ, 1),
-    ER_BC_ROUTE(PLAN_S4('L', 'a', 's', 't'), OP_LAST, 1),
-    ER_BC_ROUTE(PLAN_S4('I', 'n', 'i', 't'), OP_INIT, 1),
-    ER_BC_ROUTE(PLAN_S3('I', 'n', 'c'), OP_INC, 1),
-    ER_BC_ROUTE(PLAN_S3('D', 'e', 'c'), OP_DEC, 1),
-    ER_BC_ROUTE(PLAN_S3('A', 'd', 'd'), OP_ADD, 2),
-    ER_BC_ROUTE(PLAN_S3('S', 'u', 'b'), OP_SUB, 2),
-    ER_BC_ROUTE(PLAN_S3('R', 's', 'h'), OP_RSH, 2),
-    ER_BC_ROUTE(PLAN_S3('L', 's', 'h'), OP_LSH, 2),
-    ER_BC_ROUTE(PLAN_S3('D', 'i', 'v'), OP_DIV, 2),
-    ER_BC_ROUTE(PLAN_S3('M', 'u', 'l'), OP_MUL, 2),
-    ER_BC_ROUTE(PLAN_S3('M', 'o', 'd'), OP_MOD, 2),
-    ER_BC_ROUTE(PLAN_S4('T', 'e', 's', 't'), OP_TEST, 2),
-    ER_BC_ROUTE(PLAN_S7('L', 'o', 'a', 'd', 'V', 'a', 'r'), OP_LOAD, 3),
-    ER_BC_ROUTE(PLAN_S5('S', 't', 'o', 'r', 'e'), OP_STORE, 4),
-    ER_BC_ROUTE(PLAN_S5('T', 'r', 'u', 'n', 'c'), OP_TRUNC, 2),
-    ER_BC_ROUTE(PLAN_S4('B', 'i', 't', 's'), OP_BITS, 1),
-    ER_BC_ROUTE(PLAN_S5('B', 'y', 't', 'e', 's'), OP_BYTES, 1),
-    ER_BC_ROUTE(PLAN_S3('R', 'e', 'p'), OP_REP, 3),
-    ER_BC_ROUTE(PLAN_S5('S', 'l', 'i', 'c', 'e'), OP_SLICE, 3),
-    ER_BC_ROUTE(PLAN_S4('W', 'e', 'l', 'd'), OP_WELD, 2),
-    ER_BC_ROUTE(PLAN_S5('F', 'o', 'r', 'c', 'e'), OP_FORCE, 1),
-    ER_BC_ROUTE(PLAN_S2('U', 'p'), OP_UP, 3),
-    ER_BC_ROUTE(PLAN_S4('C', 'o', 'u', 'p'), OP_COUP, 2),
-    ER_BC_ROUTE(PLAN_S2('H', 'd'), OP_HD, 1),
-    ER_BC_ROUTE(PLAN_S2('I', 'x'), OP_IX, 2),
-    ER_BC_ROUTE(PLAN_S3('N', 'i', 'l'), OP_NOT, 1),
-    ER_BC_ROUTE(PLAN_S5('T', 'r', 'u', 't', 'h'), OP_TRU, 1),
-    ER_BC_ROUTE(PLAN_S2('O', 'r'), OP_OR, 2),
-    ER_BC_ROUTE(PLAN_S3('A', 'n', 'd'), OP_AND, 2),
+    ER_BC_ROUTE1(PLAN_S3('P', 'i', 'n'), OP_PIN, 1, ER_BC_W),
+    ER_BC_ROUTE3(PLAN_S3('L', 'a', 'w'), OP_LAW, 3, ER_BC_N, ER_BC_N, ER_BC_N),
+    ER_BC_ROUTE6(PLAN_S4('E', 'l', 'i', 'm'), OP_ELIM, 6, ER_BC_W, ER_BC_W,
+                 ER_BC_W, ER_BC_W, ER_BC_W, ER_BC_W),
+    ER_BC_ROUTE1(PLAN_S3('N', 'a', 't'), OP_NAT, 1, ER_BC_W),
+    ER_BC_ROUTE1(PLAN_S5('A', 'r', 'i', 't', 'y'), OP_ARI, 1, ER_BC_W),
+    ER_BC_ROUTE1(PLAN_S4('N', 'a', 'm', 'e'), OP_NAM, 1, ER_BC_W),
+    ER_BC_ROUTE1(PLAN_S4('B', 'o', 'd', 'y'), OP_BODY, 1, ER_BC_W),
+    ER_BC_ROUTE1(PLAN_S5('U', 'n', 'p', 'i', 'n'), OP_UNPIN, 1, ER_BC_W),
+    ER_BC_ROUTE1(PLAN_S2('S', 'z'), OP_SZ, 1, ER_BC_W),
+    ER_BC_ROUTE1(PLAN_S4('L', 'a', 's', 't'), OP_LAST, 1, ER_BC_W),
+    ER_BC_ROUTE1(PLAN_S4('I', 'n', 'i', 't'), OP_INIT, 1, ER_BC_W),
+    ER_BC_ROUTE1(PLAN_S3('I', 'n', 'c'), OP_INC, 1, ER_BC_W),
+    ER_BC_ROUTE1(PLAN_S3('D', 'e', 'c'), OP_DEC, 1, ER_BC_W),
+    ER_BC_ROUTE2(PLAN_S3('A', 'd', 'd'), OP_ADD, 2, ER_BC_W, ER_BC_W),
+    ER_BC_ROUTE2(PLAN_S3('S', 'u', 'b'), OP_SUB, 2, ER_BC_W, ER_BC_W),
+    ER_BC_ROUTE2(PLAN_S3('R', 's', 'h'), OP_RSH, 2, ER_BC_W, ER_BC_W),
+    ER_BC_ROUTE2(PLAN_S3('L', 's', 'h'), OP_LSH, 2, ER_BC_W, ER_BC_W),
+    ER_BC_ROUTE2(PLAN_S3('D', 'i', 'v'), OP_DIV, 2, ER_BC_W, ER_BC_W),
+    ER_BC_ROUTE2(PLAN_S3('M', 'u', 'l'), OP_MUL, 2, ER_BC_W, ER_BC_W),
+    ER_BC_ROUTE2(PLAN_S3('M', 'o', 'd'), OP_MOD, 2, ER_BC_W, ER_BC_W),
+    ER_BC_ROUTE2(PLAN_S4('T', 'e', 's', 't'), OP_TEST, 2, ER_BC_W, ER_BC_W),
+    ER_BC_ROUTE3(PLAN_S7('L', 'o', 'a', 'd', 'V', 'a', 'r'), OP_LOAD, 3, ER_BC_W,
+                 ER_BC_W, ER_BC_W),
+    ER_BC_ROUTE4(PLAN_S5('S', 't', 'o', 'r', 'e'), OP_STORE, 4, ER_BC_W, ER_BC_W,
+                 ER_BC_W, ER_BC_W),
+    ER_BC_ROUTE2(PLAN_S5('T', 'r', 'u', 'n', 'c'), OP_TRUNC, 2, ER_BC_W,
+                 ER_BC_W),
+    ER_BC_ROUTE1(PLAN_S4('B', 'i', 't', 's'), OP_BITS, 1, ER_BC_W),
+    ER_BC_ROUTE1(PLAN_S5('B', 'y', 't', 'e', 's'), OP_BYTES, 1, ER_BC_W),
+    ER_BC_ROUTE3(PLAN_S3('R', 'e', 'p'), OP_REP, 3, ER_BC_L, ER_BC_L, ER_BC_W),
+    ER_BC_ROUTE3(PLAN_S5('S', 'l', 'i', 'c', 'e'), OP_SLICE, 3, ER_BC_W, ER_BC_W,
+                 ER_BC_W),
+    ER_BC_ROUTE2(PLAN_S4('W', 'e', 'l', 'd'), OP_WELD, 2, ER_BC_W, ER_BC_W),
+    ER_BC_ROUTE0(PLAN_S4('E', 'v', 'a', 'l'), OP_EVAL, 1),
+    ER_BC_ROUTE0(PLAN_S5('F', 'o', 'r', 'c', 'e'), OP_FORCE, 1),
+    ER_BC_ROUTE3(PLAN_S2('U', 'p'), OP_UP, 3, ER_BC_W, ER_BC_L, ER_BC_W),
+    ER_BC_ROUTE2(PLAN_S4('C', 'o', 'u', 'p'), OP_COUP, 2, ER_BC_W, ER_BC_W),
+    ER_BC_ROUTE1(PLAN_S2('H', 'd'), OP_HD, 1, ER_BC_W),
+    ER_BC_ROUTE2(PLAN_S2('I', 'x'), OP_IX, 2, ER_BC_W, ER_BC_W),
+    ER_BC_ROUTE1(PLAN_S3('N', 'i', 'l'), OP_NOT, 1, ER_BC_W),
+    ER_BC_ROUTE1(PLAN_S5('T', 'r', 'u', 't', 'h'), OP_TRU, 1, ER_BC_W),
+    ER_BC_ROUTE2(PLAN_S2('O', 'r'), OP_OR, 2, ER_BC_W, ER_BC_L),
+    ER_BC_ROUTE2(PLAN_S3('A', 'n', 'd'), OP_AND, 2, ER_BC_W, ER_BC_L),
     {.name_v = PLAN_S2('I', 'f'), .tag = OP_COUNT, .ari_d = 3, .if_f = true},
-    ER_BC_ROUTE(PLAN_S2('E', 'q'), OP_EQ, 2),
-    ER_BC_ROUTE(PLAN_S2('L', 'e'), OP_LE, 2),
-    ER_BC_ROUTE(PLAN_S3('C', 'm', 'p'), OP_CMP, 2),
+    {.name_v = PLAN_S3('I', 'f', 'z'),
+     .tag = OP_JUMP_IF_ZERO,
+     .ari_d = 3,
+     .if_f = true},
+    ER_BC_ROUTE2(PLAN_S2('E', 'q'), OP_EQ, 2, ER_BC_W, ER_BC_W),
+    ER_BC_ROUTE2(PLAN_S2('L', 'e'), OP_LE, 2, ER_BC_W, ER_BC_W),
+    ER_BC_ROUTE2(PLAN_S3('C', 'm', 'p'), OP_CMP, 2, ER_BC_W, ER_BC_W),
 };
 
 static bool er_bc_mul_size(size_t a_s, size_t b_s, size_t* out_s)
@@ -357,7 +398,7 @@ static bool er_bc_is_let(er_val val_v, er_val* v_v, er_val* k_v)
 
 static bool er_bc_is_var(size_t depth_s, er_val val_v)
 {
-    return er_is_cat(val_v) && val_v != 0 && val_v <= (er_val)depth_s;
+    return er_is_cat(val_v) && val_v <= (er_val)depth_s;
 }
 
 static er_val er_bc_pull_const(er_val val_v)
@@ -486,6 +527,12 @@ static uint32_t er_bc_arity(er_val val_v)
     }
 }
 
+static bool er_bc_is_prim_pin(er_val val_v)
+{
+    er_pin* pin = er_outt(er_tag_pin, val_v);
+    return pin != NULL && er_is_cat(pin->val_v);
+}
+
 static er_val er_bc_prim_key(er_val f_v)
 {
     er_pin* pin = er_outt(er_tag_pin, f_v);
@@ -519,7 +566,11 @@ static const er_bc_prim* er_bc_prim_get(er_val f_v)
 }
 
 static bool er_bc_compile_expr(er_bc_compiler* c, size_t depth_s, uint32_t ari_d, er_val body_v,
-                               er_bc_code* code);
+                               er_bc_code* code, bool tail_f);
+static bool er_bc_compile_value(er_bc_compiler* c, size_t depth_s, uint32_t ari_d, er_val body_v,
+                                er_bc_code* code);
+static bool er_bc_compile_app_value(er_bc_compiler* c, size_t depth_s, uint32_t ari_d,
+                                    er_val body_v, er_bc_code* code);
 
 static bool er_bc_lift_call_inner(er_bc_vals* out, er_val f_v, er_val x_v)
 {
@@ -564,7 +615,57 @@ static bool er_bc_compile_args(er_bc_compiler* c, size_t depth_s, uint32_t ari_d
                                const er_val* arg_v, size_t arg_s, er_bc_code* code)
 {
     for (size_t k = 0; k < arg_s; k++) {
-        if (!er_bc_compile_expr(c, depth_s, ari_d, arg_v[k], code)) {
+        if (!er_bc_compile_value(c, depth_s, ari_d, arg_v[k], code)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool er_bc_emit_eval_stack_arg(er_bc_code* code, size_t arg_s, size_t arg_i,
+                                      er_bc_eval_req eval)
+{
+    if (eval == ER_BC_EVAL_NONE) {
+        return true;
+    }
+    if (arg_i >= arg_s || arg_s > UINT32_MAX) {
+        code->ok_f = false;
+        return false;
+    }
+
+    size_t span_s = arg_s - arg_i;
+    if (span_s > UINT32_MAX) {
+        code->ok_f = false;
+        return false;
+    }
+
+    /*
+     * Bring the selected argument to top, evaluate it, then left-rotate the
+     * same window enough times to restore the primitive's operand order.
+     */
+    uint32_t span_d = (uint32_t)span_s;
+    if (span_s > 1 && !er_bc_emit_u32(code, OP_ROTATE, span_d)) {
+        return false;
+    }
+    if (!er_bc_emit(code, eval == ER_BC_EVAL_NF ? OP_FORCE : OP_EVAL)) {
+        return false;
+    }
+    for (size_t k = 1; k < span_s; k++) {
+        if (!er_bc_emit_u32(code, OP_ROTATE, span_d)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool er_bc_emit_prim_arg_evals(const er_bc_prim* prim, er_bc_code* code)
+{
+    if (prim->ari_d > ER_BC_MAX_PRIM_ARITY) {
+        code->ok_f = false;
+        return false;
+    }
+    for (size_t k = 0; k < prim->ari_d; k++) {
+        if (!er_bc_emit_eval_stack_arg(code, prim->ari_d, k, prim->arg_eval_v[k])) {
             return false;
         }
     }
@@ -591,7 +692,8 @@ static bool er_bc_compile_label(er_bc_compiler* c, size_t depth_s, uint32_t ari_
 {
     ENKI_PROFILE_ZONE("er_bc_compile_label");
     er_bc_code code = {.loc_a = c->loc_a, .ok_f = true};
-    if (!er_bc_compile_expr(c, depth_s, ari_d, body_v, &code) || !er_bc_emit(&code, OP_RET)) {
+    if (!er_bc_compile_expr(c, depth_s, ari_d, body_v, &code, true) ||
+        !er_bc_emit(&code, OP_RET)) {
         er_bc_code_free(&code);
         c->ok_f = false;
         return false;
@@ -604,31 +706,38 @@ static bool er_bc_compile_label(er_bc_compiler* c, size_t depth_s, uint32_t ari_
 }
 
 static bool er_bc_compile_if(er_bc_compiler* c, size_t depth_s, uint32_t ari_d,
-                             const er_val* arg_v, er_bc_code* code)
+                             const er_val* arg_v, er_bc_code* code, bool zero_f)
 {
     ENKI_PROFILE_ZONE("er_bc_compile_if");
-    if (!er_bc_compile_expr(c, depth_s, ari_d, arg_v[0], code)) {
+    if (!er_bc_compile_expr(c, depth_s, ari_d, arg_v[0], code, false)) {
         return false;
     }
     uint32_t true_label_d = 0;
     if (!er_bc_compiler_fresh(c, &true_label_d) ||
         !er_bc_compile_label(c, depth_s, ari_d, true_label_d, arg_v[1]) ||
-        !er_bc_emit_u32(code, OP_JUMP_IF, true_label_d)) {
+        !er_bc_emit(code, OP_EVAL) ||
+        !er_bc_emit_u32(code, zero_f ? OP_JUMP_IF_ZERO : OP_JUMP_IF, true_label_d)) {
         return false;
     }
-    return er_bc_compile_expr(c, depth_s, ari_d, arg_v[2], code);
+    return er_bc_compile_expr(c, depth_s, ari_d, arg_v[2], code, true);
 }
 
 static bool er_bc_compile_prim_call(er_bc_compiler* c, size_t depth_s, uint32_t ari_d,
                                     const er_bc_prim* prim, er_val f_v, const er_val* arg_v,
-                                    size_t arg_s, er_bc_code* code)
+                                    size_t arg_s, er_bc_code* code, bool tail_f)
 {
     ENKI_PROFILE_ZONE("er_bc_compile_prim_call");
-    if (prim->if_f && arg_s == 3) {
-        return er_bc_compile_if(c, depth_s, ari_d, arg_v, code);
+    if (prim->if_f) {
+        if (!tail_f || arg_s != prim->ari_d) {
+            code->ok_f = false;
+            return false;
+        }
+        return er_bc_compile_if(c, depth_s, ari_d, arg_v, code,
+                                prim->tag == OP_JUMP_IF_ZERO);
     }
     if (arg_s == prim->ari_d) {
         return er_bc_compile_args(c, depth_s, ari_d, arg_v, arg_s, code) &&
+               er_bc_emit_prim_arg_evals(prim, code) &&
                er_bc_emit(code, prim->tag);
     }
     if (arg_s < prim->ari_d) {
@@ -638,6 +747,7 @@ static bool er_bc_compile_prim_call(er_bc_compiler* c, size_t depth_s, uint32_t 
     }
 
     return er_bc_compile_args(c, depth_s, ari_d, arg_v, prim->ari_d, code) &&
+           er_bc_emit_prim_arg_evals(prim, code) &&
            er_bc_emit(code, prim->tag) &&
            er_bc_compile_args(c, depth_s, ari_d, arg_v + prim->ari_d, arg_s - prim->ari_d,
                               code) &&
@@ -647,8 +757,6 @@ static bool er_bc_compile_prim_call(er_bc_compiler* c, size_t depth_s, uint32_t 
 static bool er_bc_compile_direct_prim_body(er_bc_compiler* c, size_t depth_s, uint32_t ari_d,
                                            er_val body_v, er_bc_code* code, bool* done_f)
 {
-    enum { ER_BC_MAX_DIRECT_PRIM_ARITY = 8 };
-
     *done_f = false;
     er_val key_v = 0;
     if (!er_bc_direct_prim_body_key(body_v, ari_d, &key_v)) {
@@ -656,18 +764,19 @@ static bool er_bc_compile_direct_prim_body(er_bc_compiler* c, size_t depth_s, ui
     }
 
     const er_bc_prim* prim = er_bc_prim_lookup(key_v);
-    if (prim == NULL || prim->ari_d != ari_d || prim->ari_d > ER_BC_MAX_DIRECT_PRIM_ARITY) {
+    if (prim == NULL || prim->ari_d != ari_d || prim->ari_d > ER_BC_MAX_PRIM_ARITY) {
         c->ok_f = false;
         return false;
     }
 
-    er_val arg_v[ER_BC_MAX_DIRECT_PRIM_ARITY];
+    er_val arg_v[ER_BC_MAX_PRIM_ARITY];
     for (uint32_t k = 0; k < prim->ari_d; k++) {
         arg_v[k] = (er_val)k + 1u;
     }
 
     *done_f = true;
-    return er_bc_compile_prim_call(c, depth_s, ari_d, prim, key_v, arg_v, prim->ari_d, code);
+    return er_bc_compile_prim_call(c, depth_s, ari_d, prim, key_v, arg_v, prim->ari_d, code,
+                                   true);
 }
 
 static bool er_bc_compile_plain_call(er_bc_compiler* c, size_t depth_s, uint32_t ari_d,
@@ -692,6 +801,16 @@ static bool er_bc_compile_plain_call(er_bc_compiler* c, size_t depth_s, uint32_t
         c->ok_f = false;
         return false;
     }
+    if (er_bc_is_prim_pin(lit_v) && arg_s > 0) {
+        if (arg_s > UINT32_MAX) {
+            code->ok_f = false;
+            return false;
+        }
+        return er_bc_emit_lit(code, lit_v) &&
+               er_bc_compile_app_value(c, depth_s, ari_d, arg_v[0], code) &&
+               er_bc_compile_args(c, depth_s, ari_d, arg_v + 1, arg_s - 1, code) &&
+               er_bc_compile_call_tail(code, 1, arg_s);
+    }
     uint32_t lit_ari_d = er_bc_arity(lit_v);
     if (lit_ari_d == 0) {
         if (arg_s > UINT32_MAX - 1u) {
@@ -709,7 +828,7 @@ static bool er_bc_compile_plain_call(er_bc_compiler* c, size_t depth_s, uint32_t
 }
 
 static bool er_bc_compile_call(er_bc_compiler* c, size_t depth_s, uint32_t ari_d, er_val f_v,
-                               er_val x_v, er_bc_code* code)
+                               er_val x_v, er_bc_code* code, bool tail_f)
 {
     ENKI_PROFILE_ZONE("er_bc_compile_call");
     er_bc_vals lifted;
@@ -728,9 +847,13 @@ static bool er_bc_compile_call(er_bc_compiler* c, size_t depth_s, uint32_t ari_d
     const er_val* arg_v = lifted.val_v + 1;
     size_t arg_s = lifted.val_s - 1;
     const er_bc_prim* prim = er_bc_prim_get(er_bc_pull_const(head_v));
+    if (prim != NULL && prim->if_f && (!tail_f || arg_s != prim->ari_d)) {
+        prim = NULL;
+    }
     bool ok_f;
     if (prim != NULL) {
-        ok_f = er_bc_compile_prim_call(c, depth_s, ari_d, prim, head_v, arg_v, arg_s, code);
+        ok_f = er_bc_compile_prim_call(c, depth_s, ari_d, prim, head_v, arg_v, arg_s, code,
+                                       tail_f);
     } else {
         ok_f = er_bc_compile_plain_call(c, depth_s, ari_d, head_v, arg_v, arg_s, code);
     }
@@ -738,8 +861,98 @@ static bool er_bc_compile_call(er_bc_compiler* c, size_t depth_s, uint32_t ari_d
     return ok_f;
 }
 
+static bool er_bc_compile_value(er_bc_compiler* c, size_t depth_s, uint32_t ari_d, er_val body_v,
+                                er_bc_code* code)
+{
+    if (er_bc_is_var(depth_s, body_v)) {
+        return er_bc_emit_var(code, body_v);
+    }
+
+    er_val f_v = 0;
+    er_val x_v = 0;
+    if (!er_bc_is_call(body_v, &f_v, &x_v)) {
+        er_app* app = er_outt(er_tag_app, body_v);
+        if (app != NULL && !(app->fn_v == 0 && app->arg_s == 1)) {
+            if (app->arg_s > UINT32_MAX - 1u) {
+                code->ok_f = false;
+                return false;
+            }
+            if (!er_bc_compile_value(c, depth_s, ari_d, app->fn_v, code)) {
+                return false;
+            }
+            for (size_t k = 0; k < app->arg_s; k++) {
+                if (!er_bc_compile_value(c, depth_s, ari_d, app->arg_v[k], code)) {
+                    return false;
+                }
+            }
+            return er_bc_emit_u32(code, OP_MK_APP, (uint32_t)app->arg_s + 1u);
+        }
+        return er_bc_emit_lit(code, er_bc_pull_const(body_v));
+    }
+
+    er_bc_vals lifted;
+    if (!er_bc_lift_call(c, f_v, x_v, &lifted)) {
+        er_bc_vals_free(&lifted);
+        c->ok_f = false;
+        return false;
+    }
+    if (lifted.val_s == 0 || lifted.val_s > UINT32_MAX) {
+        er_bc_vals_free(&lifted);
+        c->ok_f = false;
+        return false;
+    }
+
+    bool ok_f = true;
+    er_val head_v = lifted.val_v[0];
+    if (head_v == 0) {
+        ok_f = er_bc_emit(code, OP_PUSH_SELF);
+    } else {
+        ok_f = er_bc_compile_value(c, depth_s, ari_d, head_v, code);
+    }
+    for (size_t k = 1; ok_f && k < lifted.val_s; k++) {
+        ok_f = er_bc_compile_value(c, depth_s, ari_d, lifted.val_v[k], code);
+    }
+    if (ok_f) {
+        ok_f = er_bc_emit_u32(code, OP_MK_CALL, (uint32_t)lifted.val_s);
+    }
+    er_bc_vals_free(&lifted);
+    return ok_f;
+}
+
+static bool er_bc_compile_app_value(er_bc_compiler* c, size_t depth_s, uint32_t ari_d,
+                                    er_val body_v, er_bc_code* code)
+{
+    er_val f_v = 0;
+    er_val x_v = 0;
+    if (!er_bc_is_call(body_v, &f_v, &x_v)) {
+        return er_bc_compile_value(c, depth_s, ari_d, body_v, code);
+    }
+
+    er_bc_vals lifted;
+    if (!er_bc_lift_call(c, f_v, x_v, &lifted)) {
+        er_bc_vals_free(&lifted);
+        c->ok_f = false;
+        return false;
+    }
+    if (lifted.val_s == 0 || lifted.val_s > UINT32_MAX) {
+        er_bc_vals_free(&lifted);
+        c->ok_f = false;
+        return false;
+    }
+
+    bool ok_f = true;
+    for (size_t k = 0; ok_f && k < lifted.val_s; k++) {
+        ok_f = er_bc_compile_value(c, depth_s, ari_d, lifted.val_v[k], code);
+    }
+    if (ok_f) {
+        ok_f = er_bc_emit_u32(code, OP_MK_APP, (uint32_t)lifted.val_s);
+    }
+    er_bc_vals_free(&lifted);
+    return ok_f;
+}
+
 static bool er_bc_compile_expr(er_bc_compiler* c, size_t depth_s, uint32_t ari_d, er_val body_v,
-                               er_bc_code* code)
+                               er_bc_code* code, bool tail_f)
 {
     ENKI_PROFILE_ZONE("er_bc_compile_expr");
     bool done_f = false;
@@ -757,10 +970,10 @@ static bool er_bc_compile_expr(er_bc_compiler* c, size_t depth_s, uint32_t ari_d
     er_val f_v = 0;
     er_val x_v = 0;
     if (er_bc_is_call(body_v, &f_v, &x_v)) {
-        return er_bc_compile_call(c, depth_s, ari_d, f_v, x_v, code);
+        return er_bc_compile_call(c, depth_s, ari_d, f_v, x_v, code, tail_f);
     }
 
-    return er_bc_emit_lit(code, er_bc_pull_const(body_v));
+    return er_bc_compile_value(c, depth_s, ari_d, body_v, code);
 }
 
 er_val er_law_compile(const enki_allocator* loc_a, er_val nam_v, er_val bod_v, uint32_t ari_d)
@@ -848,4 +1061,13 @@ cleanup:
     return law_v;
 }
 
-#undef ER_BC_ROUTE
+#undef ER_BC_ROUTE6
+#undef ER_BC_ROUTE4
+#undef ER_BC_ROUTE3
+#undef ER_BC_ROUTE2
+#undef ER_BC_ROUTE1
+#undef ER_BC_ROUTE0
+#undef ER_BC_ROUTE_ARGS
+#undef ER_BC_N
+#undef ER_BC_W
+#undef ER_BC_L

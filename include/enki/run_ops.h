@@ -37,6 +37,7 @@ er_val eo_trunc8(const enki_allocator* loc_a, er_val n_v);
 er_val eo_trunc16(const enki_allocator* loc_a, er_val n_v);
 er_val eo_trunc32(const enki_allocator* loc_a, er_val n_v);
 er_val eo_trunc64(const enki_allocator* loc_a, er_val n_v);
+bool eo_nat_to_size(er_val val_v, size_t* out_s);
 
 er_val eo_nam(er_val law_v);
 er_val eo_body(er_val law_v);
@@ -46,6 +47,7 @@ er_val eo_last(er_val row_v);
 er_val eo_init(const enki_allocator* loc_a, er_val row_v);
 
 er_val eo_rep(const enki_allocator* loc_a, er_val hd_v, er_val item_v, er_val count_v);
+er_val eo_row(const enki_allocator* loc_a, er_val hd_v, er_val count_v, er_val xs_v);
 er_val eo_slice(const enki_allocator* loc_a, er_val off_v, er_val count_v, er_val row_v);
 er_val eo_weld(const enki_allocator* loc_a, er_val x_v, er_val y_v);
 er_val eo_up(const enki_allocator* loc_a, er_val idx_v, er_val val_v, er_val row_v);

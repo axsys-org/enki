@@ -277,6 +277,15 @@ Test(wisp, bind_law_and_apply_it)
     cr_assert_eq(eval_input("(add 20 22)"), 42);
 }
 
+Test(wisp, law_body_hash_juxtaposition_splices_raw_expression)
+{
+    er_law* raw = assert_law(eval_input("(#law \"raw\" (raw x) #(42))"));
+    cr_assert_eq(raw->body_v, 42);
+
+    assert_small_strnat(eval_input("(#bind id (#pin (#law \"id\" (id x) x)))"), "id");
+    cr_assert_eq(eval_input("((#law \"caller\" (caller x) (#(id) x)) 42)"), 42);
+}
+
 Test(wisp, numeric_pin66_wrapper_emits_direct_primitive_bytecode)
 {
     assert_small_strnat(eval_input("(#bind add (#law \"add\" (add x y) "
@@ -291,8 +300,14 @@ Test(wisp, numeric_pin66_wrapper_emits_direct_primitive_bytecode)
     cr_assert_eq(code[0].as.lit_v, 20);
     cr_assert_eq(code[1].tag, OP_PUSH_LIT);
     cr_assert_eq(code[1].as.lit_v, 22);
-    cr_assert_eq(code[2].tag, OP_ADD);
-    cr_assert_eq(code[3].tag, OP_RET);
+    cr_assert_eq(code[2].tag, OP_ROTATE);
+    cr_assert_eq(code[2].as.u32, 2);
+    cr_assert_eq(code[3].tag, OP_EVAL);
+    cr_assert_eq(code[4].tag, OP_ROTATE);
+    cr_assert_eq(code[4].as.u32, 2);
+    cr_assert_eq(code[5].tag, OP_EVAL);
+    cr_assert_eq(code[6].tag, OP_ADD);
+    cr_assert_eq(code[7].tag, OP_RET);
 }
 
 Test(wisp, macro_export_and_system_shadowing_match_plan_assembler)
@@ -305,6 +320,25 @@ Test(wisp, macro_export_and_system_shadowing_match_plan_assembler)
     cr_assert_eq(eval_input("(#export a)"), 0);
     cr_assert_eq(eval_input("a"), 1);
     assert_eval_fails("b", "unbound thk");
+}
+
+Test(wisp, user_macro_results_are_forced_to_nf_before_syntax_interpretation)
+{
+    assert_strnat_bytes(eval_input("(#macro make-law (#law \"make-law\" (make-law env form) "
+                                   "sig((0 \"made\" \"x\")) "
+                                   "(0 \"#law\" (1 \"made\") sig \"x\")))"),
+                        "make-law");
+
+    er_law* law = assert_law(eval_input("(make-law)"));
+    cr_assert_eq(law->ari_d, 1);
+    assert_strnat_bytes(law->name_v, "made");
+}
+
+Test(wisp, law_self_reference_is_usable_as_value)
+{
+    assert_strnat_bytes(eval_input("(#bind self (#law \"self\" (self x) self))"), "self");
+    er_val self_v = eval_input("self");
+    cr_assert_eq(eval_input("(self 0)"), self_v);
 }
 
 Test(wisp, long_nat_symbols_are_environment_and_local_keys)
@@ -326,7 +360,8 @@ Test(wisp, long_nat_symbols_are_environment_and_local_keys)
 Test(wisp, env_values_shadow_system_macros)
 {
     assert_small_strnat(eval_input("(#bind #pin 7)"), "#pin");
-    assert_eval_fails("(#pin 1)", "runtime error");
+    er_app* app = assert_app(eval_input("(#pin 1)"), 7, 1);
+    cr_assert_eq(app->arg_v[0], 1);
 }
 
 Test(wisp, recursive_program_validates_extended_snippet)

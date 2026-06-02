@@ -292,35 +292,35 @@ static bool planvm_build_fac(planvm_fac_program* program)
     *program = (planvm_fac_program){
         .code_v = {
             [0] = {.tag = OP_PUSH_VAR, .as.slot = 1},
-            [1] = {.tag = OP_FORCE},
+            [1] = {.tag = OP_EVAL},
             [2] = {.tag = OP_JUMP_IF_ZERO, .as.u32 = BASE_PC},
 
             [3] = {.tag = OP_PUSH_VAR, .as.slot = 0},
             [4] = {.tag = OP_PUSH_LIT, .as.lit_v = prim66_v},
             [5] = {.tag = OP_PUSH_LIT, .as.lit_v = PLAN_S3('S', 'u', 'b')},
             [6] = {.tag = OP_PUSH_VAR, .as.slot = 1},
-            [7] = {.tag = OP_FORCE},
+            [7] = {.tag = OP_EVAL},
             [8] = {.tag = OP_PUSH_LIT, .as.lit_v = 1},
             [9] = {.tag = OP_MK_APP, .as.u32 = 3},
             [10] = {.tag = OP_MK_CALL, .as.u32 = 2},
-            [11] = {.tag = OP_FORCE},
+            [11] = {.tag = OP_EVAL},
 
             [12] = {.tag = OP_PUSH_LIT, .as.lit_v = prim66_v},
             [13] = {.tag = OP_PUSH_LIT, .as.lit_v = PLAN_S3('M', 'u', 'l')},
             [14] = {.tag = OP_PUSH_VAR, .as.slot = 2},
-            [15] = {.tag = OP_FORCE},
+            [15] = {.tag = OP_EVAL},
             [16] = {.tag = OP_PUSH_VAR, .as.slot = 1},
-            [17] = {.tag = OP_FORCE},
+            [17] = {.tag = OP_EVAL},
             [18] = {.tag = OP_MK_APP, .as.u32 = 3},
             [19] = {.tag = OP_MK_CALL, .as.u32 = 2},
-            [20] = {.tag = OP_FORCE},
+            [20] = {.tag = OP_EVAL},
 
             [21] = {.tag = OP_MK_CALL, .as.u32 = 3},
-            [22] = {.tag = OP_FORCE},
+            [22] = {.tag = OP_EVAL},
             [23] = {.tag = OP_RET},
 
             [24] = {.tag = OP_PUSH_VAR, .as.slot = 2},
-            [25] = {.tag = OP_FORCE},
+            [25] = {.tag = OP_EVAL},
             [26] = {.tag = OP_RET},
         },
         .fact_v = fact_v,
@@ -347,7 +347,7 @@ static er_val planvm_run_fac(planvm_fac_program* program, planvm_arena* arena, e
         .b_count = 0,
         .k_count = 0,
     };
-    er_val ret_v = plan_eval(&vm, call_v);
+    er_val ret_v = plan_eval(&vm, call_v, ER_EVAL_WHNF);
     *out_b_count += vm.b_count;
     *out_k_count += vm.k_count;
     return ret_v;
@@ -374,23 +374,23 @@ static bool planvm_build_fib(planvm_fib_program* program)
              * not the older %66 app/call/force route.
              */
             [0] = {.tag = OP_PUSH_VAR, .as.slot = 1},
-            [1] = {.tag = OP_FORCE},
+            [1] = {.tag = OP_EVAL},
             [2] = {.tag = OP_PUSH_LIT, .as.lit_v = 1},
             [3] = {.tag = OP_LE},
             [4] = {.tag = OP_JUMP_IF_ZERO, .as.u32 = FIB_RECURSE_PC},
             [5] = {.tag = OP_PUSH_VAR, .as.slot = 1},
-            [6] = {.tag = OP_FORCE},
+            [6] = {.tag = OP_EVAL},
             [7] = {.tag = OP_RET},
 
             [8] = {.tag = OP_PUSH_VAR, .as.slot = 0},
             [9] = {.tag = OP_PUSH_VAR, .as.slot = 1},
-            [10] = {.tag = OP_FORCE},
+            [10] = {.tag = OP_EVAL},
             [11] = {.tag = OP_DEC},
             [12] = {.tag = OP_CALLF, .as.u32 = 1},
 
             [13] = {.tag = OP_PUSH_VAR, .as.slot = 0},
             [14] = {.tag = OP_PUSH_VAR, .as.slot = 1},
-            [15] = {.tag = OP_FORCE},
+            [15] = {.tag = OP_EVAL},
             [16] = {.tag = OP_DEC},
             [17] = {.tag = OP_DEC},
             [18] = {.tag = OP_CALLF, .as.u32 = 1},
@@ -422,7 +422,7 @@ static er_val planvm_run_fib(planvm_fib_program* program, planvm_arena* arena, e
         .b_count = 0,
         .k_count = 0,
     };
-    er_val ret_v = plan_eval(&vm, call_v);
+    er_val ret_v = plan_eval(&vm, call_v, ER_EVAL_WHNF);
     *out_b_count += vm.b_count;
     *out_k_count += vm.k_count;
     return ret_v;

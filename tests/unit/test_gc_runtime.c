@@ -161,6 +161,64 @@ Test(gc_runtime, eval_gc_forces_collected_thunk)
     enki_gc_destroy(gc);
 }
 
+Test(gc_runtime, plan_eval_nf_keeps_parent_rooted_when_child_allocates)
+{
+    enki_gc* gc = enki_gc_create(enki_allocator_system(), 512, NULL);
+    cr_assert_not_null(gc);
+    const enki_allocator* loc_a = enki_gc_as_allocator(gc);
+
+    er_pin* prim66 = er_pin_alloc(loc_a, 0);
+    cr_assert_not_null(prim66);
+    er_val prim66_v = er_pin_init(prim66, NULL, 66, 0, NULL);
+    cr_assert_eq(er_get_tag(prim66_v), er_tag_pin);
+
+    er_val max_small_v = UINT64_C(0x7fffffffffffffff);
+    er_val row_v = gc_make_app(loc_a, PLAN_S3('I', 'n', 'c'), 1, &max_small_v);
+    er_val call_arg_v[] = {prim66_v, row_v};
+    er_val child_v = gc_make_thunk(loc_a, ER_CALL, 2, call_arg_v);
+    er_val root_v = gc_make_app(loc_a, 0, 1, &child_v);
+    er_app* old_root = er_outt(er_tag_app, root_v);
+    cr_assert_not_null(old_root);
+
+    er_gc_roots roots = {.val_v = {root_v}, .val_s = 1};
+    enki_gc_set_trace_root(gc, &roots, trace_er_roots);
+
+    size_t align_s = _Alignof(er_head);
+    size_t off_s = (gc->active_a->off_o + align_s - 1u) & ~(align_s - 1u);
+    size_t bat_s = sizeof(er_bat) + sizeof(uint64_t);
+    cr_assert_gt(gc->active_a->cap_s, off_s);
+    size_t remaining_s = gc->active_a->cap_s - off_s;
+    if (remaining_s >= bat_s) {
+        void* fill_p = enki_gc_alloc(gc, remaining_s - bat_s + 1u, align_s);
+        cr_assert_not_null(fill_p);
+    }
+
+    er_val dstack_v[64] = {0};
+    er_kon kstack_v[128] = {0};
+    er_vm vm = {
+        .code = NULL,
+        .loc_a = loc_a,
+        .dstack = dstack_v,
+        .dsp = dstack_v,
+        .kbase = kstack_v,
+        .ksp = kstack_v,
+    };
+    enki_gc_set_trace_root(gc, &vm, enki_gc_trace_vm);
+
+    er_val result_v = plan_eval(&vm, roots.val_v[0], ER_EVAL_NF);
+
+    er_app* root = er_outt(er_tag_app, result_v);
+    cr_assert_not_null(root);
+    cr_assert_neq(root, old_root);
+    cr_assert_eq(root->h.raw.nf_f, 1);
+    er_bat* child = er_outt(er_tag_bat, root->arg_v[0]);
+    cr_assert_not_null(child);
+    cr_assert_eq(child->lim_s, 1);
+    cr_assert_eq(child->lim_q[0], UINT64_C(0x8000000000000000));
+
+    enki_gc_destroy(gc);
+}
+
 Test(gc_runtime, compiled_law_keeps_bytecode_outside_gc_heap)
 {
     enki_gc* gc = enki_gc_create(enki_allocator_system(), 16384, NULL);

@@ -140,8 +140,10 @@ typedef enum {
   OP_CALLF,
   OP_CALLU,
   OP_PUSH_SELF,
+  OP_EVAL,
   OP_FORCE,
   OP_DROP,
+  OP_ROTATE,
   OP_JUMP_IF_ZERO,
   OP_JUMP_IF,
   OP_ADD_NAT,
@@ -237,11 +239,17 @@ typedef struct {
   size_t gc_tmp_s;
 } er_vm;
 
+typedef enum er_eval_mode {
+  ER_EVAL_WHNF = 0,
+  ER_EVAL_NF = 1,
+} er_eval_mode;
+
 
 
 er_val
-plan_eval(er_vm *vm, er_val val_v);
+plan_eval(er_vm *vm, er_val val_v, er_eval_mode mode);
 
+er_val er_eval_to(const enki_allocator* loc_a, er_val val_v, er_eval_mode mode);
 er_val er_eval_gc(enki_gc* gc, er_val val_v);
 
 #ifndef PLAN_CH

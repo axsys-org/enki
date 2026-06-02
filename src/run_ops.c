@@ -177,7 +177,7 @@ static er_val eo_mpz_to_nat(const enki_allocator* loc_a, const mpz_t z)
     return out_v;
 }
 
-static bool eo_nat_to_size(er_val v, size_t* out_s)
+bool eo_nat_to_size(er_val v, size_t* out_s)
 {
     if (!eo_is_nat(v)) {
         return false;
@@ -412,8 +412,11 @@ er_val eo_rsh(const enki_allocator* loc_a, er_val a_v, er_val b_v)
 er_val eo_cmp(er_val a_v, er_val b_v)
 {
     ENKI_PROFILE_ZONE("eo_cmp");
+    if (a_v == b_v) {
+        return 1;
+    }
     if (er_is_cat(a_v) && er_is_cat(b_v)) {
-        return a_v < b_v ? 0 : (a_v == b_v ? 1 : 2);
+        return a_v < b_v ? 0 : 2;
     }
     er_val out_v = 0;
     mpz_t a;
@@ -745,6 +748,9 @@ er_val eo_init(const enki_allocator* loc_a, er_val row_v)
     if (app == NULL || app->arg_s == 0) {
         return 0;
     }
+    if (app->arg_s == 1) {
+        return app->fn_v;
+    }
     return eo_app_make(loc_a, app->fn_v, app->arg_s - 1, app->arg_v);
 }
 
@@ -752,8 +758,10 @@ er_val eo_rep(const enki_allocator* loc_a, er_val hd_v, er_val item_v, er_val co
 {
     ENKI_PROFILE_ZONE("eo_rep");
     size_t count_s = 0;
-    if (!eo_nat_to_size(count_v, &count_s)) {
-        return 0;
+    hd_v = eo_nat(hd_v);
+    (void)eo_nat_to_size(count_v, &count_s);
+    if (count_s == 0) {
+        return hd_v;
     }
     er_app* app = er_app_alloc(loc_a, count_s);
     if (app == NULL) {
@@ -769,6 +777,31 @@ er_val eo_rep(const enki_allocator* loc_a, er_val hd_v, er_val item_v, er_val co
     return out_v;
 }
 
+er_val eo_row(const enki_allocator* loc_a, er_val hd_v, er_val count_v, er_val xs_v)
+{
+    ENKI_PROFILE_ZONE("eo_row");
+    size_t count_s = 0;
+    hd_v = eo_nat(hd_v);
+    (void)eo_nat_to_size(count_v, &count_s);
+    if (count_s == 0) {
+        return hd_v;
+    }
+    er_app* app = er_app_alloc(loc_a, count_s);
+    if (app == NULL) {
+        return er_bad;
+    }
+    er_val out_v = er_app_init(app, hd_v, count_s, NULL);
+    if (out_v == 0) {
+        return er_bad;
+    }
+    er_val cur_v = xs_v;
+    for (size_t k = 0; k < count_s; k++) {
+        app->arg_v[k] = eo_ix(0, cur_v);
+        cur_v = eo_ix(1, cur_v);
+    }
+    return out_v;
+}
+
 er_val eo_slice(const enki_allocator* loc_a, er_val off_v, er_val count_v, er_val row_v)
 {
     ENKI_PROFILE_ZONE("eo_slice");
@@ -776,10 +809,14 @@ er_val eo_slice(const enki_allocator* loc_a, er_val off_v, er_val count_v, er_va
     size_t count_s = 0;
     er_app* row = er_outt(er_tag_app, row_v);
     if (row == NULL || !eo_nat_to_size(off_v, &off_s) || !eo_nat_to_size(count_v, &count_s) ||
-        off_s > row->arg_s || count_s > row->arg_s - off_s) {
+        off_s > row->arg_s) {
         return 0;
     }
-    return eo_app_make(loc_a, 0, count_s, row->arg_v + off_s);
+    size_t keep_s = row->arg_s - off_s;
+    if (keep_s > count_s) {
+        keep_s = count_s;
+    }
+    return eo_app_make(loc_a, 0, keep_s, row->arg_v + off_s);
 }
 
 er_val eo_weld(const enki_allocator* loc_a, er_val x_v, er_val y_v)
@@ -824,7 +861,7 @@ er_val eo_coup(const enki_allocator* loc_a, er_val hd_v, er_val row_v)
 {
     ENKI_PROFILE_ZONE("eo_coup");
     er_app* row = er_outt(er_tag_app, row_v);
-    return row == NULL ? 0 : eo_app_make(loc_a, hd_v, row->arg_s, row->arg_v);
+    return row == NULL ? 0 : eo_thk_app(loc_a, hd_v, row->arg_s, row->arg_v);
 }
 
 er_val eo_hd(er_val row_v)
@@ -860,13 +897,13 @@ er_val eo_tru(er_val v)
 er_val eo_or(er_val a_v, er_val b_v)
 {
     ENKI_PROFILE_ZONE("eo_or");
-    return a_v != 0 || b_v != 0 ? 1 : 0;
+    return a_v == 0 ? b_v : a_v;
 }
 
 er_val eo_and(er_val a_v, er_val b_v)
 {
     ENKI_PROFILE_ZONE("eo_and");
-    return a_v != 0 && b_v != 0 ? 1 : 0;
+    return a_v == 0 ? 0 : b_v;
 }
 
 er_val eo_pin(const enki_allocator* loc_a, er_val v)
@@ -953,8 +990,20 @@ bool eo_op66_from_tag(er_val tag_v, int* out_op)
     case PLAN_S2('E', 'q'):
         *out_op = OP66_EQ;
         return true;
+    case PLAN_S2('N', 'e'):
+        *out_op = OP66_NE;
+        return true;
+    case PLAN_S2('L', 't'):
+        *out_op = OP66_LT;
+        return true;
     case PLAN_S2('L', 'e'):
         *out_op = OP66_LE;
+        return true;
+    case PLAN_S2('G', 't'):
+        *out_op = OP66_GT;
+        return true;
+    case PLAN_S2('G', 'e'):
+        *out_op = OP66_GE;
         return true;
     case PLAN_S3('C', 'm', 'p'):
         *out_op = OP66_CMP;
@@ -967,6 +1016,63 @@ bool eo_op66_from_tag(er_val tag_v, int* out_op)
         return true;
     case PLAN_S4('T', 'e', 's', 't'):
         *out_op = OP66_TEST;
+        return true;
+    case PLAN_S3('S', 'e', 't'):
+        *out_op = OP66_SET;
+        return true;
+    case PLAN_S5('C', 'l', 'e', 'a', 'r'):
+        *out_op = OP66_CLEAR;
+        return true;
+    case PLAN_S3('B', 'e', 'x'):
+        *out_op = OP66_BEX;
+        return true;
+    case PLAN_S4('B', 'i', 't', 's'):
+        *out_op = OP66_BITS;
+        return true;
+    case PLAN_S5('B', 'y', 't', 'e', 's'):
+        *out_op = OP66_BYTES;
+        return true;
+    case PLAN_S3('N', 'i', 'b'):
+        *out_op = OP66_NIB;
+        return true;
+    case PLAN_S5('L', 'o', 'a', 'd', '8'):
+        *out_op = OP66_LOAD8;
+        return true;
+    case PLAN_S6('S', 't', 'o', 'r', 'e', '8'):
+        *out_op = OP66_STORE8;
+        return true;
+    case PLAN_S5('T', 'r', 'u', 'n', 'c'):
+        *out_op = OP66_TRUNC;
+        return true;
+    case PLAN_S6('T', 'r', 'u', 'n', 'c', '8'):
+        *out_op = OP66_TRUNC8;
+        return true;
+    case PLAN_S7('T', 'r', 'u', 'n', 'c', '1', '6'):
+        *out_op = OP66_TRUNC16;
+        return true;
+    case PLAN_S7('T', 'r', 'u', 'n', 'c', '3', '2'):
+        *out_op = OP66_TRUNC32;
+        return true;
+    case PLAN_S7('T', 'r', 'u', 'n', 'c', '6', '4'):
+        *out_op = OP66_TRUNC64;
+        return true;
+    case PLAN_S4('T', 'y', 'p', 'e'):
+        *out_op = OP66_TYPE;
+        return true;
+    case PLAN_S5('I', 's', 'P', 'i', 'n'):
+        *out_op = OP66_IS_PIN;
+        return true;
+    case PLAN_S5('I', 's', 'L', 'a', 'w'):
+        *out_op = OP66_IS_LAW;
+        return true;
+    case PLAN_S5('I', 's', 'A', 'p', 'p'):
+        *out_op = OP66_IS_APP;
+        return true;
+    case PLAN_S5('I', 's', 'N', 'a', 't'):
+        *out_op = OP66_IS_NAT;
+        return true;
+    case PLAN_S5('A', 'r', 'i', 't', 'y'):
+        *out_op = OP66_ARITY;
         return true;
     case PLAN_S4('N', 'a', 'm', 'e'):
     case PLAN_S3('N', 'a', 'm'):
@@ -990,6 +1096,9 @@ bool eo_op66_from_tag(er_val tag_v, int* out_op)
     case PLAN_S3('R', 'e', 'p'):
         *out_op = OP66_REP;
         return true;
+    case PLAN_S3('R', 'o', 'w'):
+        *out_op = OP66_ROW;
+        return true;
     case PLAN_S5('S', 'l', 'i', 'c', 'e'):
         *out_op = OP66_SLICE;
         return true;
@@ -999,6 +1108,9 @@ bool eo_op66_from_tag(er_val tag_v, int* out_op)
     case PLAN_S2('U', 'p'):
         *out_op = OP66_UP;
         return true;
+    case PLAN_S6('U', 'p', 'U', 'n', 'i', 'q'):
+        *out_op = OP66_UP_UNIQ;
+        return true;
     case PLAN_S4('C', 'o', 'u', 'p'):
         *out_op = OP66_COUP;
         return true;
@@ -1007,6 +1119,78 @@ bool eo_op66_from_tag(er_val tag_v, int* out_op)
         return true;
     case PLAN_S2('I', 'x'):
         *out_op = OP66_IX;
+        return true;
+    case PLAN_S3('I', 'x', '0'):
+        *out_op = OP66_IX0;
+        return true;
+    case PLAN_S3('I', 'x', '1'):
+        *out_op = OP66_IX1;
+        return true;
+    case PLAN_S3('I', 'x', '2'):
+        *out_op = OP66_IX2;
+        return true;
+    case PLAN_S3('I', 'x', '3'):
+        *out_op = OP66_IX3;
+        return true;
+    case PLAN_S3('I', 'x', '4'):
+        *out_op = OP66_IX4;
+        return true;
+    case PLAN_S3('I', 'x', '5'):
+        *out_op = OP66_IX5;
+        return true;
+    case PLAN_S3('I', 'x', '6'):
+        *out_op = OP66_IX6;
+        return true;
+    case PLAN_S3('I', 'x', '7'):
+        *out_op = OP66_IX7;
+        return true;
+    case PLAN_S4('C', 'a', 's', 'e'):
+        *out_op = OP66_CASE;
+        return true;
+    case PLAN_S5('C', 'a', 's', 'e', '2'):
+        *out_op = OP66_CASE2;
+        return true;
+    case PLAN_S5('C', 'a', 's', 'e', '3'):
+        *out_op = OP66_CASE3;
+        return true;
+    case PLAN_S5('C', 'a', 's', 'e', '4'):
+        *out_op = OP66_CASE4;
+        return true;
+    case PLAN_S5('C', 'a', 's', 'e', '5'):
+        *out_op = OP66_CASE5;
+        return true;
+    case PLAN_S5('C', 'a', 's', 'e', '6'):
+        *out_op = OP66_CASE6;
+        return true;
+    case PLAN_S5('C', 'a', 's', 'e', '7'):
+        *out_op = OP66_CASE7;
+        return true;
+    case PLAN_S5('C', 'a', 's', 'e', '8'):
+        *out_op = OP66_CASE8;
+        return true;
+    case PLAN_S5('C', 'a', 's', 'e', '9'):
+        *out_op = OP66_CASE9;
+        return true;
+    case PLAN_S6('C', 'a', 's', 'e', '1', '0'):
+        *out_op = OP66_CASE10;
+        return true;
+    case PLAN_S6('C', 'a', 's', 'e', '1', '1'):
+        *out_op = OP66_CASE11;
+        return true;
+    case PLAN_S6('C', 'a', 's', 'e', '1', '2'):
+        *out_op = OP66_CASE12;
+        return true;
+    case PLAN_S6('C', 'a', 's', 'e', '1', '3'):
+        *out_op = OP66_CASE13;
+        return true;
+    case PLAN_S6('C', 'a', 's', 'e', '1', '4'):
+        *out_op = OP66_CASE14;
+        return true;
+    case PLAN_S6('C', 'a', 's', 'e', '1', '5'):
+        *out_op = OP66_CASE15;
+        return true;
+    case PLAN_S6('C', 'a', 's', 'e', '1', '6'):
+        *out_op = OP66_CASE16;
         return true;
     case PLAN_S3('N', 'o', 't'):
         *out_op = OP66_NIL;
@@ -1018,8 +1202,57 @@ bool eo_op66_from_tag(er_val tag_v, int* out_op)
     case PLAN_S2('O', 'r'):
         *out_op = OP66_OR;
         return true;
+    case PLAN_S3('N', 'o', 'r'):
+        *out_op = OP66_NOR;
+        return true;
     case PLAN_S3('A', 'n', 'd'):
         *out_op = OP66_AND;
+        return true;
+    case PLAN_S2('I', 'f'):
+        *out_op = OP66_IF;
+        return true;
+    case PLAN_S3('I', 'f', 'z'):
+        *out_op = OP66_IFZ;
+        return true;
+    case PLAN_S3('S', 'e', 'q'):
+        *out_op = OP66_SEQ;
+        return true;
+    case PLAN_S4('S', 'e', 'q', '2'):
+        *out_op = OP66_SEQ2;
+        return true;
+    case PLAN_S4('S', 'e', 'q', '3'):
+        *out_op = OP66_SEQ3;
+        return true;
+    case PLAN_S3('S', 'a', 'p'):
+        *out_op = OP66_SAP;
+        return true;
+    case PLAN_S4('S', 'a', 'p', '2'):
+        *out_op = OP66_SAP2;
+        return true;
+    case PLAN_S5('F', 'o', 'r', 'c', 'e'):
+        *out_op = OP66_FORCE;
+        return true;
+    case PLAN_S7('D', 'e', 'e', 'p', 's', 'e', 'q'):
+    case PLAN_S7('D', 'e', 'e', 'p', 'S', 'e', 'q'):
+        *out_op = OP66_DEEPSEQ;
+        return true;
+    case PLAN_S3('T', 'r', 'y'):
+        *out_op = OP66_TRY;
+        return true;
+    case PLAN_S5('T', 'h', 'r', 'o', 'w'):
+        *out_op = OP66_THROW;
+        return true;
+    case PLAN_S4('S', 'a', 'v', 'e'):
+        *out_op = OP66_SAVE;
+        return true;
+    case PLAN_S4('L', 'o', 'a', 'd'):
+        *out_op = OP66_LOAD;
+        return true;
+    case PLAN_S5('T', 'r', 'a', 'c', 'e'):
+        *out_op = OP66_TRACE;
+        return true;
+    case PLAN_S5('E', 'q', 'u', 'a', 'l'):
+        *out_op = OP66_EQUAL;
         return true;
     case PLAN_S6('O', 'P', '_', 'N', 'A', 'M'):
         *out_op = OP66_NAME;

@@ -198,7 +198,6 @@ er_val er_law_init(er_law* law, er_val name_v, er_val body_v, uint32_t ari_d,
     if (!er_flex_fits(&law->h, sizeof(er_law), bc_s, sizeof(er_op*))) {
         return 0;
     }
-    law->h.raw.nf_f = 1;
     law->name_v = name_v;
     law->body_v = body_v;
     law->ari_d = ari_d;
@@ -310,6 +309,8 @@ static er_val er_thk_make_call(const enki_allocator* loc_a, size_t arg_s, const 
     return er_thk_init(thk, ER_CALL, arg_s, arg_v);
 }
 
+static size_t er_call_frame_size(er_val fun_v, uint32_t arity_d);
+
 static er_val er_thk_make_call_frame(const enki_allocator* loc_a, size_t frame_s,
     size_t copy_s, const er_val arg_v[])
 {
@@ -330,17 +331,71 @@ static er_val er_thk_make_call_frame(const enki_allocator* loc_a, size_t frame_s
     return out_v;
 }
 
-static er_val er_thk_make_susp(const enki_allocator* loc_a, uint32_t pc, er_val frame_v)
+static bool er_app_spine_count(er_val fn_v, size_t extra_s, er_val* out_fn_v,
+                               size_t* out_arg_s);
+static void er_app_spine_copy(er_val fn_v, er_val* out_v, size_t* out_s);
+
+static er_val er_thk_make_partial_call_frame(const enki_allocator* loc_a, er_app* app,
+                                             size_t extra_s, const er_val extra_v[])
+{
+    if (app == NULL || app->arg_s > SIZE_MAX - extra_s) {
+        return 0;
+    }
+    er_val flat_fn_v = app->fn_v;
+    size_t total_arg_s = 0;
+    if (!er_app_spine_count(app->fn_v, app->arg_s + extra_s, &flat_fn_v, &total_arg_s) ||
+        total_arg_s > UINT32_MAX) {
+        return 0;
+    }
+    uint32_t call_arity_d = (uint32_t)total_arg_s;
+    size_t frame_s = er_call_frame_size(flat_fn_v, call_arity_d);
+    if (frame_s == 0 || frame_s < (size_t)call_arity_d + 1u) {
+        return 0;
+    }
+    er_thk* thk = er_thk_alloc(loc_a, frame_s);
+    if (thk == NULL) {
+        return 0;
+    }
+    er_val out_v = er_thk_init(thk, ER_CALL, frame_s, NULL);
+    if (out_v == 0) {
+        return 0;
+    }
+    thk->arg_v[0] = flat_fn_v;
+    size_t copied_s = 0;
+    er_app_spine_copy(app->fn_v, thk->arg_v + 1, &copied_s);
+    if (app->arg_s > 0) {
+        memcpy(thk->arg_v + 1 + copied_s, app->arg_v, app->arg_s * sizeof(er_val));
+        copied_s += app->arg_s;
+    }
+    if (extra_s > 0) {
+        memcpy(thk->arg_v + 1 + copied_s, extra_v, extra_s * sizeof(er_val));
+    }
+    return out_v;
+}
+
+static er_val er_thk_make_susp(const enki_allocator* loc_a, uint32_t pc, er_val frame_v,
+                               er_val law_v)
 {
     er_val arg_v[] = {
         (er_val)pc,
         frame_v,
+        law_v,
     };
-    er_thk* thk = er_thk_alloc(loc_a, 2);
+    er_thk* thk = er_thk_alloc(loc_a, 3);
     if (thk == NULL) {
         return 0;
     }
-    return er_thk_init(thk, ER_SUSP, 2, arg_v);
+    return er_thk_init(thk, ER_SUSP, 3, arg_v);
+}
+
+static er_val er_thk_make_env_frame(const enki_allocator* loc_a, size_t frame_s,
+                                    const er_val frame_v[])
+{
+    er_thk* thk = er_thk_alloc(loc_a, frame_s);
+    if (thk == NULL) {
+        return 0;
+    }
+    return er_thk_init(thk, ER_XDONE, frame_s, frame_v);
 }
 
 static er_val er_thk_make_unk_app(const enki_allocator* loc_a, size_t arg_s,
@@ -363,8 +418,67 @@ static er_val er_app_make(const enki_allocator* loc_a, er_val fn_v, size_t arg_s
     return er_app_init(app, fn_v, arg_s, arg_v);
 }
 
+static bool er_app_spine_count(er_val fn_v, size_t extra_s, er_val* out_fn_v,
+                               size_t* out_arg_s)
+{
+    size_t total_s = extra_s;
+    er_val cur_v = fn_v;
+    er_app* app = er_outt(er_tag_app, cur_v);
+    while (app != NULL) {
+        if (app->arg_s > SIZE_MAX - total_s) {
+            return false;
+        }
+        total_s += app->arg_s;
+        cur_v = app->fn_v;
+        app = er_outt(er_tag_app, cur_v);
+    }
+    *out_fn_v = cur_v;
+    *out_arg_s = total_s;
+    return true;
+}
+
+static void er_app_spine_copy(er_val fn_v, er_val* out_v, size_t* out_s)
+{
+    er_app* app = er_outt(er_tag_app, fn_v);
+    if (app == NULL) {
+        return;
+    }
+    er_app_spine_copy(app->fn_v, out_v, out_s);
+    if (app->arg_s > 0) {
+        memcpy(out_v + *out_s, app->arg_v, app->arg_s * sizeof(er_val));
+        *out_s += app->arg_s;
+    }
+}
+
+static er_val er_app_make_flat(const enki_allocator* loc_a, er_val fn_v, size_t arg_s,
+                               const er_val arg_v[])
+{
+    er_val flat_fn_v = fn_v;
+    size_t total_s = arg_s;
+    if (!er_app_spine_count(fn_v, arg_s, &flat_fn_v, &total_s)) {
+        return 0;
+    }
+    if (flat_fn_v == fn_v && total_s == arg_s) {
+        return er_app_make(loc_a, fn_v, arg_s, arg_v);
+    }
+    er_app* app = er_app_alloc(loc_a, total_s);
+    if (app == NULL) {
+        return 0;
+    }
+    er_val out_v = er_app_init(app, flat_fn_v, total_s, NULL);
+    if (out_v == 0) {
+        return 0;
+    }
+    size_t copied_s = 0;
+    er_app_spine_copy(fn_v, app->arg_v, &copied_s);
+    if (arg_s > 0) {
+        memcpy(app->arg_v + copied_s, arg_v, arg_s * sizeof(er_val));
+    }
+    return out_v;
+}
+
 static er_val er_eval_with_heap(const enki_allocator* heap_a, const enki_allocator* work_a,
-                                enki_gc* gc, er_val val_v)
+                                enki_gc* gc, er_val val_v, er_eval_mode mode)
 {
     ENKI_PROFILE_ZONE("er_eval");
     if (heap_a == NULL || heap_a->alloc == NULL || heap_a->free == NULL ||
@@ -408,7 +522,7 @@ static er_val er_eval_with_heap(const enki_allocator* heap_a, const enki_allocat
         old_trace = gc->trace_fn;
         enki_gc_set_trace_root(gc, &vm, enki_gc_trace_vm);
     }
-    er_val out_v = plan_eval(&vm, val_v);
+    er_val out_v = plan_eval(&vm, val_v, mode);
     ENKI_PROFILE_PLOT_I("er_eval.bytecode_steps", (int64_t)vm.b_count);
     ENKI_PROFILE_PLOT_I("er_eval.reductions", (int64_t)vm.k_count);
     if (gc != NULL) {
@@ -421,7 +535,12 @@ static er_val er_eval_with_heap(const enki_allocator* heap_a, const enki_allocat
 
 er_val er_eval(const enki_allocator* loc_a, er_val val_v)
 {
-    return er_eval_with_heap(loc_a, loc_a, NULL, val_v);
+    return er_eval_with_heap(loc_a, loc_a, NULL, val_v, ER_EVAL_WHNF);
+}
+
+er_val er_eval_to(const enki_allocator* loc_a, er_val val_v, er_eval_mode mode)
+{
+    return er_eval_with_heap(loc_a, loc_a, NULL, val_v, mode);
 }
 
 er_val er_eval_gc(enki_gc* gc, er_val val_v)
@@ -429,7 +548,8 @@ er_val er_eval_gc(enki_gc* gc, er_val val_v)
     if (gc == NULL) {
         return er_bad;
     }
-    return er_eval_with_heap(enki_gc_as_allocator(gc), enki_gc_parent_allocator(gc), gc, val_v);
+    return er_eval_with_heap(enki_gc_as_allocator(gc), enki_gc_parent_allocator(gc), gc, val_v,
+                             ER_EVAL_WHNF);
 }
 
 static er_val er_app_take(const enki_allocator* loc_a, er_app* old, size_t arg_s)
@@ -478,11 +598,19 @@ static er_val er_app_drop_coup(const enki_allocator* loc_a, er_thk* old, er_val 
         return 0;
     }
     size_t siz_s = old->arg_s - dop_s - 1;
-    er_app* app = er_app_alloc(loc_a, siz_s);
-    if (app == NULL) {
+    er_thk* thk = er_thk_alloc(loc_a, siz_s + 1);
+    if (thk == NULL) {
         return 0;
     }
-    return er_app_init(app, fn_v, siz_s, &old->arg_v[dop_s + 1]);
+    er_val out_v = er_thk_init(thk, ER_XUNK_APP, siz_s + 1, NULL);
+    if (out_v == 0) {
+        return 0;
+    }
+    thk->arg_v[0] = fn_v;
+    if (siz_s > 0) {
+        memcpy(thk->arg_v + 1, &old->arg_v[dop_s + 1], siz_s * sizeof(er_val));
+    }
+    return out_v;
 }
 
 static er_law* er_resolve_law(er_val val_v)
@@ -523,36 +651,53 @@ static size_t er_call_frame_size(er_val fun_v, uint32_t arity_d)
     return (size_t)law->ari_d + 1 + law->let_d;
 }
 
-static uint32_t er_arity(er_val val_v)
+static bool er_callable_arity(er_val val_v, uint32_t* out_d)
 {
   er_pin* pin;
   er_app* app;
   er_law* law;
   switch ( er_get_tag(val_v) ) {
-    case er_tag_bat:
-      return 0;
     case er_tag_pin:
       pin = er_outa(val_v);
       if (er_is_cat(pin->val_v)) {
-        return 1;
+        *out_d = 1;
+        return true;
       }
       law = er_outt(er_tag_law, pin->val_v);
-      assert("bad pin arity" && law);
-      return law->ari_d;
-    case er_tag_app:
+      if (law == NULL) {
+        return false;
+      }
+      *out_d = law->ari_d;
+      return true;
+    case er_tag_app: {
       app = er_outa(val_v);
-      return er_arity(app->fn_v) - (uint32_t)app->arg_s;
+      uint32_t fun_ari_d = 0;
+      if (!er_callable_arity(app->fn_v, &fun_ari_d) || fun_ari_d <= app->arg_s) {
+        return false;
+      }
+      *out_d = fun_ari_d - (uint32_t)app->arg_s;
+      return true;
+    }
     case er_tag_law:
       law = er_outa(val_v);
-      return law->ari_d;
-    case er_tag_thk:
-    case er_tag_fwd:
-    case er_tag_bad:
-      assert("bad arity" && 0);
+      *out_d = law->ari_d;
+      return true;
     default:
-      return 0;
+      return false;
   }
 }
+
+static uint32_t er_arity(er_val val_v)
+{
+  uint32_t arity_d = 0;
+  if (er_callable_arity(val_v, &arity_d)) {
+    return arity_d;
+  }
+  return 0;
+}
+
+static er_val plan_eval_nf_inner(er_vm* vm, er_val val_v);
+static er_val plan_eval_whnf_preserve(er_vm* vm, er_val val_v);
 
 /*
  * (define (OP_PUSH_VAR val) ("OP_PUSH_VAR" val)) ;; [] -- a
@@ -561,10 +706,12 @@ static uint32_t er_arity(er_val val_v)
 (define (OP_MK_APP count) ("OP_MK_APP" count)) ;; [<count>] -- a
 (define (OP_CALLF ari) ("OP_CALLF" ari)) ;; [<count>] -- a
 (define (OP_CALLU ari) ("OP_CALLU" ari)) ;; [<count>] -- a
-(define (OP_FORCE ari) ("OP_FORCE" ari)) ;; a -- a
+(define (OP_EVAL ari) ("OP_EVAL" ari)) ;; a -- whnf
+(define OP_FORCE ("OP_FORCE" 0)) ;; a -- nf
 (define (OP_PRIM_UNK set) ("OP_PRIM_UNK" set)) ;; a -- a
 (define OP_RET ("OP_RET" 0))
-;;(define (OP_DROP idx) ("OP_DROP" ari)) ;; [a b] -- [a]
+(define (OP_DROP idx) ("OP_DROP" ari)) ;; [a b] -- [a]
+(define (OP_ROTATE n) ("OP_ROTATE" n)) ;; [a b c] -- [b c a]
 
 ;; -- primops
 (define OP_PIN ("OP_PIN" 0)) ;; a -- a
@@ -622,15 +769,16 @@ static uint32_t er_arity(er_val val_v)
 
 
 __attribute__((noinline))
-er_val
-plan_eval(er_vm *vm, er_val val_v)
+static er_val
+plan_eval_whnf(er_vm *vm, er_val val_v)
 {
-    ENKI_PROFILE_ZONE("plan_eval");
+    ENKI_PROFILE_ZONE("plan_eval_whnf");
     er_op* code  = vm->code;
     er_law* code_law = NULL;
 
+    er_val* dbase = vm->dsp;
     er_val* dsp   = vm->dsp;
-    er_kon* kbase = vm->kbase;
+    er_kon* kbase = vm->ksp;
     er_kon* ksp   = vm->ksp;
 
     uint32_t  pc  = 0;
@@ -658,6 +806,7 @@ plan_eval(er_vm *vm, er_val val_v)
     er_val prim_d_v = 0;
     er_val prim_e_v = 0;
     er_val prim_f_v = 0;
+    er_val* prim_base_v = NULL;
     er_optag prim_byte_op;
     size_t prim_need_s;
     er_prim_route prim_route;
@@ -677,8 +826,10 @@ plan_eval(er_vm *vm, er_val val_v)
         [OP_CALLF]     = &&I_CALLF,
         [OP_CALLU]     = &&I_CALLU,
         [OP_PUSH_SELF] = &&I_PUSH_SELF,
+        [OP_EVAL]      = &&I_EVAL,
         [OP_FORCE]     = &&I_FORCE,
         [OP_DROP]      = &&I_DROP,
+        [OP_ROTATE]    = &&I_ROTATE,
         [OP_JUMP_IF_ZERO] = &&I_JUMP_IF_ZERO,
         [OP_JUMP_IF]   = &&I_JUMP_IF,
         [OP_ADD_NAT]   = &&I_ADD_NAT,
@@ -832,12 +983,14 @@ plan_eval(er_vm *vm, er_val val_v)
         (ksp++)->pc  = (_pc);                      \
         (ksp++)->code = (_code);                   \
         (ksp++)->law = (_law);                     \
+        (ksp++)->ref = dbase;                      \
         (ksp++)->lab = &&K_RETURN;                 \
     } while (0)
 
 #define KPUSH_UPDATE(_target)                      \
     do {                                           \
         (ksp++)->val_v = (_target);                  \
+        (ksp++)->ref = dbase;                      \
         (ksp++)->lab = &&K_UPDATE;                 \
     } while (0)
 
@@ -885,6 +1038,31 @@ plan_eval(er_vm *vm, er_val val_v)
         if ((_v) == er_bad) {                      \
             FAIL_ALLOC();                          \
         }                                          \
+    } while (0)
+
+#define PRIM_EVAL_STACK_WHNF(_idx)                 \
+    do {                                           \
+        GC_SYNC();                                 \
+        er_val prim_eval_v =                       \
+            plan_eval_whnf_preserve(vm, prim_base_v[(_idx)]); \
+        CHECK_PRIM(prim_eval_v);                   \
+        prim_base_v[(_idx)] = prim_eval_v;         \
+    } while (0)
+
+#define PRIM_EVAL_STACK_NF(_idx)                   \
+    do {                                           \
+        GC_SYNC();                                 \
+        er_val prim_eval_v =                       \
+            plan_eval_nf_inner(vm, prim_base_v[(_idx)]); \
+        CHECK_PRIM(prim_eval_v);                   \
+        prim_base_v[(_idx)] = prim_eval_v;         \
+    } while (0)
+
+#define PRIM_EVAL_VALUE_WHNF(_dst, _src)           \
+    do {                                           \
+        GC_SYNC();                                 \
+        (_dst) = plan_eval_whnf_preserve(vm, (_src)); \
+        CHECK_PRIM(_dst);                          \
     } while (0)
 
 #define PRIM_DONE_VALUE(_v)                        \
@@ -949,7 +1127,7 @@ I_PUSH_LIT:
 
 I_MK_APP: {
     size_t app_s = op->as.u32;
-    if (app_s == 0 || (size_t)(dsp - vm->dstack) < app_s) {
+    if (app_s == 0 || dsp < dbase || (size_t)(dsp - dbase) < app_s) {
       FAIL_ALLOC();
     }
     er_val* app_base = dsp - app_s;
@@ -964,7 +1142,7 @@ I_MK_APP: {
 
 I_MK_CALL: {
     size_t app_s = op->as.u32;
-    if (app_s == 0 || (size_t)(dsp - vm->dstack) < app_s) {
+    if (app_s == 0 || dsp < dbase || (size_t)(dsp - dbase) < app_s) {
       FAIL_ALLOC();
     }
     er_val* app_base = dsp - app_s;
@@ -979,7 +1157,7 @@ I_MK_CALL: {
 I_CALLF: {
     size_t arg_s = op->as.u32;
     size_t call_s = arg_s + 1;
-    if (arg_s == SIZE_MAX || (size_t)(dsp - vm->dstack) < call_s) {
+    if (arg_s == SIZE_MAX || dsp < dbase || (size_t)(dsp - dbase) < call_s) {
       FAIL_ALLOC();
     }
     er_val* call_base = dsp - call_s;
@@ -996,7 +1174,7 @@ I_CALLF: {
 I_CALLU: {
     size_t arg_s = op->as.u32;
     size_t call_s = arg_s + 1;
-    if (arg_s == SIZE_MAX || (size_t)(dsp - vm->dstack) < call_s) {
+    if (arg_s == SIZE_MAX || dsp < dbase || (size_t)(dsp - dbase) < call_s) {
       FAIL_ALLOC();
     }
     er_val* call_base = dsp - call_s;
@@ -1293,10 +1471,30 @@ I_DROP:
     (void)DPOP();
     DISPATCH();
 
+I_ROTATE: {
+    size_t rotate_s = op->as.u32;
+    if (dsp < dbase || rotate_s > (size_t)(dsp - dbase)) {
+      FAIL_ALLOC();
+    }
+    if (rotate_s > 1) {
+      er_val* base_v = dsp - rotate_s;
+      er_val first_v = base_v[0];
+      memmove(base_v, base_v + 1, (rotate_s - 1u) * sizeof(er_val));
+      base_v[rotate_s - 1u] = first_v;
+    }
+    DISPATCH();
+}
+
 I_JUMP_IF_ZERO:
     r = DPOP();
     if (r == 0) {
-      pc = op->as.u32;
+      if (code_law != NULL && op->as.u32 < code_law->bc_s &&
+          code_law->bc_v[op->as.u32] != NULL) {
+        code = code_law->bc_v[op->as.u32];
+        pc = 0;
+      } else {
+        pc = op->as.u32;
+      }
     }
     DISPATCH();
 
@@ -1312,12 +1510,12 @@ I_JUMP_IF:
     }
     DISPATCH();
 
-I_FORCE:
+I_EVAL:
     r = DPOP();
 
     /*
      * Optional fast path: if r is already WHNF, avoid pushing K_RETURN.
-     * Only push a continuation if forcing actually enters something.
+     * Only push a continuation if evaluation actually enters something.
      */
 
     if (er_is_whnf(r)) {
@@ -1325,8 +1523,21 @@ I_FORCE:
         DISPATCH();
     }
 
+    GC_SYNC();
     KPUSH_RETURN(pc, env, code, code_law);
     goto FORCE_ENTRY;
+
+I_FORCE:
+    r = DPOP();
+    GC_SYNC();
+    r = plan_eval_nf_inner(vm, r);
+    dsp = vm->dsp;
+    ksp = vm->ksp;
+    if (r == er_bad) {
+      FAIL_ALLOC();
+    }
+    DPUSH(r);
+    DISPATCH();
 
     // ---------------------------------------------------------------------
     // Force mode
@@ -1340,8 +1551,16 @@ FORCE_UNK_APP: {
       r = f;
       goto FORCE_ENTRY;
     }
-    wan_d = er_arity(f);
     hav_d = (uint32_t)(thk->arg_s - 1);
+	    if (!er_callable_arity(f, &wan_d)) {
+	      if (hav_d == 0) {
+	        RETURN(f);
+	      }
+	      GC_SYNC();
+	      r = er_app_make_flat(vm->loc_a, f, thk->arg_s - 1, &thk->arg_v[1]);
+	      CHECK_ALLOC(r);
+	      goto FORCE_ENTRY;
+	    }
     if ( hav_d ==  wan_d ) {
       size_t frame_s = er_call_frame_size(f, wan_d);
       CHECK_ALLOC(frame_s);
@@ -1355,7 +1574,7 @@ FORCE_UNK_APP: {
       goto FORCE_ENTRY;
     } else if ( hav_d < wan_d ) {
       GC_SYNC();
-      r = er_app_make(vm->loc_a, f, thk->arg_s - 1, &thk->arg_v[1]);
+      r = er_app_make_flat(vm->loc_a, f, thk->arg_s - 1, &thk->arg_v[1]);
       CHECK_ALLOC(r);
       goto FORCE_ENTRY;
     } else {
@@ -1545,6 +1764,237 @@ PRIM66_DECODE: {
         (size_t)prim_op_i >= ER_OP66_COUNT) {
         FAIL_ALLOC();
     }
+    switch (prim_op_i) {
+    case OP66_TYPE:
+        if (prim_arg_s != 1) {
+            PRIM_BAD_ARITY();
+        }
+        PRIM_EVAL_VALUE_WHNF(prim_a_v, prim_arg_v[0]);
+        switch (er_get_tag(prim_a_v)) {
+        case er_tag_bat:
+            PRIM_DONE_VALUE(0);
+        case er_tag_pin:
+            PRIM_DONE_VALUE(1);
+        case er_tag_law:
+            PRIM_DONE_VALUE(2);
+        case er_tag_app:
+            PRIM_DONE_VALUE(3);
+        default:
+            if (er_is_cat(prim_a_v)) {
+                PRIM_DONE_VALUE(0);
+            }
+            FAIL_ALLOC();
+        }
+    case OP66_IS_PIN:
+    case OP66_IS_LAW:
+    case OP66_IS_APP:
+    case OP66_IS_NAT:
+        if (prim_arg_s != 1) {
+            PRIM_BAD_ARITY();
+        }
+        PRIM_EVAL_VALUE_WHNF(prim_a_v, prim_arg_v[0]);
+        if (prim_op_i == OP66_IS_PIN) {
+            PRIM_DONE_VALUE(er_is_tag(er_tag_pin, prim_a_v) ? 1 : 0);
+        }
+        if (prim_op_i == OP66_IS_LAW) {
+            PRIM_DONE_VALUE(er_is_tag(er_tag_law, prim_a_v) ? 1 : 0);
+        }
+        if (prim_op_i == OP66_IS_APP) {
+            PRIM_DONE_VALUE(er_is_tag(er_tag_app, prim_a_v) ? 1 : 0);
+        }
+        PRIM_DONE_VALUE((er_is_cat(prim_a_v) || er_is_tag(er_tag_bat, prim_a_v)) ? 1 : 0);
+    case OP66_NE:
+    case OP66_LT:
+    case OP66_GT:
+    case OP66_GE:
+        if (prim_arg_s != 2) {
+            PRIM_BAD_ARITY();
+        }
+        PRIM_EVAL_VALUE_WHNF(prim_a_v, prim_arg_v[0]);
+        PRIM_EVAL_VALUE_WHNF(prim_b_v, prim_arg_v[1]);
+        if (prim_op_i == OP66_NE) {
+            PRIM_DONE_VALUE(eo_eq(prim_a_v, prim_b_v) == 0 ? 1 : 0);
+        }
+        prim_c_v = eo_cmp(prim_a_v, prim_b_v);
+        if (prim_op_i == OP66_LT) {
+            PRIM_DONE_VALUE(prim_c_v == 0 ? 1 : 0);
+        }
+        if (prim_op_i == OP66_GT) {
+            PRIM_DONE_VALUE(prim_c_v == 2 ? 1 : 0);
+        }
+        PRIM_DONE_VALUE(prim_c_v == 0 ? 0 : 1);
+    case OP66_SET:
+    case OP66_CLEAR:
+    case OP66_NIB:
+        if (prim_arg_s != 2) {
+            PRIM_BAD_ARITY();
+        }
+        PRIM_EVAL_VALUE_WHNF(prim_a_v, prim_arg_v[0]);
+        PRIM_EVAL_VALUE_WHNF(prim_b_v, prim_arg_v[1]);
+        if (prim_op_i == OP66_NIB) {
+            PRIM_DONE_VALUE(eo_load(vm->loc_a, prim_a_v, 4, prim_b_v));
+        }
+        PRIM_DONE_VALUE(eo_store(vm->loc_a, prim_a_v, prim_op_i == OP66_SET ? 1 : 0, 1,
+                                 prim_b_v));
+    case OP66_CASE: {
+        if (prim_arg_s != 3) {
+            PRIM_BAD_ARITY();
+        }
+        PRIM_EVAL_VALUE_WHNF(prim_a_v, prim_arg_v[0]);
+        PRIM_EVAL_VALUE_WHNF(prim_b_v, prim_arg_v[1]);
+        size_t case_idx_s = 0;
+        er_app* case_row = er_outt(er_tag_app, prim_b_v);
+        if (!eo_nat_to_size(prim_a_v, &case_idx_s) || case_row == NULL ||
+            case_idx_s >= case_row->arg_s) {
+            r = prim_arg_v[2];
+        } else {
+            r = case_row->arg_v[case_idx_s];
+        }
+        goto FORCE_ENTRY;
+    }
+    case OP66_CASE2:
+    case OP66_CASE3:
+    case OP66_CASE4:
+    case OP66_CASE5:
+    case OP66_CASE6:
+    case OP66_CASE7:
+    case OP66_CASE8:
+    case OP66_CASE9:
+    case OP66_CASE10:
+    case OP66_CASE11:
+    case OP66_CASE12:
+    case OP66_CASE13:
+    case OP66_CASE14:
+    case OP66_CASE15:
+    case OP66_CASE16: {
+        size_t case_s = (size_t)(prim_op_i - OP66_CASE2 + 2);
+        if (prim_arg_s != case_s + 1) {
+            PRIM_BAD_ARITY();
+        }
+        PRIM_EVAL_VALUE_WHNF(prim_a_v, prim_arg_v[0]);
+        size_t case_idx_s = 0;
+        if (!eo_nat_to_size(prim_a_v, &case_idx_s) || case_idx_s >= case_s - 1) {
+            r = prim_arg_v[case_s];
+        } else {
+            r = prim_arg_v[case_idx_s + 1];
+        }
+        goto FORCE_ENTRY;
+    }
+    case OP66_IX0:
+    case OP66_IX1:
+    case OP66_IX2:
+    case OP66_IX3:
+    case OP66_IX4:
+    case OP66_IX5:
+    case OP66_IX6:
+    case OP66_IX7:
+        if (prim_arg_s != 1) {
+            PRIM_BAD_ARITY();
+        }
+        prim_a_v = (er_val)(prim_op_i - OP66_IX0);
+        PRIM_EVAL_VALUE_WHNF(prim_b_v, prim_arg_v[0]);
+        PRIM_DONE_VALUE(eo_ix(prim_a_v, prim_b_v));
+    case OP66_IF:
+    case OP66_IFZ:
+        if (prim_arg_s != 3) {
+            PRIM_BAD_ARITY();
+        }
+        PRIM_EVAL_VALUE_WHNF(prim_a_v, prim_arg_v[0]);
+        r = (prim_op_i == OP66_IF ? prim_a_v != 0 : prim_a_v == 0) ? prim_arg_v[1]
+                                                                    : prim_arg_v[2];
+        goto FORCE_ENTRY;
+    case OP66_NOR:
+        if (prim_arg_s != 2) {
+            PRIM_BAD_ARITY();
+        }
+        PRIM_EVAL_VALUE_WHNF(prim_a_v, prim_arg_v[0]);
+        if (prim_a_v != 0) {
+            PRIM_DONE_VALUE(0);
+        }
+        PRIM_EVAL_VALUE_WHNF(prim_b_v, prim_arg_v[1]);
+        PRIM_DONE_VALUE(prim_b_v == 0 ? 1 : 0);
+    case OP66_ROW:
+        if (prim_arg_s != 3) {
+            PRIM_BAD_ARITY();
+        }
+        PRIM_EVAL_VALUE_WHNF(prim_a_v, prim_arg_v[0]);
+        prim_a_v = eo_nat(prim_a_v);
+        PRIM_EVAL_VALUE_WHNF(prim_b_v, prim_arg_v[1]);
+        prim_c_v = prim_arg_v[2];
+        {
+            size_t row_count_s = 0;
+            (void)eo_nat_to_size(prim_b_v, &row_count_s);
+            if (row_count_s == 0) {
+                PRIM_DONE_VALUE(prim_a_v);
+            }
+
+            GC_SYNC();
+            GC_ROOT_PRIMS();
+            er_app* row_app = er_app_alloc(vm->loc_a, row_count_s);
+            prim_a_v = vm->gc_tmp_v[0];
+            prim_b_v = vm->gc_tmp_v[1];
+            prim_c_v = vm->gc_tmp_v[2];
+            GC_CLEAR_ROOTS();
+            if (row_app == NULL) {
+                FAIL_ALLOC();
+            }
+
+            er_val row_v = er_app_init(row_app, prim_a_v, row_count_s, NULL);
+            CHECK_ALLOC(row_v);
+            er_val* row_root_p = dsp;
+            DPUSH(row_v);
+
+            for (size_t row_k_s = 0; row_k_s < row_count_s; row_k_s++) {
+                PRIM_EVAL_VALUE_WHNF(prim_c_v, prim_c_v);
+                row_app = er_outt(er_tag_app, *row_root_p);
+                if (row_app == NULL) {
+                    FAIL_ALLOC();
+                }
+                row_app->arg_v[row_k_s] = eo_ix(0, prim_c_v);
+                prim_c_v = eo_ix(1, prim_c_v);
+            }
+
+            r = DPOP();
+            goto FORCE_ENTRY;
+        }
+    case OP66_TRACE:
+        if (prim_arg_s != 2) {
+            PRIM_BAD_ARITY();
+        }
+        r = prim_arg_v[1];
+        goto FORCE_ENTRY;
+    case OP66_SEQ:
+        if (prim_arg_s != 2) {
+            PRIM_BAD_ARITY();
+        }
+        PRIM_EVAL_VALUE_WHNF(prim_a_v, prim_arg_v[0]);
+        r = prim_arg_v[1];
+        goto FORCE_ENTRY;
+    case OP66_SEQ2:
+        if (prim_arg_s != 3) {
+            PRIM_BAD_ARITY();
+        }
+        PRIM_EVAL_VALUE_WHNF(prim_a_v, prim_arg_v[0]);
+        PRIM_EVAL_VALUE_WHNF(prim_b_v, prim_arg_v[1]);
+        r = prim_arg_v[2];
+        goto FORCE_ENTRY;
+    case OP66_SEQ3:
+        if (prim_arg_s != 4) {
+            PRIM_BAD_ARITY();
+        }
+        PRIM_EVAL_VALUE_WHNF(prim_a_v, prim_arg_v[0]);
+        PRIM_EVAL_VALUE_WHNF(prim_b_v, prim_arg_v[1]);
+        PRIM_EVAL_VALUE_WHNF(prim_c_v, prim_arg_v[2]);
+        r = prim_arg_v[3];
+        goto FORCE_ENTRY;
+    case OP66_THROW:
+        if (prim_arg_s != 1) {
+            PRIM_BAD_ARITY();
+        }
+        FAIL_ALLOC();
+    default:
+        break;
+    }
     prim_route = prim66_route[prim_op_i];
     if (!prim_route.valid_f) {
         FAIL_ALLOC();
@@ -1557,7 +2007,36 @@ PRIM_ROUTE_DISPATCH: {
     if (prim_byte_op >= OP_COUNT || dispatch[prim_byte_op] == NULL) {
         FAIL_ALLOC();
     }
-    PRIM_PUSH_ARGS(prim_need_s);
+    if (prim_arg_s != prim_need_s) {
+        PRIM_BAD_ARITY();
+    }
+    prim_base_v = dsp;
+    for (size_t prim_k_s = 0; prim_k_s < prim_need_s; prim_k_s++) {
+        DPUSH(prim_arg_v[prim_k_s]);
+    }
+    switch (prim_byte_op) {
+    case OP_LAW:
+        PRIM_EVAL_STACK_NF(0);
+        PRIM_EVAL_STACK_NF(1);
+        PRIM_EVAL_STACK_NF(2);
+        break;
+    case OP_REP:
+        PRIM_EVAL_STACK_WHNF(2);
+        break;
+    case OP_UP:
+        PRIM_EVAL_STACK_WHNF(0);
+        PRIM_EVAL_STACK_WHNF(2);
+        break;
+    case OP_OR:
+    case OP_AND:
+        PRIM_EVAL_STACK_WHNF(0);
+        break;
+    default:
+        for (size_t prim_k_s = 0; prim_k_s < prim_need_s; prim_k_s++) {
+            PRIM_EVAL_STACK_WHNF(prim_k_s);
+        }
+        break;
+    }
     goto *dispatch[prim_byte_op];
 }
 
@@ -1579,7 +2058,8 @@ FORCE_SUSP: {
     if (fr == NULL) {
       FAIL_ALLOC();
     }
-    er_law* law = er_resolve_law(fr->arg_v[0]);
+    er_val susp_law_v = thk->arg_s >= 3 ? thk->arg_v[2] : fr->arg_v[0];
+    er_law* law = er_resolve_law(susp_law_v);
     if (law == NULL || susp_label >= law->bc_s || law->bc_v[susp_label] == NULL) {
       FAIL_ALLOC();
     }
@@ -1588,6 +2068,7 @@ FORCE_SUSP: {
     code = law->bc_v[susp_label];
     pc = 0;
     env = fr->arg_v;
+    dbase = dsp;
     thk->fun = ER_HOLE;
     DISPATCH();
 }
@@ -1601,13 +2082,34 @@ ENTER_CALL: {
       if ( er_is_cat(pin->val_v) ) {
         prim_set = pin->val_v;
         prim_arg = thk->arg_v[1];
+        if (!er_is_whnf(prim_arg)) {
+          GC_SYNC();
+          prim_arg = plan_eval_whnf_preserve(vm, prim_arg);
+          dsp = vm->dsp;
+          ksp = vm->ksp;
+          CHECK_PRIM(prim_arg);
+        }
         goto PRIMOP;
       }
       f = pin->val_v;
     }
     er_law* law = er_outt(er_tag_law, f);
     if (law == NULL) {
-      FAIL_ALLOC();
+      er_app* part = er_outt(er_tag_app, f);
+      if (part != NULL) {
+        GC_SYNC();
+        r = er_thk_make_partial_call_frame(vm->loc_a, part, thk->arg_s - 1,
+                                           &thk->arg_v[1]);
+        CHECK_ALLOC(r);
+        goto FORCE_ENTRY;
+      }
+      if (thk->arg_s <= 1) {
+        RETURN(thk->arg_v[0]);
+      }
+      GC_SYNC();
+      r = er_app_make_flat(vm->loc_a, thk->arg_v[0], thk->arg_s - 1, &thk->arg_v[1]);
+      CHECK_ALLOC(r);
+      goto FORCE_ENTRY;
     }
     size_t frame_s = (size_t)law->ari_d + 1 + law->let_d;
     if (thk->arg_s != frame_s || law->bc_s == 0 || law->bc_v[0] == NULL) {
@@ -1618,9 +2120,22 @@ ENTER_CALL: {
     for (size_t i = 0; i < n_lets; i++) {
       size_t slot_s = (size_t)law->ari_d + 1 + i;
       GC_SYNC();
-      er_val susp_v = er_thk_make_susp(vm->loc_a, (uint32_t)i + 1, self_v);
+      er_val susp_v = er_thk_make_susp(vm->loc_a, (uint32_t)i + 1, self_v, f);
       CHECK_ALLOC(susp_v);
       thk->arg_v[slot_s] = susp_v;
+    }
+    if (n_lets > 0) {
+      GC_SYNC();
+      er_val env_v = er_thk_make_env_frame(vm->loc_a, thk->arg_s, thk->arg_v);
+      CHECK_ALLOC(env_v);
+      for (size_t i = 0; i < n_lets; i++) {
+        size_t slot_s = (size_t)law->ari_d + 1 + i;
+        er_thk* susp = er_outt(er_tag_thk, thk->arg_v[slot_s]);
+        if (susp == NULL || susp->fun != ER_SUSP || susp->arg_s < 2) {
+          FAIL_ALLOC();
+        }
+        susp->arg_v[1] = env_v;
+      }
     }
     KPUSH_UPDATE(self_v);
     thk->fun = ER_HOLE;
@@ -1628,6 +2143,7 @@ ENTER_CALL: {
     code = law->bc_v[0];
     pc  = 0;
     env = thk->arg_v;
+    dbase = dsp;
     // env_s = thk->arg_s;
     DISPATCH();
 }
@@ -1640,10 +2156,11 @@ K_RETURN:
     /*
      * Payload layout:
      *
-     *   [ env ][ pc ][ code ][ law ][ &&K_RETURN ]
+     *   [ env ][ pc ][ code ][ law ][ dbase ][ &&K_RETURN ]
      *
      * The label has already been popped by RETURN.
      */
+    dbase = (--ksp)->ref;
     code_law = (--ksp)->law;
     code = (--ksp)->code;
     pc  = (--ksp)->pc;
@@ -1656,8 +2173,9 @@ K_UPDATE:
     /*
      * Payload layout:
      *
-     *   [ target ][ &&K_UPDATE ]
+     *   [ target ][ dbase ][ &&K_UPDATE ]
      */
+    dbase = (--ksp)->ref;
     target = (--ksp)->val_v;
     if (!er_is_whnf(r)) {
       KPUSH_UPDATE(target);
@@ -1765,6 +2283,9 @@ K_OVERAPP:
 #undef PRIM_PUSH_ARGS
 #undef PRIM_BAD_ARITY
 #undef PRIM_DONE_VALUE
+#undef PRIM_EVAL_VALUE_WHNF
+#undef PRIM_EVAL_STACK_NF
+#undef PRIM_EVAL_STACK_WHNF
 #undef CHECK_PRIM
 #undef FAIL_ALLOC
 #undef RETURN
@@ -1776,4 +2297,195 @@ K_OVERAPP:
 #undef DPOP
 #undef DPUSH
 #undef ER_PRIM_ROUTE
+}
+
+static er_val plan_eval_whnf_preserve(er_vm* vm, er_val val_v)
+{
+    er_val* base_dsp = vm->dsp;
+    er_kon* base_ksp = vm->ksp;
+    er_val* saved_gc_rp = vm->gc_rp;
+    size_t saved_gc_tmp_s = vm->gc_tmp_s;
+
+    er_val out_v = plan_eval_whnf(vm, val_v);
+
+    vm->dsp = base_dsp;
+    vm->ksp = base_ksp;
+    vm->gc_rp = saved_gc_rp;
+    vm->gc_tmp_s = saved_gc_tmp_s;
+    return out_v;
+}
+
+static er_val plan_eval_nf_inner(er_vm* vm, er_val val_v)
+{
+    er_val* base_dsp = vm->dsp;
+    er_val root_v = plan_eval_whnf_preserve(vm, val_v);
+    if (root_v == er_bad || er_is_cat(root_v)) {
+        return root_v;
+    }
+
+    switch (er_get_tag(root_v)) {
+    case er_tag_bat:
+    case er_tag_pin:
+    case er_tag_law:
+    case er_tag_app:
+        break;
+    default:
+        return er_bad;
+    }
+
+    er_head* h = er_outa(root_v);
+    if (h->raw.nf_f) {
+        return root_v;
+    }
+
+    er_val* root_p = vm->dsp++;
+    *root_p = root_v;
+
+    switch (er_get_tag(root_v)) {
+    case er_tag_bat:
+        h = er_outa(*root_p);
+        h->raw.nf_f = 1;
+        break;
+
+    case er_tag_pin: {
+        er_pin* pin = er_outt(er_tag_pin, *root_p);
+        if (pin == NULL) {
+            root_v = er_bad;
+            break;
+        }
+
+        er_val child_v = plan_eval_nf_inner(vm, pin->val_v);
+        if (child_v == er_bad) {
+            root_v = er_bad;
+            break;
+        }
+
+        pin = er_outt(er_tag_pin, *root_p);
+        if (pin == NULL) {
+            root_v = er_bad;
+            break;
+        }
+        pin->val_v = child_v;
+
+        for (size_t k = 0; k < pin->sub_s; k++) {
+            child_v = plan_eval_nf_inner(vm, pin->sub_v[k]);
+            if (child_v == er_bad) {
+                root_v = er_bad;
+                break;
+            }
+            pin = er_outt(er_tag_pin, *root_p);
+            if (pin == NULL) {
+                root_v = er_bad;
+                break;
+            }
+            pin->sub_v[k] = child_v;
+        }
+        if (root_v == er_bad) {
+            break;
+        }
+
+        h = er_outa(*root_p);
+        h->raw.nf_f = 1;
+        break;
+    }
+
+    case er_tag_law: {
+        er_law* law = er_outt(er_tag_law, *root_p);
+        if (law == NULL) {
+            root_v = er_bad;
+            break;
+        }
+
+        er_val child_v = plan_eval_nf_inner(vm, law->name_v);
+        if (child_v == er_bad) {
+            root_v = er_bad;
+            break;
+        }
+
+        law = er_outt(er_tag_law, *root_p);
+        if (law == NULL) {
+            root_v = er_bad;
+            break;
+        }
+        law->name_v = child_v;
+
+        child_v = plan_eval_nf_inner(vm, law->body_v);
+        if (child_v == er_bad) {
+            root_v = er_bad;
+            break;
+        }
+
+        law = er_outt(er_tag_law, *root_p);
+        if (law == NULL) {
+            root_v = er_bad;
+            break;
+        }
+        law->body_v = child_v;
+
+        h = er_outa(*root_p);
+        h->raw.nf_f = 1;
+        break;
+    }
+
+    case er_tag_app: {
+        er_app* app = er_outt(er_tag_app, *root_p);
+        if (app == NULL) {
+            root_v = er_bad;
+            break;
+        }
+
+        er_val child_v = plan_eval_nf_inner(vm, app->fn_v);
+        if (child_v == er_bad) {
+            root_v = er_bad;
+            break;
+        }
+
+        app = er_outt(er_tag_app, *root_p);
+        if (app == NULL) {
+            root_v = er_bad;
+            break;
+        }
+        app->fn_v = child_v;
+
+        for (size_t k = 0; k < app->arg_s; k++) {
+            child_v = plan_eval_nf_inner(vm, app->arg_v[k]);
+            if (child_v == er_bad) {
+                root_v = er_bad;
+                break;
+            }
+            app = er_outt(er_tag_app, *root_p);
+            if (app == NULL) {
+                root_v = er_bad;
+                break;
+            }
+            app->arg_v[k] = child_v;
+        }
+        if (root_v == er_bad) {
+            break;
+        }
+
+        h = er_outa(*root_p);
+        h->raw.nf_f = 1;
+        break;
+    }
+
+    default:
+        root_v = er_bad;
+        break;
+    }
+
+    if (root_v != er_bad) {
+        root_v = *root_p;
+    }
+    vm->dsp = base_dsp;
+    return root_v;
+}
+
+er_val plan_eval(er_vm* vm, er_val val_v, er_eval_mode mode)
+{
+    ENKI_PROFILE_ZONE("plan_eval");
+    if (mode == ER_EVAL_NF) {
+        return plan_eval_nf_inner(vm, val_v);
+    }
+    return plan_eval_whnf_preserve(vm, val_v);
 }
