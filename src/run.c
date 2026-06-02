@@ -2016,12 +2016,18 @@ PRIM_ROUTE_DISPATCH: {
         PRIM_EVAL_STACK_WHNF(1);
         PRIM_EVAL_STACK_WHNF(2);
         break;
+    case OP_ELIM:
+        PRIM_EVAL_STACK_WHNF(5);
+        break;
     case OP_REP:
         PRIM_EVAL_STACK_WHNF(2);
         break;
     case OP_UP:
         PRIM_EVAL_STACK_WHNF(0);
         PRIM_EVAL_STACK_WHNF(2);
+        break;
+    case OP_COUP:
+        PRIM_EVAL_STACK_WHNF(1);
         break;
     case OP_OR:
     case OP_AND:

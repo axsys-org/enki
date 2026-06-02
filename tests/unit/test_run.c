@@ -467,6 +467,15 @@ static er_val make_done_thunk(er_val val_v)
     return thunk_v;
 }
 
+static er_val make_hole_thunk(void)
+{
+    er_thk* thk = er_thk_alloc(enki_allocator_system(), 0);
+    cr_assert_not_null(thk);
+    er_val thunk_v = er_thk_init(thk, ER_HOLE, 0, NULL);
+    cr_assert_eq(er_get_tag(thunk_v), er_tag_thk);
+    return thunk_v;
+}
+
 static er_val run_vm_mode(er_op* code, er_val root_v, er_eval_mode mode)
 {
     er_val dstack_v[256] = {0};
@@ -764,6 +773,31 @@ Test(run_vm, primop0_law_forces_arguments_to_whnf_and_increments_arity)
     cr_assert_not_null(body_app);
     cr_assert_eq(body_app->h.raw.nf_f, 0);
     cr_assert_eq(body_app->arg_v[0], body_arg_v[0]);
+}
+
+Test(run_vm, primop0_elim_forces_only_scrutinee)
+{
+    er_val prim0_v = make_prim0();
+    er_val bad_v = make_hole_thunk();
+    er_val scrutinee_v = make_done_thunk(0);
+    er_op code[] = {
+        [0] = {.tag = OP_PUSH_LIT, .as.lit_v = prim0_v},
+        [1] = {.tag = OP_PUSH_LIT, .as.lit_v = OP0_ELIM},
+        [2] = {.tag = OP_PUSH_LIT, .as.lit_v = bad_v},
+        [3] = {.tag = OP_PUSH_LIT, .as.lit_v = bad_v},
+        [4] = {.tag = OP_PUSH_LIT, .as.lit_v = bad_v},
+        [5] = {.tag = OP_PUSH_LIT, .as.lit_v = 42},
+        [6] = {.tag = OP_PUSH_LIT, .as.lit_v = bad_v},
+        [7] = {.tag = OP_PUSH_LIT, .as.lit_v = scrutinee_v},
+        [8] = {.tag = OP_MK_APP, .as.u32 = 7},
+        [9] = {.tag = OP_MK_CALL, .as.u32 = 2},
+        [10] = {.tag = OP_EVAL},
+        [11] = {.tag = OP_RET},
+    };
+    er_val law_v = make_law(0, code, 0, NULL);
+    er_val call_v = make_call(law_v, 1);
+
+    cr_assert_eq(run_vm(code, call_v), 42);
 }
 
 Test(run_vm, primop0_bad_arity_is_bad)
@@ -1270,6 +1304,78 @@ Test(run_vm, compiled_law_primitive_forces_arguments_to_whnf_and_increments_arit
     cr_assert_not_null(body_app);
     cr_assert_eq(body_app->h.raw.nf_f, 0);
     cr_assert_eq(body_app->arg_v[0], body_arg_v[0]);
+}
+
+Test(run_vm, compiled_elim_primitive_forces_only_scrutinee)
+{
+    er_val elim_v = make_prim_law(PLAN_S4('E', 'l', 'i', 'm'), 6);
+    er_val bad_v = make_hole_thunk();
+    er_val scrutinee_v = make_done_thunk(0);
+    er_val body_v = make_plan_call_expr(
+        make_plan_call_expr(
+            make_plan_call_expr(
+                make_plan_call_expr(
+                    make_plan_call_expr(
+                        make_plan_call_expr(elim_v, bad_v),
+                        bad_v),
+                    bad_v),
+                42),
+            bad_v),
+        scrutinee_v);
+
+    er_val law_v = er_law_make(enki_allocator_system(), 0, body_v, 0);
+    cr_assert_eq(er_get_tag(law_v), er_tag_law);
+    er_law* law = er_outt(er_tag_law, law_v);
+    cr_assert_not_null(law);
+    er_op* code = law->bc_v[0];
+    cr_assert_not_null(code);
+
+    size_t eval_s = 0;
+    bool saw_elim_f = false;
+    for (size_t k = 0; k < 32 && code[k].tag != OP_RET; k++) {
+        if (code[k].tag == OP_EVAL) {
+            eval_s++;
+        }
+        if (code[k].tag == OP_ELIM) {
+            saw_elim_f = true;
+            break;
+        }
+    }
+    cr_assert_eq(eval_s, 1);
+    cr_assert(saw_elim_f);
+
+    er_val call_v = make_call(law_v, 1);
+    cr_assert_eq(run_vm(NULL, call_v), 42);
+}
+
+Test(run_vm, compiled_coup_primitive_forces_only_row)
+{
+    er_val coup_v = make_prim_law(PLAN_S4('C', 'o', 'u', 'p'), 2);
+    er_val bad_v = make_hole_thunk();
+    er_val row_v = make_done_thunk(0);
+    er_val body_v =
+        make_plan_call_expr(make_plan_call_expr(coup_v, bad_v), row_v);
+
+    er_val law_v = er_law_make(enki_allocator_system(), 0, body_v, 0);
+    cr_assert_eq(er_get_tag(law_v), er_tag_law);
+    er_law* law = er_outt(er_tag_law, law_v);
+    cr_assert_not_null(law);
+    er_op* code = law->bc_v[0];
+    cr_assert_not_null(code);
+
+    size_t eval_s = 0;
+    bool saw_coup_f = false;
+    for (size_t k = 0; k < 32 && code[k].tag != OP_RET; k++) {
+        if (code[k].tag == OP_EVAL) {
+            eval_s++;
+        }
+        if (code[k].tag == OP_COUP) {
+            saw_coup_f = true;
+            break;
+        }
+    }
+    cr_assert_eq(eval_s, 1);
+    cr_assert(saw_coup_f);
 }
 
 Test(run_vm, compiled_law_inlines_simple_primitive_wrapper)
