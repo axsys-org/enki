@@ -1077,8 +1077,7 @@ plan_eval_whnf(er_vm *vm, er_val val_v)
 
 #define PRIM_BAD_ARITY()                           \
     do {                                           \
-        DPUSH(0);                                  \
-        goto PRIM_DONE;                            \
+        FAIL_ALLOC();                              \
     } while (0)
 
 #define PRIM_PUSH_ARGS(_n)                         \

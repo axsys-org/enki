@@ -261,6 +261,67 @@ Test(run_ops, weld_uses_head_zero_and_empty_non_app_rows)
     assert_app_value(eo_weld(loc_a, 123, 456), 0, 0);
 }
 
+Test(run_ops, div_mod_zero_divisor_is_bad_after_nat_coercion)
+{
+    const enki_allocator* loc_a = enki_allocator_system();
+    er_val app_args_v[] = {1};
+    er_val app_v = make_app_value(0, 1, app_args_v);
+    uint64_t zero_q[] = {0};
+    er_val big_zero_v = make_bat(1, zero_q);
+
+    cr_assert_eq(eo_div(loc_a, 10, 0), er_bad);
+    cr_assert_eq(eo_mod(loc_a, 10, 0), er_bad);
+    cr_assert_eq(eo_div(loc_a, 10, app_v), er_bad);
+    cr_assert_eq(eo_mod(loc_a, 10, big_zero_v), er_bad);
+    cr_assert_eq(eo_div(loc_a, app_v, 5), 0);
+    cr_assert_eq(eo_mod(loc_a, app_v, 5), 0);
+}
+
+Test(run_ops, comparisons_coerce_non_nats_to_zero)
+{
+    er_val a_args_v[] = {1};
+    er_val b_args_v[] = {2};
+    er_val app_a_v = make_app_value(10, 1, a_args_v);
+    er_val app_b_v = make_app_value(20, 1, b_args_v);
+
+    cr_assert_eq(eo_eq(app_a_v, app_b_v), 1);
+    cr_assert_eq(eo_eq(app_a_v, 0), 1);
+    cr_assert_eq(eo_eq(7, app_b_v), 0);
+    cr_assert_eq(eo_cmp(app_a_v, app_b_v), 1);
+    cr_assert_eq(eo_cmp(app_a_v, 7), 0);
+    cr_assert_eq(eo_cmp(7, app_b_v), 2);
+    cr_assert_eq(eo_le(app_a_v, app_b_v), 1);
+    cr_assert_eq(eo_le(app_a_v, 7), 1);
+    cr_assert_eq(eo_le(7, app_b_v), 0);
+}
+
+Test(run_ops, primitive_dispatch_bad_arity_is_bad)
+{
+    const enki_allocator* loc_a = enki_allocator_system();
+    er_val arg_v[] = {1};
+
+    cr_assert_eq(eo_exec_op66(loc_a, OP66_ADD, 1, arg_v), er_bad);
+    cr_assert_eq(eo_exec_op0(loc_a, OP0_LAW, 1, arg_v), er_bad);
+}
+
+Test(run_ops, row_style_primitive_errors_do_not_fall_through)
+{
+    const enki_allocator* loc_a = enki_allocator_system();
+    er_val add_args_v[] = {PLAN_S3('A', 'd', 'd')};
+    er_val add_row_v = make_app_value(0, 1, add_args_v);
+    er_val bad_args_v[] = {PLAN_S5('B', 'o', 'g', 'u', 's'), 1};
+    er_val bad_row_v = make_app_value(0, 2, bad_args_v);
+    er_val div_args_v[] = {PLAN_S3('D', 'i', 'v'), 10, 0};
+    er_val div_row_v = make_app_value(0, 3, div_args_v);
+    er_val law_args_v[] = {OP0_LAW, 2};
+    er_val law_row_v = make_app_value(0, 2, law_args_v);
+
+    cr_assert_eq(eo_exec_op66_app(loc_a, add_row_v), er_bad);
+    cr_assert_eq(eo_exec_op66_app(loc_a, bad_row_v), er_bad);
+    cr_assert_eq(eo_exec_op66_app(loc_a, div_row_v), er_bad);
+    cr_assert_eq(eo_exec_op0_app(loc_a, law_row_v), er_bad);
+}
+
 typedef struct er_gc_test_root {
     er_val val_v;
 } er_gc_test_root;
@@ -705,6 +766,24 @@ Test(run_vm, primop0_law_forces_arguments_to_whnf_and_increments_arity)
     cr_assert_eq(body_app->arg_v[0], body_arg_v[0]);
 }
 
+Test(run_vm, primop0_bad_arity_is_bad)
+{
+    er_val prim0_v = make_prim0();
+    er_op code[] = {
+        [0] = {.tag = OP_PUSH_LIT, .as.lit_v = prim0_v},
+        [1] = {.tag = OP_PUSH_LIT, .as.lit_v = OP0_LAW},
+        [2] = {.tag = OP_PUSH_LIT, .as.lit_v = 2},
+        [3] = {.tag = OP_MK_APP, .as.u32 = 2},
+        [4] = {.tag = OP_MK_CALL, .as.u32 = 2},
+        [5] = {.tag = OP_EVAL},
+        [6] = {.tag = OP_RET},
+    };
+    er_val law_v = make_law(0, code, 0, NULL);
+    er_val call_v = make_call(law_v, 1);
+
+    cr_assert_eq(run_vm(code, call_v), er_bad);
+}
+
 Test(run_vm, primop66_eq_returns_nat_boolean)
 {
     er_val prim66_v = make_prim66();
@@ -727,6 +806,24 @@ Test(run_vm, primop66_eq_returns_nat_boolean)
     law_v = make_law(0, code, 0, NULL);
     call_v = make_call(law_v, 1);
     cr_assert_eq(run_vm(code, call_v), 0);
+}
+
+Test(run_vm, primop66_bad_arity_is_bad)
+{
+    er_val prim66_v = make_prim66();
+    er_op code[] = {
+        [0] = {.tag = OP_PUSH_LIT, .as.lit_v = prim66_v},
+        [1] = {.tag = OP_PUSH_LIT, .as.lit_v = PLAN_S3('A', 'd', 'd')},
+        [2] = {.tag = OP_PUSH_LIT, .as.lit_v = 10},
+        [3] = {.tag = OP_MK_APP, .as.u32 = 2},
+        [4] = {.tag = OP_MK_CALL, .as.u32 = 2},
+        [5] = {.tag = OP_EVAL},
+        [6] = {.tag = OP_RET},
+    };
+    er_val law_v = make_law(0, code, 0, NULL);
+    er_val call_v = make_call(law_v, 1);
+
+    cr_assert_eq(run_vm(code, call_v), er_bad);
 }
 
 Test(run_vm, primop66_cmp_identical_non_nat_is_equal)
