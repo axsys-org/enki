@@ -5,6 +5,8 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "bytecode_internal.h"
+
 #include "enki/gc.h"
 #include "enki/profile.h"
 #include "enki/run_ops.h"
@@ -30,14 +32,6 @@ typedef struct er_bc_label {
     size_t code_s;
     bool set_f;
 } er_bc_label;
-
-typedef enum er_bc_eval_req {
-    ER_BC_EVAL_NONE = 0,
-    ER_BC_EVAL_WHNF,
-    ER_BC_EVAL_NF,
-} er_bc_eval_req;
-
-enum { ER_BC_MAX_PRIM_ARITY = 8 };
 
 typedef struct er_bc_compiler {
     const enki_allocator* loc_a;
@@ -135,6 +129,108 @@ static const er_bc_prim er_bc_prim_v[] = {
     ER_BC_ROUTE2(PLAN_S2('L', 'e'), OP_LE, 2, ER_BC_W, ER_BC_W),
     ER_BC_ROUTE2(PLAN_S3('C', 'm', 'p'), OP_CMP, 2, ER_BC_W, ER_BC_W),
 };
+
+#define ER_BC_PRIM_ROUTE(_tag, _arg_s) \
+    { \
+        .tag = (_tag), \
+        .arg_s = (_arg_s), \
+        .valid_f = true, \
+        .arg_eval_v = {ER_BC_W, ER_BC_W, ER_BC_W, ER_BC_W, ER_BC_W, ER_BC_W, ER_BC_W, \
+                       ER_BC_W}, \
+    }
+
+#define ER_BC_PRIM_ROUTE_ARGS(_tag, _arg_s, ...) \
+    { \
+        .tag = (_tag), \
+        .arg_s = (_arg_s), \
+        .valid_f = true, \
+        .arg_eval_v = {__VA_ARGS__}, \
+    }
+
+static const er_bc_prim_route er_bc_prim0_route_v[] = {
+    [OP0_PIN]  = ER_BC_PRIM_ROUTE(OP_PIN, 1),
+    [OP0_LAW]  = ER_BC_PRIM_ROUTE(OP_LAW, 3),
+    [OP0_ELIM] = ER_BC_PRIM_ROUTE_ARGS(OP_ELIM, 6, ER_BC_L, ER_BC_L, ER_BC_L, ER_BC_L,
+                                        ER_BC_L, ER_BC_W),
+};
+
+static const er_bc_prim_route er_bc_prim66_route_v[ER_OP66_COUNT] = {
+    [OP66_INC]      = ER_BC_PRIM_ROUTE(OP_INC, 1),
+    [OP66_DEC]      = ER_BC_PRIM_ROUTE(OP_DEC, 1),
+    [OP66_ADD]      = ER_BC_PRIM_ROUTE(OP_ADD, 2),
+    [OP66_SUB]      = ER_BC_PRIM_ROUTE(OP_SUB, 2),
+    [OP66_MUL]      = ER_BC_PRIM_ROUTE(OP_MUL, 2),
+    [OP66_DIV]      = ER_BC_PRIM_ROUTE(OP_DIV, 2),
+    [OP66_MOD]      = ER_BC_PRIM_ROUTE(OP_MOD, 2),
+    [OP66_EQ]       = ER_BC_PRIM_ROUTE(OP_EQ, 2),
+    [OP66_LE]       = ER_BC_PRIM_ROUTE(OP_LE, 2),
+    [OP66_CMP]      = ER_BC_PRIM_ROUTE(OP_CMP, 2),
+    [OP66_RSH]      = ER_BC_PRIM_ROUTE(OP_RSH, 2),
+    [OP66_LSH]      = ER_BC_PRIM_ROUTE(OP_LSH, 2),
+    [OP66_TEST]     = ER_BC_PRIM_ROUTE(OP_TEST, 2),
+    [OP66_BEX]      = ER_BC_PRIM_ROUTE(OP_BEX, 1),
+    [OP66_BITS]     = ER_BC_PRIM_ROUTE(OP_BITS, 1),
+    [OP66_BYTES]    = ER_BC_PRIM_ROUTE(OP_BYTES, 1),
+    [OP66_LOAD8]    = ER_BC_PRIM_ROUTE(OP_LOAD8, 2),
+    [OP66_STORE8]   = ER_BC_PRIM_ROUTE(OP_STORE8, 3),
+    [OP66_TRUNC]    = ER_BC_PRIM_ROUTE(OP_TRUNC, 2),
+    [OP66_TRUNC8]   = ER_BC_PRIM_ROUTE(OP_TRUNC8, 1),
+    [OP66_TRUNC16]  = ER_BC_PRIM_ROUTE(OP_TRUNC16, 1),
+    [OP66_TRUNC32]  = ER_BC_PRIM_ROUTE(OP_TRUNC32, 1),
+    [OP66_TRUNC64]  = ER_BC_PRIM_ROUTE(OP_TRUNC64, 1),
+    [OP66_NAT]      = ER_BC_PRIM_ROUTE(OP_NAT, 1),
+    [OP66_UNPIN]    = ER_BC_PRIM_ROUTE(OP_UNPIN, 1),
+    [OP66_ARITY]    = ER_BC_PRIM_ROUTE(OP_ARI, 1),
+    [OP66_NAME]     = ER_BC_PRIM_ROUTE(OP_NAM, 1),
+    [OP66_BODY]     = ER_BC_PRIM_ROUTE(OP_BODY, 1),
+    [OP66_HD]       = ER_BC_PRIM_ROUTE(OP_HD, 1),
+    [OP66_LAST]     = ER_BC_PRIM_ROUTE(OP_LAST, 1),
+    [OP66_INIT]     = ER_BC_PRIM_ROUTE(OP_INIT, 1),
+    [OP66_REP]      = ER_BC_PRIM_ROUTE_ARGS(OP_REP, 3, ER_BC_L, ER_BC_L, ER_BC_W),
+    [OP66_SLICE]    = ER_BC_PRIM_ROUTE(OP_SLICE, 3),
+    [OP66_WELD]     = ER_BC_PRIM_ROUTE(OP_WELD, 2),
+    [OP66_UP]       = ER_BC_PRIM_ROUTE_ARGS(OP_UP, 3, ER_BC_W, ER_BC_L, ER_BC_W),
+    [OP66_UP_UNIQ]  = ER_BC_PRIM_ROUTE_ARGS(OP_UP, 3, ER_BC_W, ER_BC_L, ER_BC_W),
+    [OP66_COUP]     = ER_BC_PRIM_ROUTE_ARGS(OP_COUP, 2, ER_BC_L, ER_BC_W),
+    [OP66_SZ]       = ER_BC_PRIM_ROUTE(OP_SZ, 1),
+    [OP66_IX]       = ER_BC_PRIM_ROUTE(OP_IX, 2),
+    [OP66_NIL]      = ER_BC_PRIM_ROUTE(OP_NOT, 1),
+    [OP66_TRUTH]    = ER_BC_PRIM_ROUTE(OP_TRU, 1),
+    [OP66_OR]       = ER_BC_PRIM_ROUTE_ARGS(OP_OR, 2, ER_BC_W, ER_BC_L),
+    [OP66_AND]      = ER_BC_PRIM_ROUTE_ARGS(OP_AND, 2, ER_BC_W, ER_BC_L),
+    [OP66_LOAD]     = ER_BC_PRIM_ROUTE(OP_LOAD, 3),
+    [ER_OP66_STORE] = ER_BC_PRIM_ROUTE(OP_STORE, 4),
+    [ER_OP66_MET]   = ER_BC_PRIM_ROUTE(OP_MET_DYN, 2),
+};
+
+bool er_bc_prim_route_strict(er_optag tag, size_t arg_s, er_bc_prim_route* out)
+{
+    if (out == NULL || arg_s > ER_BC_MAX_PRIM_ARITY) {
+        return false;
+    }
+    *out = (er_bc_prim_route)ER_BC_PRIM_ROUTE(tag, arg_s);
+    return true;
+}
+
+bool er_bc_prim0_route(size_t op_s, er_bc_prim_route* out)
+{
+    if (out == NULL || op_s >= sizeof(er_bc_prim0_route_v) / sizeof(er_bc_prim0_route_v[0]) ||
+        !er_bc_prim0_route_v[op_s].valid_f) {
+        return false;
+    }
+    *out = er_bc_prim0_route_v[op_s];
+    return true;
+}
+
+bool er_bc_prim66_route(int op_i, er_bc_prim_route* out)
+{
+    if (out == NULL || op_i < 0 || (size_t)op_i >= ER_OP66_COUNT ||
+        !er_bc_prim66_route_v[op_i].valid_f) {
+        return false;
+    }
+    *out = er_bc_prim66_route_v[op_i];
+    return true;
+}
 
 static bool er_bc_mul_size(size_t a_s, size_t b_s, size_t* out_s)
 {
@@ -672,6 +768,33 @@ static bool er_bc_emit_prim_arg_evals(const er_bc_prim* prim, er_bc_code* code)
             return false;
         }
     }
+    return true;
+}
+
+bool er_bc_emit_prim_route_fragment(er_op out_v[], size_t cap_s, er_optag tag, size_t arg_s,
+                                    const er_bc_eval_req arg_eval_v[], er_val lit_v,
+                                    size_t* out_s)
+{
+    er_bc_code code = {
+        .op_v = out_v,
+        .op_s = 0,
+        .cap_s = cap_s,
+        .ok_f = true,
+    };
+    if (out_v == NULL || arg_eval_v == NULL || out_s == NULL || tag >= OP_COUNT ||
+        arg_s > ER_BC_MAX_PRIM_ARITY) {
+        return false;
+    }
+    for (size_t k = 0; k < arg_s; k++) {
+        if (!er_bc_emit_eval_stack_arg(&code, arg_s, k, arg_eval_v[k])) {
+            return false;
+        }
+    }
+    if (!er_bc_emit(&code, tag)) {
+        return false;
+    }
+    code.op_v[code.op_s - 1u].as.lit_v = lit_v;
+    *out_s = code.op_s;
     return true;
 }
 

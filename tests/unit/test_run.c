@@ -7,6 +7,9 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+#define TEST_S8(a, b, c, d, e, f, g, h) \
+    ((er_val)(PLAN_S7(a, b, c, d, e, f, g) | (PLAN_CH(h) << 56u)))
+
 static void* fail_alloc(void* ctx, size_t size_s)
 {
     (void)ctx;
@@ -535,6 +538,46 @@ static er_val run_vm(er_op* code, er_val root_v)
     return run_vm_mode(code, root_v, ER_EVAL_WHNF);
 }
 
+static er_val run_code(er_op* code)
+{
+    er_val law_v = make_law(0, code, 0, NULL);
+    er_val call_v = make_call(law_v, 1);
+    return run_vm(code, call_v);
+}
+
+static er_val run_prim66_row(er_val tag_v, size_t arg_s, const er_val arg_v[])
+{
+    er_val prim66_v = make_prim66();
+    er_val row_v = make_app_value(tag_v, arg_s, arg_v);
+    er_op code[] = {
+        [0] = {.tag = OP_PUSH_LIT, .as.lit_v = prim66_v},
+        [1] = {.tag = OP_PUSH_LIT, .as.lit_v = row_v},
+        [2] = {.tag = OP_MK_CALL, .as.u32 = 2},
+        [3] = {.tag = OP_EVAL},
+        [4] = {.tag = OP_RET},
+    };
+    return run_code(code);
+}
+
+static er_val run_prim0_row(er_val tag_v, size_t arg_s, const er_val arg_v[])
+{
+    er_val prim0_v = make_prim0();
+    er_val row_v = make_app_value(tag_v, arg_s, arg_v);
+    er_op code[] = {
+        [0] = {.tag = OP_PUSH_LIT, .as.lit_v = prim0_v},
+        [1] = {.tag = OP_PUSH_LIT, .as.lit_v = row_v},
+        [2] = {.tag = OP_MK_CALL, .as.u32 = 2},
+        [3] = {.tag = OP_EVAL},
+        [4] = {.tag = OP_RET},
+    };
+    return run_code(code);
+}
+
+static er_val make_op_descriptor(er_val name_v, er_val word_v)
+{
+    return make_app_value(name_v, 1, &word_v);
+}
+
 static er_val run_prim66_inc(er_val input_v)
 {
     er_val prim66_v = make_prim66();
@@ -880,6 +923,122 @@ Test(run_vm, primop66_eq_returns_nat_boolean)
     law_v = make_law(0, code, 0, NULL);
     call_v = make_call(law_v, 1);
     cr_assert_eq(run_vm(code, call_v), 0);
+}
+
+Test(run_vm, primop66_sub_forces_operands_and_preserves_order)
+{
+    er_val arg_v[] = {make_done_thunk(10), make_done_thunk(3)};
+
+    cr_assert_eq(run_prim66_row(PLAN_S3('S', 'u', 'b'), 2, arg_v), 7);
+}
+
+Test(run_vm, primop66_rep_forces_count_only)
+{
+    er_val lazy_item_v = make_hole_thunk();
+    er_val arg_v[] = {5, lazy_item_v, make_done_thunk(3)};
+
+    er_val result_v = run_prim66_row(PLAN_S3('R', 'e', 'p'), 3, arg_v);
+
+    er_app* row = er_outt(er_tag_app, result_v);
+    cr_assert_not_null(row);
+    cr_assert_eq(row->fn_v, 5);
+    cr_assert_eq(row->arg_s, 3);
+    for (size_t k = 0; k < row->arg_s; k++) {
+        cr_assert_eq(row->arg_v[k], lazy_item_v);
+    }
+}
+
+Test(run_vm, primop66_up_forces_index_and_row_only)
+{
+    er_val row_arg_v[] = {10, 20, 30};
+    er_val row_v = make_app_value(0, 3, row_arg_v);
+    er_val replacement_v = make_hole_thunk();
+    er_val arg_v[] = {make_done_thunk(1), replacement_v, make_done_thunk(row_v)};
+
+    er_val result_v = run_prim66_row(PLAN_S2('U', 'p'), 3, arg_v);
+
+    er_app* row = er_outt(er_tag_app, result_v);
+    cr_assert_not_null(row);
+    cr_assert_eq(row->fn_v, 0);
+    cr_assert_eq(row->arg_s, 3);
+    cr_assert_eq(row->arg_v[0], 10);
+    cr_assert_eq(row->arg_v[1], replacement_v);
+    cr_assert_eq(row->arg_v[2], 30);
+}
+
+Test(run_vm, primop66_or_and_short_circuit_do_not_force_rhs)
+{
+    er_val or_arg_v[] = {1, make_hole_thunk()};
+    er_val and_arg_v[] = {0, make_hole_thunk()};
+
+    cr_assert_eq(run_prim66_row(PLAN_S2('O', 'r'), 2, or_arg_v), 1);
+    cr_assert_eq(run_prim66_row(PLAN_S3('A', 'n', 'd'), 2, and_arg_v), 0);
+}
+
+Test(run_vm, primop66_store_preserves_stack_order)
+{
+    er_val store_desc_v = make_op_descriptor(TEST_S8('O', 'P', '_', 'S', 'T', 'O', 'R', 'E'), 0);
+    er_val arg_v[] = {1, 4, 10, 0};
+
+    cr_assert_eq(run_prim66_row(store_desc_v, 4, arg_v), 160);
+}
+
+Test(run_vm, primop66_word_descriptors_route_correctly)
+{
+    er_val load_desc_v = make_op_descriptor(PLAN_S7('O', 'P', '_', 'L', 'O', 'A', 'D'), 4);
+    er_val load_arg_v[] = {1, 0xAB};
+    er_op load_code[] = {
+        [0] = {.tag = OP_PUSH_LIT, .as.lit_v = load_arg_v[0]},
+        [1] = {.tag = OP_PUSH_LIT, .as.lit_v = load_arg_v[1]},
+        [2] = {.tag = OP_LOADN, .as.lit_v = 4},
+        [3] = {.tag = OP_RET},
+    };
+    cr_assert_eq(run_prim66_row(load_desc_v, 2, load_arg_v), run_code(load_code));
+
+    er_val store_desc_v = make_op_descriptor(TEST_S8('O', 'P', '_', 'S', 'T', 'O', 'R', 'E'), 4);
+    er_val store_arg_v[] = {1, 10, 0};
+    er_op store_code[] = {
+        [0] = {.tag = OP_PUSH_LIT, .as.lit_v = store_arg_v[0]},
+        [1] = {.tag = OP_PUSH_LIT, .as.lit_v = store_arg_v[1]},
+        [2] = {.tag = OP_PUSH_LIT, .as.lit_v = store_arg_v[2]},
+        [3] = {.tag = OP_STOREN, .as.lit_v = 4},
+        [4] = {.tag = OP_RET},
+    };
+    cr_assert_eq(run_prim66_row(store_desc_v, 3, store_arg_v), run_code(store_code));
+
+    er_val trunc_desc_v = make_op_descriptor(TEST_S8('O', 'P', '_', 'T', 'R', 'U', 'N', 'C'), 4);
+    er_val trunc_arg_v[] = {0xAB};
+    er_op trunc_code[] = {
+        [0] = {.tag = OP_PUSH_LIT, .as.lit_v = trunc_arg_v[0]},
+        [1] = {.tag = OP_TRUNCN, .as.lit_v = 4},
+        [2] = {.tag = OP_RET},
+    };
+    cr_assert_eq(run_prim66_row(trunc_desc_v, 1, trunc_arg_v), run_code(trunc_code));
+
+    er_val met_desc_v = make_op_descriptor(PLAN_S6('O', 'P', '_', 'M', 'E', 'T'), 4);
+    er_val met_arg_v[] = {0x10};
+    er_op met_code[] = {
+        [0] = {.tag = OP_PUSH_LIT, .as.lit_v = met_arg_v[0]},
+        [1] = {.tag = OP_MET, .as.lit_v = 4},
+        [2] = {.tag = OP_RET},
+    };
+    cr_assert_eq(run_prim66_row(met_desc_v, 1, met_arg_v), run_code(met_code));
+}
+
+Test(run_vm, primop0_leading_zero_descriptor_matches_direct_tag)
+{
+    er_val direct_arg_v[] = {make_done_thunk(42)};
+    er_val leading_arg_v[] = {OP0_PIN, direct_arg_v[0]};
+
+    er_val direct_v = run_prim0_row(OP0_PIN, 1, direct_arg_v);
+    er_val leading_v = run_prim0_row(0, 2, leading_arg_v);
+
+    er_pin* direct = er_outt(er_tag_pin, direct_v);
+    er_pin* leading = er_outt(er_tag_pin, leading_v);
+    cr_assert_not_null(direct);
+    cr_assert_not_null(leading);
+    cr_assert_eq(direct->val_v, 42);
+    cr_assert_eq(leading->val_v, direct->val_v);
 }
 
 Test(run_vm, primop66_bad_arity_is_bad)

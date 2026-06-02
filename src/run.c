@@ -4,6 +4,8 @@
 #include <string.h>
 #include <assert.h>
 
+#include "bytecode_internal.h"
+
 #include "enki/bytecode.h"
 #include "enki/gc.h"
 #include "enki/interp.h"
@@ -12,23 +14,22 @@
 #include "enki/run_ops.h"
 #include "enki/util.h"
 
-#define ER_S8(a, b, c, d, e, f, g, h) \
-    ((er_val)(PLAN_S7(a, b, c, d, e, f, g) | (PLAN_CH(h) << 56u)))
-
 enum {
-    ER_OP66_STORE = OP66_PRINT_REX + 1,
-    ER_OP66_MET,
-    ER_OP66_COUNT,
+    ER_PRIM_ROUTE_MAX_CODE = 64,
+    ER_PRIM_ROUTE_MAX_DEPTH = 64,
 };
 
-typedef struct er_prim_route {
-    er_optag tag;
-    size_t arg_s;
-    bool valid_f;
-} er_prim_route;
-
-#define ER_PRIM_ROUTE(_tag, _arg_s) \
-    { .tag = (_tag), .arg_s = (_arg_s), .valid_f = true }
+static bool er_prim66_op_from_descriptor(er_val tag_v, int* out_op)
+{
+    if (eo_op66_from_tag(tag_v, out_op)) {
+        return true;
+    }
+    if (tag_v == PLAN_S5('O', 'P', '_', 'L', 'E')) {
+        *out_op = OP66_LE;
+        return true;
+    }
+    return false;
+}
 
 static bool er_alloc_size(size_t base_s, size_t count_s, size_t elem_s, size_t* out_s)
 {
@@ -856,10 +857,8 @@ plan_eval_whnf(er_vm *vm, er_val val_v)
     er_kon* ksp   = vm->ksp;
 
     uint32_t  pc  = 0;
-    // uint32_t ari_d = 0;
     er_val hd_v = er_bad;
     er_val* env = NULL;
-    // size_t env_s = 0;
     er_val r   = val_v;
     er_thk* thk;
     uint32_t wan_d, hav_d;
@@ -880,16 +879,15 @@ plan_eval_whnf(er_vm *vm, er_val val_v)
     er_val prim_d_v = 0;
     er_val prim_e_v = 0;
     er_val prim_f_v = 0;
-    er_val* prim_base_v = NULL;
     er_optag prim_byte_op;
     size_t prim_need_s;
-    er_prim_route prim_route;
-    bool prim_force_f = false;
+    er_bc_prim_route prim_route;
+    er_op prim_route_code_v[ER_PRIM_ROUTE_MAX_DEPTH][ER_PRIM_ROUTE_MAX_CODE];
+    size_t prim_route_final_pc_v[ER_PRIM_ROUTE_MAX_DEPTH] = {0};
+    size_t prim_route_depth_s = 0;
 
     er_op *op;
     er_val f, app, target;
-    // er_app* app;
-    // er_thk* sat;
     uint32_t split;
 
     static void *const dispatch[OP_COUNT] = {
@@ -962,61 +960,6 @@ plan_eval_whnf(er_vm *vm, er_val val_v)
         [OP_RET]       = &&I_RET,
     };
 
-    static const er_prim_route prim0_route[] = {
-        [OP0_PIN]  = ER_PRIM_ROUTE(OP_PIN, 1),
-        [OP0_LAW]  = ER_PRIM_ROUTE(OP_LAW, 3),
-        [OP0_ELIM] = ER_PRIM_ROUTE(OP_ELIM, 6),
-    };
-
-    static const er_prim_route prim66_route[ER_OP66_COUNT] = {
-        [OP66_INC]      = ER_PRIM_ROUTE(OP_INC, 1),
-        [OP66_DEC]      = ER_PRIM_ROUTE(OP_DEC, 1),
-        [OP66_ADD]      = ER_PRIM_ROUTE(OP_ADD, 2),
-        [OP66_SUB]      = ER_PRIM_ROUTE(OP_SUB, 2),
-        [OP66_MUL]      = ER_PRIM_ROUTE(OP_MUL, 2),
-        [OP66_DIV]      = ER_PRIM_ROUTE(OP_DIV, 2),
-        [OP66_MOD]      = ER_PRIM_ROUTE(OP_MOD, 2),
-        [OP66_EQ]       = ER_PRIM_ROUTE(OP_EQ, 2),
-        [OP66_LE]       = ER_PRIM_ROUTE(OP_LE, 2),
-        [OP66_CMP]      = ER_PRIM_ROUTE(OP_CMP, 2),
-        [OP66_RSH]      = ER_PRIM_ROUTE(OP_RSH, 2),
-        [OP66_LSH]      = ER_PRIM_ROUTE(OP_LSH, 2),
-        [OP66_TEST]     = ER_PRIM_ROUTE(OP_TEST, 2),
-        [OP66_BEX]      = ER_PRIM_ROUTE(OP_BEX, 1),
-        [OP66_BITS]     = ER_PRIM_ROUTE(OP_BITS, 1),
-        [OP66_BYTES]    = ER_PRIM_ROUTE(OP_BYTES, 1),
-        [OP66_LOAD8]    = ER_PRIM_ROUTE(OP_LOAD8, 2),
-        [OP66_STORE8]   = ER_PRIM_ROUTE(OP_STORE8, 3),
-        [OP66_TRUNC]    = ER_PRIM_ROUTE(OP_TRUNC, 2),
-        [OP66_TRUNC8]   = ER_PRIM_ROUTE(OP_TRUNC8, 1),
-        [OP66_TRUNC16]  = ER_PRIM_ROUTE(OP_TRUNC16, 1),
-        [OP66_TRUNC32]  = ER_PRIM_ROUTE(OP_TRUNC32, 1),
-        [OP66_TRUNC64]  = ER_PRIM_ROUTE(OP_TRUNC64, 1),
-        [OP66_NAT]      = ER_PRIM_ROUTE(OP_NAT, 1),
-        [OP66_UNPIN]    = ER_PRIM_ROUTE(OP_UNPIN, 1),
-        [OP66_ARITY]    = ER_PRIM_ROUTE(OP_ARI, 1),
-        [OP66_NAME]     = ER_PRIM_ROUTE(OP_NAM, 1),
-        [OP66_BODY]     = ER_PRIM_ROUTE(OP_BODY, 1),
-        [OP66_HD]       = ER_PRIM_ROUTE(OP_HD, 1),
-        [OP66_LAST]     = ER_PRIM_ROUTE(OP_LAST, 1),
-        [OP66_INIT]     = ER_PRIM_ROUTE(OP_INIT, 1),
-        [OP66_REP]      = ER_PRIM_ROUTE(OP_REP, 3),
-        [OP66_SLICE]    = ER_PRIM_ROUTE(OP_SLICE, 3),
-        [OP66_WELD]     = ER_PRIM_ROUTE(OP_WELD, 2),
-        [OP66_UP]       = ER_PRIM_ROUTE(OP_UP, 3),
-        [OP66_UP_UNIQ]  = ER_PRIM_ROUTE(OP_UP, 3),
-        [OP66_COUP]     = ER_PRIM_ROUTE(OP_COUP, 2),
-        [OP66_SZ]       = ER_PRIM_ROUTE(OP_SZ, 1),
-        [OP66_IX]       = ER_PRIM_ROUTE(OP_IX, 2),
-        [OP66_NIL]      = ER_PRIM_ROUTE(OP_NOT, 1),
-        [OP66_TRUTH]    = ER_PRIM_ROUTE(OP_TRU, 1),
-        [OP66_OR]       = ER_PRIM_ROUTE(OP_OR, 2),
-        [OP66_AND]      = ER_PRIM_ROUTE(OP_AND, 2),
-        [OP66_LOAD]     = ER_PRIM_ROUTE(OP_LOAD, 3),
-        [ER_OP66_STORE] = ER_PRIM_ROUTE(OP_STORE, 4),
-        [ER_OP66_MET]   = ER_PRIM_ROUTE(OP_MET_DYN, 2),
-    };
-
 #define DPUSH(_r)      do { *dsp++ = (_r); } while (0)
 #define DPOP()         (*--dsp)
 
@@ -1070,7 +1013,6 @@ plan_eval_whnf(er_vm *vm, er_val val_v)
 #define DISPATCH()                                 \
     do {                                           \
         vm->b_count++;                             \
-        prim_force_f = false;                      \
         CODE_REFRESH();                            \
         op = &code[pc++];                          \
         if ((size_t)op->tag >= OP_COUNT || dispatch[op->tag] == NULL) { \
@@ -1086,6 +1028,7 @@ plan_eval_whnf(er_vm *vm, er_val val_v)
         (ksp++)->pc  = (_pc);                      \
         (ksp++)->u = (uintptr_t)(_label_d);        \
         (ksp++)->val_v = (_law_v);                 \
+        (ksp++)->code = code;                      \
         (ksp++)->ref = dbase;                      \
         (ksp++)->lab = &&K_RETURN;                 \
     } while (0)
@@ -1147,25 +1090,7 @@ plan_eval_whnf(er_vm *vm, er_val val_v)
         code_label_d = vm->code_label_d;           \
     } while (0)
 
-#define PRIM_EVAL_STACK_WHNF(_idx)                 \
-    do {                                           \
-        GC_SYNC();                                 \
-        er_val prim_eval_v =                       \
-            plan_eval_whnf_preserve(vm, prim_base_v[(_idx)]); \
-        CHECK_PRIM(prim_eval_v);                   \
-        prim_base_v[(_idx)] = prim_eval_v;         \
-    } while (0)
-
-#define PRIM_EVAL_STACK_NF(_idx)                   \
-    do {                                           \
-        GC_SYNC();                                 \
-        er_val prim_eval_v =                       \
-            plan_eval_nf_inner(vm, prim_base_v[(_idx)]); \
-        CHECK_PRIM(prim_eval_v);                   \
-        prim_base_v[(_idx)] = prim_eval_v;         \
-    } while (0)
-
-#define PRIM_EVAL_VALUE_WHNF(_dst, _src)           \
+#define PRIM_FORCE_VALUE_WHNF(_dst, _src)          \
     do {                                           \
         GC_SYNC();                                 \
         (_dst) = plan_eval_whnf_preserve(vm, (_src)); \
@@ -1190,23 +1115,20 @@ plan_eval_whnf(er_vm *vm, er_val val_v)
         FAIL_ALLOC();                              \
     } while (0)
 
-#define PRIM_PUSH_ARGS(_n)                         \
+#define PRIM_SELECT_ROUTE(_route)                  \
     do {                                           \
-        if (prim_arg_s != (size_t)(_n)) {          \
-            PRIM_BAD_ARITY();                      \
-        }                                          \
-        for (size_t prim_k_s = 0;                  \
-             prim_k_s < (size_t)(_n);              \
-             prim_k_s++) {                         \
-            DPUSH(prim_arg_v[prim_k_s]);           \
-        }                                          \
+        prim_route = (_route);                     \
+        prim_byte_op = prim_route.tag;             \
+        prim_need_s = prim_route.arg_s;            \
+        goto PRIM_ROUTE_DISPATCH;                  \
     } while (0)
 
 #define PRIM_SELECT(_tag, _arg_s)                  \
     do {                                           \
-        prim_byte_op = (_tag);                     \
-        prim_need_s = (size_t)(_arg_s);            \
-        goto PRIM_ROUTE_DISPATCH;                  \
+        if (!er_bc_prim_route_strict((_tag), (size_t)(_arg_s), &prim_route)) { \
+            FAIL_ALLOC();                          \
+        }                                          \
+        PRIM_SELECT_ROUTE(prim_route);             \
     } while (0)
 
     /*
@@ -1399,9 +1321,7 @@ I_OP_TEST:
     PRIM_DONE_VALUE(eo_test(prim_a_v, prim_b_v));
 
 I_OP_LOADN:
-    if (!prim_force_f) {
-        prim_word_v = op->as.lit_v;
-    }
+    prim_word_v = op->as.lit_v;
     prim_b_v = DPOP();
     prim_a_v = DPOP();
     PRIM_DONE_VALUE(eo_loadn(vm->loc_a, prim_word_v, prim_a_v, prim_b_v));
@@ -1413,9 +1333,7 @@ I_OP_LOAD:
     PRIM_DONE_VALUE(eo_load(vm->loc_a, prim_a_v, prim_b_v, prim_c_v));
 
 I_OP_STOREN:
-    if (!prim_force_f) {
-        prim_word_v = op->as.lit_v;
-    }
+    prim_word_v = op->as.lit_v;
     prim_c_v = DPOP();
     prim_b_v = DPOP();
     prim_a_v = DPOP();
@@ -1426,12 +1344,11 @@ I_OP_STORE:
     prim_c_v = DPOP();
     prim_b_v = DPOP();
     prim_a_v = DPOP();
+    /* Stack order is idx, width, value, n; eo_store wants idx, value, width, n. */
     PRIM_DONE_VALUE(eo_store(vm->loc_a, prim_a_v, prim_c_v, prim_b_v, prim_d_v));
 
 I_OP_TRUNCN:
-    if (!prim_force_f) {
-        prim_word_v = op->as.lit_v;
-    }
+    prim_word_v = op->as.lit_v;
     prim_a_v = DPOP();
     PRIM_DONE_VALUE(eo_truncn(vm->loc_a, prim_word_v, prim_a_v));
 
@@ -1441,9 +1358,7 @@ I_OP_TRUNC:
     PRIM_DONE_VALUE(eo_trunc(vm->loc_a, prim_a_v, prim_b_v));
 
 I_OP_MET:
-    if (!prim_force_f) {
-        prim_word_v = op->as.lit_v;
-    }
+    prim_word_v = op->as.lit_v;
     prim_a_v = DPOP();
     PRIM_DONE_VALUE(eo_met(prim_word_v, prim_a_v));
 
@@ -1721,7 +1636,6 @@ FORCE_ENTRY: {
 }
 
 PRIMOP: {
-    prim_force_f = true;
     if (prim_set == 66) {
         goto PRIM66_DECODE;
     }
@@ -1739,26 +1653,20 @@ PRIM0_DECODE: {
     prim_tag_v = prim_row->fn_v;
     prim_arg_v = prim_row->arg_v;
     prim_arg_s = prim_row->arg_s;
-    if (prim_tag_v == 0 && prim_row->arg_s > 0 && er_is_cat(prim_row->arg_v[0]) &&
-        prim_row->arg_v[0] <= (er_val)OP0_ELIM) {
-        prim_op_s = (size_t)prim_row->arg_v[0];
+    if (prim_tag_v == 0 && prim_arg_s > 0 && er_is_cat(prim_arg_v[0]) &&
+        prim_arg_v[0] <= (er_val)OP0_ELIM) {
+        prim_tag_v = prim_arg_v[0];
         prim_arg_v = prim_row->arg_v + 1;
         prim_arg_s = prim_row->arg_s - 1;
-        prim_route = prim0_route[prim_op_s];
-        if (!prim_route.valid_f) {
-            FAIL_ALLOC();
-        }
-        PRIM_SELECT(prim_route.tag, prim_route.arg_s);
     }
     if (!er_is_cat(prim_tag_v) || prim_tag_v > (er_val)OP0_ELIM) {
         FAIL_ALLOC();
     }
     prim_op_s = (size_t)prim_tag_v;
-    prim_route = prim0_route[prim_op_s];
-    if (!prim_route.valid_f) {
+    if (!er_bc_prim0_route(prim_op_s, &prim_route)) {
         FAIL_ALLOC();
     }
-    PRIM_SELECT(prim_route.tag, prim_route.arg_s);
+    PRIM_SELECT_ROUTE(prim_route);
 }
 
 PRIM66_DECODE: {
@@ -1784,86 +1692,24 @@ PRIM66_DECODE: {
         }
         prim_name_v = prim_desc->fn_v;
         prim_word_v = prim_desc->arg_v[0];
-        switch (prim_name_v) {
-        case PLAN_S6('O', 'P', '_', 'N', 'A', 'M'):
-            PRIM_SELECT(OP_NAM, 1);
-        case PLAN_S7('O', 'P', '_', 'B', 'O', 'D', 'Y'):
-            PRIM_SELECT(OP_BODY, 1);
-        case PLAN_S6('O', 'P', '_', 'N', 'A', 'T'):
-            PRIM_SELECT(OP_NAT, 1);
-        case PLAN_S6('O', 'P', '_', 'A', 'R', 'I'):
-            PRIM_SELECT(OP_ARI, 1);
-        case ER_S8('O', 'P', '_', 'U', 'N', 'P', 'I', 'N'):
-            PRIM_SELECT(OP_UNPIN, 1);
-        case PLAN_S5('O', 'P', '_', 'S', 'Z'):
-            PRIM_SELECT(OP_SZ, 1);
-        case PLAN_S7('O', 'P', '_', 'L', 'A', 'S', 'T'):
-            PRIM_SELECT(OP_LAST, 1);
-        case PLAN_S7('O', 'P', '_', 'I', 'N', 'I', 'T'):
-            PRIM_SELECT(OP_INIT, 1);
-        case PLAN_S6('O', 'P', '_', 'A', 'D', 'D'):
-            PRIM_SELECT(OP_ADD, 2);
-        case PLAN_S6('O', 'P', '_', 'S', 'U', 'B'):
-            PRIM_SELECT(OP_SUB, 2);
-        case PLAN_S6('O', 'P', '_', 'R', 'S', 'H'):
-            PRIM_SELECT(OP_RSH, 2);
-        case PLAN_S6('O', 'P', '_', 'L', 'S', 'H'):
-            PRIM_SELECT(OP_LSH, 2);
-        case PLAN_S6('O', 'P', '_', 'D', 'I', 'V'):
-            PRIM_SELECT(OP_DIV, 2);
-        case PLAN_S6('O', 'P', '_', 'M', 'U', 'L'):
-            PRIM_SELECT(OP_MUL, 2);
-        case PLAN_S6('O', 'P', '_', 'M', 'O', 'D'):
-            PRIM_SELECT(OP_MOD, 2);
-        case PLAN_S7('O', 'P', '_', 'T', 'E', 'S', 'T'):
-            PRIM_SELECT(OP_TEST, 2);
-        case PLAN_S7('O', 'P', '_', 'L', 'O', 'A', 'D'):
-            if (prim_word_v == 0) {
-                PRIM_SELECT(OP_LOAD, 3);
-            }
-            PRIM_SELECT(OP_LOADN, 2);
-        case ER_S8('O', 'P', '_', 'S', 'T', 'O', 'R', 'E'):
-            if (prim_word_v == 0) {
-                PRIM_SELECT(OP_STORE, 4);
-            }
-            PRIM_SELECT(OP_STOREN, 3);
-        case ER_S8('O', 'P', '_', 'T', 'R', 'U', 'N', 'C'):
-            if (prim_word_v == 0) {
-                PRIM_SELECT(OP_TRUNC, 2);
-            }
-            PRIM_SELECT(OP_TRUNCN, 1);
-        case PLAN_S6('O', 'P', '_', 'M', 'E', 'T'):
-            PRIM_SELECT(OP_MET, 1);
-        case PLAN_S6('O', 'P', '_', 'R', 'E', 'P'):
-            PRIM_SELECT(OP_REP, 3);
-        case ER_S8('O', 'P', '_', 'S', 'L', 'I', 'C', 'E'):
-            PRIM_SELECT(OP_SLICE, 3);
-        case PLAN_S7('O', 'P', '_', 'W', 'E', 'L', 'D'):
-            PRIM_SELECT(OP_WELD, 2);
-        case PLAN_S5('O', 'P', '_', 'U', 'P'):
-            PRIM_SELECT(OP_UP, 3);
-        case PLAN_S7('O', 'P', '_', 'C', 'O', 'U', 'P'):
-            PRIM_SELECT(OP_COUP, 2);
-        case PLAN_S5('O', 'P', '_', 'H', 'D'):
-            PRIM_SELECT(OP_HD, 1);
-        case PLAN_S5('O', 'P', '_', 'I', 'X'):
-            PRIM_SELECT(OP_IX, 2);
-        case PLAN_S6('O', 'P', '_', 'N', 'O', 'T'):
-            PRIM_SELECT(OP_NOT, 1);
-        case PLAN_S6('O', 'P', '_', 'T', 'R', 'U'):
-            PRIM_SELECT(OP_TRU, 1);
-        case PLAN_S5('O', 'P', '_', 'O', 'R'):
-            PRIM_SELECT(OP_OR, 2);
-        case PLAN_S6('O', 'P', '_', 'A', 'N', 'D'):
-            PRIM_SELECT(OP_AND, 2);
-        case PLAN_S5('O', 'P', '_', 'E', 'Q'):
-            PRIM_SELECT(OP_EQ, 2);
-        case PLAN_S5('O', 'P', '_', 'L', 'E'):
-            PRIM_SELECT(OP_LE, 2);
-        case PLAN_S6('O', 'P', '_', 'C', 'M', 'P'):
-            PRIM_SELECT(OP_CMP, 2);
-        default:
+        if (!er_prim66_op_from_descriptor(prim_name_v, &prim_op_i) || prim_op_i < 0 ||
+            (size_t)prim_op_i >= ER_OP66_COUNT) {
             FAIL_ALLOC();
+        }
+        if (!er_bc_prim66_route(prim_op_i, &prim_route)) {
+            FAIL_ALLOC();
+        }
+        switch (prim_op_i) {
+        case OP66_LOAD:
+            PRIM_SELECT(prim_word_v == 0 ? OP_LOAD : OP_LOADN, prim_word_v == 0 ? 3 : 2);
+        case ER_OP66_STORE:
+            PRIM_SELECT(prim_word_v == 0 ? OP_STORE : OP_STOREN, prim_word_v == 0 ? 4 : 3);
+        case OP66_TRUNC:
+            PRIM_SELECT(prim_word_v == 0 ? OP_TRUNC : OP_TRUNCN, prim_word_v == 0 ? 2 : 1);
+        case ER_OP66_MET:
+            PRIM_SELECT(OP_MET, 1);
+        default:
+            PRIM_SELECT_ROUTE(prim_route);
         }
     }
     if (!eo_op66_from_tag(prim_tag_v, &prim_op_i) || prim_op_i < 0 ||
@@ -1875,7 +1721,7 @@ PRIM66_DECODE: {
         if (prim_arg_s != 1) {
             PRIM_BAD_ARITY();
         }
-        PRIM_EVAL_VALUE_WHNF(prim_a_v, prim_arg_v[0]);
+        PRIM_FORCE_VALUE_WHNF(prim_a_v, prim_arg_v[0]);
         switch (er_get_tag(prim_a_v)) {
         case er_tag_bat:
             PRIM_DONE_VALUE(0);
@@ -1898,7 +1744,7 @@ PRIM66_DECODE: {
         if (prim_arg_s != 1) {
             PRIM_BAD_ARITY();
         }
-        PRIM_EVAL_VALUE_WHNF(prim_a_v, prim_arg_v[0]);
+        PRIM_FORCE_VALUE_WHNF(prim_a_v, prim_arg_v[0]);
         if (prim_op_i == OP66_IS_PIN) {
             PRIM_DONE_VALUE(er_is_tag(er_tag_pin, prim_a_v) ? 1 : 0);
         }
@@ -1916,8 +1762,8 @@ PRIM66_DECODE: {
         if (prim_arg_s != 2) {
             PRIM_BAD_ARITY();
         }
-        PRIM_EVAL_VALUE_WHNF(prim_a_v, prim_arg_v[0]);
-        PRIM_EVAL_VALUE_WHNF(prim_b_v, prim_arg_v[1]);
+        PRIM_FORCE_VALUE_WHNF(prim_a_v, prim_arg_v[0]);
+        PRIM_FORCE_VALUE_WHNF(prim_b_v, prim_arg_v[1]);
         if (prim_op_i == OP66_NE) {
             PRIM_DONE_VALUE(eo_eq(prim_a_v, prim_b_v) == 0 ? 1 : 0);
         }
@@ -1935,8 +1781,8 @@ PRIM66_DECODE: {
         if (prim_arg_s != 2) {
             PRIM_BAD_ARITY();
         }
-        PRIM_EVAL_VALUE_WHNF(prim_a_v, prim_arg_v[0]);
-        PRIM_EVAL_VALUE_WHNF(prim_b_v, prim_arg_v[1]);
+        PRIM_FORCE_VALUE_WHNF(prim_a_v, prim_arg_v[0]);
+        PRIM_FORCE_VALUE_WHNF(prim_b_v, prim_arg_v[1]);
         if (prim_op_i == OP66_NIB) {
             PRIM_DONE_VALUE(eo_load(vm->loc_a, prim_a_v, 4, prim_b_v));
         }
@@ -1946,8 +1792,8 @@ PRIM66_DECODE: {
         if (prim_arg_s != 3) {
             PRIM_BAD_ARITY();
         }
-        PRIM_EVAL_VALUE_WHNF(prim_a_v, prim_arg_v[0]);
-        PRIM_EVAL_VALUE_WHNF(prim_b_v, prim_arg_v[1]);
+        PRIM_FORCE_VALUE_WHNF(prim_a_v, prim_arg_v[0]);
+        PRIM_FORCE_VALUE_WHNF(prim_b_v, prim_arg_v[1]);
         size_t case_idx_s = 0;
         er_app* case_row = er_outt(er_tag_app, prim_b_v);
         if (!eo_nat_to_size(prim_a_v, &case_idx_s) || case_row == NULL ||
@@ -1977,7 +1823,7 @@ PRIM66_DECODE: {
         if (prim_arg_s != case_s + 1) {
             PRIM_BAD_ARITY();
         }
-        PRIM_EVAL_VALUE_WHNF(prim_a_v, prim_arg_v[0]);
+        PRIM_FORCE_VALUE_WHNF(prim_a_v, prim_arg_v[0]);
         size_t case_idx_s = 0;
         if (!eo_nat_to_size(prim_a_v, &case_idx_s) || case_idx_s >= case_s - 1) {
             r = prim_arg_v[case_s];
@@ -1998,14 +1844,14 @@ PRIM66_DECODE: {
             PRIM_BAD_ARITY();
         }
         prim_a_v = (er_val)(prim_op_i - OP66_IX0);
-        PRIM_EVAL_VALUE_WHNF(prim_b_v, prim_arg_v[0]);
+        PRIM_FORCE_VALUE_WHNF(prim_b_v, prim_arg_v[0]);
         PRIM_DONE_VALUE(eo_ix(prim_a_v, prim_b_v));
     case OP66_IF:
     case OP66_IFZ:
         if (prim_arg_s != 3) {
             PRIM_BAD_ARITY();
         }
-        PRIM_EVAL_VALUE_WHNF(prim_a_v, prim_arg_v[0]);
+        PRIM_FORCE_VALUE_WHNF(prim_a_v, prim_arg_v[0]);
         r = (prim_op_i == OP66_IF ? prim_a_v != 0 : prim_a_v == 0) ? prim_arg_v[1]
                                                                     : prim_arg_v[2];
         goto FORCE_ENTRY;
@@ -2013,19 +1859,19 @@ PRIM66_DECODE: {
         if (prim_arg_s != 2) {
             PRIM_BAD_ARITY();
         }
-        PRIM_EVAL_VALUE_WHNF(prim_a_v, prim_arg_v[0]);
+        PRIM_FORCE_VALUE_WHNF(prim_a_v, prim_arg_v[0]);
         if (prim_a_v != 0) {
             PRIM_DONE_VALUE(0);
         }
-        PRIM_EVAL_VALUE_WHNF(prim_b_v, prim_arg_v[1]);
+        PRIM_FORCE_VALUE_WHNF(prim_b_v, prim_arg_v[1]);
         PRIM_DONE_VALUE(prim_b_v == 0 ? 1 : 0);
     case OP66_ROW:
         if (prim_arg_s != 3) {
             PRIM_BAD_ARITY();
         }
-        PRIM_EVAL_VALUE_WHNF(prim_a_v, prim_arg_v[0]);
+        PRIM_FORCE_VALUE_WHNF(prim_a_v, prim_arg_v[0]);
         prim_a_v = eo_nat(prim_a_v);
-        PRIM_EVAL_VALUE_WHNF(prim_b_v, prim_arg_v[1]);
+        PRIM_FORCE_VALUE_WHNF(prim_b_v, prim_arg_v[1]);
         prim_c_v = prim_arg_v[2];
         {
             size_t row_count_s = 0;
@@ -2051,7 +1897,7 @@ PRIM66_DECODE: {
             DPUSH(row_v);
 
             for (size_t row_k_s = 0; row_k_s < row_count_s; row_k_s++) {
-                PRIM_EVAL_VALUE_WHNF(prim_c_v, prim_c_v);
+                PRIM_FORCE_VALUE_WHNF(prim_c_v, prim_c_v);
                 row_app = er_outt(er_tag_app, *row_root_p);
                 if (row_app == NULL) {
                     FAIL_ALLOC();
@@ -2073,24 +1919,24 @@ PRIM66_DECODE: {
         if (prim_arg_s != 2) {
             PRIM_BAD_ARITY();
         }
-        PRIM_EVAL_VALUE_WHNF(prim_a_v, prim_arg_v[0]);
+        PRIM_FORCE_VALUE_WHNF(prim_a_v, prim_arg_v[0]);
         r = prim_arg_v[1];
         goto FORCE_ENTRY;
     case OP66_SEQ2:
         if (prim_arg_s != 3) {
             PRIM_BAD_ARITY();
         }
-        PRIM_EVAL_VALUE_WHNF(prim_a_v, prim_arg_v[0]);
-        PRIM_EVAL_VALUE_WHNF(prim_b_v, prim_arg_v[1]);
+        PRIM_FORCE_VALUE_WHNF(prim_a_v, prim_arg_v[0]);
+        PRIM_FORCE_VALUE_WHNF(prim_b_v, prim_arg_v[1]);
         r = prim_arg_v[2];
         goto FORCE_ENTRY;
     case OP66_SEQ3:
         if (prim_arg_s != 4) {
             PRIM_BAD_ARITY();
         }
-        PRIM_EVAL_VALUE_WHNF(prim_a_v, prim_arg_v[0]);
-        PRIM_EVAL_VALUE_WHNF(prim_b_v, prim_arg_v[1]);
-        PRIM_EVAL_VALUE_WHNF(prim_c_v, prim_arg_v[2]);
+        PRIM_FORCE_VALUE_WHNF(prim_a_v, prim_arg_v[0]);
+        PRIM_FORCE_VALUE_WHNF(prim_b_v, prim_arg_v[1]);
+        PRIM_FORCE_VALUE_WHNF(prim_c_v, prim_arg_v[2]);
         r = prim_arg_v[3];
         goto FORCE_ENTRY;
     case OP66_THROW:
@@ -2101,59 +1947,62 @@ PRIM66_DECODE: {
     default:
         break;
     }
-    prim_route = prim66_route[prim_op_i];
-    if (!prim_route.valid_f) {
+    if (!er_bc_prim66_route(prim_op_i, &prim_route)) {
         FAIL_ALLOC();
     }
-    PRIM_SELECT(prim_route.tag, prim_route.arg_s);
+    PRIM_SELECT_ROUTE(prim_route);
 }
 
 PRIM_ROUTE_DISPATCH: {
-    prim_force_f = true;
     if (prim_byte_op >= OP_COUNT || dispatch[prim_byte_op] == NULL) {
         FAIL_ALLOC();
     }
-    if (prim_arg_s != prim_need_s) {
+    if (prim_arg_s != prim_need_s || prim_need_s > ER_BC_MAX_PRIM_ARITY ||
+        prim_route_depth_s >= ER_PRIM_ROUTE_MAX_DEPTH) {
         PRIM_BAD_ARITY();
     }
-    prim_base_v = dsp;
     for (size_t prim_k_s = 0; prim_k_s < prim_need_s; prim_k_s++) {
         DPUSH(prim_arg_v[prim_k_s]);
     }
+
+    size_t prim_route_slot_s = prim_route_depth_s++;
+    er_op* prim_code_v = prim_route_code_v[prim_route_slot_s];
+    size_t prim_code_s = 0;
+    er_val prim_lit_v = 0;
     switch (prim_byte_op) {
-    case OP_LAW:
-        PRIM_EVAL_STACK_WHNF(0);
-        PRIM_EVAL_STACK_WHNF(1);
-        PRIM_EVAL_STACK_WHNF(2);
-        break;
-    case OP_ELIM:
-        PRIM_EVAL_STACK_WHNF(5);
-        break;
-    case OP_REP:
-        PRIM_EVAL_STACK_WHNF(2);
-        break;
-    case OP_UP:
-        PRIM_EVAL_STACK_WHNF(0);
-        PRIM_EVAL_STACK_WHNF(2);
-        break;
-    case OP_COUP:
-        PRIM_EVAL_STACK_WHNF(1);
-        break;
-    case OP_OR:
-    case OP_AND:
-        PRIM_EVAL_STACK_WHNF(0);
+    case OP_LOADN:
+    case OP_STOREN:
+    case OP_TRUNCN:
+    case OP_MET:
+        prim_lit_v = prim_word_v;
         break;
     default:
-        for (size_t prim_k_s = 0; prim_k_s < prim_need_s; prim_k_s++) {
-            PRIM_EVAL_STACK_WHNF(prim_k_s);
-        }
         break;
     }
-    goto *dispatch[prim_byte_op];
+    if (!er_bc_emit_prim_route_fragment(prim_code_v, ER_PRIM_ROUTE_MAX_CODE, prim_byte_op,
+                                        prim_need_s, prim_route.arg_eval_v, prim_lit_v,
+                                        &prim_code_s)) {
+        FAIL_ALLOC();
+    }
+    prim_route_final_pc_v[prim_route_slot_s] = prim_code_s;
+
+    code = prim_code_v;
+    vm->code = code;
+    code_law_v = 0;
+    code_label_d = 0;
+    vm->code_law_v = 0;
+    vm->code_label_d = 0;
+    pc = 0;
+    DISPATCH();
 }
 
 PRIM_DONE: {
-    if (prim_force_f) {
+    bool prim_route_done_f =
+        prim_route_depth_s > 0 &&
+        code == prim_route_code_v[prim_route_depth_s - 1u] &&
+        pc == prim_route_final_pc_v[prim_route_depth_s - 1u];
+    if (prim_route_done_f) {
+      prim_route_depth_s--;
       r = DPOP();
       goto FORCE_ENTRY;
     }
@@ -2254,7 +2103,6 @@ ENTER_CALL: {
     pc  = 0;
     env = thk->arg_v;
     dbase = dsp;
-    // env_s = thk->arg_s;
     DISPATCH();
 }
 
@@ -2266,11 +2114,13 @@ K_RETURN:
     /*
      * Payload layout:
      *
-     *   [ env ][ pc ][ label ][ law ][ dbase ][ &&K_RETURN ]
+     *   [ env ][ pc ][ label ][ law ][ code ][ dbase ][ &&K_RETURN ]
      *
      * The label has already been popped by RETURN.
      */
     dbase = (--ksp)->ref;
+    code = (--ksp)->code;
+    vm->code = code;
     code_law_v = (--ksp)->val_v;
     code_label_d = (uint32_t)(--ksp)->u;
     vm->code_law_v = code_law_v;
@@ -2325,50 +2175,6 @@ K_APPHEAD:
     r = er_into(er_tag_thk, thk);
     goto FORCE_ENTRY;
 
-    //
-    // if ( !er_is_tag(er_tag_app, app) ) {
-    //     RETURN(app);
-    // }
-    //
-    // {
-    //     hd_v = app_fun(app);
-    //     arg_v = app_args(app);
-    //     wan_d   = er_arity(head);
-    //     hav_d = args_len(args);
-    //
-    //     // if (af < 0) {
-    //     //     panic_negative_arity();
-    //     // }
-    //
-    //     if (hav_d < (uint32_t)wan_d) {
-    //         /*
-    //          * Partial application. The app is already WHNF.
-    //          */
-    //         RETURN(app);
-    //     }
-    //
-    //     if (hav_d == wan_d) {
-    //         sat = er_thk_make_call();
-    //         goto ENTER_SAT;
-    //     }
-    //
-    //     /*
-    //      * Overapplication:
-    //      *
-    //      *   app = f a b c d
-    //      *   law arity says saturated prefix is f a b
-    //      *
-    //      * Instead of storing the rest vector in the continuation, store only
-    //      * the split index. K_OVERAPP recovers the rest from the original app.
-    //      */
-    //     split = (uint32_t)af;
-    //
-    //     sat = er_outa(er_app_take(vm->loc_a, app, wan_d));
-    //
-    //     KPUSH_OVERAPP(app, wan_d);
-    //     goto ENTER_SAT;
-    // }
-
 K_OVERAPP:
     /*
      * Payload layout:
@@ -2391,13 +2197,11 @@ K_OVERAPP:
 #undef GC_ROOT_PRIMS
 #undef GC_SYNC
 #undef CHECK_ALLOC
+#undef PRIM_SELECT_ROUTE
 #undef PRIM_SELECT
-#undef PRIM_PUSH_ARGS
 #undef PRIM_BAD_ARITY
 #undef PRIM_DONE_VALUE
-#undef PRIM_EVAL_VALUE_WHNF
-#undef PRIM_EVAL_STACK_NF
-#undef PRIM_EVAL_STACK_WHNF
+#undef PRIM_FORCE_VALUE_WHNF
 #undef CHECK_PRIM
 #undef FAIL_ALLOC
 #undef RETURN
@@ -2410,7 +2214,6 @@ K_OVERAPP:
 #undef CODE_SET
 #undef DPOP
 #undef DPUSH
-#undef ER_PRIM_ROUTE
 }
 
 static er_val plan_eval_whnf_preserve(er_vm* vm, er_val val_v)
@@ -2419,6 +2222,7 @@ static er_val plan_eval_whnf_preserve(er_vm* vm, er_val val_v)
     er_kon* base_ksp = vm->ksp;
     er_val* saved_gc_rp = vm->gc_rp;
     size_t saved_gc_tmp_s = vm->gc_tmp_s;
+    er_op* saved_code = vm->code;
     er_val saved_code_law_v = vm->code_law_v;
     uint32_t saved_code_label_d = vm->code_label_d;
     bool root_code_law_f = saved_code_law_v != 0;
@@ -2435,6 +2239,7 @@ static er_val plan_eval_whnf_preserve(er_vm* vm, er_val val_v)
     vm->ksp = base_ksp;
     vm->gc_rp = saved_gc_rp;
     vm->gc_tmp_s = saved_gc_tmp_s;
+    vm->code = saved_code;
     vm->code_law_v = saved_code_law_v;
     vm->code_label_d = saved_code_label_d;
     return out_v;
