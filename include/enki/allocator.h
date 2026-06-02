@@ -2,6 +2,7 @@
 #define ENKI_ALLOCATOR_H
 
 #include <stddef.h>
+#include <string.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -51,8 +52,28 @@ const enki_allocator* enki_allocator_system(void);
 
 extern const enki_allocator sys_a;
 
-#define ea_calloc(loc_a,typ,count) (typ*)(loc_a->alloc((loc_a->ctx), sizeof(typ) * count));
-#define ea_free(loc_a, ptr) (loc_a->free(loc_a->ctx, ptr))
+
+static inline void* ea_alloc_zero(const enki_allocator* loc_a, size_t elem_s, size_t count_s)
+{
+    if (count_s != 0 && elem_s > ((size_t)-1) / count_s) {
+        return NULL;
+    }
+
+    size_t size_s = elem_s * count_s;
+    if (size_s == 0) {
+        size_s = 1;
+    }
+
+    void* ptr = loc_a->alloc(loc_a->ctx, size_s);
+    if (ptr != NULL) {
+        memset(ptr, 0, size_s);
+    }
+    return ptr;
+}
+
+#define ea_calloc(loc_a, typ, count) (typ*)ea_alloc_zero((loc_a), sizeof(typ), (count))
+ #define ea_free(loc_a, ptr) (loc_a->free(loc_a->ctx, ptr))
+
 
 #ifdef __cplusplus
 }

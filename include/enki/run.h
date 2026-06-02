@@ -71,6 +71,11 @@ typedef struct er_pin {
   er_val sub_v[];
 } er_pin;
 
+typedef struct er_law_label {
+  size_t off_s;
+  size_t op_s;
+} er_law_label;
+
 typedef struct er_law {
   er_head h;
   er_val name_v;
@@ -78,7 +83,9 @@ typedef struct er_law {
   uint32_t ari_d;
   uint32_t let_d; // size of letrec table
   size_t bc_s; // number of bytecode labels
-  er_op* bc_v[]; // bytecode labels
+  size_t op_s; // total bytecode instruction count
+  size_t code_o; // byte offset from law base to bytecode storage
+  er_law_label bc_v[]; // bytecode label spans
 } er_law;
 
 typedef struct er_app {
@@ -113,11 +120,12 @@ er_val er_pin_init(er_pin* pin, const uint8_t hash_b[32], er_val val_v, size_t s
     const er_val sub_v[]);
 er_val er_pin_make(const enki_allocator* loc_a, er_val val_v);
 
-er_law* er_law_alloc(const enki_allocator* allocator, size_t bc_s);
+er_law* er_law_alloc(const enki_allocator* allocator, size_t bc_s, size_t op_s);
 er_val er_law_init(er_law* law, er_val name_v, er_val body_v, uint32_t ari_d,
-    uint32_t let_d, size_t bc_s, er_op* const bc_v[]);
+    uint32_t let_d, size_t bc_s, er_op* const bc_v[], const size_t bc_len_v[]);
 er_val er_law_make_code(const enki_allocator* loc_a, er_val nam_v, er_val bod_v,
-    uint32_t ari_d, uint32_t let_d, size_t bc_s, er_op* const bc_v[]);
+    uint32_t ari_d, uint32_t let_d, size_t bc_s, er_op* const bc_v[],
+    const size_t bc_len_v[]);
 er_val er_law_make(const enki_allocator* loc_a, er_val nam_v, er_val bod_v, uint32_t ari_d);
 
 er_app* er_app_alloc(const enki_allocator* allocator, size_t arg_s);
@@ -212,6 +220,40 @@ struct er_op {
     } as;
 };
 
+static inline er_op* er_law_code_base(er_law* law)
+{
+    return law == NULL ? NULL : (er_op*)((unsigned char*)law + law->code_o);
+}
+
+static inline const er_op* er_law_code_base_const(const er_law* law)
+{
+    return law == NULL ? NULL : (const er_op*)((const unsigned char*)law + law->code_o);
+}
+
+static inline er_op* er_law_label_code(er_law* law, size_t label_s)
+{
+    if (law == NULL || label_s >= law->bc_s) {
+        return NULL;
+    }
+    er_law_label label = law->bc_v[label_s];
+    if (label.op_s == 0 || label.off_s > law->op_s || label.op_s > law->op_s - label.off_s) {
+        return NULL;
+    }
+    return er_law_code_base(law) + label.off_s;
+}
+
+static inline const er_op* er_law_label_code_const(const er_law* law, size_t label_s)
+{
+    if (law == NULL || label_s >= law->bc_s) {
+        return NULL;
+    }
+    er_law_label label = law->bc_v[label_s];
+    if (label.op_s == 0 || label.off_s > law->op_s || label.op_s > law->op_s - label.off_s) {
+        return NULL;
+    }
+    return er_law_code_base_const(law) + label.off_s;
+}
+
 typedef union {
     void      *lab;
     er_val    *ref;
@@ -224,6 +266,8 @@ typedef union {
 
 typedef struct {
   er_op* code;
+  er_val code_law_v;
+  uint32_t code_label_d;
   const enki_allocator* loc_a;
 
   er_val* dstack;

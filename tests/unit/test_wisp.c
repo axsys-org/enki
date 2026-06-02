@@ -298,7 +298,7 @@ Test(wisp, numeric_pin66_wrapper_emits_direct_primitive_bytecode)
                         "add");
     cr_assert_not_null(assert_law(eval_input("add")));
     er_law* law = assert_law(eval_input("(#law \"caller\" (caller ignored) (add 20 22))"));
-    er_op* code = law->bc_v[0];
+    er_op* code = er_law_label_code(law, 0);
     cr_assert_not_null(code);
 
     cr_assert_eq(code[0].tag, OP_PUSH_LIT);

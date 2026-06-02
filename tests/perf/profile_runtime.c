@@ -247,14 +247,15 @@ static er_val planvm_make_prim66(void)
     return er_pin_init(pin, NULL, 66, 0, NULL);
 }
 
-static er_val planvm_make_law(uint32_t arity_d, er_op* entry_v)
+static er_val planvm_make_law(uint32_t arity_d, er_op* entry_v, size_t entry_len_s)
 {
     er_op* labels_v[] = {entry_v};
-    er_law* law = er_law_alloc(enki_allocator_system(), 1);
+    size_t label_len_v[] = {entry_len_s};
+    er_law* law = er_law_alloc(enki_allocator_system(), 1, entry_len_s);
     if (law == NULL) {
         return 0;
     }
-    return er_law_init(law, 0, 0, arity_d, 0, 1, labels_v);
+    return er_law_init(law, 0, 0, arity_d, 0, 1, labels_v, label_len_v);
 }
 
 static er_val planvm_make_call2(const enki_allocator* allocator, er_val fun_v, er_val a_v,
@@ -284,8 +285,7 @@ static bool planvm_build_fac(planvm_fac_program* program)
         BASE_PC = 24,
     };
     er_val prim66_v = planvm_make_prim66();
-    er_val fact_v = planvm_make_law(2, program->code_v);
-    if (prim66_v == 0 || fact_v == 0) {
+    if (prim66_v == 0) {
         return false;
     }
 
@@ -323,9 +323,13 @@ static bool planvm_build_fac(planvm_fac_program* program)
             [25] = {.tag = OP_EVAL},
             [26] = {.tag = OP_RET},
         },
-        .fact_v = fact_v,
         .prim66_v = prim66_v,
     };
+    program->fact_v = planvm_make_law(2, program->code_v,
+                                      sizeof(program->code_v) / sizeof(program->code_v[0]));
+    if (program->fact_v == 0) {
+        return false;
+    }
     return true;
 }
 
@@ -358,11 +362,6 @@ static bool planvm_build_fib(planvm_fib_program* program)
     enum {
         FIB_RECURSE_PC = 8,
     };
-
-    er_val fib_v = planvm_make_law(1, program->code_v);
-    if (fib_v == 0) {
-        return false;
-    }
 
     *program = (planvm_fib_program){
         .code_v = {
@@ -398,8 +397,12 @@ static bool planvm_build_fib(planvm_fib_program* program)
             [19] = {.tag = OP_ADD},
             [20] = {.tag = OP_RET},
         },
-        .fib_v = fib_v,
     };
+    program->fib_v = planvm_make_law(1, program->code_v,
+                                     sizeof(program->code_v) / sizeof(program->code_v[0]));
+    if (program->fib_v == 0) {
+        return false;
+    }
     return true;
 }
 

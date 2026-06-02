@@ -249,6 +249,7 @@ void enki_gc_trace_vm(enki_gc* gc, void* root)
     }
 
     enki_gc_trace_ref(gc, vm->gc_rp);
+    enki_gc_trace_ref(gc, &vm->code_law_v);
     for (size_t k = 0; k < vm->gc_tmp_s; k++) {
         enki_gc_trace_ref(gc, &vm->gc_tmp_v[k]);
     }
@@ -271,6 +272,17 @@ static void enki_gc_trace_object(enki_gc* gc, er_val val_v)
         er_law* law = er_outa(val_v);
         enki_gc_trace_ref(gc, &law->name_v);
         enki_gc_trace_ref(gc, &law->body_v);
+        for (size_t label_s = 0; label_s < law->bc_s; label_s++) {
+            er_op* code_v = er_law_label_code(law, label_s);
+            if (code_v == NULL) {
+                continue;
+            }
+            for (size_t op_s = 0; op_s < law->bc_v[label_s].op_s; op_s++) {
+                if (code_v[op_s].tag == OP_PUSH_LIT) {
+                    enki_gc_trace_ref(gc, &code_v[op_s].as.lit_v);
+                }
+            }
+        }
         return;
     }
     case er_tag_app: {

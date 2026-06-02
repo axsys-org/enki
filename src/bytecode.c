@@ -27,6 +27,7 @@ typedef struct er_bc_vals {
 
 typedef struct er_bc_label {
     er_op* code_v;
+    size_t code_s;
     bool set_f;
 } er_bc_label;
 
@@ -332,16 +333,18 @@ static bool er_bc_compiler_reserve(er_bc_compiler* c, size_t need_s)
     return true;
 }
 
-static bool er_bc_compiler_set_label(er_bc_compiler* c, uint32_t label_d, er_op* code_v)
+static bool er_bc_compiler_set_label(er_bc_compiler* c, uint32_t label_d, er_op* code_v,
+                                     size_t code_s)
 {
     size_t label_s = (size_t)label_d;
-    if (!er_bc_compiler_reserve(c, label_s + 1)) {
+    if (code_v == NULL || code_s == 0 || !er_bc_compiler_reserve(c, label_s + 1)) {
         return false;
     }
     if (label_s >= c->label_s) {
         c->label_s = label_s + 1;
     }
     c->label_v[label_s].code_v = code_v;
+    c->label_v[label_s].code_s = code_s;
     c->label_v[label_s].set_f = true;
     return true;
 }
@@ -698,7 +701,7 @@ static bool er_bc_compile_label(er_bc_compiler* c, size_t depth_s, uint32_t ari_
         c->ok_f = false;
         return false;
     }
-    if (!er_bc_compiler_set_label(c, label_d, code.op_v)) {
+    if (!er_bc_compiler_set_label(c, label_d, code.op_v, code.op_s)) {
         er_bc_code_free(&code);
         return false;
     }
@@ -1003,6 +1006,7 @@ er_val er_law_compile(const enki_allocator* loc_a, er_val nam_v, er_val bod_v, u
     er_val law_v = 0;
     er_val* lets_v = NULL;
     er_op** code_v = NULL;
+    size_t* code_len_v = NULL;
     er_bc_compiler c = {
         .loc_a = work_a,
         .next_label_d = (uint32_t)let_s + 1,
@@ -1041,23 +1045,32 @@ er_val er_law_compile(const enki_allocator* loc_a, er_val nam_v, er_val bod_v, u
     if (code_v == NULL) {
         goto cleanup;
     }
+    code_len_v = work_a->alloc(work_a->ctx, bc_s * sizeof(size_t));
+    if (code_len_v == NULL) {
+        goto cleanup;
+    }
     for (size_t k = 0; k < bc_s; k++) {
         if (!c.label_v[k].set_f || c.label_v[k].code_v == NULL) {
             goto cleanup;
         }
         code_v[k] = c.label_v[k].code_v;
+        code_len_v[k] = c.label_v[k].code_s;
     }
 
-    law_v = er_law_make_code(loc_a, nam_v, bod_v, ari_d, (uint32_t)let_s, bc_s, code_v);
+    law_v = er_law_make_code(loc_a, nam_v, bod_v, ari_d, (uint32_t)let_s, bc_s, code_v,
+                             code_len_v);
 
 cleanup:
+    if (code_len_v != NULL) {
+        work_a->free(work_a->ctx, code_len_v);
+    }
     if (code_v != NULL) {
         work_a->free(work_a->ctx, code_v);
     }
     if (lets_v != NULL) {
         work_a->free(work_a->ctx, lets_v);
     }
-    er_bc_compiler_free(&c, law_v == 0);
+    er_bc_compiler_free(&c, true);
     return law_v;
 }
 

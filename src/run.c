@@ -39,6 +39,24 @@ static bool er_alloc_size(size_t base_s, size_t count_s, size_t elem_s, size_t* 
     return true;
 }
 
+static bool er_align_size(size_t size_s, size_t align_s, size_t* out_s)
+{
+    if (align_s == 0) {
+        return false;
+    }
+    size_t rem_s = size_s % align_s;
+    if (rem_s == 0) {
+        *out_s = size_s;
+        return true;
+    }
+    size_t add_s = align_s - rem_s;
+    if (size_s > SIZE_MAX - add_s) {
+        return false;
+    }
+    *out_s = size_s + add_s;
+    return true;
+}
+
 static void* er_alloc_bytes(const enki_allocator* allocator, size_t size_s)
 {
     if (allocator == NULL || allocator->alloc == NULL || size_s == 0) {
@@ -165,11 +183,42 @@ er_val er_pin_make(const enki_allocator* loc_a, er_val val_v)
   return er_pin_init(pin, NULL, val_v, 0, NULL);
 
 }
-er_law* er_law_alloc(const enki_allocator* allocator, size_t bc_s)
+
+static bool er_law_layout(size_t bc_s, size_t op_s, size_t* code_o, size_t* size_s)
+{
+    size_t label_end_s = 0;
+    if (!er_alloc_size(sizeof(er_law), bc_s, sizeof(er_law_label), &label_end_s)) {
+        return false;
+    }
+    if (!er_align_size(label_end_s, _Alignof(er_op), code_o)) {
+        return false;
+    }
+    return er_alloc_size(*code_o, op_s, sizeof(er_op), size_s);
+}
+
+static bool er_law_total_ops(size_t bc_s, const er_op* const bc_v[],
+                             const size_t bc_len_v[], size_t* out_s)
+{
+    if (bc_s == 0 || bc_v == NULL || bc_len_v == NULL) {
+        return false;
+    }
+    size_t op_s = 0;
+    for (size_t k = 0; k < bc_s; k++) {
+        if (bc_v[k] == NULL || bc_len_v[k] == 0 || op_s > SIZE_MAX - bc_len_v[k]) {
+            return false;
+        }
+        op_s += bc_len_v[k];
+    }
+    *out_s = op_s;
+    return true;
+}
+
+er_law* er_law_alloc(const enki_allocator* allocator, size_t bc_s, size_t op_s)
 {
     ENKI_PROFILE_ZONE("er_law_alloc");
     size_t size_s = 0;
-    if (!er_alloc_size(sizeof(er_law), bc_s, sizeof(er_op*), &size_s)) {
+    size_t code_o = 0;
+    if (!er_law_layout(bc_s, op_s, &code_o, &size_s)) {
         return NULL;
     }
     er_law* law = (er_law*)er_alloc_bytes(allocator, size_s);
@@ -182,11 +231,16 @@ er_law* er_law_alloc(const enki_allocator* allocator, size_t bc_s)
     law->ari_d = 0;
     law->let_d = 0;
     law->bc_s = bc_s;
+    law->op_s = op_s;
+    law->code_o = code_o;
+    if (bc_s > 0) {
+        memset(law->bc_v, 0, bc_s * sizeof(er_law_label));
+    }
     return law;
 }
 
 er_val er_law_init(er_law* law, er_val name_v, er_val body_v, uint32_t ari_d,
-    uint32_t let_d, size_t bc_s, er_op* const bc_v[])
+    uint32_t let_d, size_t bc_s, er_op* const bc_v[], const size_t bc_len_v[])
 {
     if (law == NULL) {
         return 0;
@@ -195,7 +249,16 @@ er_val er_law_init(er_law* law, er_val name_v, er_val body_v, uint32_t ari_d,
         bc_s < (size_t)let_d + 1u) {
         return 0;
     }
-    if (!er_flex_fits(&law->h, sizeof(er_law), bc_s, sizeof(er_op*))) {
+    size_t op_s = 0;
+    if (!er_law_total_ops(bc_s, (const er_op* const*)bc_v, bc_len_v, &op_s)) {
+        return 0;
+    }
+    size_t code_o = 0;
+    size_t size_s = 0;
+    if (!er_law_layout(bc_s, op_s, &code_o, &size_s) || size_s > er_head_size(&law->h)) {
+        return 0;
+    }
+    if (law->code_o != code_o || law->op_s < op_s) {
         return 0;
     }
     law->name_v = name_v;
@@ -203,22 +266,35 @@ er_val er_law_init(er_law* law, er_val name_v, er_val body_v, uint32_t ari_d,
     law->ari_d = ari_d;
     law->let_d = let_d;
     law->bc_s = bc_s;
-    if (bc_v == NULL) {
-        memset(law->bc_v, 0, bc_s * sizeof(er_op*));
-    } else {
-        memcpy(law->bc_v, bc_v, bc_s * sizeof(er_op*));
+    law->op_s = op_s;
+
+    er_op* dst_v = er_law_code_base(law);
+    size_t off_s = 0;
+    for (size_t k = 0; k < bc_s; k++) {
+        law->bc_v[k] = (er_law_label){.off_s = off_s, .op_s = bc_len_v[k]};
+        memcpy(dst_v + off_s, bc_v[k], bc_len_v[k] * sizeof(er_op));
+        off_s += bc_len_v[k];
     }
     return er_into(er_tag_law, law);
 }
 
 er_val er_law_make_code(const enki_allocator* loc_a, er_val nam_v, er_val bod_v,
-                        uint32_t ari_d, uint32_t let_d, size_t bc_s, er_op* const bc_v[])
+                        uint32_t ari_d, uint32_t let_d, size_t bc_s, er_op* const bc_v[],
+                        const size_t bc_len_v[])
 {
-  er_law* law = er_law_alloc(loc_a, bc_s);
+  size_t op_s = 0;
+  if (!er_law_total_ops(bc_s, (const er_op* const*)bc_v, bc_len_v, &op_s)) {
+    return 0;
+  }
+  er_law* law = er_law_alloc(loc_a, bc_s, op_s);
   if (law == NULL) {
     return 0;
   }
-  return er_law_init(law, nam_v, bod_v, ari_d, let_d, bc_s, bc_v);
+  er_val law_v = er_law_init(law, nam_v, bod_v, ari_d, let_d, bc_s, bc_v, bc_len_v);
+  if (law_v == 0 && loc_a != NULL && loc_a->free != NULL) {
+    loc_a->free(loc_a->ctx, law);
+  }
+  return law_v;
 }
 
 er_val er_law_make(const enki_allocator* loc_a, er_val nam_v, er_val bod_v, uint32_t ari_d)
@@ -771,7 +847,8 @@ plan_eval_whnf(er_vm *vm, er_val val_v)
 {
     ENKI_PROFILE_ZONE("plan_eval_whnf");
     er_op* code  = vm->code;
-    er_law* code_law = NULL;
+    er_val code_law_v = vm->code_law_v;
+    uint32_t code_label_d = vm->code_label_d;
 
     er_val* dbase = vm->dsp;
     er_val* dsp   = vm->dsp;
@@ -947,6 +1024,8 @@ plan_eval_whnf(er_vm *vm, er_val val_v)
     do {                                              \
         vm->dsp = dsp;                                \
         vm->ksp = ksp;                                \
+        vm->code_law_v = code_law_v;                  \
+        vm->code_label_d = code_label_d;              \
     } while (0)
 
 #define GC_ROOT_PRIMS()                               \
@@ -965,21 +1044,48 @@ plan_eval_whnf(er_vm *vm, er_val val_v)
         vm->gc_tmp_s = 0;                             \
     } while (0)
 
+#define CODE_SET(_law_v, _label_d)                 \
+    do {                                           \
+        code_law_v = (_law_v);                     \
+        code_label_d = (uint32_t)(_label_d);       \
+        vm->code_law_v = code_law_v;               \
+        vm->code_label_d = code_label_d;           \
+    } while (0)
+
+#define CODE_REFRESH()                             \
+    do {                                           \
+        code_law_v = vm->code_law_v;               \
+        code_label_d = vm->code_label_d;           \
+        if (code_law_v != 0) {                     \
+            er_law* dispatch_law = er_resolve_law(code_law_v); \
+            code = er_law_label_code(dispatch_law, code_label_d); \
+        } else {                                   \
+            code = vm->code;                       \
+        }                                          \
+        if (code == NULL) {                        \
+            FAIL_ALLOC();                          \
+        }                                          \
+    } while (0)
+
 #define DISPATCH()                                 \
     do {                                           \
-        vm->b_count++;                              \
-        prim_force_f = false;                       \
+        vm->b_count++;                             \
+        prim_force_f = false;                      \
+        CODE_REFRESH();                            \
         op = &code[pc++];                          \
+        if ((size_t)op->tag >= OP_COUNT || dispatch[op->tag] == NULL) { \
+            FAIL_ALLOC();                          \
+        }                                          \
         goto *dispatch[op->tag];                   \
     } while (0)
 
-#define KPUSH_RETURN(_pc, _env, _code, _law)       \
+#define KPUSH_RETURN(_pc, _env, _law_v, _label_d)  \
     do {                                           \
-        vm->k_count++;                              \
+        vm->k_count++;                             \
         (ksp++)->ref = (_env);                     \
         (ksp++)->pc  = (_pc);                      \
-        (ksp++)->code = (_code);                   \
-        (ksp++)->law = (_law);                     \
+        (ksp++)->u = (uintptr_t)(_label_d);        \
+        (ksp++)->val_v = (_law_v);                 \
         (ksp++)->ref = dbase;                      \
         (ksp++)->lab = &&K_RETURN;                 \
     } while (0)
@@ -1028,6 +1134,8 @@ plan_eval_whnf(er_vm *vm, er_val val_v)
         if ((_v) == 0) {                           \
             FAIL_ALLOC();                          \
         }                                          \
+        code_law_v = vm->code_law_v;               \
+        code_label_d = vm->code_label_d;           \
     } while (0)
 
 #define CHECK_PRIM(_v)                             \
@@ -1035,6 +1143,8 @@ plan_eval_whnf(er_vm *vm, er_val val_v)
         if ((_v) == er_bad) {                      \
             FAIL_ALLOC();                          \
         }                                          \
+        code_law_v = vm->code_law_v;               \
+        code_label_d = vm->code_label_d;           \
     } while (0)
 
 #define PRIM_EVAL_STACK_WHNF(_idx)                 \
@@ -1163,7 +1273,7 @@ I_CALLF: {
     r = er_thk_make_call_frame(vm->loc_a, frame_s, call_s, call_base);
     CHECK_ALLOC(r);
     dsp = call_base;
-    KPUSH_RETURN(pc, env, code, code_law);
+    KPUSH_RETURN(pc, env, code_law_v, code_label_d);
     goto FORCE_ENTRY;
 }
 
@@ -1178,7 +1288,7 @@ I_CALLU: {
     r = er_thk_make_unk_app(vm->loc_a, call_s, call_base);
     CHECK_ALLOC(r);
     dsp = call_base;
-    KPUSH_RETURN(pc, env, code, code_law);
+    KPUSH_RETURN(pc, env, code_law_v, code_label_d);
     goto FORCE_ENTRY;
 }
 
@@ -1484,9 +1594,9 @@ I_ROTATE: {
 I_JUMP_IF_ZERO:
     r = DPOP();
     if (r == 0) {
-      if (code_law != NULL && op->as.u32 < code_law->bc_s &&
-          code_law->bc_v[op->as.u32] != NULL) {
-        code = code_law->bc_v[op->as.u32];
+      er_law* jump_law = er_resolve_law(code_law_v);
+      if (jump_law != NULL && er_law_label_code(jump_law, op->as.u32) != NULL) {
+        CODE_SET(code_law_v, op->as.u32);
         pc = 0;
       } else {
         pc = op->as.u32;
@@ -1497,11 +1607,11 @@ I_JUMP_IF_ZERO:
 I_JUMP_IF:
     r = DPOP();
     if (r != 0) {
-      if (code_law == NULL || op->as.u32 >= code_law->bc_s ||
-          code_law->bc_v[op->as.u32] == NULL) {
+      er_law* jump_law = er_resolve_law(code_law_v);
+      if (jump_law == NULL || er_law_label_code(jump_law, op->as.u32) == NULL) {
         FAIL_ALLOC();
       }
-      code = code_law->bc_v[op->as.u32];
+      CODE_SET(code_law_v, op->as.u32);
       pc = 0;
     }
     DISPATCH();
@@ -1520,7 +1630,7 @@ I_EVAL:
     }
 
     GC_SYNC();
-    KPUSH_RETURN(pc, env, code, code_law);
+    KPUSH_RETURN(pc, env, code_law_v, code_label_d);
     goto FORCE_ENTRY;
 
 I_FORCE:
@@ -2062,12 +2172,11 @@ FORCE_SUSP: {
     }
     er_val susp_law_v = thk->arg_s >= 3 ? thk->arg_v[2] : fr->arg_v[0];
     er_law* law = er_resolve_law(susp_law_v);
-    if (law == NULL || susp_label >= law->bc_s || law->bc_v[susp_label] == NULL) {
+    if (er_law_label_code(law, susp_label) == NULL) {
       FAIL_ALLOC();
     }
     KPUSH_UPDATE(er_into(er_tag_thk, thk));
-    code_law = law;
-    code = law->bc_v[susp_label];
+    CODE_SET(susp_law_v, susp_label);
     pc = 0;
     env = fr->arg_v;
     dbase = dsp;
@@ -2114,7 +2223,7 @@ ENTER_CALL: {
       goto FORCE_ENTRY;
     }
     size_t frame_s = (size_t)law->ari_d + 1 + law->let_d;
-    if (thk->arg_s != frame_s || law->bc_s == 0 || law->bc_v[0] == NULL) {
+    if (thk->arg_s != frame_s || er_law_label_code(law, 0) == NULL) {
       FAIL_ALLOC();
     }
     size_t n_lets = er_law_n_lets(law);
@@ -2141,8 +2250,7 @@ ENTER_CALL: {
     }
     KPUSH_UPDATE(self_v);
     thk->fun = ER_HOLE;
-    code_law = law;
-    code = law->bc_v[0];
+    CODE_SET(f, 0);
     pc  = 0;
     env = thk->arg_v;
     dbase = dsp;
@@ -2158,13 +2266,15 @@ K_RETURN:
     /*
      * Payload layout:
      *
-     *   [ env ][ pc ][ code ][ law ][ dbase ][ &&K_RETURN ]
+     *   [ env ][ pc ][ label ][ law ][ dbase ][ &&K_RETURN ]
      *
      * The label has already been popped by RETURN.
      */
     dbase = (--ksp)->ref;
-    code_law = (--ksp)->law;
-    code = (--ksp)->code;
+    code_law_v = (--ksp)->val_v;
+    code_label_d = (uint32_t)(--ksp)->u;
+    vm->code_law_v = code_law_v;
+    vm->code_label_d = code_label_d;
     pc  = (--ksp)->pc;
     env = (--ksp)->ref;
 
@@ -2296,6 +2406,8 @@ K_OVERAPP:
 #undef KPUSH_UPDATE
 #undef KPUSH_RETURN
 #undef DISPATCH
+#undef CODE_REFRESH
+#undef CODE_SET
 #undef DPOP
 #undef DPUSH
 #undef ER_PRIM_ROUTE
@@ -2307,13 +2419,24 @@ static er_val plan_eval_whnf_preserve(er_vm* vm, er_val val_v)
     er_kon* base_ksp = vm->ksp;
     er_val* saved_gc_rp = vm->gc_rp;
     size_t saved_gc_tmp_s = vm->gc_tmp_s;
+    er_val saved_code_law_v = vm->code_law_v;
+    uint32_t saved_code_label_d = vm->code_label_d;
+    bool root_code_law_f = saved_code_law_v != 0;
+    if (root_code_law_f) {
+        (vm->ksp++)->val_v = saved_code_law_v;
+    }
 
     er_val out_v = plan_eval_whnf(vm, val_v);
 
+    if (root_code_law_f) {
+        saved_code_law_v = base_ksp->val_v;
+    }
     vm->dsp = base_dsp;
     vm->ksp = base_ksp;
     vm->gc_rp = saved_gc_rp;
     vm->gc_tmp_s = saved_gc_tmp_s;
+    vm->code_law_v = saved_code_law_v;
+    vm->code_label_d = saved_code_label_d;
     return out_v;
 }
 

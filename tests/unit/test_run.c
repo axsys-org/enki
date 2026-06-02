@@ -92,6 +92,18 @@ Test(run_alloc, thunk_alloc_returns_null_on_alloc_failure)
     cr_assert_null(er_thk_alloc(&fail_allocator, 1));
 }
 
+static size_t test_code_len(const er_op* code_v)
+{
+    cr_assert_not_null(code_v);
+    for (size_t k = 0; k < 4096; k++) {
+        if (code_v[k].tag == OP_RET) {
+            return k + 1;
+        }
+    }
+    cr_assert_fail("test bytecode label is missing OP_RET");
+    return 0;
+}
+
 Test(run_alloc, law_alloc_init_records_label_table)
 {
     er_op label0[] = {{.tag = OP_RET}};
@@ -99,22 +111,28 @@ Test(run_alloc, law_alloc_init_records_label_table)
     er_op label2[] = {{.tag = OP_RET}};
     er_op label3[] = {{.tag = OP_RET}};
     er_op* labels_v[] = {label0, label1, label2, label3};
-    er_law* law = er_law_alloc(enki_allocator_system(), 4);
+    size_t label_len_v[] = {1, 1, 1, 1};
+    er_law* law = er_law_alloc(enki_allocator_system(), 4, 4);
     cr_assert_not_null(law);
 
-    er_val law_v = er_law_init(law, 11, 22, 2, 3, 4, labels_v);
+    er_val law_v = er_law_init(law, 11, 22, 2, 3, 4, labels_v, label_len_v);
 
     cr_assert_eq(er_get_tag(law_v), er_tag_law);
     cr_assert_eq(er_outa(law_v), law);
-    cr_assert_eq(law->h.siz_s & ~(size_t)0x3, sizeof(er_law) + 4 * sizeof(er_op*));
+    cr_assert_eq(law->h.siz_s & ~(size_t)0x3, law->code_o + 4 * sizeof(er_op));
     cr_assert_eq(law->h.raw.nf_f, 0);
     cr_assert_eq(law->name_v, 11);
     cr_assert_eq(law->body_v, 22);
     cr_assert_eq(law->ari_d, 2);
     cr_assert_eq(law->let_d, 3);
     cr_assert_eq(law->bc_s, 4);
+    cr_assert_eq(law->op_s, 4);
     for (size_t k = 0; k < 4; k++) {
-        cr_assert_eq(law->bc_v[k], labels_v[k]);
+        er_op* label_code_v = er_law_label_code(law, k);
+        cr_assert_not_null(label_code_v);
+        cr_assert_neq(label_code_v, labels_v[k]);
+        cr_assert_eq(law->bc_v[k].op_s, 1);
+        cr_assert_eq(label_code_v[0].tag, OP_RET);
     }
 
     free_system(law);
@@ -122,10 +140,10 @@ Test(run_alloc, law_alloc_init_records_label_table)
 
 Test(run_alloc, law_init_rejects_missing_let_labels)
 {
-    er_law* law = er_law_alloc(enki_allocator_system(), 1);
+    er_law* law = er_law_alloc(enki_allocator_system(), 1, 1);
     cr_assert_not_null(law);
 
-    cr_assert_eq(er_law_init(law, 0, 0, 2, 1, 1, NULL), 0);
+    cr_assert_eq(er_law_init(law, 0, 0, 2, 1, 1, NULL, NULL), 0);
 
     free_system(law);
 }
@@ -136,15 +154,36 @@ static er_val make_law(uint32_t arity_d, er_op* entry_v, size_t n_lets,
     size_t bc_s = n_lets + 1;
     er_op** labels_v = calloc(bc_s, sizeof(er_op*));
     cr_assert_not_null(labels_v);
+    size_t* label_len_v = calloc(bc_s, sizeof(size_t));
+    cr_assert_not_null(label_len_v);
     labels_v[0] = entry_v;
+    label_len_v[0] = test_code_len(entry_v);
     for (size_t k = 0; k < n_lets; k++) {
         labels_v[k + 1] = let_code_v[k];
+        label_len_v[k + 1] = test_code_len(let_code_v[k]);
     }
 
-    er_law* law = er_law_alloc(enki_allocator_system(), bc_s);
+    size_t op_s = 0;
+    for (size_t k = 0; k < bc_s; k++) {
+        op_s += label_len_v[k];
+    }
+    er_law* law = er_law_alloc(enki_allocator_system(), bc_s, op_s);
     cr_assert_not_null(law);
-    er_val law_v = er_law_init(law, 0, 0, arity_d, (uint32_t)n_lets, bc_s, labels_v);
+    er_val law_v = er_law_init(law, 0, 0, arity_d, (uint32_t)n_lets, bc_s, labels_v,
+                               label_len_v);
+    free(label_len_v);
     free(labels_v);
+    cr_assert_eq(er_get_tag(law_v), er_tag_law);
+    return law_v;
+}
+
+static er_val make_law_with_len(uint32_t arity_d, er_op* entry_v, size_t entry_len_s)
+{
+    er_op* labels_v[] = {entry_v};
+    size_t label_len_v[] = {entry_len_s};
+    er_law* law = er_law_alloc(enki_allocator_system(), 1, entry_len_s);
+    cr_assert_not_null(law);
+    er_val law_v = er_law_init(law, 0, 0, arity_d, 0, 1, labels_v, label_len_v);
     cr_assert_eq(er_get_tag(law_v), er_tag_law);
     return law_v;
 }
@@ -711,9 +750,10 @@ Test(run_vm, plan_eval_nf_forces_law_name_and_body)
     er_val body_v = make_done_thunk(42);
     er_op code[] = {{.tag = OP_RET}};
     er_op* labels_v[] = {code};
-    er_law* law = er_law_alloc(enki_allocator_system(), 1);
+    size_t label_len_v[] = {1};
+    er_law* law = er_law_alloc(enki_allocator_system(), 1, 1);
     cr_assert_not_null(law);
-    er_val law_v = er_law_init(law, name_v, body_v, 0, 0, 1, labels_v);
+    er_val law_v = er_law_init(law, name_v, body_v, 0, 0, 1, labels_v, label_len_v);
     cr_assert_eq(er_get_tag(law_v), er_tag_law);
 
     er_val result_v = run_vm_mode(NULL, law_v, ER_EVAL_NF);
@@ -1225,7 +1265,7 @@ Test(run_vm, compiled_law_can_return_self_as_value)
     cr_assert_eq(er_get_tag(law_v), er_tag_law);
     er_law* law = er_outt(er_tag_law, law_v);
     cr_assert_not_null(law);
-    er_op* code = law->bc_v[0];
+    er_op* code = er_law_label_code(law, 0);
     cr_assert_not_null(code);
     cr_assert_eq(code[0].tag, OP_PUSH_VAR);
     cr_assert_eq(code[0].as.slot, 0);
@@ -1243,7 +1283,7 @@ Test(run_vm, compiled_primitive_evals_lower_stack_argument_before_opcode)
     cr_assert_eq(er_get_tag(law_v), er_tag_law);
     er_law* law = er_outt(er_tag_law, law_v);
     cr_assert_not_null(law);
-    er_op* code = law->bc_v[0];
+    er_op* code = er_law_label_code(law, 0);
     cr_assert_not_null(code);
 
     cr_assert_eq(code[2].tag, OP_ROTATE);
@@ -1271,7 +1311,7 @@ Test(run_vm, compiled_law_primitive_forces_arguments_to_whnf_and_increments_arit
     cr_assert_eq(er_get_tag(outer_law_v), er_tag_law);
     er_law* outer_law = er_outt(er_tag_law, outer_law_v);
     cr_assert_not_null(outer_law);
-    er_op* code = outer_law->bc_v[0];
+    er_op* code = er_law_label_code(outer_law, 0);
     cr_assert_not_null(code);
 
     size_t force_s = 0;
@@ -1327,7 +1367,7 @@ Test(run_vm, compiled_elim_primitive_forces_only_scrutinee)
     cr_assert_eq(er_get_tag(law_v), er_tag_law);
     er_law* law = er_outt(er_tag_law, law_v);
     cr_assert_not_null(law);
-    er_op* code = law->bc_v[0];
+    er_op* code = er_law_label_code(law, 0);
     cr_assert_not_null(code);
 
     size_t eval_s = 0;
@@ -1360,7 +1400,7 @@ Test(run_vm, compiled_coup_primitive_forces_only_row)
     cr_assert_eq(er_get_tag(law_v), er_tag_law);
     er_law* law = er_outt(er_tag_law, law_v);
     cr_assert_not_null(law);
-    er_op* code = law->bc_v[0];
+    er_op* code = er_law_label_code(law, 0);
     cr_assert_not_null(code);
 
     size_t eval_s = 0;
@@ -1392,7 +1432,7 @@ Test(run_vm, compiled_law_inlines_simple_primitive_wrapper)
     cr_assert_eq(er_get_tag(law_v), er_tag_law);
     er_law* law = er_outt(er_tag_law, law_v);
     cr_assert_not_null(law);
-    er_op* code = law->bc_v[0];
+    er_op* code = er_law_label_code(law, 0);
     cr_assert_not_null(code);
 
     cr_assert_eq(code[0].tag, OP_PUSH_LIT);
@@ -1422,7 +1462,7 @@ Test(run_vm, compiled_if_evals_condition_before_jump)
     cr_assert_eq(er_get_tag(law_v), er_tag_law);
     er_law* law = er_outt(er_tag_law, law_v);
     cr_assert_not_null(law);
-    er_op* code = law->bc_v[0];
+    er_op* code = er_law_label_code(law, 0);
     cr_assert_not_null(code);
 
     cr_assert_eq(code[1].tag, OP_EVAL);
@@ -1589,7 +1629,7 @@ Test(run_vm, recursive_factorial_uses_bytecode_calls_and_primop_set)
     };
     code[4].as.lit_v = prim66_v;
     code[12].as.lit_v = prim66_v;
-    er_val fact_v = make_law(2, code, 0, NULL);
+    er_val fact_v = make_law_with_len(2, code, sizeof(code) / sizeof(code[0]));
     er_val call_v = make_call(fact_v, 3);
     er_thk* call = er_outt(er_tag_thk, call_v);
     call->arg_v[1] = 8;

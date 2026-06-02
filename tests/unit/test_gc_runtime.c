@@ -57,7 +57,8 @@ Test(gc_runtime, collect_moves_and_traces_er_runtime_tags)
 
     er_op ret_op[] = {{.tag = OP_RET}};
     er_op* label_v[] = {ret_op};
-    er_val law_v = er_law_make_code(loc_a, 77, bat_v, 0, 0, 1, label_v);
+    size_t label_len_v[] = {1};
+    er_val law_v = er_law_make_code(loc_a, 77, bat_v, 0, 0, 1, label_v, label_len_v);
     cr_assert_eq(er_get_tag(law_v), er_tag_law);
     er_law* old_law = er_outt(er_tag_law, law_v);
 
@@ -99,7 +100,10 @@ Test(gc_runtime, collect_moves_and_traces_er_runtime_tags)
     cr_assert_neq(moved_law, old_law);
     cr_assert_eq(moved_law->name_v, 77);
     cr_assert_eq(moved_law->bc_s, 1);
-    cr_assert_eq(moved_law->bc_v[0], ret_op);
+    er_op* moved_code = er_law_label_code(moved_law, 0);
+    cr_assert_not_null(moved_code);
+    cr_assert_neq(moved_code, ret_op);
+    cr_assert_eq(moved_code[0].tag, OP_RET);
 
     er_bat* moved_bat = er_outt(er_tag_bat, moved_law->body_v);
     cr_assert_not_null(moved_bat);
@@ -141,6 +145,43 @@ Test(gc_runtime, allocator_collection_preserves_registered_root)
     cr_assert_eq(root->arg_v[0], 11);
     cr_assert_eq(root->arg_v[1], 22);
     cr_assert_eq(root->arg_v[2], 33);
+
+    enki_gc_destroy(gc);
+}
+
+Test(gc_runtime, law_bytecode_literals_are_traced)
+{
+    enki_gc* gc = enki_gc_create(enki_allocator_system(), 8192, NULL);
+    cr_assert_not_null(gc);
+    const enki_allocator* loc_a = enki_gc_as_allocator(gc);
+
+    uint64_t limbs_q[] = {UINT64_C(0x1234)};
+    er_val bat_v = gc_make_bat(loc_a, 1, limbs_q);
+    er_bat* old_bat = er_outt(er_tag_bat, bat_v);
+    cr_assert_not_null(old_bat);
+
+    er_op code[] = {
+        [0] = {.tag = OP_PUSH_LIT, .as.lit_v = bat_v},
+        [1] = {.tag = OP_RET},
+    };
+    er_op* label_v[] = {code};
+    size_t label_len_v[] = {2};
+    er_val law_v = er_law_make_code(loc_a, 0, 0, 0, 0, 1, label_v, label_len_v);
+    cr_assert_eq(er_get_tag(law_v), er_tag_law);
+
+    er_gc_roots roots = {.val_v = {law_v}, .val_s = 1};
+    enki_gc_set_trace_root(gc, &roots, trace_er_roots);
+    enki_gc_collect(gc);
+
+    er_law* moved_law = er_outt(er_tag_law, roots.val_v[0]);
+    cr_assert_not_null(moved_law);
+    er_op* moved_code = er_law_label_code(moved_law, 0);
+    cr_assert_not_null(moved_code);
+    er_bat* moved_bat = er_outt(er_tag_bat, moved_code[0].as.lit_v);
+    cr_assert_not_null(moved_bat);
+    cr_assert_neq(moved_bat, old_bat);
+    cr_assert_eq(moved_bat->lim_s, 1);
+    cr_assert_eq(moved_bat->lim_q[0], limbs_q[0]);
 
     enki_gc_destroy(gc);
 }
@@ -219,7 +260,7 @@ Test(gc_runtime, plan_eval_nf_keeps_parent_rooted_when_child_allocates)
     enki_gc_destroy(gc);
 }
 
-Test(gc_runtime, compiled_law_keeps_bytecode_outside_gc_heap)
+Test(gc_runtime, compiled_law_keeps_inline_bytecode_valid_after_collection)
 {
     enki_gc* gc = enki_gc_create(enki_allocator_system(), 16384, NULL);
     cr_assert_not_null(gc);
