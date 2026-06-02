@@ -689,11 +689,8 @@ static bool er_callable_arity(er_val val_v, uint32_t* out_d)
 
 static uint32_t er_arity(er_val val_v)
 {
-  uint32_t arity_d = 0;
-  if (er_callable_arity(val_v, &arity_d)) {
-    return arity_d;
-  }
-  return 0;
+  er_law* law = er_outt(er_tag_law, val_v);
+  return law == NULL ? 0 : law->ari_d;
 }
 
 static er_val plan_eval_nf_inner(er_vm* vm, er_val val_v);

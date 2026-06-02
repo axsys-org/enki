@@ -26,10 +26,15 @@ static void teardown(void)
     fixture_interp = NULL;
 }
 
-static enki_value pin_nat(enki_value inner_v)
+static enki_value pin_value(enki_value inner_v)
 {
     uint8_t hash_b[32] = {0};
     return enki_pin_alloc(fixture_interp->gc, hash_b, inner_v, 0, NULL);
+}
+
+static enki_value pin_nat(enki_value inner_v)
+{
+    return pin_value(inner_v);
 }
 
 static enki_value app1(enki_value fn_v, enki_value a)
@@ -54,6 +59,16 @@ static enki_value strnat(const char* str_c)
     return enki_alloc_cstrnat(fixture_interp->gc, (char*)str_c);
 }
 
+static enki_value eval_op66_arity(enki_value input_v)
+{
+    enki_value pin_b = pin_nat(66);
+    enki_value row_v = app1(strnat("Arity"), input_v);
+    enki_value out_v = 0;
+
+    cr_assert_eq(enki_plan_apply(&fixture_plan, pin_b, 1, &row_v, &out_v), ENKI_ERROR_OK);
+    return out_v;
+}
+
 TestSuite(plan, .init = setup, .fini = teardown);
 
 Test(plan, pinned_op66_add_evaluates_row)
@@ -65,6 +80,20 @@ Test(plan, pinned_op66_add_evaluates_row)
     cr_assert_eq(enki_plan_apply(&fixture_plan, pin_b, 1, &row_v, &out_v), ENKI_ERROR_OK);
 
     cr_assert_eq(out_v, 42);
+}
+
+Test(plan, op66_arity_reports_only_raw_laws)
+{
+    enki_value raw_law_v = enki_law_alloc(fixture_interp->gc, 3, 0, 0, 0, 0, NULL, NULL);
+    enki_value pinned_law_v = pin_value(raw_law_v);
+    enki_value primitive_pin_v = pin_nat(66);
+    enki_value partial_app_v = app1(raw_law_v, 99);
+
+    cr_assert_eq(eval_op66_arity(raw_law_v), 3);
+    cr_assert_eq(eval_op66_arity(pinned_law_v), 0);
+    cr_assert_eq(eval_op66_arity(primitive_pin_v), 0);
+    cr_assert_eq(eval_op66_arity(partial_app_v), 0);
+    cr_assert_eq(eval_op66_arity(42), 0);
 }
 
 Test(plan, treewalks_law_body_with_vars_and_application)

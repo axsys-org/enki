@@ -845,9 +845,9 @@ static enki_error plan_dispatch_op66(enki_plan* plan, enki_value row_v, enki_val
     case OP66_ARITY:
         if ((err = plan_require_argc(plan, row.n_args_s, 1)) != ENKI_ERROR_OK)
             break;
-        if ((err = plan_arity_value(plan, row.args_v[0], &n_s)) != ENKI_ERROR_OK)
-            break;
-        *out_v = (enki_value)n_s;
+        *out_v = plan_is_kind(row.args_v[0], ENKI_LAW)
+                     ? (enki_value)ENKI_AS(enki_law, row.args_v[0])->arity_s
+                     : 0;
         break;
     case OP66_NAME:
         if ((err = plan_require_argc(plan, row.n_args_s, 1)) != ENKI_ERROR_OK)

@@ -185,6 +185,15 @@ static er_val make_app_value(er_val fn_v, size_t arg_s, const er_val arg_v[])
     return app_v;
 }
 
+static er_app* assert_app_value(er_val value_v, er_val fn_v, size_t arg_s)
+{
+    er_app* app = er_outt(er_tag_app, value_v);
+    cr_assert_not_null(app);
+    cr_assert_eq(app->fn_v, fn_v);
+    cr_assert_eq(app->arg_s, arg_s);
+    return app;
+}
+
 Test(run_ops, elim_app_case_receives_init_and_last)
 {
     er_val app_args_v[] = {20, 30};
@@ -204,6 +213,52 @@ Test(run_ops, elim_app_case_receives_init_and_last)
     cr_assert_eq(init->fn_v, 10);
     cr_assert_eq(init->arg_s, 1);
     cr_assert_eq(init->arg_v[0], 20);
+}
+
+Test(run_ops, row_helpers_match_reference_fallbacks)
+{
+    const enki_allocator* loc_a = enki_allocator_system();
+    er_val row_args_v[] = {11, 22};
+    er_val row_v = make_app_value(77, 2, row_args_v);
+
+    cr_assert_eq(eo_hd(row_v), 77);
+    cr_assert_eq(eo_hd(123), 123);
+    cr_assert_eq(eo_coup(loc_a, 44, 123), 44);
+
+    cr_assert_eq(eo_slice(loc_a, 0, 0, row_v), 0);
+    cr_assert_eq(eo_slice(loc_a, 2, 1, row_v), 0);
+    er_app* sliced = assert_app_value(eo_slice(loc_a, row_v, 1, row_v), 0, 1);
+    cr_assert_eq(sliced->arg_v[0], 11);
+
+    cr_assert_eq(eo_up(loc_a, 9, 99, row_v), row_v);
+    cr_assert_eq(eo_up(loc_a, 0, 99, 123), 123);
+
+    er_app* updated = assert_app_value(eo_up(loc_a, row_v, 99, row_v), 77, 2);
+    cr_assert_eq(updated->arg_v[0], 99);
+    cr_assert_eq(updated->arg_v[1], 22);
+}
+
+Test(run_ops, weld_uses_head_zero_and_empty_non_app_rows)
+{
+    const enki_allocator* loc_a = enki_allocator_system();
+    er_val x_args_v[] = {1, 2};
+    er_val y_args_v[] = {3};
+    er_val x_v = make_app_value(9, 2, x_args_v);
+    er_val y_v = make_app_value(8, 1, y_args_v);
+
+    er_app* welded = assert_app_value(eo_weld(loc_a, x_v, y_v), 0, 3);
+    cr_assert_eq(welded->arg_v[0], 1);
+    cr_assert_eq(welded->arg_v[1], 2);
+    cr_assert_eq(welded->arg_v[2], 3);
+
+    welded = assert_app_value(eo_weld(loc_a, 123, y_v), 0, 1);
+    cr_assert_eq(welded->arg_v[0], 3);
+
+    welded = assert_app_value(eo_weld(loc_a, x_v, 456), 0, 2);
+    cr_assert_eq(welded->arg_v[0], 1);
+    cr_assert_eq(welded->arg_v[1], 2);
+
+    assert_app_value(eo_weld(loc_a, 123, 456), 0, 0);
 }
 
 typedef struct er_gc_test_root {
@@ -377,6 +432,23 @@ static er_val run_prim66_inc(er_val input_v)
     er_op code[] = {
         [0] = {.tag = OP_PUSH_LIT, .as.lit_v = prim66_v},
         [1] = {.tag = OP_PUSH_LIT, .as.lit_v = PLAN_S3('I', 'n', 'c')},
+        [2] = {.tag = OP_PUSH_LIT, .as.lit_v = input_v},
+        [3] = {.tag = OP_MK_APP, .as.u32 = 2},
+        [4] = {.tag = OP_MK_CALL, .as.u32 = 2},
+        [5] = {.tag = OP_EVAL},
+        [6] = {.tag = OP_RET},
+    };
+    er_val law_v = make_law(0, code, 0, NULL);
+    er_val call_v = make_call(law_v, 1);
+    return run_vm(code, call_v);
+}
+
+static er_val run_prim66_arity(er_val input_v)
+{
+    er_val prim66_v = make_prim66();
+    er_op code[] = {
+        [0] = {.tag = OP_PUSH_LIT, .as.lit_v = prim66_v},
+        [1] = {.tag = OP_PUSH_LIT, .as.lit_v = PLAN_S5('A', 'r', 'i', 't', 'y')},
         [2] = {.tag = OP_PUSH_LIT, .as.lit_v = input_v},
         [3] = {.tag = OP_MK_APP, .as.u32 = 2},
         [4] = {.tag = OP_MK_CALL, .as.u32 = 2},
@@ -674,6 +746,23 @@ Test(run_vm, primop66_cmp_identical_non_nat_is_equal)
     er_val call_v = make_call(law_v, 1);
 
     cr_assert_eq(run_vm(code, call_v), 1);
+}
+
+Test(run_vm, primop66_arity_reports_only_raw_laws)
+{
+    er_op raw_code[] = {{.tag = OP_RET}};
+    er_val raw_law_v = make_law(3, raw_code, 0, NULL);
+    er_val pinned_law_v = er_pin_make(enki_allocator_system(), raw_law_v);
+    cr_assert_eq(er_get_tag(pinned_law_v), er_tag_pin);
+    er_val primitive_pin_v = make_prim66();
+    er_val partial_arg_v = 99;
+    er_val partial_app_v = make_app_value(raw_law_v, 1, &partial_arg_v);
+
+    cr_assert_eq(run_prim66_arity(raw_law_v), 3);
+    cr_assert_eq(run_prim66_arity(pinned_law_v), 0);
+    cr_assert_eq(run_prim66_arity(primitive_pin_v), 0);
+    cr_assert_eq(run_prim66_arity(partial_app_v), 0);
+    cr_assert_eq(run_prim66_arity(42), 0);
 }
 
 Test(run_vm, primop66_init_singleton_returns_head)

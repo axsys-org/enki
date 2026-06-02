@@ -199,6 +199,15 @@ bool eo_nat_to_size(er_val v, size_t* out_s)
     return ok;
 }
 
+static size_t eo_nat_size_or(er_val v, size_t nonnat_s, size_t overflow_s)
+{
+    size_t out_s = 0;
+    if (!eo_is_nat(v)) {
+        return nonnat_s;
+    }
+    return eo_nat_to_size(v, &out_s) ? out_s : overflow_s;
+}
+
 static bool eo_mul_size(size_t a_s, size_t b_s, size_t* out_s)
 {
     if (b_s != 0 && a_s > SIZE_MAX / b_s) {
@@ -805,16 +814,18 @@ er_val eo_row(const enki_allocator* loc_a, er_val hd_v, er_val count_v, er_val x
 er_val eo_slice(const enki_allocator* loc_a, er_val off_v, er_val count_v, er_val row_v)
 {
     ENKI_PROFILE_ZONE("eo_slice");
-    size_t off_s = 0;
-    size_t count_s = 0;
+    size_t off_s = eo_nat_size_or(off_v, 0, SIZE_MAX);
+    size_t count_s = eo_nat_size_or(count_v, 0, SIZE_MAX);
     er_app* row = er_outt(er_tag_app, row_v);
-    if (row == NULL || !eo_nat_to_size(off_v, &off_s) || !eo_nat_to_size(count_v, &count_s) ||
-        off_s > row->arg_s) {
+    if (row == NULL || off_s > row->arg_s) {
         return 0;
     }
     size_t keep_s = row->arg_s - off_s;
     if (keep_s > count_s) {
         keep_s = count_s;
+    }
+    if (keep_s == 0) {
+        return 0;
     }
     return eo_app_make(loc_a, 0, keep_s, row->arg_v + off_s);
 }
@@ -824,36 +835,43 @@ er_val eo_weld(const enki_allocator* loc_a, er_val x_v, er_val y_v)
     ENKI_PROFILE_ZONE("eo_weld");
     er_app* x = er_outt(er_tag_app, x_v);
     er_app* y = er_outt(er_tag_app, y_v);
+    size_t x_s = x == NULL ? 0 : x->arg_s;
+    size_t y_s = y == NULL ? 0 : y->arg_s;
     size_t total_s = 0;
-    if (x == NULL || y == NULL || !eo_add_size(x->arg_s, y->arg_s, &total_s)) {
+    if (!eo_add_size(x_s, y_s, &total_s)) {
         return 0;
     }
     er_app* out = er_app_alloc(loc_a, total_s);
     if (out == NULL) {
         return er_bad;
     }
-    er_val out_v = er_app_init(out, x->fn_v, total_s, NULL);
+    er_val out_v = er_app_init(out, 0, total_s, NULL);
     if (out_v == 0) {
         return er_bad;
     }
-    memcpy(out->arg_v, x->arg_v, x->arg_s * sizeof(er_val));
-    memcpy(out->arg_v + x->arg_s, y->arg_v, y->arg_s * sizeof(er_val));
+    if (x_s > 0) {
+        memcpy(out->arg_v, x->arg_v, x_s * sizeof(er_val));
+    }
+    if (y_s > 0) {
+        memcpy(out->arg_v + x_s, y->arg_v, y_s * sizeof(er_val));
+    }
     return out_v;
 }
 
 er_val eo_up(const enki_allocator* loc_a, er_val idx_v, er_val val_v, er_val row_v)
 {
     ENKI_PROFILE_ZONE("eo_up");
-    size_t idx_s = 0;
+    size_t idx_s = eo_nat_size_or(idx_v, 0, SIZE_MAX);
     er_app* row = er_outt(er_tag_app, row_v);
-    if (row == NULL || !eo_nat_to_size(idx_v, &idx_s)) {
-        return 0;
+    if (row == NULL || idx_s >= row->arg_s) {
+        return row_v;
     }
     er_val out_v = eo_app_make(loc_a, row->fn_v, row->arg_s, row->arg_v);
     er_app* out = er_outt(er_tag_app, out_v);
-    if (out != NULL && idx_s < out->arg_s) {
-        out->arg_v[idx_s] = val_v;
+    if (out == NULL) {
+        return out_v;
     }
+    out->arg_v[idx_s] = val_v;
     return out_v;
 }
 
@@ -861,14 +879,14 @@ er_val eo_coup(const enki_allocator* loc_a, er_val hd_v, er_val row_v)
 {
     ENKI_PROFILE_ZONE("eo_coup");
     er_app* row = er_outt(er_tag_app, row_v);
-    return row == NULL ? 0 : eo_thk_app(loc_a, hd_v, row->arg_s, row->arg_v);
+    return row == NULL ? hd_v : eo_thk_app(loc_a, hd_v, row->arg_s, row->arg_v);
 }
 
 er_val eo_hd(er_val row_v)
 {
     ENKI_PROFILE_ZONE("eo_hd");
     er_app* row = er_outt(er_tag_app, row_v);
-    return row == NULL ? 0 : row->fn_v;
+    return row == NULL ? row_v : row->fn_v;
 }
 
 er_val eo_ix(er_val idx_v, er_val row_v)
