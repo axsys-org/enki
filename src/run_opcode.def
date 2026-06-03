@@ -1,0 +1,85 @@
+/*
+ * Private evaluator opcode metadata.
+ *
+ * The numeric values mirror include/enki/run.h and must stay stable for the
+ * public bytecode format. The role groups keep the evaluator dispatch table
+ * readable without introducing a generic primitive-leaf dispatch path.
+ */
+
+#define ER_CORE_OPS(X) \
+    X(OP_PUSH_VAR, I_PUSH_VAR, 0) \
+    X(OP_PUSH_LIT, I_PUSH_LIT, 1) \
+    X(OP_MK_APP, I_MK_APP, 2) \
+    X(OP_CALLF, I_CALLF, 3) \
+    X(OP_CALLU, I_CALLU, 4) \
+    X(OP_PUSH_SELF, I_PUSH_SELF, 5) \
+    X(OP_EVAL, I_EVAL, 6) \
+    X(OP_TAIL_EVAL, I_TAIL_EVAL, 7) \
+    X(OP_FORCE, I_FORCE, 8) \
+    X(OP_DROP, I_DROP, 9) \
+    X(OP_ROTATE, I_ROTATE, 10) \
+    X(OP_JUMP_IF_ZERO, I_JUMP_IF_ZERO, 11) \
+    X(OP_JUMP_IF, I_JUMP_IF, 12) \
+    X(OP_ADD_NAT, I_ADD_NAT, 13)
+
+#define ER_PRIM_LEAF_OPS(X) \
+    X(OP_PIN, I_OP_PIN, 14) \
+    X(OP_LAW, I_OP_LAW, 15) \
+    X(OP_ELIM, I_OP_ELIM, 16) \
+    X(OP_INC, I_OP_INC, 17) \
+    X(OP_DEC, I_OP_DEC, 18) \
+    X(OP_NAM, I_OP_NAM, 19) \
+    X(OP_BODY, I_OP_BODY, 20) \
+    X(OP_NAT, I_OP_NAT, 21) \
+    X(OP_ARI, I_OP_ARI, 22) \
+    X(OP_UNPIN, I_OP_UNPIN, 23) \
+    X(OP_SZ, I_OP_SZ, 24) \
+    X(OP_LAST, I_OP_LAST, 25) \
+    X(OP_INIT, I_OP_INIT, 26) \
+    X(OP_ADD, I_OP_ADD, 27) \
+    X(OP_SUB, I_OP_SUB, 28) \
+    X(OP_RSH, I_OP_RSH, 29) \
+    X(OP_LSH, I_OP_LSH, 30) \
+    X(OP_DIV, I_OP_DIV, 31) \
+    X(OP_MUL, I_OP_MUL, 32) \
+    X(OP_MOD, I_OP_MOD, 33) \
+    X(OP_TEST, I_OP_TEST, 34) \
+    X(OP_LOADN, I_OP_LOADN, 35) \
+    X(OP_LOAD, I_OP_LOAD, 36) \
+    X(OP_STOREN, I_OP_STOREN, 37) \
+    X(OP_STORE, I_OP_STORE, 38) \
+    X(OP_TRUNCN, I_OP_TRUNCN, 39) \
+    X(OP_TRUNC, I_OP_TRUNC, 40) \
+    X(OP_MET, I_OP_MET, 41) \
+    X(OP_MET_DYN, I_OP_MET_DYN, 42) \
+    X(OP_BEX, I_OP_BEX, 43) \
+    X(OP_BITS, I_OP_BITS, 44) \
+    X(OP_BYTES, I_OP_BYTES, 45) \
+    X(OP_LOAD8, I_OP_LOAD8, 46) \
+    X(OP_STORE8, I_OP_STORE8, 47) \
+    X(OP_TRUNC8, I_OP_TRUNC8, 48) \
+    X(OP_TRUNC16, I_OP_TRUNC16, 49) \
+    X(OP_TRUNC32, I_OP_TRUNC32, 50) \
+    X(OP_TRUNC64, I_OP_TRUNC64, 51) \
+    X(OP_REP, I_OP_REP, 52) \
+    X(OP_SLICE, I_OP_SLICE, 53) \
+    X(OP_WELD, I_OP_WELD, 54) \
+    X(OP_UP, I_OP_UP, 55) \
+    X(OP_COUP, I_OP_COUP, 56) \
+    X(OP_HD, I_OP_HD, 57) \
+    X(OP_IX, I_OP_IX, 58) \
+    X(OP_NOT, I_OP_NOT, 59) \
+    X(OP_TRU, I_OP_TRU, 60) \
+    X(OP_OR, I_OP_OR, 61) \
+    X(OP_AND, I_OP_AND, 62) \
+    X(OP_EQ, I_OP_EQ, 63) \
+    X(OP_LE, I_OP_LE, 64) \
+    X(OP_CMP, I_OP_CMP, 65)
+
+#define ER_RETURN_CONTROL_OPS(X) \
+    X(OP_RET, I_RET, 66)
+
+#define ER_ALL_OPS(X) \
+    ER_CORE_OPS(X) \
+    ER_PRIM_LEAF_OPS(X) \
+    ER_RETURN_CONTROL_OPS(X)
