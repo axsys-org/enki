@@ -208,15 +208,10 @@ Test(gc_runtime, plan_eval_nf_keeps_parent_rooted_when_child_allocates)
     cr_assert_not_null(gc);
     const enki_allocator* loc_a = enki_gc_as_allocator(gc);
 
-    er_pin* prim66 = er_pin_alloc(loc_a, 0);
-    cr_assert_not_null(prim66);
-    er_val prim66_v = er_pin_init(prim66, NULL, 66, 0, NULL);
-    cr_assert_eq(er_get_tag(prim66_v), er_tag_pin);
-
     er_val max_small_v = UINT64_C(0x7fffffffffffffff);
     er_val row_v = gc_make_app(loc_a, PLAN_S3('I', 'n', 'c'), 1, &max_small_v);
-    er_val call_arg_v[] = {prim66_v, row_v};
-    er_val child_v = gc_make_thunk(loc_a, ER_CALL, 2, call_arg_v);
+    er_val call_arg_v[] = {66, row_v};
+    er_val child_v = gc_make_thunk(loc_a, ER_XPRIM, 2, call_arg_v);
     er_val root_v = gc_make_app(loc_a, 0, 1, &child_v);
     er_app* old_root = er_outt(er_tag_app, root_v);
     cr_assert_not_null(old_root);

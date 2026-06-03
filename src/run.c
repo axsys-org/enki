@@ -196,6 +196,7 @@ er_val er_pin_init(er_pin* pin, const uint8_t hash_b[32], er_val val_v, size_t s
     if (!er_flex_fits(&pin->hed, sizeof(er_pin), sub_s, sizeof(er_val))) {
         return 0;
     }
+    pin->hed.raw.nf_f = 1;
     pin->val_v = val_v;
     pin->sub_s = sub_s;
     if (hash_b != NULL) {
@@ -304,6 +305,7 @@ er_val er_law_init(er_law* law, er_val name_v, er_val body_v, uint32_t ari_d,
     law->let_d = let_d;
     law->bc_s = bc_s;
     law->op_s = op_s;
+    law->h.raw.nf_f = 1;
 
     er_op* dst_v = er_law_code_base(law);
     size_t off_s = 0;
@@ -880,7 +882,7 @@ static er_val plan_eval_whnf_preserve(er_vm* vm, er_val val_v);
 
 __attribute__((noinline))
 static er_val
-plan_eval_whnf(er_vm *vm, er_val val_v)
+plan_eval_whnf(er_vm *vm, er_val val_v, er_eval_mode mode)
 {
     ENKI_PROFILE_ZONE("plan_eval_whnf");
     er_op* code  = vm->code;
@@ -925,8 +927,10 @@ plan_eval_whnf(er_vm *vm, er_val val_v)
 
     er_op *op;
     er_val f, app, target;
+    er_head* head;
     er_kon kon;
     uint32_t split;
+    size_t idx_s;
 
 #define ER_DISPATCH_ENTRY(_tag, _label, _value) [_tag] = &&_label,
     static void *const dispatch[OP_COUNT] = {
@@ -1039,6 +1043,17 @@ plan_eval_whnf(er_vm *vm, er_val val_v)
         };                                                 \
     } while (0)
 
+#define KPUSH_APP_IDX(_app, _idx)                          \
+    do {                                                   \
+        *ksp++ = (er_kon){                                 \
+            .tag = ER_K_APP_IDX,                           \
+            .as.appidx = {                                 \
+                .app_v = (_app),                           \
+                .idx_s = (_idx),                           \
+            },                                             \
+        };                                                 \
+    } while (0)
+
 #define KPUSH_OVERAPP(_app, _split)                        \
     do {                                                   \
         *ksp++ = (er_kon){                                 \
@@ -1048,6 +1063,11 @@ plan_eval_whnf(er_vm *vm, er_val val_v)
                 .split_d = (uint32_t)(_split),             \
             },                                             \
         };                                                 \
+    } while (0)
+
+#define KPUSH_NORMAL()                                     \
+    do {                                                   \
+        *ksp++ = (er_kon){.tag = ER_K_NORMAL};             \
     } while (0)
 
 #define RETURN(_r)                                 \
@@ -1071,8 +1091,12 @@ plan_eval_whnf(er_vm *vm, er_val val_v)
             goto K_UPDATE;                         \
         case ER_K_APPHEAD:                         \
             goto K_APPHEAD;                        \
+        case ER_K_APP_IDX:                         \
+            goto K_APP_IDX;                        \
         case ER_K_OVERAPP:                         \
             goto K_OVERAPP;                        \
+        case ER_K_NORMAL:                          \
+            goto K_NORMAL;                         \
         default:                                   \
             assert("bad continuation" && 0);       \
             vm->dsp = dsp;                         \
@@ -1188,6 +1212,9 @@ plan_eval_whnf(er_vm *vm, er_val val_v)
     r = val_v;
     vm->gc_rp = &r;
     vm->gc_tmp_s = 0;
+    if (mode == ER_EVAL_NF) {
+        KPUSH_NORMAL();
+    }
     goto FORCE_ENTRY;
 
     // ---------------------------------------------------------------------
@@ -1354,12 +1381,9 @@ I_TAIL_EVAL:
 I_FORCE:
     r = DPOP();
     GC_SYNC();
-    r = plan_eval_nf_inner(vm, r);
-    dsp = vm->dsp;
-    ksp = vm->ksp;
-    CHECK_PRIM(r);
-    DPUSH(r);
-    DISPATCH();
+    KPUSH_BYTECODE_RETURN(pc, env, code_law_v, code_label_d);
+    KPUSH_NORMAL();
+    goto FORCE_ENTRY;
 
     // ---------------------------------------------------------------------
     // Force mode
@@ -1591,6 +1615,57 @@ K_UPDATE:
     thk->arg_v[0] = r;
     RETURN(r);
 
+K_APP_IDX:
+    app = kon.as.appidx.app_v;
+    idx_s = kon.as.appidx.idx_s;
+    prim_row = er_outt(er_tag_app, app);
+    if (prim_row == NULL) {
+      FAIL_TANK("bad app", app);
+    }
+    if (idx_s == 0) {
+      prim_row->fn_v = r;
+    } else {
+      idx_s--;
+      if (idx_s >= prim_row->arg_s) {
+        FAIL_TANK("bad app index", app);
+      }
+      prim_row->arg_v[idx_s] = r;
+    }
+    RETURN(app);
+
+K_NORMAL:
+    if (er_is_nf(r)) {
+      RETURN(r);
+    }
+    if (!er_is_tag(er_tag_app, r)) {
+      head = er_outa(r);
+      head->raw.nf_f = 1;
+      RETURN(r);
+    }
+
+    prim_row = er_outt(er_tag_app, r);
+    if (prim_row == NULL) {
+      FAIL_TANK("bad app", r);
+    }
+    if (!er_is_nf(prim_row->fn_v)) {
+      KPUSH_NORMAL();
+      KPUSH_APP_IDX(r, 0);
+      KPUSH_NORMAL();
+      r = prim_row->fn_v;
+      goto FORCE_ENTRY;
+    }
+    for (idx_s = 0; idx_s < prim_row->arg_s; idx_s++) {
+      if (!er_is_nf(prim_row->arg_v[idx_s])) {
+        KPUSH_NORMAL();
+        KPUSH_APP_IDX(r, idx_s + 1);
+        KPUSH_NORMAL();
+        r = prim_row->arg_v[idx_s];
+        goto FORCE_ENTRY;
+      }
+    }
+    prim_row->h.raw.nf_f = 1;
+    RETURN(r);
+
 K_APPHEAD:
     app = kon.as.apphead.app_v;
     thk = er_outt(er_tag_thk, app);
@@ -1633,7 +1708,9 @@ K_OVERAPP:
 #undef CHECK_PRIM
 #undef FAIL_ALLOC
 #undef RETURN
+#undef KPUSH_NORMAL
 #undef KPUSH_OVERAPP
+#undef KPUSH_APP_IDX
 #undef KPUSH_APPHEAD
 #undef KPUSH_UPDATE
 #undef KPUSH_BYTECODE_RETURN
@@ -1644,7 +1721,7 @@ K_OVERAPP:
 #undef DPUSH
 }
 
-static er_val plan_eval_whnf_preserve(er_vm* vm, er_val val_v)
+static er_val plan_eval_preserve(er_vm* vm, er_val val_v, er_eval_mode mode)
 {
     er_val* base_dsp = vm->dsp;
     er_kon* base_ksp = vm->ksp;
@@ -1663,7 +1740,7 @@ static er_val plan_eval_whnf_preserve(er_vm* vm, er_val val_v)
         };
     }
 
-    er_val out_v = plan_eval_whnf(vm, val_v);
+    er_val out_v = plan_eval_whnf(vm, val_v, mode);
 
     if (root_code_law_f) {
         saved_code_law_v = base_ksp->as.value_root.val_v;
@@ -1678,170 +1755,14 @@ static er_val plan_eval_whnf_preserve(er_vm* vm, er_val val_v)
     return out_v;
 }
 
+static er_val plan_eval_whnf_preserve(er_vm* vm, er_val val_v)
+{
+    return plan_eval_preserve(vm, val_v, ER_EVAL_WHNF);
+}
+
 static er_val plan_eval_nf_inner(er_vm* vm, er_val val_v)
 {
-    er_val* base_dsp = vm->dsp;
-    er_val root_v = plan_eval_whnf_preserve(vm, val_v);
-    if (!er_is_good(root_v) || er_is_cat(root_v)) {
-        return root_v;
-    }
-
-    switch (er_get_tag(root_v)) {
-    case er_tag_bat:
-    case er_tag_pin:
-    case er_tag_law:
-    case er_tag_app:
-        break;
-    default:
-        return er_tank_make(vm->loc_a, root_v, "bad value tag");
-    }
-
-    er_head* h = er_outa(root_v);
-    if (h->raw.nf_f) {
-        return root_v;
-    }
-
-    er_val* root_p = vm->dsp++;
-    *root_p = root_v;
-
-    switch (er_get_tag(root_v)) {
-    case er_tag_bat:
-        h = er_outa(*root_p);
-        h->raw.nf_f = 1;
-        break;
-
-    case er_tag_pin: {
-        er_pin* pin = er_outt(er_tag_pin, *root_p);
-        if (pin == NULL) {
-            root_v = er_tank_make(vm->loc_a, *root_p, "bad pin");
-            break;
-        }
-
-        er_val child_v = plan_eval_nf_inner(vm, pin->val_v);
-        if (!er_is_good(child_v)) {
-            root_v = child_v;
-            break;
-        }
-
-        pin = er_outt(er_tag_pin, *root_p);
-        if (pin == NULL) {
-            root_v = er_tank_make(vm->loc_a, *root_p, "bad pin");
-            break;
-        }
-        pin->val_v = child_v;
-
-        for (size_t k = 0; k < pin->sub_s; k++) {
-            child_v = plan_eval_nf_inner(vm, pin->sub_v[k]);
-            if (!er_is_good(child_v)) {
-                root_v = child_v;
-                break;
-            }
-            pin = er_outt(er_tag_pin, *root_p);
-            if (pin == NULL) {
-                root_v = er_tank_make(vm->loc_a, *root_p, "bad pin");
-                break;
-            }
-            pin->sub_v[k] = child_v;
-        }
-        if (!er_is_good(root_v)) {
-            break;
-        }
-
-        h = er_outa(*root_p);
-        h->raw.nf_f = 1;
-        break;
-    }
-
-    case er_tag_law: {
-        er_law* law = er_outt(er_tag_law, *root_p);
-        if (law == NULL) {
-            root_v = er_tank_make(vm->loc_a, *root_p, "bad law");
-            break;
-        }
-
-        er_val child_v = plan_eval_nf_inner(vm, law->name_v);
-        if (!er_is_good(child_v)) {
-            root_v = child_v;
-            break;
-        }
-
-        law = er_outt(er_tag_law, *root_p);
-        if (law == NULL) {
-            root_v = er_tank_make(vm->loc_a, *root_p, "bad law");
-            break;
-        }
-        law->name_v = child_v;
-
-        child_v = plan_eval_nf_inner(vm, law->body_v);
-        if (!er_is_good(child_v)) {
-            root_v = child_v;
-            break;
-        }
-
-        law = er_outt(er_tag_law, *root_p);
-        if (law == NULL) {
-            root_v = er_tank_make(vm->loc_a, *root_p, "bad law");
-            break;
-        }
-        law->body_v = child_v;
-
-        h = er_outa(*root_p);
-        h->raw.nf_f = 1;
-        break;
-    }
-
-    case er_tag_app: {
-        er_app* app = er_outt(er_tag_app, *root_p);
-        if (app == NULL) {
-            root_v = er_tank_make(vm->loc_a, *root_p, "bad app");
-            break;
-        }
-
-        er_val child_v = plan_eval_nf_inner(vm, app->fn_v);
-        if (!er_is_good(child_v)) {
-            root_v = child_v;
-            break;
-        }
-
-        app = er_outt(er_tag_app, *root_p);
-        if (app == NULL) {
-            root_v = er_tank_make(vm->loc_a, *root_p, "bad app");
-            break;
-        }
-        app->fn_v = child_v;
-
-        for (size_t k = 0; k < app->arg_s; k++) {
-            child_v = plan_eval_nf_inner(vm, app->arg_v[k]);
-            if (!er_is_good(child_v)) {
-                root_v = child_v;
-                break;
-            }
-            app = er_outt(er_tag_app, *root_p);
-            if (app == NULL) {
-                root_v = er_tank_make(vm->loc_a, *root_p, "bad app");
-                break;
-            }
-            app->arg_v[k] = child_v;
-        }
-        if (!er_is_good(root_v)) {
-            break;
-        }
-
-        h = er_outa(*root_p);
-        h->raw.nf_f = 1;
-        break;
-    }
-
-    default:
-        root_v = er_tank_make(vm->loc_a, root_v, "bad value tag");
-        break;
-    }
-
-    if (er_is_good(root_v)) {
-        root_v = *root_p;
-    }
-    vm->dsp = base_dsp;
-    return root_v;
+    return plan_eval_preserve(vm, val_v, ER_EVAL_NF);
 }
 
 er_val plan_eval(er_vm* vm, er_val val_v, er_eval_mode mode)

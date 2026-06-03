@@ -266,6 +266,9 @@ void enki_gc_trace_vm(enki_gc* gc, void* root)
         case ER_K_APPHEAD:
             enki_gc_trace_ref(gc, &cur->as.apphead.app_v);
             break;
+        case ER_K_APP_IDX:
+            enki_gc_trace_ref(gc, &cur->as.appidx.app_v);
+            break;
         case ER_K_OVERAPP:
             enki_gc_trace_ref(gc, &cur->as.overapp.app_v);
             break;

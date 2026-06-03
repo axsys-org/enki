@@ -157,7 +157,7 @@ Test(run_alloc, law_alloc_init_records_label_table)
     cr_assert_eq(er_get_tag(law_v), er_tag_law);
     cr_assert_eq(er_outa(law_v), law);
     cr_assert_eq(law->h.siz_s & ~(size_t)0x3, law->code_o + 4 * sizeof(er_op));
-    cr_assert_eq(law->h.raw.nf_f, 0);
+    cr_assert_eq(law->h.raw.nf_f, 1);
     cr_assert_eq(law->name_v, 11);
     cr_assert_eq(law->body_v, 22);
     cr_assert_eq(law->ari_d, 2);
@@ -999,6 +999,22 @@ Test(run_vm, plan_eval_nf_forces_children_inside_whnf_app)
     cr_assert_eq(app->arg_v[0], 42);
 }
 
+Test(run_vm, plan_eval_nf_forces_app_head)
+{
+    er_val head_v = make_done_thunk(7);
+    er_val arg_v = 11;
+    er_val app_v = make_app_value(head_v, 1, &arg_v);
+
+    er_val result_v = run_vm_mode(NULL, app_v, ER_EVAL_NF);
+
+    er_app* app = er_outt(er_tag_app, result_v);
+    cr_assert_not_null(app);
+    cr_assert_eq(result_v, app_v);
+    cr_assert_eq(app->h.raw.nf_f, 1);
+    cr_assert_eq(app->fn_v, 7);
+    cr_assert_eq(app->arg_v[0], 11);
+}
+
 Test(run_vm, op_force_reduces_stack_value_to_nf)
 {
     er_val child_v = make_done_thunk(42);
@@ -1020,7 +1036,7 @@ Test(run_vm, op_force_reduces_stack_value_to_nf)
     cr_assert_eq(app->arg_v[0], 42);
 }
 
-Test(run_vm, plan_eval_nf_forces_pin_inner_and_subpins)
+Test(run_vm, plan_eval_nf_keeps_pin_fields_lazy)
 {
     er_val inner_v = make_done_thunk(42);
     er_val sub_v[] = {make_done_thunk(10)};
@@ -1035,11 +1051,11 @@ Test(run_vm, plan_eval_nf_forces_pin_inner_and_subpins)
     cr_assert_not_null(pin);
     cr_assert_eq(result_v, pin_v);
     cr_assert_eq(pin->hed.raw.nf_f, 1);
-    cr_assert_eq(pin->val_v, 42);
-    cr_assert_eq(pin->sub_v[0], 10);
+    cr_assert_eq(pin->val_v, inner_v);
+    cr_assert_eq(pin->sub_v[0], sub_v[0]);
 }
 
-Test(run_vm, plan_eval_nf_forces_law_name_and_body)
+Test(run_vm, plan_eval_nf_keeps_law_fields_lazy)
 {
     er_val name_v = make_done_thunk(10);
     er_val body_v = make_done_thunk(42);
@@ -1057,8 +1073,8 @@ Test(run_vm, plan_eval_nf_forces_law_name_and_body)
     cr_assert_not_null(law);
     cr_assert_eq(result_v, law_v);
     cr_assert_eq(law->h.raw.nf_f, 1);
-    cr_assert_eq(law->name_v, 10);
-    cr_assert_eq(law->body_v, 42);
+    cr_assert_eq(law->name_v, name_v);
+    cr_assert_eq(law->body_v, body_v);
 }
 
 Test(run_vm, direct_primop_bytecode_uses_data_stack)

@@ -128,6 +128,27 @@ typedef struct er_thk {
   er_val arg_v[];
 } er_thk;
 
+static inline bool er_is_nf(er_val val_v)
+{
+    if (er_is_cat(val_v)) {
+        return true;
+    }
+    if (!er_is_good(val_v)) {
+        return false;
+    }
+    switch (er_get_tag(val_v)) {
+    case er_tag_bat:
+    case er_tag_pin:
+    case er_tag_law:
+    case er_tag_app:
+        break;
+    default:
+        return false;
+    }
+    er_head* h = er_outa(val_v);
+    return h->raw.nf_f != 0;
+}
+
 er_tank* er_tank_alloc(const enki_allocator* allocator);
 er_val er_tank_init(er_tank* tank, er_val val_v, char* msg_c);
 er_val er_tank_make(const enki_allocator* loc_a, er_val val_v, char* msg_c);
@@ -279,7 +300,9 @@ typedef enum er_kon_tag {
     ER_K_BYTECODE_RETURN = 1,
     ER_K_UPDATE,
     ER_K_APPHEAD,
+    ER_K_APP_IDX,
     ER_K_OVERAPP,
+    ER_K_NORMAL,
     ER_K_VALUE_ROOT,
 } er_kon_tag;
 
@@ -301,6 +324,11 @@ typedef struct er_kon_apphead {
     er_val app_v;
 } er_kon_apphead;
 
+typedef struct er_kon_app_idx {
+    er_val app_v;
+    size_t idx_s;
+} er_kon_app_idx;
+
 typedef struct er_kon_overapp {
     er_val app_v;
     uint32_t split_d;
@@ -316,6 +344,7 @@ typedef struct er_kon {
         er_kon_bytecode_return bytecode_return;
         er_kon_update update;
         er_kon_apphead apphead;
+        er_kon_app_idx appidx;
         er_kon_overapp overapp;
         er_kon_value_root value_root;
     } as;

@@ -190,6 +190,7 @@ static void enki_print_value_sb(const enki_allocator* cat_a, enki_string_builder
 
     er_thk* thk = er_outt(er_tag_thk, val_v);
     if (thk != NULL) {
+
       if (thk->fun == ER_XDONE) {
         enki_print_value_sb(cat_a, sb, thk->arg_v[0]);
         return;
@@ -217,6 +218,14 @@ char* enki_print_value(const enki_allocator* cat_a, er_val val_v, size_t* out_s)
     size_t def_s = 0;
     if (out_s == NULL) {
         out_s = &def_s;
+    }
+
+    er_thk* thk = er_outt(er_tag_thk, val_v);
+    if (thk != NULL) {
+      er_val res_v = er_eval_to(cat_a, val_v, ER_EVAL_NF);
+      if ( er_is_good(res_v) ) {
+        val_v = res_v;
+      }
     }
     enki_string_builder sb;
     enki_sb_init(&sb, cat_a);
