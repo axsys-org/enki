@@ -1034,6 +1034,12 @@ static bool er_bc_compile_plain_call(er_bc_compiler* c, size_t depth_s, uint32_t
             code->ok_f = false;
             return false;
         }
+        if (arg_s == 1) {
+            return er_bc_emit_lit(code, lit_v) &&
+                   er_bc_compile_app_value(c, depth_s, ari_d, arg_v[0], code) &&
+                   er_bc_emit(code, OP_CALLP) &&
+                   er_bc_emit_tail_eval_if(code, tail_f, true);
+        }
         bool thunk_f = false;
         return er_bc_emit_lit(code, lit_v) &&
                er_bc_compile_app_value(c, depth_s, ari_d, arg_v[0], code) &&

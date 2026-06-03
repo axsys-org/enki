@@ -121,6 +121,14 @@ Test(run_alloc, tank_uses_error_tag_and_records_payload)
     free_system(tank);
 }
 
+Test(run_vm, opcode_values_stay_stable_with_callp_appended)
+{
+    cr_assert_eq(OP_PUSH_VAR, 0);
+    cr_assert_eq(OP_RET, 66);
+    cr_assert_eq(OP_CALLP, 67);
+    cr_assert_eq(OP_COUNT, 68);
+}
+
 static size_t test_code_len(const er_op* code_v)
 {
     cr_assert_not_null(code_v);
@@ -750,6 +758,27 @@ Test(run_vm, mk_app_uses_operand_count_and_leaves_single_stack_value)
     cr_assert_eq(app->arg_v[1], 20);
 }
 
+Test(run_vm, mk_app_flattens_existing_app_head)
+{
+    er_val row_arg_v[] = {1, 2};
+    er_val row_v = make_app_value(0, 2, row_arg_v);
+    er_op code[] = {
+        [0] = {.tag = OP_PUSH_LIT, .as.lit_v = row_v},
+        [1] = {.tag = OP_PUSH_LIT, .as.lit_v = 3},
+        [2] = {.tag = OP_MK_APP, .as.u32 = 2},
+        [3] = {.tag = OP_RET},
+    };
+    er_val law_v = make_law(0, code, 0, NULL);
+    er_val call_v = make_call(law_v, 1);
+
+    er_val result_v = run_vm(code, call_v);
+
+    er_app* app = assert_app_value(result_v, 0, 3);
+    cr_assert_eq(app->arg_v[0], 1);
+    cr_assert_eq(app->arg_v[1], 2);
+    cr_assert_eq(app->arg_v[2], 3);
+}
+
 Test(run_vm, callf_builds_call_thunk_without_evaluating)
 {
     er_op callee_code[] = {
@@ -810,6 +839,54 @@ Test(run_vm, callu_builds_unknown_app_thunk_without_evaluating)
     cr_assert_eq(thunk->arg_s, 2);
     cr_assert_eq(thunk->arg_v[0], callee_v);
     cr_assert_eq(thunk->arg_v[1], 41);
+}
+
+Test(run_vm, callp_builds_primitive_thunk_without_evaluating)
+{
+    er_val prim66_v = make_prim66();
+    er_val bad_v = make_hole_thunk();
+    er_val row_v = make_app_value(PLAN_S3('I', 'n', 'c'), 1, &bad_v);
+    er_op code[] = {
+        [0] = {.tag = OP_PUSH_LIT, .as.lit_v = 0},
+        [1] = {.tag = OP_PUSH_LIT, .as.lit_v = prim66_v},
+        [2] = {.tag = OP_PUSH_LIT, .as.lit_v = row_v},
+        [3] = {.tag = OP_CALLP},
+        [4] = {.tag = OP_MK_APP, .as.u32 = 2},
+        [5] = {.tag = OP_RET},
+    };
+    er_val law_v = make_law(0, code, 0, NULL);
+    er_val call_v = make_call(law_v, 1);
+
+    er_val result_v = run_vm(code, call_v);
+
+    er_app* app = assert_app_value(result_v, 0, 1);
+    er_thk* thunk = er_outt(er_tag_thk, app->arg_v[0]);
+    cr_assert_not_null(thunk);
+    cr_assert_eq(thunk->fun, ER_XPRIM);
+    cr_assert_eq(thunk->arg_s, 2);
+    cr_assert_eq(thunk->arg_v[0], 66);
+    cr_assert_eq(thunk->arg_v[1], row_v);
+}
+
+Test(run_vm, callp_evaluates_primitive_route_with_explicit_eval)
+{
+    er_val prim66_v = make_prim66();
+    er_op code[] = {
+        [0] = {.tag = OP_PUSH_LIT, .as.lit_v = prim66_v},
+        [1] = {.tag = OP_PUSH_LIT, .as.lit_v = PLAN_S3('I', 'n', 'c')},
+        [2] = {.tag = OP_PUSH_LIT, .as.lit_v = 41},
+        [3] = {.tag = OP_MK_APP, .as.u32 = 2},
+        [4] = {.tag = OP_CALLP},
+        [5] = {.tag = OP_EVAL},
+        [6] = {.tag = OP_RET},
+    };
+
+    cr_assert_eq(run_code(code), 42);
+}
+
+Test(run_vm, callu_primitive_pin_uses_xprim_path)
+{
+    cr_assert_eq(run_prim66_inc(41), 42);
 }
 
 Test(run_vm, call_builders_evaluate_only_with_explicit_eval)
@@ -1502,6 +1579,26 @@ Test(run_vm, primop66_row_forces_list_spine_while_copying_lazy_items)
     cr_assert_eq(run_vm(code, call_v), 3);
 }
 
+Test(run_vm, callu_non_callable_head_returns_flat_app)
+{
+    er_op code[] = {
+        [0] = {.tag = OP_PUSH_LIT, .as.lit_v = 9},
+        [1] = {.tag = OP_PUSH_LIT, .as.lit_v = 1},
+        [2] = {.tag = OP_PUSH_LIT, .as.lit_v = 2},
+        [3] = {.tag = OP_CALLU, .as.u32 = 2},
+        [4] = {.tag = OP_EVAL},
+        [5] = {.tag = OP_RET},
+    };
+    er_val law_v = make_law(0, code, 0, NULL);
+    er_val call_v = make_call(law_v, 1);
+
+    er_val result_v = run_vm(code, call_v);
+
+    er_app* app = assert_app_value(result_v, 9, 2);
+    cr_assert_eq(app->arg_v[0], 1);
+    cr_assert_eq(app->arg_v[1], 2);
+}
+
 Test(run_vm, unknown_application_flattens_existing_app_head)
 {
     er_val row_arg_v[] = {1, 2, 3};
@@ -1551,6 +1648,57 @@ Test(run_vm, unknown_application_flattens_nested_app_spine)
     cr_assert_eq(row->arg_v[0], 1);
     cr_assert_eq(row->arg_v[1], 2);
     cr_assert_eq(row->arg_v[2], 3);
+}
+
+Test(run_vm, callu_partial_app_head_completes_after_spine_normalization)
+{
+    er_op callee_code[] = {
+        [0] = {.tag = OP_PUSH_VAR, .as.slot = 2},
+        [1] = {.tag = OP_RET},
+    };
+    er_val callee_v = make_law(2, callee_code, 0, NULL);
+    er_val first_arg_v = 10;
+    er_val partial_v = make_app_value(callee_v, 1, &first_arg_v);
+    er_op code[] = {
+        [0] = {.tag = OP_PUSH_LIT, .as.lit_v = partial_v},
+        [1] = {.tag = OP_PUSH_LIT, .as.lit_v = 42},
+        [2] = {.tag = OP_CALLU, .as.u32 = 1},
+        [3] = {.tag = OP_EVAL},
+        [4] = {.tag = OP_RET},
+    };
+    er_val law_v = make_law(0, code, 0, NULL);
+    er_val call_v = make_call(law_v, 1);
+
+    cr_assert_eq(run_vm(code, call_v), 42);
+}
+
+Test(run_vm, callu_partial_app_head_overapplies_after_spine_normalization)
+{
+    er_op callee_code[] = {
+        [0] = {.tag = OP_PUSH_LIT, .as.lit_v = 0},
+        [1] = {.tag = OP_PUSH_VAR, .as.slot = 2},
+        [2] = {.tag = OP_MK_APP, .as.u32 = 2},
+        [3] = {.tag = OP_RET},
+    };
+    er_val callee_v = make_law(2, callee_code, 0, NULL);
+    er_val first_arg_v = 10;
+    er_val partial_v = make_app_value(callee_v, 1, &first_arg_v);
+    er_op code[] = {
+        [0] = {.tag = OP_PUSH_LIT, .as.lit_v = partial_v},
+        [1] = {.tag = OP_PUSH_LIT, .as.lit_v = 20},
+        [2] = {.tag = OP_PUSH_LIT, .as.lit_v = 30},
+        [3] = {.tag = OP_CALLU, .as.u32 = 2},
+        [4] = {.tag = OP_EVAL},
+        [5] = {.tag = OP_RET},
+    };
+    er_val law_v = make_law(0, code, 0, NULL);
+    er_val call_v = make_call(law_v, 1);
+
+    er_val result_v = run_vm(code, call_v);
+
+    er_app* row = assert_app_value(result_v, 0, 2);
+    cr_assert_eq(row->arg_v[0], 20);
+    cr_assert_eq(row->arg_v[1], 30);
 }
 
 Test(run_vm, overapplication_reenters_returned_row_with_leftover_args)
@@ -1683,6 +1831,29 @@ Test(run_vm, compiled_dynamic_tail_call_emits_callu_then_tail_eval)
     cr_assert_eq(code[2].as.u32, 1);
     cr_assert_eq(code[3].tag, OP_TAIL_EVAL);
     cr_assert_eq(code[4].tag, OP_RET);
+}
+
+Test(run_vm, compiled_exact_primitive_pin_call_emits_callp)
+{
+    er_val prim66_v = make_prim66();
+    er_val inc_arg_v = 41;
+    er_val inc_row_v = make_app_value(PLAN_S3('I', 'n', 'c'), 1, &inc_arg_v);
+    er_val body_v = make_plan_call_expr(prim66_v, inc_row_v);
+    er_val law_v = er_law_make(enki_allocator_system(), 0, body_v, 0);
+    cr_assert_eq(er_get_tag(law_v), er_tag_law);
+    er_law* law = er_outt(er_tag_law, law_v);
+    cr_assert_not_null(law);
+    er_op* code = er_law_label_code(law, 0);
+    cr_assert_not_null(code);
+
+    cr_assert_eq(code[0].tag, OP_PUSH_LIT);
+    cr_assert_eq(code[0].as.lit_v, prim66_v);
+    cr_assert_eq(code[4].tag, OP_CALLP);
+    cr_assert_eq(code[5].tag, OP_TAIL_EVAL);
+    cr_assert_eq(code[6].tag, OP_RET);
+
+    er_val call_v = make_call(law_v, 1);
+    cr_assert_eq(run_vm(NULL, call_v), 42);
 }
 
 Test(run_vm, compiled_value_position_call_emits_lazy_callu)

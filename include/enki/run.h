@@ -228,6 +228,7 @@ typedef enum {
   OP_LE,
   OP_CMP,
   OP_RET,
+  OP_CALLP,
   OP_COUNT
 } er_optag;
 

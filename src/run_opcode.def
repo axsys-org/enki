@@ -20,7 +20,8 @@
     X(OP_ROTATE, I_ROTATE, 10) \
     X(OP_JUMP_IF_ZERO, I_JUMP_IF_ZERO, 11) \
     X(OP_JUMP_IF, I_JUMP_IF, 12) \
-    X(OP_ADD_NAT, I_ADD_NAT, 13)
+    X(OP_ADD_NAT, I_ADD_NAT, 13) \
+    X(OP_CALLP, I_CALLP, 67)
 
 #define ER_PRIM_LEAF_OPS(X) \
     X(OP_PIN, I_OP_PIN, 14) \

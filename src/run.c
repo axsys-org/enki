@@ -27,7 +27,7 @@ enum {
 ER_ALL_OPS(ER_ASSERT_OPCODE_VALUE)
 #undef ER_ASSERT_OPCODE_VALUE
 
-static_assert(OP_COUNT == 67, "OP_COUNT opcode value changed");
+static_assert(OP_COUNT == 68, "OP_COUNT opcode value changed");
 
 static bool er_prim66_op_from_descriptor(er_val tag_v, int* out_op)
 {
@@ -424,6 +424,17 @@ static er_val er_thk_make_call(const enki_allocator* loc_a, size_t arg_s, const 
 
 static size_t er_call_frame_size(er_val fun_v, uint32_t arity_d);
 
+static er_val er_thk_make_prim(const enki_allocator* loc_a, er_val prim_set_v,
+                               er_val prim_arg_v)
+{
+    er_val arg_v[] = {prim_set_v, prim_arg_v};
+    er_thk* thk = er_thk_alloc(loc_a, 2);
+    if (thk == NULL) {
+        return 0;
+    }
+    return er_thk_init(thk, ER_XPRIM, 2, arg_v);
+}
+
 static er_val er_thk_make_call_frame(const enki_allocator* loc_a, size_t frame_s,
     size_t copy_s, const er_val arg_v[])
 {
@@ -448,40 +459,28 @@ static bool er_app_spine_count(er_val fn_v, size_t extra_s, er_val* out_fn_v,
                                size_t* out_arg_s);
 static void er_app_spine_copy(er_val fn_v, er_val* out_v, size_t* out_s);
 
-static er_val er_thk_make_partial_call_frame(const enki_allocator* loc_a, er_app* app,
-                                             size_t extra_s, const er_val extra_v[])
+static er_val er_thk_make_unk_app_flat(const enki_allocator* loc_a, er_val fn_v,
+                                       size_t arg_s, const er_val arg_v[])
 {
-    if (app == NULL || app->arg_s > SIZE_MAX - extra_s) {
-        return 0;
-    }
-    er_val flat_fn_v = app->fn_v;
+    er_val flat_fn_v = fn_v;
     size_t total_arg_s = 0;
-    if (!er_app_spine_count(app->fn_v, app->arg_s + extra_s, &flat_fn_v, &total_arg_s) ||
+    if (!er_app_spine_count(fn_v, arg_s, &flat_fn_v, &total_arg_s) ||
         total_arg_s > UINT32_MAX) {
         return 0;
     }
-    uint32_t call_arity_d = (uint32_t)total_arg_s;
-    size_t frame_s = er_call_frame_size(flat_fn_v, call_arity_d);
-    if (frame_s == 0 || frame_s < (size_t)call_arity_d + 1u) {
-        return 0;
-    }
-    er_thk* thk = er_thk_alloc(loc_a, frame_s);
+    er_thk* thk = er_thk_alloc(loc_a, total_arg_s + 1u);
     if (thk == NULL) {
         return 0;
     }
-    er_val out_v = er_thk_init(thk, ER_CALL, frame_s, NULL);
+    er_val out_v = er_thk_init(thk, ER_XUNK_APP, total_arg_s + 1u, NULL);
     if (out_v == 0) {
         return 0;
     }
     thk->arg_v[0] = flat_fn_v;
     size_t copied_s = 0;
-    er_app_spine_copy(app->fn_v, thk->arg_v + 1, &copied_s);
-    if (app->arg_s > 0) {
-        memcpy(thk->arg_v + 1 + copied_s, app->arg_v, app->arg_s * sizeof(er_val));
-        copied_s += app->arg_s;
-    }
-    if (extra_s > 0) {
-        memcpy(thk->arg_v + 1 + copied_s, extra_v, extra_s * sizeof(er_val));
+    er_app_spine_copy(fn_v, thk->arg_v + 1, &copied_s);
+    if (arg_s > 0) {
+        memcpy(thk->arg_v + 1 + copied_s, arg_v, arg_s * sizeof(er_val));
     }
     return out_v;
 }
@@ -755,7 +754,7 @@ static size_t er_call_frame_size(er_val fun_v, uint32_t arity_d)
 {
     er_law* law = er_resolve_law(fun_v);
     if (law == NULL) {
-        return (size_t)arity_d + 1;
+        return 0;
     }
     if (law->ari_d != arity_d || law->ari_d == UINT32_MAX ||
         law->let_d > UINT32_MAX - law->ari_d - 1u) {
@@ -922,6 +921,7 @@ plan_eval_whnf(er_vm *vm, er_val val_v)
     er_op prim_route_code_v[ER_PRIM_ROUTE_MAX_DEPTH][ER_PRIM_ROUTE_MAX_CODE];
     size_t prim_route_final_pc_v[ER_PRIM_ROUTE_MAX_DEPTH] = {0};
     size_t prim_route_depth_s = 0;
+    er_op app_route_code_v[2];
 
     er_op *op;
     er_val f, app, target;
@@ -1159,6 +1159,29 @@ plan_eval_whnf(er_vm *vm, er_val val_v)
         PRIM_SELECT_ROUTE(prim_route);             \
     } while (0)
 
+#define CALLU_DISPATCH_MK_APP()                    \
+    do {                                           \
+        if (thk->arg_s == 0 || thk->arg_s > UINT32_MAX) { \
+            FAIL_ALLOC();                          \
+        }                                          \
+        for (size_t app_k_s = 0; app_k_s < thk->arg_s; app_k_s++) { \
+            DPUSH(thk->arg_v[app_k_s]);            \
+        }                                          \
+        app_route_code_v[0] = (er_op){             \
+            .tag = OP_MK_APP,                      \
+            .as.u32 = (uint32_t)thk->arg_s,        \
+        };                                         \
+        app_route_code_v[1] = (er_op){.tag = OP_RET}; \
+        code = app_route_code_v;                   \
+        vm->code = code;                           \
+        code_law_v = 0;                            \
+        code_label_d = 0;                          \
+        vm->code_law_v = 0;                        \
+        vm->code_label_d = 0;                      \
+        pc = 0;                                    \
+        DISPATCH();                                \
+    } while (0)
+
     /*
      * Entry: eval root by forcing it.
      */
@@ -1189,7 +1212,7 @@ I_MK_APP: {
     er_val* app_base = dsp - app_s;
     hd_v = app_base[0];
     GC_SYNC();
-    r = er_app_make(vm->loc_a, hd_v, app_s - 1, &app_base[1]);
+    r = er_app_make_flat(vm->loc_a, hd_v, app_s - 1, &app_base[1]);
     CHECK_ALLOC(r);
     dsp = app_base;
     DPUSH(r);
@@ -1229,6 +1252,25 @@ I_CALLU: {
     er_val* call_base = dsp - call_s;
     GC_SYNC();
     r = er_thk_make_unk_app(vm->loc_a, call_s, call_base);
+    CHECK_ALLOC(r);
+    dsp = call_base;
+    DPUSH(r);
+    DISPATCH();
+}
+
+I_CALLP: {
+    size_t call_s = 2;
+    if (dsp < dbase || (size_t)(dsp - dbase) < call_s) {
+      FAIL_ALLOC();
+    }
+    er_val* call_base = dsp - call_s;
+    hd_v = call_base[0];
+    er_pin* pin = er_outt(er_tag_pin, hd_v);
+    if (pin == NULL || !er_is_cat(pin->val_v)) {
+      FAIL_TANK("bad primitive call", hd_v);
+    }
+    GC_SYNC();
+    r = er_thk_make_prim(vm->loc_a, pin->val_v, call_base[1]);
     CHECK_ALLOC(r);
     dsp = call_base;
     DPUSH(r);
@@ -1324,6 +1366,9 @@ I_FORCE:
     // ------------------------------------------------------------------
 
 FORCE_UNK_APP: {
+    if (thk->arg_s == 0) {
+      FAIL_TANK("bad unknown application", er_into(er_tag_thk, thk));
+    }
     f = thk->arg_v[0];
     if ( !er_is_whnf(f) ) {
       thk->fun = ER_HOLE;
@@ -1331,16 +1376,39 @@ FORCE_UNK_APP: {
       r = f;
       goto FORCE_ENTRY;
     }
-    hav_d = (uint32_t)(thk->arg_s - 1);
-	    if (!er_callable_arity(f, &wan_d)) {
-	      if (hav_d == 0) {
-	        RETURN(f);
-	      }
-	      GC_SYNC();
-	      r = er_app_make_flat(vm->loc_a, f, thk->arg_s - 1, &thk->arg_v[1]);
-	      CHECK_ALLOC(r);
-	      goto FORCE_ENTRY;
-	    }
+    size_t hav_s = thk->arg_s - 1u;
+    if (hav_s > UINT32_MAX) {
+      FAIL_ALLOC();
+    }
+    hav_d = (uint32_t)hav_s;
+
+    er_pin* pin = er_outt(er_tag_pin, f);
+    if (pin != NULL && er_is_cat(pin->val_v)) {
+      if (hav_s == 0) {
+        CALLU_DISPATCH_MK_APP();
+      }
+      if (hav_s > 1) {
+        KPUSH_OVERAPP(er_into(er_tag_thk, thk), 1);
+      }
+      GC_SYNC();
+      r = er_thk_make_prim(vm->loc_a, pin->val_v, thk->arg_v[1]);
+      CHECK_ALLOC(r);
+      goto FORCE_ENTRY;
+    }
+
+    if (er_is_tag(er_tag_app, f)) {
+      GC_SYNC();
+      r = er_thk_make_unk_app_flat(vm->loc_a, f, hav_s, &thk->arg_v[1]);
+      CHECK_ALLOC(r);
+      goto FORCE_ENTRY;
+    }
+
+    if (!er_callable_arity(f, &wan_d)) {
+      if (hav_s == 0) {
+        RETURN(f);
+      }
+      CALLU_DISPATCH_MK_APP();
+    }
     if ( hav_d ==  wan_d ) {
       size_t frame_s = er_call_frame_size(f, wan_d);
       if (frame_s == 0) {
@@ -1355,10 +1423,7 @@ FORCE_UNK_APP: {
       CHECK_ALLOC(r);
       goto FORCE_ENTRY;
     } else if ( hav_d < wan_d ) {
-      GC_SYNC();
-      r = er_app_make_flat(vm->loc_a, f, thk->arg_s - 1, &thk->arg_v[1]);
-      CHECK_ALLOC(r);
-      goto FORCE_ENTRY;
+      CALLU_DISPATCH_MK_APP();
     } else {
       split = wan_d;
       size_t frame_s = er_call_frame_size(f, wan_d);
@@ -1371,6 +1436,22 @@ FORCE_UNK_APP: {
       KPUSH_OVERAPP(er_into(er_tag_thk, thk), split);
       goto FORCE_ENTRY;
     }
+}
+
+FORCE_XPRIM: {
+    if (thk->arg_s != 2 || !er_is_cat(thk->arg_v[0])) {
+      FAIL_TANK("bad primitive thunk", er_into(er_tag_thk, thk));
+    }
+    prim_set = thk->arg_v[0];
+    prim_arg = thk->arg_v[1];
+    if (!er_is_whnf(prim_arg)) {
+      GC_SYNC();
+      prim_arg = plan_eval_whnf_preserve(vm, prim_arg);
+      dsp = vm->dsp;
+      ksp = vm->ksp;
+      CHECK_PRIM(prim_arg);
+    }
+    goto PRIMOP;
 }
 
 
@@ -1394,6 +1475,8 @@ FORCE_ENTRY: {
         goto FORCE_UNK_APP;
       case ER_CALL:
         goto ENTER_CALL;
+      case ER_XPRIM:
+        goto FORCE_XPRIM;
       case ER_SUSP:
         goto FORCE_SUSP;
       case ER_HOLE:
@@ -1430,45 +1513,14 @@ FORCE_SUSP: {
 }
 
 ENTER_CALL: {
-    er_pin* pin;
     er_val self_v = er_into(er_tag_thk, thk);
     f = thk->arg_v[0];
-    if ( er_is_tag(er_tag_pin, f) ) {
-      pin = er_outa(f);
-      if ( er_is_cat(pin->val_v) ) {
-        prim_set = pin->val_v;
-        prim_arg = thk->arg_v[1];
-        if (!er_is_whnf(prim_arg)) {
-          GC_SYNC();
-          prim_arg = plan_eval_whnf_preserve(vm, prim_arg);
-          dsp = vm->dsp;
-          ksp = vm->ksp;
-          CHECK_PRIM(prim_arg);
-        }
-        goto PRIMOP;
-      }
-      f = pin->val_v;
-    }
-    er_law* law = er_outt(er_tag_law, f);
+    er_law* law = er_resolve_law(f);
     if (law == NULL) {
-      er_app* part = er_outt(er_tag_app, f);
-      if (part != NULL) {
-        GC_SYNC();
-        r = er_thk_make_partial_call_frame(vm->loc_a, part, thk->arg_s - 1,
-                                           &thk->arg_v[1]);
-        CHECK_ALLOC(r);
-        goto FORCE_ENTRY;
-      }
-      if (thk->arg_s <= 1) {
-        RETURN(thk->arg_v[0]);
-      }
-      GC_SYNC();
-      r = er_app_make_flat(vm->loc_a, thk->arg_v[0], thk->arg_s - 1, &thk->arg_v[1]);
-      CHECK_ALLOC(r);
-      goto FORCE_ENTRY;
+      FAIL_TANK("bad call frame", self_v);
     }
-    size_t frame_s = (size_t)law->ari_d + 1 + law->let_d;
-    if (thk->arg_s != frame_s || er_law_label_code(law, 0) == NULL) {
+    size_t frame_s = er_call_frame_size(f, law->ari_d);
+    if (frame_s == 0 || thk->arg_s != frame_s || er_law_label_code(law, 0) == NULL) {
       FAIL_TANK("bad call frame", self_v);
     }
     size_t n_lets = er_law_n_lets(law);
@@ -1574,6 +1626,7 @@ K_OVERAPP:
 #undef FAIL_TANK
 #undef PRIM_SELECT_ROUTE
 #undef PRIM_SELECT
+#undef CALLU_DISPATCH_MK_APP
 #undef PRIM_BAD_ARITY
 #undef PRIM_DONE_VALUE
 #undef PRIM_FORCE_VALUE_WHNF
