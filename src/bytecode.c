@@ -687,14 +687,15 @@ static bool er_bc_lift_call(er_bc_compiler* c, er_val f_v, er_val x_v, er_bc_val
     if (!er_bc_lift_call_inner(out, f_v, x_v)) {
         return false;
     }
-    er_app* app = out->val_s == 0 ? NULL : er_outt(er_tag_app, out->val_v[0]);
+    er_val head_v = out->val_s == 0 ? 0 : er_bc_pull_const(out->val_v[0]);
+    er_app* app = er_outt(er_tag_app, head_v);
     if (app == NULL || app->fn_v == 0) {
         return true;
     }
 
     er_bc_vals expanded;
     er_bc_vals_init(&expanded, c->loc_a);
-    bool ok_f = er_bc_vals_push(&expanded, app->fn_v);
+    bool ok_f = er_bc_vals_push(&expanded, er_bc_pull_const(app->fn_v));
     for (size_t k = 0; ok_f && k < app->arg_s; k++) {
         ok_f = er_bc_vals_push(&expanded, app->arg_v[k]);
     }

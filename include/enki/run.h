@@ -30,6 +30,7 @@ THK 1110000000000000 - 0xE000
 #define er_tag_law 0xc8
 #define er_tag_app 0xd0
 #define er_tag_thk 0xe0
+#define er_tag_tank 0xfe
 #define er_tag_fwd 0xf0
 #define er_tag_bad 0xff
 
@@ -44,6 +45,16 @@ typedef uint64_t er_val;
 
 #define er_bad er_into(er_tag_bad, 0)
 
+static inline bool er_is_tank(er_val val_v)
+{
+    return er_is_tag(er_tag_tank, val_v);
+}
+
+static inline bool er_is_good(er_val val_v)
+{
+    return er_get_tag(val_v) < er_tag_tank;
+}
+
 typedef struct er_op er_op;
 
 typedef struct er_head_raw {
@@ -56,6 +67,11 @@ typedef union er_head {
   size_t siz_s;
   er_head_raw raw;
 } er_head;
+
+typedef struct er_tank {
+  er_val val_v;
+  char* msg_c;
+} er_tank;
 
 typedef struct er_bat {
   er_head hed;
@@ -111,6 +127,10 @@ typedef struct er_thk {
   size_t arg_s;
   er_val arg_v[];
 } er_thk;
+
+er_tank* er_tank_alloc(const enki_allocator* allocator);
+er_val er_tank_init(er_tank* tank, er_val val_v, char* msg_c);
+er_val er_tank_make(const enki_allocator* loc_a, er_val val_v, char* msg_c);
 
 er_bat* er_bat_alloc(const enki_allocator* allocator, size_t lim_s);
 er_val er_bat_init(er_bat* bat, size_t lim_s, const uint64_t lim_q[]);

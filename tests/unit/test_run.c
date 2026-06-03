@@ -6,6 +6,7 @@
 #include <criterion/criterion.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 
 #define TEST_S8(a, b, c, d, e, f, g, h) \
     ((er_val)(PLAN_S7(a, b, c, d, e, f, g) | (PLAN_CH(h) << 56u)))
@@ -27,6 +28,19 @@ static void free_system(void* ptr)
 {
     const enki_allocator* allocator = enki_allocator_system();
     allocator->free(allocator->ctx, ptr);
+}
+
+static er_tank* assert_tank_value(er_val value_v, const char* msg_c)
+{
+    cr_assert(er_is_tank(value_v), "expected er_tank tag 0xFE, got 0x%02x",
+              (unsigned int)er_get_tag(value_v));
+    er_tank* tank = er_outt(er_tag_tank, value_v);
+    cr_assert_not_null(tank);
+    if (msg_c != NULL) {
+        cr_assert_not_null(tank->msg_c);
+        cr_assert_str_eq(tank->msg_c, msg_c);
+    }
+    return tank;
 }
 
 Test(run_alloc, thunk_alloc_initializes_header)
@@ -93,6 +107,18 @@ Test(run_alloc, thunk_alloc_returns_null_on_alloc_failure)
     };
 
     cr_assert_null(er_thk_alloc(&fail_allocator, 1));
+}
+
+Test(run_alloc, tank_uses_error_tag_and_records_payload)
+{
+    er_val tank_v = er_tank_make(enki_allocator_system(), 42, "boom");
+
+    cr_assert_eq(er_get_tag(tank_v), er_tag_tank);
+    cr_assert_not(er_is_good(tank_v));
+    er_tank* tank = assert_tank_value(tank_v, "boom");
+    cr_assert_eq(tank->val_v, 42);
+
+    free_system(tank);
 }
 
 static size_t test_code_len(const er_op* code_v)
@@ -311,10 +337,10 @@ Test(run_ops, div_mod_zero_divisor_is_bad_after_nat_coercion)
     uint64_t zero_q[] = {0};
     er_val big_zero_v = make_bat(1, zero_q);
 
-    cr_assert_eq(eo_div(loc_a, 10, 0), er_bad);
-    cr_assert_eq(eo_mod(loc_a, 10, 0), er_bad);
-    cr_assert_eq(eo_div(loc_a, 10, app_v), er_bad);
-    cr_assert_eq(eo_mod(loc_a, 10, big_zero_v), er_bad);
+    assert_tank_value(eo_div(loc_a, 10, 0), "division by zero");
+    assert_tank_value(eo_mod(loc_a, 10, 0), "division by zero");
+    assert_tank_value(eo_div(loc_a, 10, app_v), "division by zero");
+    assert_tank_value(eo_mod(loc_a, 10, big_zero_v), "division by zero");
     cr_assert_eq(eo_div(loc_a, app_v, 5), 0);
     cr_assert_eq(eo_mod(loc_a, app_v, 5), 0);
 }
@@ -342,8 +368,8 @@ Test(run_ops, primitive_dispatch_bad_arity_is_bad)
     const enki_allocator* loc_a = enki_allocator_system();
     er_val arg_v[] = {1};
 
-    cr_assert_eq(eo_exec_op66(loc_a, OP66_ADD, 1, arg_v), er_bad);
-    cr_assert_eq(eo_exec_op0(loc_a, OP0_LAW, 1, arg_v), er_bad);
+    assert_tank_value(eo_exec_op66(loc_a, OP66_ADD, 1, arg_v), "bad primitive arity");
+    assert_tank_value(eo_exec_op0(loc_a, OP0_LAW, 1, arg_v), "bad primitive arity");
 }
 
 Test(run_ops, row_style_primitive_errors_do_not_fall_through)
@@ -358,10 +384,10 @@ Test(run_ops, row_style_primitive_errors_do_not_fall_through)
     er_val law_args_v[] = {OP0_LAW, 2};
     er_val law_row_v = make_app_value(0, 2, law_args_v);
 
-    cr_assert_eq(eo_exec_op66_app(loc_a, add_row_v), er_bad);
-    cr_assert_eq(eo_exec_op66_app(loc_a, bad_row_v), er_bad);
-    cr_assert_eq(eo_exec_op66_app(loc_a, div_row_v), er_bad);
-    cr_assert_eq(eo_exec_op0_app(loc_a, law_row_v), er_bad);
+    assert_tank_value(eo_exec_op66_app(loc_a, add_row_v), "bad primitive arity");
+    assert_tank_value(eo_exec_op66_app(loc_a, bad_row_v), "bad primitive tag");
+    assert_tank_value(eo_exec_op66_app(loc_a, div_row_v), "division by zero");
+    assert_tank_value(eo_exec_op0_app(loc_a, law_row_v), "bad primitive arity");
 }
 
 typedef struct er_gc_test_root {
@@ -415,6 +441,34 @@ Test(run_gc, collect_moves_nested_er_values)
     cr_assert_eq(moved_child->arg_s, 2);
     cr_assert_eq(moved_child->arg_v[0], 11);
     cr_assert_eq(moved_child->arg_v[1], 22);
+
+    enki_gc_destroy(gc);
+}
+
+Test(run_gc, collect_moves_tank_payload)
+{
+    enki_gc* gc = enki_gc_create(enki_allocator_system(), 4096, NULL);
+    cr_assert_not_null(gc);
+    const enki_allocator* loc_a = enki_gc_as_allocator(gc);
+
+    er_val child_arg_v[] = {11};
+    er_val child_v = make_gc_app_value(loc_a, 7, 1, child_arg_v);
+    er_app* old_child = er_outt(er_tag_app, child_v);
+    er_val tank_v = er_tank_make(loc_a, child_v, "boom");
+    er_tank* old_tank = assert_tank_value(tank_v, "boom");
+
+    er_gc_test_root root = {.val_v = tank_v};
+    enki_gc_set_trace_root(gc, &root, trace_er_gc_test_root);
+    enki_gc_collect(gc);
+
+    er_tank* moved_tank = assert_tank_value(root.val_v, "boom");
+    cr_assert_neq(moved_tank, old_tank);
+    er_app* moved_child = er_outt(er_tag_app, moved_tank->val_v);
+    cr_assert_not_null(moved_child);
+    cr_assert_neq(moved_child, old_child);
+    cr_assert_eq(moved_child->fn_v, 7);
+    cr_assert_eq(moved_child->arg_s, 1);
+    cr_assert_eq(moved_child->arg_v[0], 11);
 
     enki_gc_destroy(gc);
 }
@@ -653,7 +707,7 @@ Test(run_vm, strict_let_prelude_forces_suspension_and_discards_value)
     cr_assert_eq(susp->arg_v[0], 7);
 }
 
-Test(run_vm, strict_let_cycle_traps_as_bad_value)
+Test(run_vm, strict_let_cycle_traps_as_tank)
 {
     enum {
         LAW_START = 0,
@@ -671,7 +725,7 @@ Test(run_vm, strict_let_cycle_traps_as_bad_value)
     er_val law_v = make_law(0, code + LAW_START, 1, let_code_v);
     er_val call_v = make_call(law_v, 2);
 
-    cr_assert_eq(run_vm(code, call_v), er_bad);
+    assert_tank_value(run_vm(code, call_v), "thunk hole");
 }
 
 Test(run_vm, mk_app_uses_operand_count_and_leaves_single_stack_value)
@@ -883,7 +937,7 @@ Test(run_vm, primop0_elim_forces_only_scrutinee)
     cr_assert_eq(run_vm(code, call_v), 42);
 }
 
-Test(run_vm, primop0_bad_arity_is_bad)
+Test(run_vm, primop0_bad_arity_is_tank)
 {
     er_val prim0_v = make_prim0();
     er_op code[] = {
@@ -898,7 +952,7 @@ Test(run_vm, primop0_bad_arity_is_bad)
     er_val law_v = make_law(0, code, 0, NULL);
     er_val call_v = make_call(law_v, 1);
 
-    cr_assert_eq(run_vm(code, call_v), er_bad);
+    assert_tank_value(run_vm(code, call_v), "bad primitive arity");
 }
 
 Test(run_vm, primop66_eq_returns_nat_boolean)
@@ -1041,7 +1095,7 @@ Test(run_vm, primop0_leading_zero_descriptor_matches_direct_tag)
     cr_assert_eq(leading->val_v, direct->val_v);
 }
 
-Test(run_vm, primop66_bad_arity_is_bad)
+Test(run_vm, primop66_bad_arity_is_tank)
 {
     er_val prim66_v = make_prim66();
     er_op code[] = {
@@ -1056,7 +1110,7 @@ Test(run_vm, primop66_bad_arity_is_bad)
     er_val law_v = make_law(0, code, 0, NULL);
     er_val call_v = make_call(law_v, 1);
 
-    cr_assert_eq(run_vm(code, call_v), er_bad);
+    assert_tank_value(run_vm(code, call_v), "bad primitive arity");
 }
 
 Test(run_vm, primop66_cmp_identical_non_nat_is_equal)
@@ -1416,6 +1470,40 @@ Test(run_vm, compiled_law_emits_direct_primitive_bytecode)
     er_val call_v = make_call(law_v, 1);
 
     cr_assert_eq(run_vm(NULL, call_v), 42);
+}
+
+Test(run_vm, compiled_call_flattens_quoted_partial_primitive_head)
+{
+    er_val ix_v = er_pin_make(enki_allocator_system(), make_prim_law(PLAN_S2('I', 'x'), 2));
+    cr_assert_eq(er_get_tag(ix_v), er_tag_pin);
+    er_val ix_arg_v[] = {2};
+    er_val ix2_v = make_app_value(ix_v, 1, ix_arg_v);
+    er_val quoted_ix2_v = make_law_quote_expr(ix2_v);
+    er_val body_v = make_plan_call_expr(quoted_ix2_v, 1);
+    er_val law_v = er_law_make(enki_allocator_system(), 0, body_v, 1);
+    cr_assert_eq(er_get_tag(law_v), er_tag_law);
+    er_law* law = er_outt(er_tag_law, law_v);
+    cr_assert_not_null(law);
+    er_op* code = er_law_label_code(law, 0);
+    cr_assert_not_null(code);
+
+    bool saw_ix_f = false;
+    bool saw_mk_app_f = false;
+    for (size_t k = 0; k < 16 && code[k].tag != OP_RET; k++) {
+        saw_ix_f = saw_ix_f || code[k].tag == OP_IX;
+        saw_mk_app_f = saw_mk_app_f || code[k].tag == OP_MK_APP;
+    }
+    cr_assert(saw_ix_f);
+    cr_assert_not(saw_mk_app_f);
+
+    er_val row_arg_v[] = {10, 11, 12};
+    er_val row_v = make_app_value(0, 3, row_arg_v);
+    er_val call_v = make_call(law_v, 2);
+    er_thk* call = er_outt(er_tag_thk, call_v);
+    cr_assert_not_null(call);
+    call->arg_v[1] = row_v;
+
+    cr_assert_eq(run_vm(NULL, call_v), 12);
 }
 
 Test(run_vm, compiled_law_can_return_self_as_value)

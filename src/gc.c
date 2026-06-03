@@ -14,6 +14,7 @@ static bool enki_gc_is_known_tag(er_val val_v)
     case er_tag_law:
     case er_tag_app:
     case er_tag_thk:
+    case er_tag_tank:
         return true;
     default:
         return false;
@@ -204,6 +205,18 @@ er_val enki_gc_copy(enki_gc* gc, er_val val_v)
     if (!enki_gc_is_known_tag(val_v)) {
         abort();
     }
+    if (er_is_tank(val_v)) {
+        er_tank* tank = er_outa(val_v);
+        er_tank* new_tank = enki_arena_alloc_aligned(gc->active_a, sizeof(er_tank),
+                                                     _Alignof(er_tank));
+        if (new_tank == NULL) {
+            abort();
+        }
+        memcpy(new_tank, tank, sizeof(er_tank));
+        er_val new_v = er_into(er_tag_tank, new_tank);
+        enki_gc_work_push(gc, new_v);
+        return new_v;
+    }
 
     er_head* h = er_outa(val_v);
     if (h->raw.fwd_f) {
@@ -298,6 +311,11 @@ static void enki_gc_trace_object(enki_gc* gc, er_val val_v)
         for (size_t k = 0; k < thk->arg_s; k++) {
             enki_gc_trace_ref(gc, &thk->arg_v[k]);
         }
+        return;
+    }
+    case er_tag_tank: {
+        er_tank* tank = er_outa(val_v);
+        enki_gc_trace_ref(gc, &tank->val_v);
         return;
     }
     default:

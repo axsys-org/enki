@@ -535,7 +535,7 @@ static int run_planvm_fac(size_t n, double seconds)
         iterations_s,
         peak_s, b_count, k_count);
     planvm_arena_destroy(&arena);
-    return last_v == er_bad ? 1 : 0;
+    return !er_is_good(last_v) ? 1 : 0;
 }
 
 static int run_planvm_fib(size_t n, double seconds)
@@ -577,7 +577,7 @@ static int run_planvm_fib(size_t n, double seconds)
         iterations_s,
         peak_s, b_count, k_count);
     planvm_arena_destroy(&arena);
-    return last_v == er_bad ? 1 : 0;
+    return !er_is_good(last_v) ? 1 : 0;
 }
 
 static int run_bytecode_tinyops(size_t n, double seconds)

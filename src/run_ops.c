@@ -19,6 +19,17 @@ enum {
     EO_OP66_MET,
 };
 
+static er_val eo_tank(const enki_allocator* loc_a, er_val val_v, char* msg_c)
+{
+    return er_tank_make(loc_a, val_v, msg_c);
+}
+
+static er_val eo_bad_arity(const enki_allocator* loc_a, size_t have_s, size_t want_s)
+{
+    (void)want_s;
+    return eo_tank(loc_a, (er_val)have_s, "bad primitive arity");
+}
+
 static bool eo_is_nat(er_val v)
 {
     return er_is_cat(v) || er_is_tag(er_tag_bat, v);
@@ -339,14 +350,20 @@ er_val eo_div(const enki_allocator* loc_a, er_val a_v, er_val b_v)
     a_v = eo_nat(a_v);
     b_v = eo_nat(b_v);
     if (er_is_cat(a_v) && er_is_cat(b_v)) {
-        return b_v == 0 ? er_bad : a_v / b_v;
+        return b_v == 0 ? eo_tank(loc_a, b_v, "division by zero") : a_v / b_v;
     }
     er_val out_v = er_bad;
     mpz_t a;
     mpz_t b;
     mpz_t out;
     mpz_inits(a, b, out, NULL);
-    if (eo_nat_to_mpz(a_v, a) && eo_nat_to_mpz(b_v, b) && mpz_sgn(b) != 0) {
+    bool ok_a_f = eo_nat_to_mpz(a_v, a);
+    bool ok_b_f = eo_nat_to_mpz(b_v, b);
+    if (!ok_a_f || !ok_b_f) {
+        out_v = eo_tank(loc_a, !ok_a_f ? a_v : b_v, "bad numeric argument");
+    } else if (mpz_sgn(b) == 0) {
+        out_v = eo_tank(loc_a, b_v, "division by zero");
+    } else {
         mpz_fdiv_q(out, a, b);
         out_v = eo_mpz_to_nat(loc_a, out);
     }
@@ -360,14 +377,20 @@ er_val eo_mod(const enki_allocator* loc_a, er_val a_v, er_val b_v)
     a_v = eo_nat(a_v);
     b_v = eo_nat(b_v);
     if (er_is_cat(a_v) && er_is_cat(b_v)) {
-        return b_v == 0 ? er_bad : a_v % b_v;
+        return b_v == 0 ? eo_tank(loc_a, b_v, "division by zero") : a_v % b_v;
     }
     er_val out_v = er_bad;
     mpz_t a;
     mpz_t b;
     mpz_t out;
     mpz_inits(a, b, out, NULL);
-    if (eo_nat_to_mpz(a_v, a) && eo_nat_to_mpz(b_v, b) && mpz_sgn(b) != 0) {
+    bool ok_a_f = eo_nat_to_mpz(a_v, a);
+    bool ok_b_f = eo_nat_to_mpz(b_v, b);
+    if (!ok_a_f || !ok_b_f) {
+        out_v = eo_tank(loc_a, !ok_a_f ? a_v : b_v, "bad numeric argument");
+    } else if (mpz_sgn(b) == 0) {
+        out_v = eo_tank(loc_a, b_v, "division by zero");
+    } else {
         mpz_fdiv_r(out, a, b);
         out_v = eo_mpz_to_nat(loc_a, out);
     }
@@ -946,7 +969,7 @@ er_val eo_law(const enki_allocator* loc_a, er_val nam_v, er_val bod_v, er_val ar
     ENKI_PROFILE_ZONE("eo_law");
     size_t ari_s = 0;
     if (!eo_nat_to_size(ari_v, &ari_s) || ari_s > UINT32_MAX - 1) {
-        return 0;
+        return eo_tank(loc_a, ari_v, "bad law arity");
     }
     er_val out_v = er_law_make(loc_a, nam_v, bod_v, (uint32_t)(ari_s + 1));
     return out_v == 0 ? er_bad : out_v;
@@ -970,8 +993,8 @@ er_val eo_elim(const enki_allocator* loc_a, er_val pin_f_v, er_val law_f_v, er_v
     er_app* app = er_outt(er_tag_app, val_v);
     if (app != NULL) {
         er_val init_v = eo_init(loc_a, val_v);
-        if (init_v == er_bad) {
-            return er_bad;
+        if (!er_is_good(init_v)) {
+            return init_v;
         }
         er_val args_v[] = {init_v, eo_last(val_v)};
         return eo_thk_app(loc_a, app_f_v, 2, args_v);
@@ -984,7 +1007,7 @@ er_val eo_elim(const enki_allocator* loc_a, er_val pin_f_v, er_val law_f_v, er_v
         return zero_v;
     }
     er_val dec_v = eo_dec(loc_a, val_v);
-    return dec_v == er_bad ? er_bad : eo_thk_app(loc_a, nat_f_v, 1, &dec_v);
+    return !er_is_good(dec_v) ? dec_v : eo_thk_app(loc_a, nat_f_v, 1, &dec_v);
 }
 
 bool eo_op66_from_tag(er_val tag_v, int* out_op)
@@ -1387,100 +1410,103 @@ bool eo_op66_from_tag(er_val tag_v, int* out_op)
 er_val eo_exec_op66(const enki_allocator* loc_a, int op, size_t arg_s, const er_val arg_v[])
 {
     ENKI_PROFILE_ZONE("eo_exec_op66");
+#define EO_ARITY(_want) eo_bad_arity(loc_a, arg_s, (_want))
     switch (op) {
     case OP66_NAME:
-        return arg_s == 1 ? eo_nam(arg_v[0]) : er_bad;
+        return arg_s == 1 ? eo_nam(arg_v[0]) : EO_ARITY(1);
     case OP66_BODY:
-        return arg_s == 1 ? eo_body(arg_v[0]) : er_bad;
+        return arg_s == 1 ? eo_body(arg_v[0]) : EO_ARITY(1);
     case OP66_UNPIN:
-        return arg_s == 1 ? eo_unpin(arg_v[0]) : er_bad;
+        return arg_s == 1 ? eo_unpin(arg_v[0]) : EO_ARITY(1);
     case OP66_SZ:
-        return arg_s == 1 ? eo_sz(arg_v[0]) : er_bad;
+        return arg_s == 1 ? eo_sz(arg_v[0]) : EO_ARITY(1);
     case OP66_LAST:
-        return arg_s == 1 ? eo_last(arg_v[0]) : er_bad;
+        return arg_s == 1 ? eo_last(arg_v[0]) : EO_ARITY(1);
     case OP66_INIT:
-        return arg_s == 1 ? eo_init(loc_a, arg_v[0]) : er_bad;
+        return arg_s == 1 ? eo_init(loc_a, arg_v[0]) : EO_ARITY(1);
 
     case OP66_ADD:
-        return arg_s == 2 ? eo_add(loc_a, arg_v[0], arg_v[1]) : er_bad;
+        return arg_s == 2 ? eo_add(loc_a, arg_v[0], arg_v[1]) : EO_ARITY(2);
     case OP66_SUB:
-        return arg_s == 2 ? eo_sub(loc_a, arg_v[0], arg_v[1]) : er_bad;
+        return arg_s == 2 ? eo_sub(loc_a, arg_v[0], arg_v[1]) : EO_ARITY(2);
     case OP66_RSH:
-        return arg_s == 2 ? eo_rsh(loc_a, arg_v[0], arg_v[1]) : er_bad;
+        return arg_s == 2 ? eo_rsh(loc_a, arg_v[0], arg_v[1]) : EO_ARITY(2);
     case OP66_LSH:
-        return arg_s == 2 ? eo_lsh(loc_a, arg_v[0], arg_v[1]) : er_bad;
+        return arg_s == 2 ? eo_lsh(loc_a, arg_v[0], arg_v[1]) : EO_ARITY(2);
     case OP66_DIV:
-        return arg_s == 2 ? eo_div(loc_a, arg_v[0], arg_v[1]) : er_bad;
+        return arg_s == 2 ? eo_div(loc_a, arg_v[0], arg_v[1]) : EO_ARITY(2);
     case OP66_MUL:
-        return arg_s == 2 ? eo_mul(loc_a, arg_v[0], arg_v[1]) : er_bad;
+        return arg_s == 2 ? eo_mul(loc_a, arg_v[0], arg_v[1]) : EO_ARITY(2);
     case OP66_MOD:
-        return arg_s == 2 ? eo_mod(loc_a, arg_v[0], arg_v[1]) : er_bad;
+        return arg_s == 2 ? eo_mod(loc_a, arg_v[0], arg_v[1]) : EO_ARITY(2);
     case OP66_TEST:
-        return arg_s == 2 ? eo_test(arg_v[0], arg_v[1]) : er_bad;
+        return arg_s == 2 ? eo_test(arg_v[0], arg_v[1]) : EO_ARITY(2);
     case OP66_LOAD:
-        return arg_s == 3 ? eo_load(loc_a, arg_v[0], arg_v[1], arg_v[2]) : er_bad;
+        return arg_s == 3 ? eo_load(loc_a, arg_v[0], arg_v[1], arg_v[2]) : EO_ARITY(3);
     case OP66_LOAD8:
-        return arg_s == 2 ? eo_load8(loc_a, arg_v[0], arg_v[1]) : er_bad;
+        return arg_s == 2 ? eo_load8(loc_a, arg_v[0], arg_v[1]) : EO_ARITY(2);
     case EO_OP66_STORE:
-        return arg_s == 4 ? eo_store(loc_a, arg_v[0], arg_v[2], arg_v[1], arg_v[3]) : er_bad;
+        return arg_s == 4 ? eo_store(loc_a, arg_v[0], arg_v[2], arg_v[1], arg_v[3])
+                          : EO_ARITY(4);
     case OP66_STORE8:
-        return arg_s == 3 ? eo_store8(loc_a, arg_v[0], arg_v[1], arg_v[2]) : er_bad;
+        return arg_s == 3 ? eo_store8(loc_a, arg_v[0], arg_v[1], arg_v[2]) : EO_ARITY(3);
     case OP66_TRUNC:
-        return arg_s == 2 ? eo_trunc(loc_a, arg_v[0], arg_v[1]) : er_bad;
+        return arg_s == 2 ? eo_trunc(loc_a, arg_v[0], arg_v[1]) : EO_ARITY(2);
     case EO_OP66_MET:
-        return arg_s == 2 ? eo_met(arg_v[0], arg_v[1]) : er_bad;
+        return arg_s == 2 ? eo_met(arg_v[0], arg_v[1]) : EO_ARITY(2);
     case OP66_TRUNC8:
-        return arg_s == 1 ? eo_trunc8(loc_a, arg_v[0]) : er_bad;
+        return arg_s == 1 ? eo_trunc8(loc_a, arg_v[0]) : EO_ARITY(1);
     case OP66_TRUNC16:
-        return arg_s == 1 ? eo_trunc16(loc_a, arg_v[0]) : er_bad;
+        return arg_s == 1 ? eo_trunc16(loc_a, arg_v[0]) : EO_ARITY(1);
     case OP66_TRUNC32:
-        return arg_s == 1 ? eo_trunc32(loc_a, arg_v[0]) : er_bad;
+        return arg_s == 1 ? eo_trunc32(loc_a, arg_v[0]) : EO_ARITY(1);
     case OP66_TRUNC64:
-        return arg_s == 1 ? eo_trunc64(loc_a, arg_v[0]) : er_bad;
+        return arg_s == 1 ? eo_trunc64(loc_a, arg_v[0]) : EO_ARITY(1);
     case OP66_BITS:
-        return arg_s == 1 ? eo_bits(arg_v[0]) : er_bad;
+        return arg_s == 1 ? eo_bits(arg_v[0]) : EO_ARITY(1);
     case OP66_BYTES:
-        return arg_s == 1 ? eo_bytes(arg_v[0]) : er_bad;
+        return arg_s == 1 ? eo_bytes(arg_v[0]) : EO_ARITY(1);
 
     case OP66_REP:
-        return arg_s == 3 ? eo_rep(loc_a, arg_v[0], arg_v[1], arg_v[2]) : er_bad;
+        return arg_s == 3 ? eo_rep(loc_a, arg_v[0], arg_v[1], arg_v[2]) : EO_ARITY(3);
     case OP66_SLICE:
-        return arg_s == 3 ? eo_slice(loc_a, arg_v[0], arg_v[1], arg_v[2]) : er_bad;
+        return arg_s == 3 ? eo_slice(loc_a, arg_v[0], arg_v[1], arg_v[2]) : EO_ARITY(3);
     case OP66_WELD:
-        return arg_s == 2 ? eo_weld(loc_a, arg_v[0], arg_v[1]) : er_bad;
+        return arg_s == 2 ? eo_weld(loc_a, arg_v[0], arg_v[1]) : EO_ARITY(2);
     case OP66_UP:
     case OP66_UP_UNIQ:
-        return arg_s == 3 ? eo_up(loc_a, arg_v[0], arg_v[1], arg_v[2]) : er_bad;
+        return arg_s == 3 ? eo_up(loc_a, arg_v[0], arg_v[1], arg_v[2]) : EO_ARITY(3);
     case OP66_COUP:
-        return arg_s == 2 ? eo_coup(loc_a, arg_v[0], arg_v[1]) : er_bad;
+        return arg_s == 2 ? eo_coup(loc_a, arg_v[0], arg_v[1]) : EO_ARITY(2);
     case OP66_HD:
-        return arg_s == 1 ? eo_hd(arg_v[0]) : er_bad;
+        return arg_s == 1 ? eo_hd(arg_v[0]) : EO_ARITY(1);
     case OP66_IX:
-        return arg_s == 2 ? eo_ix(arg_v[0], arg_v[1]) : er_bad;
+        return arg_s == 2 ? eo_ix(arg_v[0], arg_v[1]) : EO_ARITY(2);
     case OP66_NIL:
-        return arg_s == 1 ? eo_not(arg_v[0]) : er_bad;
+        return arg_s == 1 ? eo_not(arg_v[0]) : EO_ARITY(1);
     case OP66_TRUTH:
-        return arg_s == 1 ? eo_tru(arg_v[0]) : er_bad;
+        return arg_s == 1 ? eo_tru(arg_v[0]) : EO_ARITY(1);
     case OP66_OR:
-        return arg_s == 2 ? eo_or(arg_v[0], arg_v[1]) : er_bad;
+        return arg_s == 2 ? eo_or(arg_v[0], arg_v[1]) : EO_ARITY(2);
     case OP66_AND:
-        return arg_s == 2 ? eo_and(arg_v[0], arg_v[1]) : er_bad;
+        return arg_s == 2 ? eo_and(arg_v[0], arg_v[1]) : EO_ARITY(2);
     case OP66_EQ:
-        return arg_s == 2 ? eo_eq(arg_v[0], arg_v[1]) : er_bad;
+        return arg_s == 2 ? eo_eq(arg_v[0], arg_v[1]) : EO_ARITY(2);
     case OP66_LE:
-        return arg_s == 2 ? eo_le(arg_v[0], arg_v[1]) : er_bad;
+        return arg_s == 2 ? eo_le(arg_v[0], arg_v[1]) : EO_ARITY(2);
     case OP66_CMP:
-        return arg_s == 2 ? eo_cmp(arg_v[0], arg_v[1]) : er_bad;
+        return arg_s == 2 ? eo_cmp(arg_v[0], arg_v[1]) : EO_ARITY(2);
 
     case OP66_INC:
-        return arg_s == 1 ? eo_inc(loc_a, arg_v[0]) : er_bad;
+        return arg_s == 1 ? eo_inc(loc_a, arg_v[0]) : EO_ARITY(1);
     case OP66_DEC:
-        return arg_s == 1 ? eo_dec(loc_a, arg_v[0]) : er_bad;
+        return arg_s == 1 ? eo_dec(loc_a, arg_v[0]) : EO_ARITY(1);
     case OP66_BEX:
-        return arg_s == 1 ? eo_bex(loc_a, arg_v[0]) : er_bad;
+        return arg_s == 1 ? eo_bex(loc_a, arg_v[0]) : EO_ARITY(1);
     default:
-        return er_bad;
+        return eo_tank(loc_a, (er_val)op, "bad primitive op");
     }
+#undef EO_ARITY
 }
 
 static er_val eo_exec_op66_descriptor(const enki_allocator* loc_a, er_val tag_v, size_t arg_s,
@@ -1499,21 +1525,27 @@ static er_val eo_exec_op66_descriptor(const enki_allocator* loc_a, er_val tag_v,
     switch (name_v) {
     case PLAN_S7('O', 'P', '_', 'L', 'O', 'A', 'D'):
         if (width_v == 0) {
-            return arg_s == 3 ? eo_load(loc_a, arg_v[0], arg_v[1], arg_v[2]) : er_bad;
+            return arg_s == 3 ? eo_load(loc_a, arg_v[0], arg_v[1], arg_v[2])
+                              : eo_bad_arity(loc_a, arg_s, 3);
         }
-        return arg_s == 2 ? eo_loadn(loc_a, width_v, arg_v[0], arg_v[1]) : er_bad;
+        return arg_s == 2 ? eo_loadn(loc_a, width_v, arg_v[0], arg_v[1])
+                          : eo_bad_arity(loc_a, arg_s, 2);
     case EO_S8('O', 'P', '_', 'S', 'T', 'O', 'R', 'E'):
         if (width_v == 0) {
-            return arg_s == 4 ? eo_store(loc_a, arg_v[0], arg_v[2], arg_v[1], arg_v[3]) : er_bad;
+            return arg_s == 4 ? eo_store(loc_a, arg_v[0], arg_v[2], arg_v[1], arg_v[3])
+                              : eo_bad_arity(loc_a, arg_s, 4);
         }
-        return arg_s == 3 ? eo_storen(loc_a, width_v, arg_v[0], arg_v[1], arg_v[2]) : er_bad;
+        return arg_s == 3 ? eo_storen(loc_a, width_v, arg_v[0], arg_v[1], arg_v[2])
+                          : eo_bad_arity(loc_a, arg_s, 3);
     case EO_S8('O', 'P', '_', 'T', 'R', 'U', 'N', 'C'):
         if (width_v == 0) {
-            return arg_s == 2 ? eo_trunc(loc_a, arg_v[0], arg_v[1]) : er_bad;
+            return arg_s == 2 ? eo_trunc(loc_a, arg_v[0], arg_v[1])
+                              : eo_bad_arity(loc_a, arg_s, 2);
         }
-        return arg_s == 1 ? eo_truncn(loc_a, width_v, arg_v[0]) : er_bad;
+        return arg_s == 1 ? eo_truncn(loc_a, width_v, arg_v[0])
+                          : eo_bad_arity(loc_a, arg_s, 1);
     case PLAN_S6('O', 'P', '_', 'M', 'E', 'T'):
-        return arg_s == 1 ? eo_met(width_v, arg_v[0]) : er_bad;
+        return arg_s == 1 ? eo_met(width_v, arg_v[0]) : eo_bad_arity(loc_a, arg_s, 1);
     default:
         break;
     }
@@ -1551,7 +1583,7 @@ er_val eo_exec_op66_app(const enki_allocator* loc_a, er_val row_v)
             if (eo_op66_from_tag(row->arg_v[0], &nested)) {
                 return eo_exec_op66(loc_a, nested, row->arg_s - 1, row->arg_v + 1);
             }
-            return er_bad;
+            return eo_tank(loc_a, row->arg_v[0], "bad primitive tag");
         }
     }
 
@@ -1562,25 +1594,28 @@ er_val eo_exec_op66_app(const enki_allocator* loc_a, er_val row_v)
     }
 
     int op = 0;
-    return eo_op66_from_tag(tag_v, &op) ? eo_exec_op66(loc_a, op, arg_s, arg_v) : er_bad;
+    return eo_op66_from_tag(tag_v, &op) ? eo_exec_op66(loc_a, op, arg_s, arg_v)
+                                        : eo_tank(loc_a, tag_v, "bad primitive tag");
 }
 
 er_val eo_exec_op0(const enki_allocator* loc_a, int op, size_t arg_s, const er_val arg_v[])
 {
     ENKI_PROFILE_ZONE("eo_exec_op0");
+#define EO_ARITY(_want) eo_bad_arity(loc_a, arg_s, (_want))
     switch (op) {
     case OP0_PIN:
-        return arg_s == 1 ? eo_pin(loc_a, arg_v[0]) : er_bad;
+        return arg_s == 1 ? eo_pin(loc_a, arg_v[0]) : EO_ARITY(1);
     case OP0_LAW:
-        return arg_s == 3 ? eo_law(loc_a, arg_v[1], arg_v[2], arg_v[0]) : er_bad;
+        return arg_s == 3 ? eo_law(loc_a, arg_v[1], arg_v[2], arg_v[0]) : EO_ARITY(3);
     case OP0_ELIM:
         return arg_s == 6
                    ? eo_elim(loc_a, arg_v[0], arg_v[1], arg_v[2], arg_v[3], arg_v[4],
                              arg_v[5])
-                   : er_bad;
+                   : EO_ARITY(6);
     default:
-        return er_bad;
+        return eo_tank(loc_a, (er_val)op, "bad primitive op");
     }
+#undef EO_ARITY
 }
 
 er_val eo_exec_op0_app(const enki_allocator* loc_a, er_val row_v)
@@ -1588,7 +1623,7 @@ er_val eo_exec_op0_app(const enki_allocator* loc_a, er_val row_v)
     ENKI_PROFILE_ZONE("eo_exec_op0_app");
     er_app* row = er_outt(er_tag_app, row_v);
     if (row == NULL) {
-        return er_bad;
+        return eo_tank(loc_a, row_v, "expected primitive row");
     }
 
     er_val tag_v = row->fn_v;
@@ -1599,10 +1634,10 @@ er_val eo_exec_op0_app(const enki_allocator* loc_a, er_val row_v)
         if (eo_nat_to_size(row->arg_v[0], &nested_s) && nested_s <= OP0_ELIM) {
             return eo_exec_op0(loc_a, (int)nested_s, row->arg_s - 1, row->arg_v + 1);
         }
-        return er_bad;
+        return eo_tank(loc_a, row->arg_v[0], "bad primitive tag");
     }
     size_t op_s = 0;
     return eo_nat_to_size(tag_v, &op_s) && op_s <= OP0_ELIM
                ? eo_exec_op0(loc_a, (int)op_s, arg_s, arg_v)
-               : er_bad;
+               : eo_tank(loc_a, tag_v, "bad primitive tag");
 }

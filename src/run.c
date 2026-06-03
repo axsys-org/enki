@@ -84,6 +84,32 @@ static bool er_flex_fits(const er_head* h, size_t base_s, size_t count_s, size_t
     return er_alloc_size(base_s, count_s, elem_s, &need_s) && need_s <= er_head_size(h);
 }
 
+er_tank* er_tank_alloc(const enki_allocator* allocator)
+{
+    ENKI_PROFILE_ZONE("er_tank_alloc");
+    return (er_tank*)er_alloc_bytes(allocator, sizeof(er_tank));
+}
+
+er_val er_tank_init(er_tank* tank, er_val val_v, char* msg_c)
+{
+    if (tank == NULL) {
+        return 0;
+    }
+    tank->val_v = val_v;
+    tank->msg_c = msg_c == NULL ? "" : msg_c;
+    return er_into(er_tag_tank, tank);
+}
+
+er_val er_tank_make(const enki_allocator* loc_a, er_val val_v, char* msg_c)
+{
+    er_tank* tank = er_tank_alloc(loc_a);
+    if (tank == NULL) {
+        return er_bad;
+    }
+    er_val out_v = er_tank_init(tank, val_v, msg_c);
+    return out_v == 0 ? er_bad : out_v;
+}
+
 er_bat* er_bat_alloc(const enki_allocator* allocator, size_t lim_s)
 {
     ENKI_PROFILE_ZONE("er_bat_alloc");
@@ -1006,7 +1032,7 @@ plan_eval_whnf(er_vm *vm, er_val val_v)
             code = vm->code;                       \
         }                                          \
         if (code == NULL) {                        \
-            FAIL_ALLOC();                          \
+            FAIL_TANK("missing bytecode", code_law_v); \
         }                                          \
     } while (0)
 
@@ -1016,7 +1042,7 @@ plan_eval_whnf(er_vm *vm, er_val val_v)
         CODE_REFRESH();                            \
         op = &code[pc++];                          \
         if ((size_t)op->tag >= OP_COUNT || dispatch[op->tag] == NULL) { \
-            FAIL_ALLOC();                          \
+            FAIL_TANK("bad bytecode op", (er_val)op->tag); \
         }                                          \
         goto *dispatch[op->tag];                   \
     } while (0)
@@ -1056,6 +1082,11 @@ plan_eval_whnf(er_vm *vm, er_val val_v)
 #define RETURN(_r)                                 \
     do {                                           \
         r = (_r);                                  \
+        if (!er_is_good(r)) {                      \
+            vm->dsp = dsp;                         \
+            vm->ksp = ksp;                         \
+            return r;                              \
+        }                                          \
         if (ksp == kbase) {                        \
             ENKI_PROFILE_PLOT_I("plan_eval.bytecode_steps", (int64_t)vm->b_count); \
             ENKI_PROFILE_PLOT_I("plan_eval.reductions", (int64_t)vm->k_count); \
@@ -1072,6 +1103,16 @@ plan_eval_whnf(er_vm *vm, er_val val_v)
         return er_bad;                             \
     } while (0)
 
+#define FAIL_TANK(_msg, _val)                      \
+    do {                                           \
+        GC_SYNC();                                 \
+        vm->gc_tmp_v[0] = (_val);                  \
+        vm->gc_tmp_s = 1;                          \
+        er_val tank_v = er_tank_make(vm->loc_a, vm->gc_tmp_v[0], (_msg)); \
+        vm->gc_tmp_s = 0;                          \
+        return tank_v;                             \
+    } while (0)
+
 #define CHECK_ALLOC(_v)                            \
     do {                                           \
         if ((_v) == 0) {                           \
@@ -1083,8 +1124,10 @@ plan_eval_whnf(er_vm *vm, er_val val_v)
 
 #define CHECK_PRIM(_v)                             \
     do {                                           \
-        if ((_v) == er_bad) {                      \
-            FAIL_ALLOC();                          \
+        if (!er_is_good(_v)) {                     \
+            vm->dsp = dsp;                         \
+            vm->ksp = ksp;                         \
+            return (_v);                           \
         }                                          \
         code_law_v = vm->code_law_v;               \
         code_label_d = vm->code_label_d;           \
@@ -1112,7 +1155,7 @@ plan_eval_whnf(er_vm *vm, er_val val_v)
 
 #define PRIM_BAD_ARITY()                           \
     do {                                           \
-        FAIL_ALLOC();                              \
+        FAIL_TANK("bad primitive arity", prim_arg); \
     } while (0)
 
 #define PRIM_SELECT_ROUTE(_route)                  \
@@ -1126,7 +1169,7 @@ plan_eval_whnf(er_vm *vm, er_val val_v)
 #define PRIM_SELECT(_tag, _arg_s)                  \
     do {                                           \
         if (!er_bc_prim_route_strict((_tag), (size_t)(_arg_s), &prim_route)) { \
-            FAIL_ALLOC();                          \
+            FAIL_TANK("bad primitive route", prim_arg); \
         }                                          \
         PRIM_SELECT_ROUTE(prim_route);             \
     } while (0)
@@ -1190,7 +1233,9 @@ I_CALLF: {
     }
     er_val* call_base = dsp - call_s;
     size_t frame_s = er_call_frame_size(call_base[0], (uint32_t)arg_s);
-    CHECK_ALLOC(frame_s);
+    if (frame_s == 0) {
+      FAIL_TANK("bad call frame", call_base[0]);
+    }
     GC_SYNC();
     r = er_thk_make_call_frame(vm->loc_a, frame_s, call_s, call_base);
     CHECK_ALLOC(r);
@@ -1554,9 +1599,7 @@ I_FORCE:
     r = plan_eval_nf_inner(vm, r);
     dsp = vm->dsp;
     ksp = vm->ksp;
-    if (r == er_bad) {
-      FAIL_ALLOC();
-    }
+    CHECK_PRIM(r);
     DPUSH(r);
     DISPATCH();
 
@@ -1584,7 +1627,9 @@ FORCE_UNK_APP: {
 	    }
     if ( hav_d ==  wan_d ) {
       size_t frame_s = er_call_frame_size(f, wan_d);
-      CHECK_ALLOC(frame_s);
+      if (frame_s == 0) {
+        FAIL_TANK("bad call frame", f);
+      }
       if (frame_s == thk->arg_s) {
         thk->fun = ER_CALL;
         goto FORCE_ENTRY;
@@ -1601,7 +1646,9 @@ FORCE_UNK_APP: {
     } else {
       split = wan_d;
       size_t frame_s = er_call_frame_size(f, wan_d);
-      CHECK_ALLOC(frame_s);
+      if (frame_s == 0) {
+        FAIL_TANK("bad call frame", f);
+      }
       GC_SYNC();
       r = er_thk_make_call_frame(vm->loc_a, frame_s, (size_t)wan_d + 1, thk->arg_v);
       CHECK_ALLOC(r);
@@ -1612,12 +1659,17 @@ FORCE_UNK_APP: {
 
 
 FORCE_ENTRY: {
+    if (!er_is_good(r)) {
+      vm->dsp = dsp;
+      vm->ksp = ksp;
+      return r;
+    }
     if( er_is_whnf(r) ) {
       RETURN(r);
     }
     thk = er_outt(er_tag_thk, r);
     if (thk == NULL) {
-      FAIL_ALLOC();
+      FAIL_TANK("expected thunk", r);
     }
     switch(thk->fun) {
       case ER_XDONE:
@@ -1629,7 +1681,7 @@ FORCE_ENTRY: {
       case ER_SUSP:
         goto FORCE_SUSP;
       case ER_HOLE:
-        FAIL_ALLOC();
+        FAIL_TANK("thunk hole", er_into(er_tag_thk, thk));
       default:
         assert("bad thk tag" && 0);
     }
@@ -1642,13 +1694,13 @@ PRIMOP: {
     if (prim_set == 0) {
         goto PRIM0_DECODE;
     }
-    FAIL_ALLOC();
+    FAIL_TANK("bad primitive set", prim_arg);
 }
 
 PRIM0_DECODE: {
     prim_row = er_outt(er_tag_app, prim_arg);
     if (prim_row == NULL) {
-        FAIL_ALLOC();
+        FAIL_TANK("expected primitive row", prim_arg);
     }
     prim_tag_v = prim_row->fn_v;
     prim_arg_v = prim_row->arg_v;
@@ -1660,11 +1712,11 @@ PRIM0_DECODE: {
         prim_arg_s = prim_row->arg_s - 1;
     }
     if (!er_is_cat(prim_tag_v) || prim_tag_v > (er_val)OP0_ELIM) {
-        FAIL_ALLOC();
+        FAIL_TANK("bad primitive tag", prim_tag_v);
     }
     prim_op_s = (size_t)prim_tag_v;
     if (!er_bc_prim0_route(prim_op_s, &prim_route)) {
-        FAIL_ALLOC();
+        FAIL_TANK("bad primitive route", prim_tag_v);
     }
     PRIM_SELECT_ROUTE(prim_route);
 }
@@ -1688,16 +1740,16 @@ PRIM66_DECODE: {
     prim_desc = er_outt(er_tag_app, prim_tag_v);
     if (prim_desc != NULL) {
         if (prim_desc->arg_s != 1) {
-            FAIL_ALLOC();
+            FAIL_TANK("bad primitive descriptor", prim_tag_v);
         }
         prim_name_v = prim_desc->fn_v;
         prim_word_v = prim_desc->arg_v[0];
         if (!er_prim66_op_from_descriptor(prim_name_v, &prim_op_i) || prim_op_i < 0 ||
             (size_t)prim_op_i >= ER_OP66_COUNT) {
-            FAIL_ALLOC();
+            FAIL_TANK("bad primitive descriptor", prim_tag_v);
         }
         if (!er_bc_prim66_route(prim_op_i, &prim_route)) {
-            FAIL_ALLOC();
+            FAIL_TANK("bad primitive route", prim_tag_v);
         }
         switch (prim_op_i) {
         case OP66_LOAD:
@@ -1714,7 +1766,7 @@ PRIM66_DECODE: {
     }
     if (!eo_op66_from_tag(prim_tag_v, &prim_op_i) || prim_op_i < 0 ||
         (size_t)prim_op_i >= ER_OP66_COUNT) {
-        FAIL_ALLOC();
+        FAIL_TANK("bad primitive tag", prim_tag_v);
     }
     switch (prim_op_i) {
     case OP66_TYPE:
@@ -1735,7 +1787,7 @@ PRIM66_DECODE: {
             if (er_is_cat(prim_a_v)) {
                 PRIM_DONE_VALUE(0);
             }
-            FAIL_ALLOC();
+            FAIL_TANK("bad value tag", prim_a_v);
         }
     case OP66_IS_PIN:
     case OP66_IS_LAW:
@@ -1943,19 +1995,19 @@ PRIM66_DECODE: {
         if (prim_arg_s != 1) {
             PRIM_BAD_ARITY();
         }
-        FAIL_ALLOC();
+        FAIL_TANK("throw", prim_arg_v[0]);
     default:
         break;
     }
     if (!er_bc_prim66_route(prim_op_i, &prim_route)) {
-        FAIL_ALLOC();
+        FAIL_TANK("bad primitive route", prim_tag_v);
     }
     PRIM_SELECT_ROUTE(prim_route);
 }
 
 PRIM_ROUTE_DISPATCH: {
     if (prim_byte_op >= OP_COUNT || dispatch[prim_byte_op] == NULL) {
-        FAIL_ALLOC();
+        FAIL_TANK("bad primitive route", prim_tag_v);
     }
     if (prim_arg_s != prim_need_s || prim_need_s > ER_BC_MAX_PRIM_ARITY ||
         prim_route_depth_s >= ER_PRIM_ROUTE_MAX_DEPTH) {
@@ -1982,7 +2034,7 @@ PRIM_ROUTE_DISPATCH: {
     if (!er_bc_emit_prim_route_fragment(prim_code_v, ER_PRIM_ROUTE_MAX_CODE, prim_byte_op,
                                         prim_need_s, prim_route.arg_eval_v, prim_lit_v,
                                         &prim_code_s)) {
-        FAIL_ALLOC();
+        FAIL_TANK("bad primitive route", prim_tag_v);
     }
     prim_route_final_pc_v[prim_route_slot_s] = prim_code_s;
 
@@ -2017,12 +2069,12 @@ FORCE_SUSP: {
     uint32_t susp_label = (uint32_t)thk->arg_v[0];
     er_thk* fr = er_outt(er_tag_thk, thk->arg_v[1]);
     if (fr == NULL) {
-      FAIL_ALLOC();
+      FAIL_TANK("bad suspension frame", thk->arg_v[1]);
     }
     er_val susp_law_v = thk->arg_s >= 3 ? thk->arg_v[2] : fr->arg_v[0];
     er_law* law = er_resolve_law(susp_law_v);
     if (er_law_label_code(law, susp_label) == NULL) {
-      FAIL_ALLOC();
+      FAIL_TANK("bad suspension label", susp_law_v);
     }
     KPUSH_UPDATE(er_into(er_tag_thk, thk));
     CODE_SET(susp_law_v, susp_label);
@@ -2073,7 +2125,7 @@ ENTER_CALL: {
     }
     size_t frame_s = (size_t)law->ari_d + 1 + law->let_d;
     if (thk->arg_s != frame_s || er_law_label_code(law, 0) == NULL) {
-      FAIL_ALLOC();
+      FAIL_TANK("bad call frame", self_v);
     }
     size_t n_lets = er_law_n_lets(law);
 
@@ -2092,7 +2144,7 @@ ENTER_CALL: {
         size_t slot_s = (size_t)law->ari_d + 1 + i;
         er_thk* susp = er_outt(er_tag_thk, thk->arg_v[slot_s]);
         if (susp == NULL || susp->fun != ER_SUSP || susp->arg_s < 2) {
-          FAIL_ALLOC();
+          FAIL_TANK("bad suspension", thk->arg_v[slot_s]);
         }
         susp->arg_v[1] = env_v;
       }
@@ -2149,7 +2201,7 @@ K_UPDATE:
      */
     thk = er_outt(er_tag_thk, target);
     if (thk == NULL) {
-      FAIL_ALLOC();
+      FAIL_TANK("bad update target", target);
     }
     thk->fun = ER_XDONE;
     thk->arg_v[0] = r;
@@ -2164,11 +2216,11 @@ K_APPHEAD:
     app = (--ksp)->val_v;
     thk = er_outt(er_tag_thk, app);
     if ( !thk ) {
-      FAIL_ALLOC();
+      FAIL_TANK("bad app head", app);
     }
     assert(thk->fun == ER_HOLE);
     if (thk->fun != ER_HOLE) {
-      FAIL_ALLOC();
+      FAIL_TANK("bad app head", app);
     }
     thk->fun = ER_XUNK_APP;
     thk->arg_v[0] = r;
@@ -2197,6 +2249,7 @@ K_OVERAPP:
 #undef GC_ROOT_PRIMS
 #undef GC_SYNC
 #undef CHECK_ALLOC
+#undef FAIL_TANK
 #undef PRIM_SELECT_ROUTE
 #undef PRIM_SELECT
 #undef PRIM_BAD_ARITY
@@ -2249,7 +2302,7 @@ static er_val plan_eval_nf_inner(er_vm* vm, er_val val_v)
 {
     er_val* base_dsp = vm->dsp;
     er_val root_v = plan_eval_whnf_preserve(vm, val_v);
-    if (root_v == er_bad || er_is_cat(root_v)) {
+    if (!er_is_good(root_v) || er_is_cat(root_v)) {
         return root_v;
     }
 
@@ -2260,7 +2313,7 @@ static er_val plan_eval_nf_inner(er_vm* vm, er_val val_v)
     case er_tag_app:
         break;
     default:
-        return er_bad;
+        return er_tank_make(vm->loc_a, root_v, "bad value tag");
     }
 
     er_head* h = er_outa(root_v);
@@ -2280,37 +2333,37 @@ static er_val plan_eval_nf_inner(er_vm* vm, er_val val_v)
     case er_tag_pin: {
         er_pin* pin = er_outt(er_tag_pin, *root_p);
         if (pin == NULL) {
-            root_v = er_bad;
+            root_v = er_tank_make(vm->loc_a, *root_p, "bad pin");
             break;
         }
 
         er_val child_v = plan_eval_nf_inner(vm, pin->val_v);
-        if (child_v == er_bad) {
-            root_v = er_bad;
+        if (!er_is_good(child_v)) {
+            root_v = child_v;
             break;
         }
 
         pin = er_outt(er_tag_pin, *root_p);
         if (pin == NULL) {
-            root_v = er_bad;
+            root_v = er_tank_make(vm->loc_a, *root_p, "bad pin");
             break;
         }
         pin->val_v = child_v;
 
         for (size_t k = 0; k < pin->sub_s; k++) {
             child_v = plan_eval_nf_inner(vm, pin->sub_v[k]);
-            if (child_v == er_bad) {
-                root_v = er_bad;
+            if (!er_is_good(child_v)) {
+                root_v = child_v;
                 break;
             }
             pin = er_outt(er_tag_pin, *root_p);
             if (pin == NULL) {
-                root_v = er_bad;
+                root_v = er_tank_make(vm->loc_a, *root_p, "bad pin");
                 break;
             }
             pin->sub_v[k] = child_v;
         }
-        if (root_v == er_bad) {
+        if (!er_is_good(root_v)) {
             break;
         }
 
@@ -2322,32 +2375,32 @@ static er_val plan_eval_nf_inner(er_vm* vm, er_val val_v)
     case er_tag_law: {
         er_law* law = er_outt(er_tag_law, *root_p);
         if (law == NULL) {
-            root_v = er_bad;
+            root_v = er_tank_make(vm->loc_a, *root_p, "bad law");
             break;
         }
 
         er_val child_v = plan_eval_nf_inner(vm, law->name_v);
-        if (child_v == er_bad) {
-            root_v = er_bad;
+        if (!er_is_good(child_v)) {
+            root_v = child_v;
             break;
         }
 
         law = er_outt(er_tag_law, *root_p);
         if (law == NULL) {
-            root_v = er_bad;
+            root_v = er_tank_make(vm->loc_a, *root_p, "bad law");
             break;
         }
         law->name_v = child_v;
 
         child_v = plan_eval_nf_inner(vm, law->body_v);
-        if (child_v == er_bad) {
-            root_v = er_bad;
+        if (!er_is_good(child_v)) {
+            root_v = child_v;
             break;
         }
 
         law = er_outt(er_tag_law, *root_p);
         if (law == NULL) {
-            root_v = er_bad;
+            root_v = er_tank_make(vm->loc_a, *root_p, "bad law");
             break;
         }
         law->body_v = child_v;
@@ -2360,37 +2413,37 @@ static er_val plan_eval_nf_inner(er_vm* vm, er_val val_v)
     case er_tag_app: {
         er_app* app = er_outt(er_tag_app, *root_p);
         if (app == NULL) {
-            root_v = er_bad;
+            root_v = er_tank_make(vm->loc_a, *root_p, "bad app");
             break;
         }
 
         er_val child_v = plan_eval_nf_inner(vm, app->fn_v);
-        if (child_v == er_bad) {
-            root_v = er_bad;
+        if (!er_is_good(child_v)) {
+            root_v = child_v;
             break;
         }
 
         app = er_outt(er_tag_app, *root_p);
         if (app == NULL) {
-            root_v = er_bad;
+            root_v = er_tank_make(vm->loc_a, *root_p, "bad app");
             break;
         }
         app->fn_v = child_v;
 
         for (size_t k = 0; k < app->arg_s; k++) {
             child_v = plan_eval_nf_inner(vm, app->arg_v[k]);
-            if (child_v == er_bad) {
-                root_v = er_bad;
+            if (!er_is_good(child_v)) {
+                root_v = child_v;
                 break;
             }
             app = er_outt(er_tag_app, *root_p);
             if (app == NULL) {
-                root_v = er_bad;
+                root_v = er_tank_make(vm->loc_a, *root_p, "bad app");
                 break;
             }
             app->arg_v[k] = child_v;
         }
-        if (root_v == er_bad) {
+        if (!er_is_good(root_v)) {
             break;
         }
 
@@ -2400,11 +2453,11 @@ static er_val plan_eval_nf_inner(er_vm* vm, er_val val_v)
     }
 
     default:
-        root_v = er_bad;
+        root_v = er_tank_make(vm->loc_a, root_v, "bad value tag");
         break;
     }
 
-    if (root_v != er_bad) {
+    if (er_is_good(root_v)) {
         root_v = *root_p;
     }
     vm->dsp = base_dsp;

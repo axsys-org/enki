@@ -244,6 +244,15 @@ static void _wisp_fail_with_val(wisp_rt* rt, const char* msg_c, er_val val_v)
     wisp_fail(rt, str_c);
 }
 
+static void _wisp_fail_with_result(wisp_rt* rt, er_val result_v, er_val fallback_v)
+{
+    er_tank* tank = er_outt(er_tag_tank, result_v);
+    if (tank != NULL) {
+        _wisp_fail_with_val(rt, tank->msg_c, tank->val_v);
+    }
+    _wisp_fail_with_val(rt, "runtime error", fallback_v);
+}
+
 static er_val _wisp_run_apply_mode(wisp_rt* rt, size_t val_s, const er_val* val_v,
                                    er_eval_mode mode)
 {
@@ -253,8 +262,8 @@ static er_val _wisp_run_apply_mode(wisp_rt* rt, size_t val_s, const er_val* val_
     }
     if (val_s == 1) {
         er_val out_v = mode == ER_EVAL_WHNF ? val_v[0] : er_eval_to(rt->loc_a, val_v[0], mode);
-        if (out_v == er_bad) {
-            _wisp_fail_with_val(rt, "runtime error", val_v[0]);
+        if (!er_is_good(out_v)) {
+            _wisp_fail_with_result(rt, out_v, val_v[0]);
         }
         return out_v;
     }
@@ -268,8 +277,8 @@ static er_val _wisp_run_apply_mode(wisp_rt* rt, size_t val_s, const er_val* val_
         wisp_fail(rt, "oom");
     }
     er_val res_v = er_eval_to(rt->loc_a, thk_v, mode);
-    if (res_v == er_bad) {
-        _wisp_fail_with_val(rt, "runtime error", thk_v);
+    if (!er_is_good(res_v)) {
+        _wisp_fail_with_result(rt, res_v, thk_v);
     }
     return res_v;
 }
@@ -454,6 +463,14 @@ static void wisp_print_value_sb(wisp_rt* rt, enki_string_builder* sb, er_val val
     if (thk != NULL) {
         enki_sb_append_lit(sb, "<thk/");
         enki_sb_append_u64(sb, (uint64_t)thk->fun);
+        enki_sb_append_lit(sb, ">");
+        return;
+    }
+
+    er_tank* tank = er_outt(er_tag_tank, val_v);
+    if (tank != NULL) {
+        enki_sb_append_lit(sb, "<tank: ");
+        enki_sb_append_cstr(sb, tank->msg_c == NULL ? "" : tank->msg_c);
         enki_sb_append_lit(sb, ">");
         return;
     }
