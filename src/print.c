@@ -190,10 +190,15 @@ static void enki_print_value_sb(const enki_allocator* cat_a, enki_string_builder
 
     er_thk* thk = er_outt(er_tag_thk, val_v);
     if (thk != NULL) {
-        enki_sb_append_lit(sb, "<thk/");
-        enki_sb_append_u64(sb, (uint64_t)thk->fun);
-        enki_sb_append_lit(sb, ">");
+      if (thk->fun == ER_XDONE) {
+        enki_print_value_sb(cat_a, sb, thk->arg_v[0]);
         return;
+      }
+
+      enki_sb_append_lit(sb, "<thk/");
+      enki_sb_append_u64(sb, (uint64_t)thk->fun);
+      enki_sb_append_lit(sb, ">");
+      return;
     }
 
     er_tank* tank = er_outt(er_tag_tank, val_v);

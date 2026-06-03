@@ -24,6 +24,9 @@ typedef struct er_bc_vals {
     er_val* val_v;
     size_t val_s;
     size_t cap_s;
+    er_app** own_app_v;
+    size_t own_app_s;
+    size_t own_app_cap_s;
     bool ok_f;
 } er_bc_vals;
 
@@ -352,6 +355,9 @@ static void er_bc_vals_init(er_bc_vals* vals, const enki_allocator* loc_a)
     vals->val_v = NULL;
     vals->val_s = 0;
     vals->cap_s = 0;
+    vals->own_app_v = NULL;
+    vals->own_app_s = 0;
+    vals->own_app_cap_s = 0;
     vals->ok_f = true;
 }
 
@@ -390,14 +396,70 @@ static bool er_bc_vals_push(er_bc_vals* vals, er_val val_v)
     return true;
 }
 
+static bool er_bc_vals_owned_reserve(er_bc_vals* vals, size_t need_s)
+{
+    if (!vals->ok_f) {
+        return false;
+    }
+    if (need_s <= vals->own_app_cap_s) {
+        return true;
+    }
+    size_t next_s = vals->own_app_cap_s == 0 ? 8 : vals->own_app_cap_s;
+    while (next_s < need_s) {
+        if (next_s > SIZE_MAX / 2) {
+            vals->ok_f = false;
+            return false;
+        }
+        next_s *= 2;
+    }
+    void* ptr = vals->own_app_v;
+    if (!er_bc_realloc(vals->loc_a, &ptr, vals->own_app_cap_s, next_s, sizeof(er_app*))) {
+        vals->ok_f = false;
+        return false;
+    }
+    vals->own_app_v = ptr;
+    vals->own_app_cap_s = next_s;
+    return true;
+}
+
+static bool er_bc_vals_push_const(er_bc_vals* vals, er_val val_v)
+{
+    er_val arg_v[] = {val_v};
+    er_app* app = er_app_alloc(vals->loc_a, 1);
+    if (app == NULL || !er_bc_vals_owned_reserve(vals, vals->own_app_s + 1)) {
+        if (app != NULL && vals->loc_a != NULL && vals->loc_a->free != NULL) {
+            vals->loc_a->free(vals->loc_a->ctx, app);
+        }
+        vals->ok_f = false;
+        return false;
+    }
+    er_val quote_v = er_app_init(app, 0, 1, arg_v);
+    if (quote_v == 0) {
+        vals->loc_a->free(vals->loc_a->ctx, app);
+        vals->ok_f = false;
+        return false;
+    }
+    vals->own_app_v[vals->own_app_s++] = app;
+    return er_bc_vals_push(vals, quote_v);
+}
+
 static void er_bc_vals_free(er_bc_vals* vals)
 {
+    if (vals->own_app_v != NULL && vals->loc_a != NULL && vals->loc_a->free != NULL) {
+        for (size_t k = 0; k < vals->own_app_s; k++) {
+            vals->loc_a->free(vals->loc_a->ctx, vals->own_app_v[k]);
+        }
+        vals->loc_a->free(vals->loc_a->ctx, vals->own_app_v);
+    }
     if (vals->val_v != NULL && vals->loc_a != NULL && vals->loc_a->free != NULL) {
         vals->loc_a->free(vals->loc_a->ctx, vals->val_v);
     }
     vals->val_v = NULL;
     vals->val_s = 0;
     vals->cap_s = 0;
+    vals->own_app_v = NULL;
+    vals->own_app_s = 0;
+    vals->own_app_cap_s = 0;
 }
 
 static bool er_bc_compiler_reserve(er_bc_compiler* c, size_t need_s)
@@ -697,7 +759,11 @@ static bool er_bc_lift_call(er_bc_compiler* c, er_val f_v, er_val x_v, er_bc_val
     er_bc_vals_init(&expanded, c->loc_a);
     bool ok_f = er_bc_vals_push(&expanded, er_bc_pull_const(app->fn_v));
     for (size_t k = 0; ok_f && k < app->arg_s; k++) {
-        ok_f = er_bc_vals_push(&expanded, app->arg_v[k]);
+        /*
+         * Captured partial-application arguments are runtime values. Keep them
+         * quoted so small natural literals are not recompiled as local refs.
+         */
+        ok_f = er_bc_vals_push_const(&expanded, app->arg_v[k]);
     }
     for (size_t k = 1; ok_f && k < out->val_s; k++) {
         ok_f = er_bc_vals_push(&expanded, out->val_v[k]);

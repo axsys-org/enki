@@ -1472,15 +1472,21 @@ Test(run_vm, compiled_law_emits_direct_primitive_bytecode)
     cr_assert_eq(run_vm(NULL, call_v), 42);
 }
 
-Test(run_vm, compiled_call_flattens_quoted_partial_primitive_head)
+Test(run_vm, compiled_call_preserves_quoted_partial_primitive_args)
 {
-    er_val ix_v = er_pin_make(enki_allocator_system(), make_prim_law(PLAN_S2('I', 'x'), 2));
+    er_val prim66_v = make_prim66();
+    er_val ix_prim_arg_v[] = {PLAN_S2('I', 'x'), 1, 2};
+    er_val ix_prim_row_v = make_app_value(0, 3, ix_prim_arg_v);
+    er_val ix_body_v = make_plan_call_expr(prim66_v, ix_prim_row_v);
+    er_val ix_law_v = er_law_make(enki_allocator_system(), PLAN_S2('I', 'x'), ix_body_v, 2);
+    cr_assert_eq(er_get_tag(ix_law_v), er_tag_law);
+    er_val ix_v = er_pin_make(enki_allocator_system(), ix_law_v);
     cr_assert_eq(er_get_tag(ix_v), er_tag_pin);
     er_val ix_arg_v[] = {2};
     er_val ix2_v = make_app_value(ix_v, 1, ix_arg_v);
     er_val quoted_ix2_v = make_law_quote_expr(ix2_v);
     er_val body_v = make_plan_call_expr(quoted_ix2_v, 1);
-    er_val law_v = er_law_make(enki_allocator_system(), 0, body_v, 1);
+    er_val law_v = er_law_make(enki_allocator_system(), 0, body_v, 2);
     cr_assert_eq(er_get_tag(law_v), er_tag_law);
     er_law* law = er_outt(er_tag_law, law_v);
     cr_assert_not_null(law);
@@ -1488,20 +1494,18 @@ Test(run_vm, compiled_call_flattens_quoted_partial_primitive_head)
     cr_assert_not_null(code);
 
     bool saw_ix_f = false;
-    bool saw_mk_app_f = false;
     for (size_t k = 0; k < 16 && code[k].tag != OP_RET; k++) {
         saw_ix_f = saw_ix_f || code[k].tag == OP_IX;
-        saw_mk_app_f = saw_mk_app_f || code[k].tag == OP_MK_APP;
     }
     cr_assert(saw_ix_f);
-    cr_assert_not(saw_mk_app_f);
 
     er_val row_arg_v[] = {10, 11, 12};
     er_val row_v = make_app_value(0, 3, row_arg_v);
-    er_val call_v = make_call(law_v, 2);
+    er_val call_v = make_call(law_v, 3);
     er_thk* call = er_outt(er_tag_thk, call_v);
     cr_assert_not_null(call);
     call->arg_v[1] = row_v;
+    call->arg_v[2] = 99;
 
     cr_assert_eq(run_vm(NULL, call_v), 12);
 }
