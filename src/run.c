@@ -13,6 +13,7 @@
 #include "enki/run.h"
 #include "enki/run_ops.h"
 #include "enki/util.h"
+#include "enki/print.h"
 
 enum {
     ER_PRIM_ROUTE_MAX_CODE = 64,
@@ -1965,6 +1966,7 @@ PRIM66_DECODE: {
         if (prim_arg_s != 2) {
             PRIM_BAD_ARITY();
         }
+        fprintf(stderr, "trace: %s\n", enki_pvalue(vm->loc_a, prim_arg_v[0]));
         r = prim_arg_v[1];
         goto FORCE_ENTRY;
     case OP66_SEQ:
