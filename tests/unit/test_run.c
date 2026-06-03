@@ -606,7 +606,7 @@ static er_val run_prim66_row(er_val tag_v, size_t arg_s, const er_val arg_v[])
     er_op code[] = {
         [0] = {.tag = OP_PUSH_LIT, .as.lit_v = prim66_v},
         [1] = {.tag = OP_PUSH_LIT, .as.lit_v = row_v},
-        [2] = {.tag = OP_MK_CALL, .as.u32 = 2},
+        [2] = {.tag = OP_CALLU, .as.u32 = 1},
         [3] = {.tag = OP_EVAL},
         [4] = {.tag = OP_RET},
     };
@@ -620,7 +620,7 @@ static er_val run_prim0_row(er_val tag_v, size_t arg_s, const er_val arg_v[])
     er_op code[] = {
         [0] = {.tag = OP_PUSH_LIT, .as.lit_v = prim0_v},
         [1] = {.tag = OP_PUSH_LIT, .as.lit_v = row_v},
-        [2] = {.tag = OP_MK_CALL, .as.u32 = 2},
+        [2] = {.tag = OP_CALLU, .as.u32 = 1},
         [3] = {.tag = OP_EVAL},
         [4] = {.tag = OP_RET},
     };
@@ -640,7 +640,7 @@ static er_val run_prim66_inc(er_val input_v)
         [1] = {.tag = OP_PUSH_LIT, .as.lit_v = PLAN_S3('I', 'n', 'c')},
         [2] = {.tag = OP_PUSH_LIT, .as.lit_v = input_v},
         [3] = {.tag = OP_MK_APP, .as.u32 = 2},
-        [4] = {.tag = OP_MK_CALL, .as.u32 = 2},
+        [4] = {.tag = OP_CALLU, .as.u32 = 1},
         [5] = {.tag = OP_EVAL},
         [6] = {.tag = OP_RET},
     };
@@ -657,7 +657,7 @@ static er_val run_prim66_arity(er_val input_v)
         [1] = {.tag = OP_PUSH_LIT, .as.lit_v = PLAN_S5('A', 'r', 'i', 't', 'y')},
         [2] = {.tag = OP_PUSH_LIT, .as.lit_v = input_v},
         [3] = {.tag = OP_MK_APP, .as.u32 = 2},
-        [4] = {.tag = OP_MK_CALL, .as.u32 = 2},
+        [4] = {.tag = OP_CALLU, .as.u32 = 1},
         [5] = {.tag = OP_EVAL},
         [6] = {.tag = OP_RET},
     };
@@ -748,6 +748,127 @@ Test(run_vm, mk_app_uses_operand_count_and_leaves_single_stack_value)
     cr_assert_eq(app->arg_s, 2);
     cr_assert_eq(app->arg_v[0], 10);
     cr_assert_eq(app->arg_v[1], 20);
+}
+
+Test(run_vm, callf_builds_call_thunk_without_evaluating)
+{
+    er_op callee_code[] = {
+        [0] = {.tag = OP_PUSH_LIT, .as.lit_v = 99},
+        [1] = {.tag = OP_RET},
+    };
+    er_val callee_v = make_law(1, callee_code, 0, NULL);
+    er_op code[] = {
+        [0] = {.tag = OP_PUSH_LIT, .as.lit_v = 0},
+        [1] = {.tag = OP_PUSH_LIT, .as.lit_v = callee_v},
+        [2] = {.tag = OP_PUSH_LIT, .as.lit_v = 41},
+        [3] = {.tag = OP_CALLF, .as.u32 = 1},
+        [4] = {.tag = OP_MK_APP, .as.u32 = 2},
+        [5] = {.tag = OP_RET},
+    };
+    er_val law_v = make_law(0, code, 0, NULL);
+    er_val call_v = make_call(law_v, 1);
+
+    er_val result_v = run_vm(code, call_v);
+
+    er_app* app = er_outt(er_tag_app, result_v);
+    cr_assert_not_null(app);
+    cr_assert_eq(app->arg_s, 1);
+    er_thk* thunk = er_outt(er_tag_thk, app->arg_v[0]);
+    cr_assert_not_null(thunk);
+    cr_assert_eq(thunk->fun, ER_CALL);
+    cr_assert_eq(thunk->arg_s, 2);
+    cr_assert_eq(thunk->arg_v[0], callee_v);
+    cr_assert_eq(thunk->arg_v[1], 41);
+}
+
+Test(run_vm, callu_builds_unknown_app_thunk_without_evaluating)
+{
+    er_op callee_code[] = {
+        [0] = {.tag = OP_PUSH_LIT, .as.lit_v = 99},
+        [1] = {.tag = OP_RET},
+    };
+    er_val callee_v = make_law(1, callee_code, 0, NULL);
+    er_op code[] = {
+        [0] = {.tag = OP_PUSH_LIT, .as.lit_v = 0},
+        [1] = {.tag = OP_PUSH_LIT, .as.lit_v = callee_v},
+        [2] = {.tag = OP_PUSH_LIT, .as.lit_v = 41},
+        [3] = {.tag = OP_CALLU, .as.u32 = 1},
+        [4] = {.tag = OP_MK_APP, .as.u32 = 2},
+        [5] = {.tag = OP_RET},
+    };
+    er_val law_v = make_law(0, code, 0, NULL);
+    er_val call_v = make_call(law_v, 1);
+
+    er_val result_v = run_vm(code, call_v);
+
+    er_app* app = er_outt(er_tag_app, result_v);
+    cr_assert_not_null(app);
+    cr_assert_eq(app->arg_s, 1);
+    er_thk* thunk = er_outt(er_tag_thk, app->arg_v[0]);
+    cr_assert_not_null(thunk);
+    cr_assert_eq(thunk->fun, ER_XUNK_APP);
+    cr_assert_eq(thunk->arg_s, 2);
+    cr_assert_eq(thunk->arg_v[0], callee_v);
+    cr_assert_eq(thunk->arg_v[1], 41);
+}
+
+Test(run_vm, call_builders_evaluate_only_with_explicit_eval)
+{
+    er_op callee_code[] = {
+        [0] = {.tag = OP_PUSH_LIT, .as.lit_v = 99},
+        [1] = {.tag = OP_RET},
+    };
+    er_val callee_v = make_law(1, callee_code, 0, NULL);
+    er_op callf_code[] = {
+        [0] = {.tag = OP_PUSH_LIT, .as.lit_v = callee_v},
+        [1] = {.tag = OP_PUSH_LIT, .as.lit_v = 41},
+        [2] = {.tag = OP_CALLF, .as.u32 = 1},
+        [3] = {.tag = OP_EVAL},
+        [4] = {.tag = OP_RET},
+    };
+    er_op callu_code[] = {
+        [0] = {.tag = OP_PUSH_LIT, .as.lit_v = callee_v},
+        [1] = {.tag = OP_PUSH_LIT, .as.lit_v = 41},
+        [2] = {.tag = OP_CALLU, .as.u32 = 1},
+        [3] = {.tag = OP_EVAL},
+        [4] = {.tag = OP_RET},
+    };
+
+    cr_assert_eq(run_code(callf_code), 99);
+    cr_assert_eq(run_code(callu_code), 99);
+}
+
+Test(run_vm, tail_eval_enters_without_bytecode_return_frame)
+{
+    er_op callee_code[] = {
+        [0] = {.tag = OP_PUSH_LIT, .as.lit_v = 42},
+        [1] = {.tag = OP_RET},
+    };
+    er_val callee_v = make_law(1, callee_code, 0, NULL);
+    er_op code[] = {
+        [0] = {.tag = OP_PUSH_LIT, .as.lit_v = callee_v},
+        [1] = {.tag = OP_PUSH_LIT, .as.lit_v = 11},
+        [2] = {.tag = OP_CALLF, .as.u32 = 1},
+        [3] = {.tag = OP_TAIL_EVAL},
+        [4] = {.tag = OP_RET},
+    };
+    er_val law_v = make_law(0, code, 0, NULL);
+    er_val call_v = make_call(law_v, 1);
+    er_val dstack_v[256] = {0};
+    er_kon kstack_v[512] = {0};
+    er_vm vm = {
+        .code = code,
+        .loc_a = enki_allocator_system(),
+        .dstack = dstack_v,
+        .dsp = dstack_v,
+        .kbase = kstack_v,
+        .ksp = kstack_v,
+    };
+
+    er_val result_v = plan_eval(&vm, call_v, ER_EVAL_WHNF);
+
+    cr_assert_eq(result_v, 42);
+    cr_assert_eq(vm.k_count, 0);
 }
 
 Test(run_vm, rotate_reorders_top_n_stack_values)
@@ -892,7 +1013,7 @@ Test(run_vm, primop0_law_forces_arguments_to_whnf_and_increments_arity)
         [3] = {.tag = OP_PUSH_LIT, .as.lit_v = name_v},
         [4] = {.tag = OP_PUSH_LIT, .as.lit_v = body_v},
         [5] = {.tag = OP_MK_APP, .as.u32 = 4},
-        [6] = {.tag = OP_MK_CALL, .as.u32 = 2},
+        [6] = {.tag = OP_CALLU, .as.u32 = 1},
         [7] = {.tag = OP_EVAL},
         [8] = {.tag = OP_RET},
     };
@@ -927,7 +1048,7 @@ Test(run_vm, primop0_elim_forces_only_scrutinee)
         [6] = {.tag = OP_PUSH_LIT, .as.lit_v = bad_v},
         [7] = {.tag = OP_PUSH_LIT, .as.lit_v = scrutinee_v},
         [8] = {.tag = OP_MK_APP, .as.u32 = 7},
-        [9] = {.tag = OP_MK_CALL, .as.u32 = 2},
+        [9] = {.tag = OP_CALLU, .as.u32 = 1},
         [10] = {.tag = OP_EVAL},
         [11] = {.tag = OP_RET},
     };
@@ -945,7 +1066,7 @@ Test(run_vm, primop0_bad_arity_is_tank)
         [1] = {.tag = OP_PUSH_LIT, .as.lit_v = OP0_LAW},
         [2] = {.tag = OP_PUSH_LIT, .as.lit_v = 2},
         [3] = {.tag = OP_MK_APP, .as.u32 = 2},
-        [4] = {.tag = OP_MK_CALL, .as.u32 = 2},
+        [4] = {.tag = OP_CALLU, .as.u32 = 1},
         [5] = {.tag = OP_EVAL},
         [6] = {.tag = OP_RET},
     };
@@ -964,7 +1085,7 @@ Test(run_vm, primop66_eq_returns_nat_boolean)
         [2] = {.tag = OP_PUSH_LIT, .as.lit_v = 42},
         [3] = {.tag = OP_PUSH_LIT, .as.lit_v = 42},
         [4] = {.tag = OP_MK_APP, .as.u32 = 3},
-        [5] = {.tag = OP_MK_CALL, .as.u32 = 2},
+        [5] = {.tag = OP_CALLU, .as.u32 = 1},
         [6] = {.tag = OP_EVAL},
         [7] = {.tag = OP_RET},
     };
@@ -1103,7 +1224,7 @@ Test(run_vm, primop66_bad_arity_is_tank)
         [1] = {.tag = OP_PUSH_LIT, .as.lit_v = PLAN_S3('A', 'd', 'd')},
         [2] = {.tag = OP_PUSH_LIT, .as.lit_v = 10},
         [3] = {.tag = OP_MK_APP, .as.u32 = 2},
-        [4] = {.tag = OP_MK_CALL, .as.u32 = 2},
+        [4] = {.tag = OP_CALLU, .as.u32 = 1},
         [5] = {.tag = OP_EVAL},
         [6] = {.tag = OP_RET},
     };
@@ -1122,7 +1243,7 @@ Test(run_vm, primop66_cmp_identical_non_nat_is_equal)
         [2] = {.tag = OP_PUSH_LIT, .as.lit_v = prim66_v},
         [3] = {.tag = OP_PUSH_LIT, .as.lit_v = prim66_v},
         [4] = {.tag = OP_MK_APP, .as.u32 = 3},
-        [5] = {.tag = OP_MK_CALL, .as.u32 = 2},
+        [5] = {.tag = OP_CALLU, .as.u32 = 1},
         [6] = {.tag = OP_EVAL},
         [7] = {.tag = OP_RET},
     };
@@ -1160,7 +1281,7 @@ Test(run_vm, primop66_init_singleton_returns_head)
         [1] = {.tag = OP_PUSH_LIT, .as.lit_v = PLAN_S4('I', 'n', 'i', 't')},
         [2] = {.tag = OP_PUSH_LIT, .as.lit_v = row_v},
         [3] = {.tag = OP_MK_APP, .as.u32 = 2},
-        [4] = {.tag = OP_MK_CALL, .as.u32 = 2},
+        [4] = {.tag = OP_CALLU, .as.u32 = 1},
         [5] = {.tag = OP_EVAL},
         [6] = {.tag = OP_RET},
     };
@@ -1179,7 +1300,7 @@ Test(run_vm, primop66_bit_helpers)
         [2] = {.tag = OP_PUSH_LIT, .as.lit_v = 1},
         [3] = {.tag = OP_PUSH_LIT, .as.lit_v = 0},
         [4] = {.tag = OP_MK_APP, .as.u32 = 3},
-        [5] = {.tag = OP_MK_CALL, .as.u32 = 2},
+        [5] = {.tag = OP_CALLU, .as.u32 = 1},
         [6] = {.tag = OP_EVAL},
         [7] = {.tag = OP_RET},
     };
@@ -1213,7 +1334,7 @@ Test(run_vm, primop66_ixn_forces_row_argument)
         [1] = {.tag = OP_PUSH_LIT, .as.lit_v = PLAN_S3('I', 'x', '0')},
         [2] = {.tag = OP_PUSH_LIT, .as.lit_v = lazy_row_v},
         [3] = {.tag = OP_MK_APP, .as.u32 = 2},
-        [4] = {.tag = OP_MK_CALL, .as.u32 = 2},
+        [4] = {.tag = OP_CALLU, .as.u32 = 1},
         [5] = {.tag = OP_EVAL},
         [6] = {.tag = OP_RET},
     };
@@ -1234,7 +1355,7 @@ Test(run_vm, primop66_case_n_uses_last_branch_as_default)
         [4] = {.tag = OP_PUSH_LIT, .as.lit_v = 22},
         [5] = {.tag = OP_PUSH_LIT, .as.lit_v = 33},
         [6] = {.tag = OP_MK_APP, .as.u32 = 5},
-        [7] = {.tag = OP_MK_CALL, .as.u32 = 2},
+        [7] = {.tag = OP_CALLU, .as.u32 = 1},
         [8] = {.tag = OP_EVAL},
         [9] = {.tag = OP_RET},
     };
@@ -1272,7 +1393,7 @@ Test(run_vm, primop66_case10_tag_maps_to_case10_opcode)
         [11] = {.tag = OP_PUSH_LIT, .as.lit_v = 108},
         [12] = {.tag = OP_PUSH_LIT, .as.lit_v = 109},
         [13] = {.tag = OP_MK_APP, .as.u32 = 12},
-        [14] = {.tag = OP_MK_CALL, .as.u32 = 2},
+        [14] = {.tag = OP_CALLU, .as.u32 = 1},
         [15] = {.tag = OP_EVAL},
         [16] = {.tag = OP_RET},
     };
@@ -1305,7 +1426,7 @@ Test(run_vm, primop66_case_forces_index_and_row)
         [3] = {.tag = OP_PUSH_LIT, .as.lit_v = make_done_thunk(row_v)},
         [4] = {.tag = OP_PUSH_LIT, .as.lit_v = 99},
         [5] = {.tag = OP_MK_APP, .as.u32 = 4},
-        [6] = {.tag = OP_MK_CALL, .as.u32 = 2},
+        [6] = {.tag = OP_CALLU, .as.u32 = 1},
         [7] = {.tag = OP_EVAL},
         [8] = {.tag = OP_RET},
     };
@@ -1340,7 +1461,7 @@ Test(run_vm, primop66_row_forces_list_spine_while_copying_lazy_items)
         [3] = {.tag = OP_PUSH_LIT, .as.lit_v = 4},
         [4] = {.tag = OP_PUSH_LIT, .as.lit_v = cell1_v},
         [5] = {.tag = OP_MK_APP, .as.u32 = 4},
-        [6] = {.tag = OP_MK_CALL, .as.u32 = 2},
+        [6] = {.tag = OP_CALLU, .as.u32 = 1},
         [7] = {.tag = OP_EVAL},
         [8] = {.tag = OP_RET},
     };
@@ -1388,7 +1509,7 @@ Test(run_vm, unknown_application_flattens_existing_app_head)
     er_op code[] = {
         [0] = {.tag = OP_PUSH_LIT, .as.lit_v = row_v},
         [1] = {.tag = OP_PUSH_LIT, .as.lit_v = 4},
-        [2] = {.tag = OP_MK_CALL, .as.u32 = 2},
+        [2] = {.tag = OP_CALLU, .as.u32 = 1},
         [3] = {.tag = OP_EVAL},
         [4] = {.tag = OP_RET},
     };
@@ -1415,7 +1536,7 @@ Test(run_vm, unknown_application_flattens_nested_app_spine)
     er_op code[] = {
         [0] = {.tag = OP_PUSH_LIT, .as.lit_v = nested_v},
         [1] = {.tag = OP_PUSH_LIT, .as.lit_v = 3},
-        [2] = {.tag = OP_MK_CALL, .as.u32 = 2},
+        [2] = {.tag = OP_CALLU, .as.u32 = 1},
         [3] = {.tag = OP_EVAL},
         [4] = {.tag = OP_RET},
     };
@@ -1445,7 +1566,7 @@ Test(run_vm, overapplication_reenters_returned_row_with_leftover_args)
         [0] = {.tag = OP_PUSH_LIT, .as.lit_v = returns_row_v},
         [1] = {.tag = OP_PUSH_LIT, .as.lit_v = 99},
         [2] = {.tag = OP_PUSH_LIT, .as.lit_v = 2},
-        [3] = {.tag = OP_MK_CALL, .as.u32 = 3},
+        [3] = {.tag = OP_CALLU, .as.u32 = 2},
         [4] = {.tag = OP_EVAL},
         [5] = {.tag = OP_RET},
     };
@@ -1523,6 +1644,97 @@ Test(run_vm, compiled_law_can_return_self_as_value)
 
     er_val call_v = make_call(law_v, 1);
     cr_assert_eq(run_vm(NULL, call_v), law_v);
+}
+
+Test(run_vm, compiled_exact_tail_call_emits_builder_then_tail_eval)
+{
+    er_val body_v = make_plan_call_expr(0, 1);
+    er_val law_v = er_law_make(enki_allocator_system(), 0, body_v, 1);
+    cr_assert_eq(er_get_tag(law_v), er_tag_law);
+    er_law* law = er_outt(er_tag_law, law_v);
+    cr_assert_not_null(law);
+    er_op* code = er_law_label_code(law, 0);
+    cr_assert_not_null(code);
+
+    cr_assert_eq(code[0].tag, OP_PUSH_SELF);
+    cr_assert_eq(code[1].tag, OP_PUSH_VAR);
+    cr_assert_eq(code[1].as.slot, 1);
+    cr_assert_eq(code[2].tag, OP_CALLF);
+    cr_assert_eq(code[2].as.u32, 1);
+    cr_assert_eq(code[3].tag, OP_TAIL_EVAL);
+    cr_assert_eq(code[4].tag, OP_RET);
+}
+
+Test(run_vm, compiled_dynamic_tail_call_emits_callu_then_tail_eval)
+{
+    er_val body_v = make_plan_call_expr(1, 2);
+    er_val law_v = er_law_make(enki_allocator_system(), 0, body_v, 2);
+    cr_assert_eq(er_get_tag(law_v), er_tag_law);
+    er_law* law = er_outt(er_tag_law, law_v);
+    cr_assert_not_null(law);
+    er_op* code = er_law_label_code(law, 0);
+    cr_assert_not_null(code);
+
+    cr_assert_eq(code[0].tag, OP_PUSH_VAR);
+    cr_assert_eq(code[0].as.slot, 1);
+    cr_assert_eq(code[1].tag, OP_PUSH_VAR);
+    cr_assert_eq(code[1].as.slot, 2);
+    cr_assert_eq(code[2].tag, OP_CALLU);
+    cr_assert_eq(code[2].as.u32, 1);
+    cr_assert_eq(code[3].tag, OP_TAIL_EVAL);
+    cr_assert_eq(code[4].tag, OP_RET);
+}
+
+Test(run_vm, compiled_value_position_call_emits_lazy_callu)
+{
+    er_op callee_code[] = {
+        [0] = {.tag = OP_PUSH_LIT, .as.lit_v = 9},
+        [1] = {.tag = OP_RET},
+    };
+    er_val callee_v = make_law(1, callee_code, 0, NULL);
+    er_val call_expr_v = make_plan_call_expr(callee_v, 10);
+    er_val row_v = make_app_value(123, 1, &call_expr_v);
+    er_val law_v = er_law_make(enki_allocator_system(), 0, row_v, 0);
+    cr_assert_eq(er_get_tag(law_v), er_tag_law);
+    er_law* law = er_outt(er_tag_law, law_v);
+    cr_assert_not_null(law);
+    er_op* code = er_law_label_code(law, 0);
+    cr_assert_not_null(code);
+
+    cr_assert_eq(code[0].tag, OP_PUSH_LIT);
+    cr_assert_eq(code[0].as.lit_v, 123);
+    cr_assert_eq(code[1].tag, OP_PUSH_LIT);
+    cr_assert_eq(code[1].as.lit_v, callee_v);
+    cr_assert_eq(code[2].tag, OP_PUSH_LIT);
+    cr_assert_eq(code[2].as.lit_v, 10);
+    cr_assert_eq(code[3].tag, OP_CALLU);
+    cr_assert_eq(code[3].as.u32, 1);
+    cr_assert_eq(code[4].tag, OP_MK_APP);
+    cr_assert_eq(code[5].tag, OP_RET);
+}
+
+Test(run_vm, compiled_under_application_stays_plain_app)
+{
+    er_op callee_code[] = {
+        [0] = {.tag = OP_PUSH_LIT, .as.lit_v = 9},
+        [1] = {.tag = OP_RET},
+    };
+    er_val callee_v = make_law(2, callee_code, 0, NULL);
+    er_val body_v = make_plan_call_expr(callee_v, 10);
+    er_val law_v = er_law_make(enki_allocator_system(), 0, body_v, 0);
+    cr_assert_eq(er_get_tag(law_v), er_tag_law);
+    er_law* law = er_outt(er_tag_law, law_v);
+    cr_assert_not_null(law);
+    er_op* code = er_law_label_code(law, 0);
+    cr_assert_not_null(code);
+
+    cr_assert_eq(code[0].tag, OP_PUSH_LIT);
+    cr_assert_eq(code[0].as.lit_v, callee_v);
+    cr_assert_eq(code[1].tag, OP_PUSH_LIT);
+    cr_assert_eq(code[1].as.lit_v, 10);
+    cr_assert_eq(code[2].tag, OP_MK_APP);
+    cr_assert_eq(code[2].as.u32, 2);
+    cr_assert_eq(code[3].tag, OP_RET);
 }
 
 Test(run_vm, compiled_primitive_evals_lower_stack_argument_before_opcode)
@@ -1773,7 +1985,8 @@ Test(run_vm, lazy_let_suspension_preserves_self_after_frame_update)
         [6] = {.tag = OP_PUSH_VAR, .as.slot = 1},
         [7] = {.tag = OP_DEC},
         [8] = {.tag = OP_CALLF, .as.u32 = 1},
-        [9] = {.tag = OP_RET},
+        [9] = {.tag = OP_TAIL_EVAL},
+        [10] = {.tag = OP_RET},
     };
     er_op* let_code_v[] = {code + REST_START};
     er_val law_v = make_law(1, code + ENTRY_START, 1, let_code_v);
@@ -1857,7 +2070,7 @@ Test(run_vm, recursive_factorial_uses_bytecode_calls_and_primop_set)
         [7] = {.tag = OP_EVAL},
         [8] = {.tag = OP_PUSH_LIT, .as.lit_v = 1},
         [9] = {.tag = OP_MK_APP, .as.u32 = 3},
-        [10] = {.tag = OP_MK_CALL, .as.u32 = 2},
+        [10] = {.tag = OP_CALLU, .as.u32 = 1},
         [11] = {.tag = OP_EVAL},
 
         [12] = {.tag = OP_PUSH_LIT, .as.lit_v = 0}, // patched to prim66
@@ -1867,11 +2080,11 @@ Test(run_vm, recursive_factorial_uses_bytecode_calls_and_primop_set)
         [16] = {.tag = OP_PUSH_VAR, .as.slot = 1},
         [17] = {.tag = OP_EVAL},
         [18] = {.tag = OP_MK_APP, .as.u32 = 3},
-        [19] = {.tag = OP_MK_CALL, .as.u32 = 2},
+        [19] = {.tag = OP_CALLU, .as.u32 = 1},
         [20] = {.tag = OP_EVAL},
 
-        [21] = {.tag = OP_MK_CALL, .as.u32 = 3},
-        [22] = {.tag = OP_EVAL},
+        [21] = {.tag = OP_CALLU, .as.u32 = 2},
+        [22] = {.tag = OP_TAIL_EVAL},
         [23] = {.tag = OP_RET},
 
         [24] = {.tag = OP_PUSH_VAR, .as.slot = 2},

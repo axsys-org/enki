@@ -256,8 +256,24 @@ void enki_gc_trace_vm(enki_gc* gc, void* root)
     }
 
     for (er_kon* cur = vm->kbase; cur < vm->ksp; cur++) {
-        if (!er_is_cat(cur->val_v) && enki_gc_is_known_tag(cur->val_v)) {
-            cur->val_v = enki_gc_copy(gc, cur->val_v);
+        switch (cur->tag) {
+        case ER_K_BYTECODE_RETURN:
+            enki_gc_trace_ref(gc, &cur->as.bytecode_return.code_law_v);
+            break;
+        case ER_K_UPDATE:
+            enki_gc_trace_ref(gc, &cur->as.update.target_v);
+            break;
+        case ER_K_APPHEAD:
+            enki_gc_trace_ref(gc, &cur->as.apphead.app_v);
+            break;
+        case ER_K_OVERAPP:
+            enki_gc_trace_ref(gc, &cur->as.overapp.app_v);
+            break;
+        case ER_K_VALUE_ROOT:
+            enki_gc_trace_ref(gc, &cur->as.value_root.val_v);
+            break;
+        default:
+            break;
         }
     }
 

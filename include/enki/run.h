@@ -164,11 +164,11 @@ typedef enum {
   OP_PUSH_VAR,
   OP_PUSH_LIT,
   OP_MK_APP,
-  OP_MK_CALL,
   OP_CALLF,
   OP_CALLU,
   OP_PUSH_SELF,
   OP_EVAL,
+  OP_TAIL_EVAL,
   OP_FORCE,
   OP_DROP,
   OP_ROTATE,
@@ -274,14 +274,50 @@ static inline const er_op* er_law_label_code_const(const er_law* law, size_t lab
     return er_law_code_base_const(law) + label.off_s;
 }
 
-typedef union {
-    void      *lab;
-    er_val    *ref;
-    er_op     *code;
-    er_law    *law;
-    er_val    val_v;
-    uintptr_t u;
-    uint32_t  pc;
+typedef enum er_kon_tag {
+    ER_K_BYTECODE_RETURN = 1,
+    ER_K_UPDATE,
+    ER_K_APPHEAD,
+    ER_K_OVERAPP,
+    ER_K_VALUE_ROOT,
+} er_kon_tag;
+
+typedef struct er_kon_bytecode_return {
+    er_val* env;
+    uint32_t pc;
+    er_val code_law_v;
+    uint32_t code_label_d;
+    er_op* code;
+    er_val* dbase;
+} er_kon_bytecode_return;
+
+typedef struct er_kon_update {
+    er_val target_v;
+    er_val* dbase;
+} er_kon_update;
+
+typedef struct er_kon_apphead {
+    er_val app_v;
+} er_kon_apphead;
+
+typedef struct er_kon_overapp {
+    er_val app_v;
+    uint32_t split_d;
+} er_kon_overapp;
+
+typedef struct er_kon_value_root {
+    er_val val_v;
+} er_kon_value_root;
+
+typedef struct er_kon {
+    er_kon_tag tag;
+    union {
+        er_kon_bytecode_return bytecode_return;
+        er_kon_update update;
+        er_kon_apphead apphead;
+        er_kon_overapp overapp;
+        er_kon_value_root value_root;
+    } as;
 } er_kon;
 
 typedef struct {

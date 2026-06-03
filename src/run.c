@@ -805,9 +805,10 @@ static er_val plan_eval_whnf_preserve(er_vm* vm, er_val val_v);
 (define OP_PUSH_SELF ("OP_PUSH_SELF" 0)) ;; [] -- a
 (define (OP_PUSH_LIT val) ("OP_PUSH_LIT" val)) ;; [] -- a
 (define (OP_MK_APP count) ("OP_MK_APP" count)) ;; [<count>] -- a
-(define (OP_CALLF ari) ("OP_CALLF" ari)) ;; [<count>] -- a
-(define (OP_CALLU ari) ("OP_CALLU" ari)) ;; [<count>] -- a
+(define (OP_CALLF argc) ("OP_CALLF" argc)) ;; [fn, args...] -- thunk
+(define (OP_CALLU argc) ("OP_CALLU" argc)) ;; [fn, args...] -- thunk
 (define (OP_EVAL ari) ("OP_EVAL" ari)) ;; a -- whnf
+(define OP_TAIL_EVAL ("OP_TAIL_EVAL" 0)) ;; a -- whnf
 (define OP_FORCE ("OP_FORCE" 0)) ;; a -- nf
 (define (OP_PRIM_UNK set) ("OP_PRIM_UNK" set)) ;; a -- a
 (define OP_RET ("OP_RET" 0))
@@ -915,17 +916,18 @@ plan_eval_whnf(er_vm *vm, er_val val_v)
 
     er_op *op;
     er_val f, app, target;
+    er_kon kon;
     uint32_t split;
 
     static void *const dispatch[OP_COUNT] = {
         [OP_PUSH_VAR]  = &&I_PUSH_VAR,
         [OP_PUSH_LIT]  = &&I_PUSH_LIT,
         [OP_MK_APP]    = &&I_MK_APP,
-        [OP_MK_CALL]   = &&I_MK_CALL,
         [OP_CALLF]     = &&I_CALLF,
         [OP_CALLU]     = &&I_CALLU,
         [OP_PUSH_SELF] = &&I_PUSH_SELF,
         [OP_EVAL]      = &&I_EVAL,
+        [OP_TAIL_EVAL] = &&I_TAIL_EVAL,
         [OP_FORCE]     = &&I_FORCE,
         [OP_DROP]      = &&I_DROP,
         [OP_ROTATE]    = &&I_ROTATE,
@@ -1048,36 +1050,52 @@ plan_eval_whnf(er_vm *vm, er_val val_v)
         goto *dispatch[op->tag];                   \
     } while (0)
 
-#define KPUSH_RETURN(_pc, _env, _law_v, _label_d)  \
-    do {                                           \
-        vm->k_count++;                             \
-        (ksp++)->ref = (_env);                     \
-        (ksp++)->pc  = (_pc);                      \
-        (ksp++)->u = (uintptr_t)(_label_d);        \
-        (ksp++)->val_v = (_law_v);                 \
-        (ksp++)->code = code;                      \
-        (ksp++)->ref = dbase;                      \
-        (ksp++)->lab = &&K_RETURN;                 \
+#define KPUSH_BYTECODE_RETURN(_pc, _env, _law_v, _label_d) \
+    do {                                                   \
+        vm->k_count++;                                     \
+        *ksp++ = (er_kon){                                 \
+            .tag = ER_K_BYTECODE_RETURN,                   \
+            .as.bytecode_return = {                        \
+                .env = (_env),                             \
+                .pc = (_pc),                               \
+                .code_law_v = (_law_v),                    \
+                .code_label_d = (uint32_t)(_label_d),      \
+                .code = code,                              \
+                .dbase = dbase,                            \
+            },                                             \
+        };                                                 \
     } while (0)
 
-#define KPUSH_UPDATE(_target)                      \
-    do {                                           \
-        (ksp++)->val_v = (_target);                  \
-        (ksp++)->ref = dbase;                      \
-        (ksp++)->lab = &&K_UPDATE;                 \
+#define KPUSH_UPDATE(_target)                              \
+    do {                                                   \
+        *ksp++ = (er_kon){                                 \
+            .tag = ER_K_UPDATE,                            \
+            .as.update = {                                 \
+                .target_v = (_target),                     \
+                .dbase = dbase,                            \
+            },                                             \
+        };                                                 \
     } while (0)
 
-#define KPUSH_APPHEAD(_app)                        \
-    do {                                           \
-        (ksp++)->val_v = (_app);                     \
-        (ksp++)->lab = &&K_APPHEAD;                \
+#define KPUSH_APPHEAD(_app)                                \
+    do {                                                   \
+        *ksp++ = (er_kon){                                 \
+            .tag = ER_K_APPHEAD,                           \
+            .as.apphead = {                                \
+                .app_v = (_app),                           \
+            },                                             \
+        };                                                 \
     } while (0)
 
-#define KPUSH_OVERAPP(_app, _split)                \
-    do {                                           \
-        (ksp++)->val_v = (_app);                     \
-        (ksp++)->u   = (uintptr_t)(_split);        \
-        (ksp++)->lab = &&K_OVERAPP;                \
+#define KPUSH_OVERAPP(_app, _split)                        \
+    do {                                                   \
+        *ksp++ = (er_kon){                                 \
+            .tag = ER_K_OVERAPP,                           \
+            .as.overapp = {                                \
+                .app_v = (_app),                           \
+                .split_d = (uint32_t)(_split),             \
+            },                                             \
+        };                                                 \
     } while (0)
 
 #define RETURN(_r)                                 \
@@ -1093,8 +1111,22 @@ plan_eval_whnf(er_vm *vm, er_val val_v)
             ENKI_PROFILE_PLOT_I("plan_eval.reductions", (int64_t)vm->k_count); \
             return r;                              \
         }                                          \
-        void *dst = (--ksp)->lab;                  \
-        goto *dst;                                 \
+        kon = *--ksp;                              \
+        switch (kon.tag) {                         \
+        case ER_K_BYTECODE_RETURN:                 \
+            goto K_RETURN;                         \
+        case ER_K_UPDATE:                          \
+            goto K_UPDATE;                         \
+        case ER_K_APPHEAD:                         \
+            goto K_APPHEAD;                        \
+        case ER_K_OVERAPP:                         \
+            goto K_OVERAPP;                        \
+        default:                                   \
+            assert("bad continuation" && 0);       \
+            vm->dsp = dsp;                         \
+            vm->ksp = ksp;                         \
+            return er_bad;                         \
+        }                                          \
     } while (0)
 
 #define FAIL_ALLOC()                               \
@@ -1212,20 +1244,6 @@ I_MK_APP: {
     DISPATCH();
 }
 
-I_MK_CALL: {
-    size_t app_s = op->as.u32;
-    if (app_s == 0 || dsp < dbase || (size_t)(dsp - dbase) < app_s) {
-      FAIL_ALLOC();
-    }
-    er_val* app_base = dsp - app_s;
-    GC_SYNC();
-    r = er_thk_make_unk_app(vm->loc_a, app_s, app_base);
-    CHECK_ALLOC(r);
-    dsp = app_base;
-    DPUSH(r);
-    DISPATCH();
-}
-
 I_CALLF: {
     size_t arg_s = op->as.u32;
     size_t call_s = arg_s + 1;
@@ -1233,16 +1251,21 @@ I_CALLF: {
       FAIL_ALLOC();
     }
     er_val* call_base = dsp - call_s;
-    size_t frame_s = er_call_frame_size(call_base[0], (uint32_t)arg_s);
-    if (frame_s == 0) {
-      FAIL_TANK("bad call frame", call_base[0]);
+    hd_v = call_base[0];
+    size_t frame_s = er_call_frame_size(hd_v, (uint32_t)arg_s);
+#ifndef NDEBUG
+    assert(er_is_whnf(hd_v));
+    assert(frame_s != 0);
+#endif
+    if (!er_is_whnf(hd_v) || frame_s == 0) {
+      FAIL_TANK("bad fast call", hd_v);
     }
     GC_SYNC();
     r = er_thk_make_call_frame(vm->loc_a, frame_s, call_s, call_base);
     CHECK_ALLOC(r);
     dsp = call_base;
-    KPUSH_RETURN(pc, env, code_law_v, code_label_d);
-    goto FORCE_ENTRY;
+    DPUSH(r);
+    DISPATCH();
 }
 
 I_CALLU: {
@@ -1256,8 +1279,8 @@ I_CALLU: {
     r = er_thk_make_unk_app(vm->loc_a, call_s, call_base);
     CHECK_ALLOC(r);
     dsp = call_base;
-    KPUSH_RETURN(pc, env, code_law_v, code_label_d);
-    goto FORCE_ENTRY;
+    DPUSH(r);
+    DISPATCH();
 }
 
 I_PUSH_SELF:
@@ -1579,19 +1602,13 @@ I_JUMP_IF:
 
 I_EVAL:
     r = DPOP();
-
-    /*
-     * Optional fast path: if r is already WHNF, avoid pushing K_RETURN.
-     * Only push a continuation if evaluation actually enters something.
-     */
-
-    if (er_is_whnf(r)) {
-        DPUSH(r);
-        DISPATCH();
-    }
-
     GC_SYNC();
-    KPUSH_RETURN(pc, env, code_law_v, code_label_d);
+    KPUSH_BYTECODE_RETURN(pc, env, code_law_v, code_label_d);
+    goto FORCE_ENTRY;
+
+I_TAIL_EVAL:
+    r = DPOP();
+    GC_SYNC();
     goto FORCE_ENTRY;
 
 I_FORCE:
@@ -2165,34 +2182,22 @@ ENTER_CALL: {
     // ---------------------------------------------------------------------
 
 K_RETURN:
-    /*
-     * Payload layout:
-     *
-     *   [ env ][ pc ][ label ][ law ][ code ][ dbase ][ &&K_RETURN ]
-     *
-     * The label has already been popped by RETURN.
-     */
-    dbase = (--ksp)->ref;
-    code = (--ksp)->code;
+    dbase = kon.as.bytecode_return.dbase;
+    code = kon.as.bytecode_return.code;
     vm->code = code;
-    code_law_v = (--ksp)->val_v;
-    code_label_d = (uint32_t)(--ksp)->u;
+    code_law_v = kon.as.bytecode_return.code_law_v;
+    code_label_d = kon.as.bytecode_return.code_label_d;
     vm->code_law_v = code_law_v;
     vm->code_label_d = code_label_d;
-    pc  = (--ksp)->pc;
-    env = (--ksp)->ref;
+    pc = kon.as.bytecode_return.pc;
+    env = kon.as.bytecode_return.env;
 
     DPUSH(r);
     DISPATCH();
 
 K_UPDATE:
-    /*
-     * Payload layout:
-     *
-     *   [ target ][ dbase ][ &&K_UPDATE ]
-     */
-    dbase = (--ksp)->ref;
-    target = (--ksp)->val_v;
+    dbase = kon.as.update.dbase;
+    target = kon.as.update.target_v;
     if (!er_is_whnf(r)) {
       KPUSH_UPDATE(target);
       goto FORCE_ENTRY;
@@ -2210,12 +2215,7 @@ K_UPDATE:
     RETURN(r);
 
 K_APPHEAD:
-    /*
-     * Payload layout:
-     *
-     *   [ app ][ &&K_APPHEAD ]
-     */
-    app = (--ksp)->val_v;
+    app = kon.as.apphead.app_v;
     thk = er_outt(er_tag_thk, app);
     if ( !thk ) {
       FAIL_TANK("bad app head", app);
@@ -2230,13 +2230,8 @@ K_APPHEAD:
     goto FORCE_ENTRY;
 
 K_OVERAPP:
-    /*
-     * Payload layout:
-     *
-     *   [ app ][ split ][ &&K_OVERAPP ]
-     */
-    split = (uint32_t)(--ksp)->u;
-    app   = (--ksp)->val_v;
+    split = kon.as.overapp.split_d;
+    app = kon.as.overapp.app_v;
 
     {
       thk = er_outt(er_tag_thk, app);
@@ -2263,7 +2258,7 @@ K_OVERAPP:
 #undef KPUSH_OVERAPP
 #undef KPUSH_APPHEAD
 #undef KPUSH_UPDATE
-#undef KPUSH_RETURN
+#undef KPUSH_BYTECODE_RETURN
 #undef DISPATCH
 #undef CODE_REFRESH
 #undef CODE_SET
@@ -2282,13 +2277,18 @@ static er_val plan_eval_whnf_preserve(er_vm* vm, er_val val_v)
     uint32_t saved_code_label_d = vm->code_label_d;
     bool root_code_law_f = saved_code_law_v != 0;
     if (root_code_law_f) {
-        (vm->ksp++)->val_v = saved_code_law_v;
+        *vm->ksp++ = (er_kon){
+            .tag = ER_K_VALUE_ROOT,
+            .as.value_root = {
+                .val_v = saved_code_law_v,
+            },
+        };
     }
 
     er_val out_v = plan_eval_whnf(vm, val_v);
 
     if (root_code_law_f) {
-        saved_code_law_v = base_ksp->val_v;
+        saved_code_law_v = base_ksp->as.value_root.val_v;
     }
     vm->dsp = base_dsp;
     vm->ksp = base_ksp;

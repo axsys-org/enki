@@ -661,7 +661,7 @@ static bool er_bc_direct_prim_wrapper_key(er_val law_v, er_val* key_v)
     return er_bc_direct_prim_body_key(law->body_v, law->ari_d, key_v);
 }
 
-static uint32_t er_bc_arity(er_val val_v)
+static bool er_bc_known_arity(er_val val_v, uint32_t* out_d)
 {
     er_pin* pin;
     er_app* app;
@@ -670,21 +670,30 @@ static uint32_t er_bc_arity(er_val val_v)
     case er_tag_pin:
         pin = er_outa(val_v);
         if (er_is_cat(pin->val_v)) {
-            return 1;
+            *out_d = 1;
+            return true;
         }
         law = er_outt(er_tag_law, pin->val_v);
-        return law == NULL ? 0 : law->ari_d;
-    case er_tag_app:
-        app = er_outa(val_v);
-        {
-            uint32_t ari_d = er_bc_arity(app->fn_v);
-            return ari_d < app->arg_s ? 0 : ari_d - (uint32_t)app->arg_s;
+        if (law == NULL) {
+            return false;
         }
+        *out_d = law->ari_d;
+        return true;
+    case er_tag_app: {
+        app = er_outa(val_v);
+        uint32_t ari_d = 0;
+        if (!er_bc_known_arity(app->fn_v, &ari_d) || ari_d <= app->arg_s) {
+            return false;
+        }
+        *out_d = ari_d - (uint32_t)app->arg_s;
+        return true;
+    }
     case er_tag_law:
         law = er_outa(val_v);
-        return law->ari_d;
+        *out_d = law->ari_d;
+        return true;
     default:
-        return 0;
+        return false;
     }
 }
 
@@ -865,19 +874,35 @@ bool er_bc_emit_prim_route_fragment(er_op out_v[], size_t cap_s, er_optag tag, s
     return true;
 }
 
-static bool er_bc_compile_call_tail(er_bc_code* code, uint32_t fun_ari_d, size_t arg_s)
+static bool er_bc_emit_tail_eval_if(er_bc_code* code, bool tail_f, bool thunk_f)
 {
+    if (!tail_f || !thunk_f) {
+        return true;
+    }
+    return er_bc_emit(code, OP_TAIL_EVAL);
+}
+
+static bool er_bc_compile_call_builder(er_bc_code* code, bool known_arity_f,
+                                       uint32_t fun_ari_d, size_t arg_s, bool* thunk_f)
+{
+    if (thunk_f == NULL) {
+        code->ok_f = false;
+        return false;
+    }
+    *thunk_f = false;
     if (arg_s > UINT32_MAX) {
         code->ok_f = false;
         return false;
     }
-    if (arg_s > fun_ari_d) {
+    if (!known_arity_f || arg_s > fun_ari_d) {
+        *thunk_f = true;
         return er_bc_emit_u32(code, OP_CALLU, (uint32_t)arg_s);
     }
     if (arg_s < fun_ari_d) {
         return er_bc_emit_u32(code, OP_MK_APP, (uint32_t)arg_s + 1);
     }
-    return er_bc_emit_u32(code, OP_CALLF, fun_ari_d);
+    *thunk_f = true;
+    return er_bc_emit_u32(code, OP_CALLF, (uint32_t)arg_s);
 }
 
 static bool er_bc_compile_label(er_bc_compiler* c, size_t depth_s, uint32_t ari_d,
@@ -939,12 +964,18 @@ static bool er_bc_compile_prim_call(er_bc_compiler* c, size_t depth_s, uint32_t 
                er_bc_emit_u32(code, OP_MK_APP, (uint32_t)arg_s + 1);
     }
 
+    if (arg_s - prim->ari_d > UINT32_MAX) {
+        code->ok_f = false;
+        return false;
+    }
+
     return er_bc_compile_args(c, depth_s, ari_d, arg_v, prim->ari_d, code) &&
            er_bc_emit_prim_arg_evals(prim, code) &&
            er_bc_emit(code, prim->tag) &&
            er_bc_compile_args(c, depth_s, ari_d, arg_v + prim->ari_d, arg_s - prim->ari_d,
                               code) &&
-           er_bc_emit_u32(code, OP_CALLU, (uint32_t)(arg_s - prim->ari_d));
+           er_bc_emit_u32(code, OP_CALLU, (uint32_t)(arg_s - prim->ari_d)) &&
+           er_bc_emit_tail_eval_if(code, tail_f, true);
 }
 
 static bool er_bc_compile_direct_prim_body(er_bc_compiler* c, size_t depth_s, uint32_t ari_d,
@@ -974,19 +1005,23 @@ static bool er_bc_compile_direct_prim_body(er_bc_compiler* c, size_t depth_s, ui
 
 static bool er_bc_compile_plain_call(er_bc_compiler* c, size_t depth_s, uint32_t ari_d,
                                      er_val f_v, const er_val* arg_v, size_t arg_s,
-                                     er_bc_code* code)
+                                     er_bc_code* code, bool tail_f)
 {
     ENKI_PROFILE_ZONE("er_bc_compile_plain_call");
     if (f_v == 0) {
+        bool thunk_f = false;
         return er_bc_emit(code, OP_PUSH_SELF) &&
                er_bc_compile_args(c, depth_s, ari_d, arg_v, arg_s, code) &&
-               er_bc_compile_call_tail(code, ari_d, arg_s);
+               er_bc_compile_call_builder(code, true, ari_d, arg_s, &thunk_f) &&
+               er_bc_emit_tail_eval_if(code, tail_f, thunk_f);
     }
 
     if (er_bc_is_var(depth_s, f_v)) {
+        bool thunk_f = false;
         return er_bc_emit_var(code, f_v) &&
                er_bc_compile_args(c, depth_s, ari_d, arg_v, arg_s, code) &&
-               er_bc_emit_u32(code, OP_CALLU, (uint32_t)arg_s);
+               er_bc_compile_call_builder(code, false, 0, arg_s, &thunk_f) &&
+               er_bc_emit_tail_eval_if(code, tail_f, thunk_f);
     }
 
     er_val lit_v = er_bc_pull_const(f_v);
@@ -999,25 +1034,21 @@ static bool er_bc_compile_plain_call(er_bc_compiler* c, size_t depth_s, uint32_t
             code->ok_f = false;
             return false;
         }
+        bool thunk_f = false;
         return er_bc_emit_lit(code, lit_v) &&
                er_bc_compile_app_value(c, depth_s, ari_d, arg_v[0], code) &&
                er_bc_compile_args(c, depth_s, ari_d, arg_v + 1, arg_s - 1, code) &&
-               er_bc_compile_call_tail(code, 1, arg_s);
+               er_bc_compile_call_builder(code, true, 1, arg_s, &thunk_f) &&
+               er_bc_emit_tail_eval_if(code, tail_f, thunk_f);
     }
-    uint32_t lit_ari_d = er_bc_arity(lit_v);
-    if (lit_ari_d == 0) {
-        if (arg_s > UINT32_MAX - 1u) {
-            code->ok_f = false;
-            return false;
-        }
-        return er_bc_emit_lit(code, lit_v) &&
-               er_bc_compile_args(c, depth_s, ari_d, arg_v, arg_s, code) &&
-               er_bc_emit_u32(code, OP_MK_APP, (uint32_t)arg_s + 1u);
-    }
+    uint32_t lit_ari_d = 0;
+    bool known_arity_f = er_bc_known_arity(lit_v, &lit_ari_d);
+    bool thunk_f = false;
 
     return er_bc_emit_lit(code, lit_v) &&
            er_bc_compile_args(c, depth_s, ari_d, arg_v, arg_s, code) &&
-           er_bc_compile_call_tail(code, lit_ari_d, arg_s);
+           er_bc_compile_call_builder(code, known_arity_f, lit_ari_d, arg_s, &thunk_f) &&
+           er_bc_emit_tail_eval_if(code, tail_f, thunk_f);
 }
 
 static bool er_bc_compile_call(er_bc_compiler* c, size_t depth_s, uint32_t ari_d, er_val f_v,
@@ -1048,7 +1079,8 @@ static bool er_bc_compile_call(er_bc_compiler* c, size_t depth_s, uint32_t ari_d
         ok_f = er_bc_compile_prim_call(c, depth_s, ari_d, prim, head_v, arg_v, arg_s, code,
                                        tail_f);
     } else {
-        ok_f = er_bc_compile_plain_call(c, depth_s, ari_d, head_v, arg_v, arg_s, code);
+        ok_f = er_bc_compile_plain_call(c, depth_s, ari_d, head_v, arg_v, arg_s, code,
+                                        tail_f);
     }
     er_bc_vals_free(&lifted);
     return ok_f;
@@ -1106,7 +1138,7 @@ static bool er_bc_compile_value(er_bc_compiler* c, size_t depth_s, uint32_t ari_
         ok_f = er_bc_compile_value(c, depth_s, ari_d, lifted.val_v[k], code);
     }
     if (ok_f) {
-        ok_f = er_bc_emit_u32(code, OP_MK_CALL, (uint32_t)lifted.val_s);
+        ok_f = er_bc_emit_u32(code, OP_CALLU, (uint32_t)(lifted.val_s - 1u));
     }
     er_bc_vals_free(&lifted);
     return ok_f;
