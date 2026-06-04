@@ -258,7 +258,6 @@ void enki_gc_trace_vm(enki_gc* gc, void* root)
     for (er_kon* cur = vm->kbase; cur < vm->ksp; cur++) {
         switch (cur->tag) {
         case ER_K_BYTECODE_RETURN:
-            enki_gc_trace_ref(gc, &cur->as.bytecode_return.code_law_v);
             break;
         case ER_K_UPDATE:
             enki_gc_trace_ref(gc, &cur->as.update.target_v);
@@ -281,7 +280,6 @@ void enki_gc_trace_vm(enki_gc* gc, void* root)
     }
 
     enki_gc_trace_ref(gc, vm->gc_rp);
-    enki_gc_trace_ref(gc, &vm->code_law_v);
     for (size_t k = 0; k < vm->gc_tmp_s; k++) {
         enki_gc_trace_ref(gc, &vm->gc_tmp_v[k]);
     }

@@ -35,6 +35,42 @@ static bool eo_is_nat(er_val v)
     return er_is_cat(v) || er_is_tag(er_tag_bat, v);
 }
 
+static bool eo_callable_arity(er_val val_v, uint32_t* out_d)
+{
+    er_pin* pin;
+    er_app* app;
+    er_law* law;
+    switch (er_get_tag(val_v)) {
+    case er_tag_pin:
+        pin = er_outa(val_v);
+        if (er_is_cat(pin->val_v)) {
+            *out_d = 1;
+            return true;
+        }
+        law = er_outt(er_tag_law, pin->val_v);
+        if (law == NULL) {
+            return false;
+        }
+        *out_d = law->ari_d;
+        return true;
+    case er_tag_app: {
+        app = er_outa(val_v);
+        uint32_t fun_ari_d = 0;
+        if (!eo_callable_arity(app->fn_v, &fun_ari_d) || fun_ari_d <= app->arg_s) {
+            return false;
+        }
+        *out_d = fun_ari_d - (uint32_t)app->arg_s;
+        return true;
+    }
+    case er_tag_law:
+        law = er_outa(val_v);
+        *out_d = law->ari_d;
+        return true;
+    default:
+        return false;
+    }
+}
+
 static er_val eo_limbs_to_nat(const enki_allocator* loc_a, size_t limb_s,
                               const uint64_t limb_q[])
 {
@@ -912,7 +948,19 @@ er_val eo_coup(const enki_allocator* loc_a, er_val hd_v, er_val row_v)
 {
     ENKI_PROFILE_ZONE("eo_coup");
     er_app* row = er_outt(er_tag_app, row_v);
-    return row == NULL ? hd_v : eo_thk_app(loc_a, hd_v, row->arg_s, row->arg_v);
+    if (row == NULL) {
+        return hd_v;
+    }
+    uint32_t arity_d = 0;
+    if (eo_callable_arity(hd_v, &arity_d) && arity_d > row->arg_s) {
+        er_app* app = er_app_alloc(loc_a, row->arg_s);
+        if (app == NULL) {
+            return er_bad;
+        }
+        er_val app_v = er_app_init(app, hd_v, row->arg_s, row->arg_v);
+        return app_v == 0 ? er_bad : app_v;
+    }
+    return eo_thk_app(loc_a, hd_v, row->arg_s, row->arg_v);
 }
 
 er_val eo_hd(er_val row_v)

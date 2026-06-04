@@ -342,7 +342,7 @@ static er_val planvm_run_fac(planvm_fac_program* program, planvm_arena* arena, e
         return er_bad;
     }
     er_vm vm = {
-        .code = program->code_v,
+        .pc = ER_BCPC_NONE,
         .loc_a = &arena->allocator,
         .dstack = dstack_v,
         .dsp = dstack_v,
@@ -418,7 +418,7 @@ static er_val planvm_run_fib(planvm_fib_program* program, planvm_arena* arena, e
         return er_bad;
     }
     er_vm vm = {
-        .code = program->code_v,
+        .pc = ER_BCPC_NONE,
         .loc_a = &arena->allocator,
         .dstack = dstack_v,
         .dsp = dstack_v,

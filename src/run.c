@@ -22,12 +22,20 @@ enum {
     ER_PRIM_ROUTE_MAX_DEPTH = 64,
 };
 
+typedef struct er_bytecode_arena {
+    er_op* op_v;
+    size_t op_s;
+    size_t cap_s;
+} er_bytecode_arena;
+
+static er_bytecode_arena er_bc_a;
+
 #define ER_ASSERT_OPCODE_VALUE(_tag, _label, _value) \
     static_assert((_tag) == (_value), #_tag " opcode value changed");
 ER_ALL_OPS(ER_ASSERT_OPCODE_VALUE)
 #undef ER_ASSERT_OPCODE_VALUE
 
-static_assert(OP_COUNT == 68, "OP_COUNT opcode value changed");
+static_assert(OP_COUNT == 73, "OP_COUNT opcode value changed");
 
 static bool er_prim66_op_from_descriptor(er_val tag_v, int* out_op)
 {
@@ -50,22 +58,93 @@ static bool er_alloc_size(size_t base_s, size_t count_s, size_t elem_s, size_t* 
     return true;
 }
 
-static bool er_align_size(size_t size_s, size_t align_s, size_t* out_s)
+static bool er_bytecode_reserve(size_t need_s)
 {
-    if (align_s == 0) {
-        return false;
-    }
-    size_t rem_s = size_s % align_s;
-    if (rem_s == 0) {
-        *out_s = size_s;
+    if (need_s <= er_bc_a.cap_s) {
         return true;
     }
-    size_t add_s = align_s - rem_s;
-    if (size_s > SIZE_MAX - add_s) {
+    if (need_s > (size_t)ER_BCPC_NONE) {
         return false;
     }
-    *out_s = size_s + add_s;
+    size_t next_s = er_bc_a.cap_s == 0 ? 1024u : er_bc_a.cap_s;
+    while (next_s < need_s) {
+        if (next_s > (size_t)ER_BCPC_NONE / 2u) {
+            next_s = (size_t)ER_BCPC_NONE;
+            break;
+        }
+        next_s *= 2u;
+    }
+    if (next_s < need_s) {
+        return false;
+    }
+    const enki_allocator* sys = enki_allocator_system();
+    void* next_p = NULL;
+    if (sys->realloc != NULL) {
+        next_p = sys->realloc(sys->ctx, er_bc_a.op_v, next_s * sizeof(er_op));
+    } else {
+        next_p = sys->alloc(sys->ctx, next_s * sizeof(er_op));
+        if (next_p != NULL && er_bc_a.op_v != NULL && er_bc_a.op_s > 0) {
+            memcpy(next_p, er_bc_a.op_v, er_bc_a.op_s * sizeof(er_op));
+            sys->free(sys->ctx, er_bc_a.op_v);
+        }
+    }
+    if (next_p == NULL) {
+        return false;
+    }
+    er_bc_a.op_v = next_p;
+    er_bc_a.cap_s = next_s;
     return true;
+}
+
+static bool er_bytecode_append(er_op* const op_v[], const size_t op_len_v[], size_t label_s,
+                               size_t total_s, er_bcpc* out_pc)
+{
+    if (op_v == NULL || op_len_v == NULL || out_pc == NULL || label_s == 0 || total_s == 0 ||
+        total_s > (size_t)ER_BCPC_NONE || er_bc_a.op_s > (size_t)ER_BCPC_NONE - total_s) {
+        return false;
+    }
+    size_t start_s = er_bc_a.op_s;
+    if (!er_bytecode_reserve(start_s + total_s)) {
+        return false;
+    }
+    size_t off_s = start_s;
+    for (size_t k = 0; k < label_s; k++) {
+        if (op_v[k] == NULL || op_len_v[k] == 0) {
+            return false;
+        }
+        memcpy(er_bc_a.op_v + off_s, op_v[k], op_len_v[k] * sizeof(er_op));
+        off_s += op_len_v[k];
+    }
+    er_bc_a.op_s = off_s;
+    *out_pc = (er_bcpc)start_s;
+    return true;
+}
+
+er_op* er_bytecode_at(er_bcpc pc)
+{
+    if (pc == ER_BCPC_NONE || (size_t)pc >= er_bc_a.op_s) {
+        return NULL;
+    }
+    return er_bc_a.op_v + (size_t)pc;
+}
+
+const er_op* er_bytecode_at_const(er_bcpc pc)
+{
+    if (pc == ER_BCPC_NONE || (size_t)pc >= er_bc_a.op_s) {
+        return NULL;
+    }
+    return er_bc_a.op_v + (size_t)pc;
+}
+
+bool er_bytecode_span_valid(er_bcpc pc, size_t op_s)
+{
+    return pc != ER_BCPC_NONE && op_s != 0 && (size_t)pc <= er_bc_a.op_s &&
+           op_s <= er_bc_a.op_s - (size_t)pc;
+}
+
+size_t er_bytecode_arena_op_count(void)
+{
+    return er_bc_a.op_s;
 }
 
 static void* er_alloc_bytes(const enki_allocator* allocator, size_t size_s)
@@ -222,16 +301,9 @@ er_val er_pin_make(const enki_allocator* loc_a, er_val val_v)
 
 }
 
-static bool er_law_layout(size_t bc_s, size_t op_s, size_t* code_o, size_t* size_s)
+static bool er_law_layout(size_t bc_s, size_t* size_s)
 {
-    size_t label_end_s = 0;
-    if (!er_alloc_size(sizeof(er_law), bc_s, sizeof(er_law_label), &label_end_s)) {
-        return false;
-    }
-    if (!er_align_size(label_end_s, _Alignof(er_op), code_o)) {
-        return false;
-    }
-    return er_alloc_size(*code_o, op_s, sizeof(er_op), size_s);
+    return er_alloc_size(sizeof(er_law), bc_s, sizeof(er_law_label), size_s);
 }
 
 static bool er_law_total_ops(size_t bc_s, const er_op* const bc_v[],
@@ -255,8 +327,7 @@ er_law* er_law_alloc(const enki_allocator* allocator, size_t bc_s, size_t op_s)
 {
     ENKI_PROFILE_ZONE("er_law_alloc");
     size_t size_s = 0;
-    size_t code_o = 0;
-    if (!er_law_layout(bc_s, op_s, &code_o, &size_s)) {
+    if (op_s > (size_t)ER_BCPC_NONE || !er_law_layout(bc_s, &size_s)) {
         return NULL;
     }
     er_law* law = (er_law*)er_alloc_bytes(allocator, size_s);
@@ -270,7 +341,6 @@ er_law* er_law_alloc(const enki_allocator* allocator, size_t bc_s, size_t op_s)
     law->let_d = 0;
     law->bc_s = bc_s;
     law->op_s = op_s;
-    law->code_o = code_o;
     if (bc_s > 0) {
         memset(law->bc_v, 0, bc_s * sizeof(er_law_label));
     }
@@ -291,12 +361,9 @@ er_val er_law_init(er_law* law, er_val name_v, er_val body_v, uint32_t ari_d,
     if (!er_law_total_ops(bc_s, (const er_op* const*)bc_v, bc_len_v, &op_s)) {
         return 0;
     }
-    size_t code_o = 0;
     size_t size_s = 0;
-    if (!er_law_layout(bc_s, op_s, &code_o, &size_s) || size_s > er_head_size(&law->h)) {
-        return 0;
-    }
-    if (law->code_o != code_o || law->op_s < op_s) {
+    if (!er_law_layout(bc_s, &size_s) || size_s > er_head_size(&law->h) ||
+        law->op_s < op_s || op_s > (size_t)ER_BCPC_NONE) {
         return 0;
     }
     law->name_v = name_v;
@@ -307,14 +374,235 @@ er_val er_law_init(er_law* law, er_val name_v, er_val body_v, uint32_t ari_d,
     law->op_s = op_s;
     law->h.raw.nf_f = 1;
 
-    er_op* dst_v = er_law_code_base(law);
-    size_t off_s = 0;
+    er_bcpc start_pc = ER_BCPC_NONE;
+    if (!er_bytecode_append(bc_v, bc_len_v, bc_s, op_s, &start_pc)) {
+        return 0;
+    }
+    er_bcpc pc = start_pc;
     for (size_t k = 0; k < bc_s; k++) {
-        law->bc_v[k] = (er_law_label){.off_s = off_s, .op_s = bc_len_v[k]};
-        memcpy(dst_v + off_s, bc_v[k], bc_len_v[k] * sizeof(er_op));
-        off_s += bc_len_v[k];
+        law->bc_v[k] = (er_law_label){.pc = pc, .op_s = bc_len_v[k]};
+        pc += (er_bcpc)bc_len_v[k];
+    }
+    for (size_t label_s = 0; label_s < bc_s; label_s++) {
+        er_law_label label = law->bc_v[label_s];
+        er_op* code_v = er_law_label_code(law, label_s);
+        if (code_v == NULL) {
+            return 0;
+        }
+        for (size_t op_s_i = 0; op_s_i < label.op_s; op_s_i++) {
+            er_op* op = code_v + op_s_i;
+            if (op->tag == OP_JUMP_IF || op->tag == OP_JMP || op->tag == OP_MAKE_SUSP) {
+                size_t target_s = (size_t)op->as.u32;
+                if (target_s >= bc_s || law->bc_v[target_s].op_s == 0) {
+                    return 0;
+                }
+            } else if (op->tag == OP_JUMP_IF_ZERO) {
+                size_t target_s = (size_t)op->as.u32;
+                if (target_s < bc_s && law->bc_v[target_s].op_s != 0) {
+                    op->as.u32 = law->bc_v[target_s].pc;
+                } else {
+                    if (target_s >= label.op_s || target_s > (size_t)ER_BCPC_NONE - label.pc) {
+                        return 0;
+                    }
+                    op->as.u32 = label.pc + (er_bcpc)target_s;
+                }
+            }
+        }
     }
     return er_into(er_tag_law, law);
+}
+
+er_op* er_law_label_code(er_law* law, size_t label_s)
+{
+    if (law == NULL || label_s >= law->bc_s) {
+        return NULL;
+    }
+    er_law_label label = law->bc_v[label_s];
+    if (label.op_s == 0 || !er_bytecode_span_valid(label.pc, label.op_s)) {
+        return NULL;
+    }
+    return er_bytecode_at(label.pc);
+}
+
+const er_op* er_law_label_code_const(const er_law* law, size_t label_s)
+{
+    if (law == NULL || label_s >= law->bc_s) {
+        return NULL;
+    }
+    er_law_label label = law->bc_v[label_s];
+    if (label.op_s == 0 || !er_bytecode_span_valid(label.pc, label.op_s)) {
+        return NULL;
+    }
+    return er_bytecode_at_const(label.pc);
+}
+
+typedef struct er_app_route_cache {
+    uint32_t app_s;
+    er_bcpc pc;
+    er_bcpc end_pc;
+} er_app_route_cache;
+
+typedef struct er_prim_route_cache {
+    er_optag tag;
+    uint32_t arg_s;
+    er_val lit_v;
+    er_bc_eval_req arg_eval_v[ER_BC_MAX_PRIM_ARITY];
+    er_bcpc pc;
+    er_bcpc end_pc;
+} er_prim_route_cache;
+
+static er_app_route_cache* er_app_route_cache_v;
+static size_t er_app_route_cache_s;
+static size_t er_app_route_cache_cap_s;
+static er_prim_route_cache* er_prim_route_cache_v;
+static size_t er_prim_route_cache_s;
+static size_t er_prim_route_cache_cap_s;
+
+static bool er_cache_reserve(void** ptr, size_t* cap_s, size_t need_s, size_t elem_s)
+{
+    if (ptr == NULL || cap_s == NULL || elem_s == 0) {
+        return false;
+    }
+    if (need_s <= *cap_s) {
+        return true;
+    }
+    size_t next_s = *cap_s == 0 ? 16u : *cap_s;
+    while (next_s < need_s) {
+        if (next_s > SIZE_MAX / 2u) {
+            return false;
+        }
+        next_s *= 2u;
+    }
+    if (next_s > SIZE_MAX / elem_s) {
+        return false;
+    }
+    const enki_allocator* sys = enki_allocator_system();
+    void* next_p = sys->realloc != NULL ? sys->realloc(sys->ctx, *ptr, next_s * elem_s) : NULL;
+    if (next_p == NULL) {
+        next_p = sys->alloc(sys->ctx, next_s * elem_s);
+        if (next_p == NULL) {
+            return false;
+        }
+        if (*ptr != NULL && *cap_s != 0) {
+            memcpy(next_p, *ptr, *cap_s * elem_s);
+            sys->free(sys->ctx, *ptr);
+        }
+    }
+    *ptr = next_p;
+    *cap_s = next_s;
+    return true;
+}
+
+static bool er_bytecode_append_ops(er_op op_v[], size_t op_s, er_bcpc* out_pc,
+                                   er_bcpc* out_end_pc)
+{
+    size_t len_v[] = {op_s};
+    er_op* code_v[] = {op_v};
+    er_bcpc pc = ER_BCPC_NONE;
+    if (!er_bytecode_append(code_v, len_v, 1, op_s, &pc) ||
+        op_s > (size_t)ER_BCPC_NONE - (size_t)pc) {
+        return false;
+    }
+    *out_pc = pc;
+    *out_end_pc = pc + (er_bcpc)op_s;
+    return true;
+}
+
+static bool er_app_route_intern(uint32_t app_s, er_bcpc* out_pc, er_bcpc* out_end_pc)
+{
+    if (out_pc == NULL || out_end_pc == NULL || app_s == 0) {
+        return false;
+    }
+    for (size_t k = 0; k < er_app_route_cache_s; k++) {
+        if (er_app_route_cache_v[k].app_s == app_s) {
+            *out_pc = er_app_route_cache_v[k].pc;
+            *out_end_pc = er_app_route_cache_v[k].end_pc;
+            return true;
+        }
+    }
+    if (!er_cache_reserve((void**)&er_app_route_cache_v, &er_app_route_cache_cap_s,
+                          er_app_route_cache_s + 1, sizeof(er_app_route_cache))) {
+        return false;
+    }
+    er_op code_v[] = {
+        {.tag = OP_MK_APP, .as.u32 = app_s},
+        {.tag = OP_RET},
+    };
+    er_bcpc pc = ER_BCPC_NONE;
+    er_bcpc end_pc = ER_BCPC_NONE;
+    if (!er_bytecode_append_ops(code_v, sizeof(code_v) / sizeof(code_v[0]), &pc, &end_pc)) {
+        return false;
+    }
+    er_app_route_cache_v[er_app_route_cache_s++] = (er_app_route_cache){
+        .app_s = app_s,
+        .pc = pc,
+        .end_pc = end_pc,
+    };
+    *out_pc = pc;
+    *out_end_pc = end_pc;
+    return true;
+}
+
+static bool er_prim_route_matches(const er_prim_route_cache* cached, er_optag tag,
+                                  uint32_t arg_s, const er_bc_eval_req arg_eval_v[],
+                                  er_val lit_v)
+{
+    if (cached == NULL || cached->tag != tag || cached->arg_s != arg_s ||
+        cached->lit_v != lit_v) {
+        return false;
+    }
+    for (size_t k = 0; k < ER_BC_MAX_PRIM_ARITY; k++) {
+        if (cached->arg_eval_v[k] != arg_eval_v[k]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool er_prim_route_intern(er_optag tag, uint32_t arg_s,
+                                 const er_bc_eval_req arg_eval_v[], er_val lit_v,
+                                 er_bcpc* out_pc, er_bcpc* out_end_pc)
+{
+    if (arg_eval_v == NULL || out_pc == NULL || out_end_pc == NULL ||
+        arg_s > ER_BC_MAX_PRIM_ARITY) {
+        return false;
+    }
+    for (size_t k = 0; k < er_prim_route_cache_s; k++) {
+        if (er_prim_route_matches(&er_prim_route_cache_v[k], tag, arg_s, arg_eval_v, lit_v)) {
+            *out_pc = er_prim_route_cache_v[k].pc;
+            *out_end_pc = er_prim_route_cache_v[k].end_pc;
+            return true;
+        }
+    }
+    if (!er_cache_reserve((void**)&er_prim_route_cache_v, &er_prim_route_cache_cap_s,
+                          er_prim_route_cache_s + 1, sizeof(er_prim_route_cache))) {
+        return false;
+    }
+    er_op code_v[ER_PRIM_ROUTE_MAX_CODE] = {0};
+    size_t code_s = 0;
+    if (!er_bc_emit_prim_route_fragment(code_v, ER_PRIM_ROUTE_MAX_CODE, tag, arg_s, arg_eval_v,
+                                        lit_v, &code_s)) {
+        return false;
+    }
+    er_bcpc pc = ER_BCPC_NONE;
+    er_bcpc end_pc = ER_BCPC_NONE;
+    if (!er_bytecode_append_ops(code_v, code_s, &pc, &end_pc)) {
+        return false;
+    }
+    er_prim_route_cache* cached = &er_prim_route_cache_v[er_prim_route_cache_s++];
+    *cached = (er_prim_route_cache){
+        .tag = tag,
+        .arg_s = arg_s,
+        .lit_v = lit_v,
+        .pc = pc,
+        .end_pc = end_pc,
+    };
+    for (size_t k = 0; k < ER_BC_MAX_PRIM_ARITY; k++) {
+        cached->arg_eval_v[k] = arg_eval_v[k];
+    }
+    *out_pc = pc;
+    *out_end_pc = end_pc;
+    return true;
 }
 
 er_val er_law_make_code(const enki_allocator* loc_a, er_val nam_v, er_val bod_v,
@@ -618,7 +906,7 @@ static er_val er_eval_with_heap(const enki_allocator* heap_a, const enki_allocat
     }
 
     er_vm vm = {
-        .code = NULL,
+        .pc = ER_BCPC_NONE,
         .loc_a = heap_a,
         .dstack = dstack_v,
         .dsp = dstack_v,
@@ -815,8 +1103,11 @@ static er_val plan_eval_whnf_preserve(er_vm* vm, er_val val_v);
 (define OP_PUSH_SELF ("OP_PUSH_SELF" 0)) ;; [] -- a
 (define (OP_PUSH_LIT val) ("OP_PUSH_LIT" val)) ;; [] -- a
 (define (OP_MK_APP count) ("OP_MK_APP" count)) ;; [<count>] -- a
-(define (OP_CALLF argc) ("OP_CALLF" argc)) ;; [fn, args...] -- thunk
+(define (OP_CALLF argc) ("OP_CALLF" argc)) ;; [fn, args...] -- whnf
+(define (OP_CALLS argc) ("OP_CALLS" argc)) ;; [fn, args...] -- whnf
 (define (OP_CALLU argc) ("OP_CALLU" argc)) ;; [fn, args...] -- thunk
+(define (OP_APPLY_UNK count) ("OP_APPLY_UNK" count)) ;; [fn, args...] -- thunk
+(define (OP_APPLY_FAST count) ("OP_APPLY_FAST" count)) ;; [fn, args...] -- thunk
 (define (OP_EVAL ari) ("OP_EVAL" ari)) ;; a -- whnf
 (define OP_TAIL_EVAL ("OP_TAIL_EVAL" 0)) ;; a -- whnf
 (define OP_FORCE ("OP_FORCE" 0)) ;; a -- nf
@@ -874,7 +1165,9 @@ static er_val plan_eval_whnf_preserve(er_vm* vm, er_val val_v);
 (define OP_TRU ("OP_TRU" 0))
 (define OP_OR ("OP_OR" 0)) ;; [x y] -- z
 (define OP_AND ("OP_AND" 0)) ;; [x y] -- z
+(define (OP_JMP label) ("OP_JMP" label)) ;; [] -- []
 (define (OP_JUMP_IF label) ("OP_JUMP_IF" label)) ;; c -- []
+(define (OP_MAKE_SUSP label) ("OP_MAKE_SUSP" label)) ;; [] -- thunk
 (define OP_EQ ("OP_EQ" 0)) ;; [x y] -- r
 (define OP_CMP ("OP_CMP" 0)) ;; [x y] -- r
 */
@@ -885,16 +1178,13 @@ static er_val
 plan_eval_whnf(er_vm *vm, er_val val_v, er_eval_mode mode)
 {
     ENKI_PROFILE_ZONE("plan_eval_whnf");
-    er_op* code  = vm->code;
-    er_val code_law_v = vm->code_law_v;
-    uint32_t code_label_d = vm->code_label_d;
-
     er_val* dbase = vm->dsp;
     er_val* dsp   = vm->dsp;
     er_kon* kbase = vm->ksp;
     er_kon* ksp   = vm->ksp;
 
-    uint32_t  pc  = 0;
+    er_bcpc pc = vm->pc;
+    er_bcpc last_pc = ER_BCPC_NONE;
     er_val hd_v = er_bad;
     er_val* env = NULL;
     er_val r   = val_v;
@@ -920,12 +1210,12 @@ plan_eval_whnf(er_vm *vm, er_val val_v, er_eval_mode mode)
     er_optag prim_byte_op;
     size_t prim_need_s;
     er_bc_prim_route prim_route;
-    er_op prim_route_code_v[ER_PRIM_ROUTE_MAX_DEPTH][ER_PRIM_ROUTE_MAX_CODE];
-    size_t prim_route_final_pc_v[ER_PRIM_ROUTE_MAX_DEPTH] = {0};
+    er_bcpc prim_route_start_pc_v[ER_PRIM_ROUTE_MAX_DEPTH] = {0};
+    er_bcpc prim_route_final_pc_v[ER_PRIM_ROUTE_MAX_DEPTH] = {0};
     size_t prim_route_depth_s = 0;
-    er_op app_route_code_v[2];
 
-    er_op *op;
+    er_op op_storage = {0};
+    er_op* op = &op_storage;
     er_val f, app, target;
     er_head* head;
     er_kon kon;
@@ -952,8 +1242,7 @@ plan_eval_whnf(er_vm *vm, er_val val_v, er_eval_mode mode)
     do {                                              \
         vm->dsp = dsp;                                \
         vm->ksp = ksp;                                \
-        vm->code_law_v = code_law_v;                  \
-        vm->code_label_d = code_label_d;              \
+        vm->pc = pc;                                  \
     } while (0)
 
 #define GC_ROOT_PRIMS()                               \
@@ -972,41 +1261,50 @@ plan_eval_whnf(er_vm *vm, er_val val_v, er_eval_mode mode)
         vm->gc_tmp_s = 0;                             \
     } while (0)
 
-#define CODE_SET(_law_v, _label_d)                 \
+#define CODE_SET_PC(_pc)                           \
     do {                                           \
-        code_law_v = (_law_v);                     \
-        code_label_d = (uint32_t)(_label_d);       \
-        vm->code_law_v = code_law_v;               \
-        vm->code_label_d = code_label_d;           \
+        pc = (_pc);                                \
+        vm->pc = pc;                               \
     } while (0)
 
-#define CODE_REFRESH()                             \
+#define CODE_SET_LABEL(_law_v, _label_d)           \
     do {                                           \
-        code_law_v = vm->code_law_v;               \
-        code_label_d = vm->code_label_d;           \
-        if (code_law_v != 0) {                     \
-            er_law* dispatch_law = er_resolve_law(code_law_v); \
-            code = er_law_label_code(dispatch_law, code_label_d); \
-        } else {                                   \
-            code = vm->code;                       \
+        er_law* code_set_law = er_resolve_law((_law_v)); \
+        size_t code_set_label_s = (size_t)(_label_d); \
+        if (code_set_law == NULL || code_set_label_s >= code_set_law->bc_s || \
+            er_law_label_code(code_set_law, code_set_label_s) == NULL) { \
+            FAIL_TANK("missing bytecode", (_law_v)); \
         }                                          \
-        if (code == NULL) {                        \
-            FAIL_TANK("missing bytecode", code_law_v); \
+        CODE_SET_PC(code_set_law->bc_v[code_set_label_s].pc); \
+    } while (0)
+
+#define CODE_SET_CURRENT_LABEL(_label_d)           \
+    do {                                           \
+        if (env == NULL) {                         \
+            FAIL_TANK("missing bytecode env", (er_val)(_label_d)); \
         }                                          \
+        CODE_SET_LABEL(env[0], (_label_d));        \
     } while (0)
 
 #define DISPATCH()                                 \
     do {                                           \
         vm->b_count++;                             \
-        CODE_REFRESH();                            \
-        op = &code[pc++];                          \
+        er_op* dispatch_op = er_bytecode_at(pc);   \
+        if (dispatch_op == NULL) {                 \
+            FAIL_TANK("missing bytecode", (er_val)pc); \
+        }                                          \
+        last_pc = pc;                              \
+        op_storage = *dispatch_op;                 \
+        op = &op_storage;                          \
+        pc++;                                      \
+        vm->pc = pc;                               \
         if ((size_t)op->tag >= OP_COUNT || dispatch[op->tag] == NULL) { \
             FAIL_TANK("bad bytecode op", (er_val)op->tag); \
         }                                          \
         goto *dispatch[op->tag];                   \
     } while (0)
 
-#define KPUSH_BYTECODE_RETURN(_pc, _env, _law_v, _label_d) \
+#define KPUSH_BYTECODE_RETURN(_pc, _env)                   \
     do {                                                   \
         vm->k_count++;                                     \
         *ksp++ = (er_kon){                                 \
@@ -1014,9 +1312,6 @@ plan_eval_whnf(er_vm *vm, er_val val_v, er_eval_mode mode)
             .as.bytecode_return = {                        \
                 .env = (_env),                             \
                 .pc = (_pc),                               \
-                .code_law_v = (_law_v),                    \
-                .code_label_d = (uint32_t)(_label_d),      \
-                .code = code,                              \
                 .dbase = dbase,                            \
             },                                             \
         };                                                 \
@@ -1127,8 +1422,7 @@ plan_eval_whnf(er_vm *vm, er_val val_v, er_eval_mode mode)
         if ((_v) == 0) {                           \
             FAIL_ALLOC();                          \
         }                                          \
-        code_law_v = vm->code_law_v;               \
-        code_label_d = vm->code_label_d;           \
+        pc = vm->pc;                               \
     } while (0)
 
 #define CHECK_PRIM(_v)                             \
@@ -1138,14 +1432,20 @@ plan_eval_whnf(er_vm *vm, er_val val_v, er_eval_mode mode)
             vm->ksp = ksp;                         \
             return (_v);                           \
         }                                          \
-        code_law_v = vm->code_law_v;               \
-        code_label_d = vm->code_label_d;           \
+        pc = vm->pc;                               \
     } while (0)
 
 #define PRIM_FORCE_VALUE_WHNF(_dst, _src)          \
     do {                                           \
         GC_SYNC();                                 \
         (_dst) = plan_eval_whnf_preserve(vm, (_src)); \
+        CHECK_PRIM(_dst);                          \
+    } while (0)
+
+#define PRIM_FORCE_VALUE_NF(_dst, _src)            \
+    do {                                           \
+        GC_SYNC();                                 \
+        (_dst) = plan_eval_nf_inner(vm, (_src));   \
         CHECK_PRIM(_dst);                          \
     } while (0)
 
@@ -1191,18 +1491,14 @@ plan_eval_whnf(er_vm *vm, er_val val_v, er_eval_mode mode)
         for (size_t app_k_s = 0; app_k_s < thk->arg_s; app_k_s++) { \
             DPUSH(thk->arg_v[app_k_s]);            \
         }                                          \
-        app_route_code_v[0] = (er_op){             \
-            .tag = OP_MK_APP,                      \
-            .as.u32 = (uint32_t)thk->arg_s,        \
-        };                                         \
-        app_route_code_v[1] = (er_op){.tag = OP_RET}; \
-        code = app_route_code_v;                   \
-        vm->code = code;                           \
-        code_law_v = 0;                            \
-        code_label_d = 0;                          \
-        vm->code_law_v = 0;                        \
-        vm->code_label_d = 0;                      \
-        pc = 0;                                    \
+        er_bcpc app_route_pc = ER_BCPC_NONE;       \
+        er_bcpc app_route_end_pc = ER_BCPC_NONE;   \
+        if (!er_app_route_intern((uint32_t)thk->arg_s, \
+                                 &app_route_pc, &app_route_end_pc)) { \
+            FAIL_ALLOC();                          \
+        }                                          \
+        (void)app_route_end_pc;                    \
+        CODE_SET_PC(app_route_pc);                 \
         DISPATCH();                                \
     } while (0)
 
@@ -1266,6 +1562,54 @@ I_CALLF: {
     r = er_thk_make_call_frame(vm->loc_a, frame_s, call_s, call_base);
     CHECK_ALLOC(r);
     dsp = call_base;
+    KPUSH_BYTECODE_RETURN(pc, env);
+    goto FORCE_ENTRY;
+}
+
+I_CALLS: {
+    size_t arg_s = op->as.u32;
+    size_t call_s = arg_s + 1;
+    if (arg_s == SIZE_MAX || dsp < dbase || (size_t)(dsp - dbase) < call_s) {
+      FAIL_ALLOC();
+    }
+    er_val* call_base = dsp - call_s;
+    hd_v = call_base[0];
+    size_t frame_s = er_call_frame_size(hd_v, (uint32_t)arg_s);
+#ifndef NDEBUG
+    assert(er_is_whnf(hd_v));
+    assert(frame_s != 0);
+#endif
+    if (!er_is_whnf(hd_v) || frame_s == 0) {
+      FAIL_TANK("bad standard call", hd_v);
+    }
+    GC_SYNC();
+    r = er_thk_make_call_frame(vm->loc_a, frame_s, call_s, call_base);
+    CHECK_ALLOC(r);
+    dsp = call_base;
+    KPUSH_BYTECODE_RETURN(pc, env);
+    goto FORCE_ENTRY;
+}
+
+I_APPLY_FAST: {
+    size_t call_s = op->as.u32;
+    if (call_s == 0 || dsp < dbase || (size_t)(dsp - dbase) < call_s) {
+      FAIL_ALLOC();
+    }
+    size_t arg_s = call_s - 1u;
+    er_val* call_base = dsp - call_s;
+    hd_v = call_base[0];
+    size_t frame_s = er_call_frame_size(hd_v, (uint32_t)arg_s);
+#ifndef NDEBUG
+    assert(er_is_whnf(hd_v));
+    assert(frame_s != 0);
+#endif
+    if (!er_is_whnf(hd_v) || frame_s == 0) {
+      FAIL_TANK("bad fast application", hd_v);
+    }
+    GC_SYNC();
+    r = er_thk_make_call_frame(vm->loc_a, frame_s, call_s, call_base);
+    CHECK_ALLOC(r);
+    dsp = call_base;
     DPUSH(r);
     DISPATCH();
 }
@@ -1279,6 +1623,26 @@ I_CALLU: {
     er_val* call_base = dsp - call_s;
     GC_SYNC();
     r = er_thk_make_unk_app(vm->loc_a, call_s, call_base);
+    CHECK_ALLOC(r);
+    dsp = call_base;
+    DPUSH(r);
+    DISPATCH();
+}
+
+I_APPLY_UNK: {
+    size_t call_s = op->as.u32;
+    if (call_s == 0 || dsp < dbase || (size_t)(dsp - dbase) < call_s) {
+      FAIL_ALLOC();
+    }
+    er_val* call_base = dsp - call_s;
+    hd_v = call_base[0];
+    er_pin* pin = call_s == 2 ? er_outt(er_tag_pin, hd_v) : NULL;
+    GC_SYNC();
+    if (pin != NULL && er_is_cat(pin->val_v)) {
+      r = er_thk_make_prim(vm->loc_a, pin->val_v, call_base[1]);
+    } else {
+      r = er_thk_make_unk_app(vm->loc_a, call_s, call_base);
+    }
     CHECK_ALLOC(r);
     dsp = call_base;
     DPUSH(r);
@@ -1345,32 +1709,51 @@ I_ROTATE: {
 I_JUMP_IF_ZERO:
     r = DPOP();
     if (r == 0) {
-      er_law* jump_law = er_resolve_law(code_law_v);
-      if (jump_law != NULL && er_law_label_code(jump_law, op->as.u32) != NULL) {
-        CODE_SET(code_law_v, op->as.u32);
-        pc = 0;
-      } else {
-        pc = op->as.u32;
-      }
+      CODE_SET_PC((er_bcpc)op->as.u32);
     }
+    DISPATCH();
+
+I_JMP:
+    CODE_SET_CURRENT_LABEL(op->as.u32);
     DISPATCH();
 
 I_JUMP_IF:
     r = DPOP();
     if (r != 0) {
-      er_law* jump_law = er_resolve_law(code_law_v);
-      if (jump_law == NULL || er_law_label_code(jump_law, op->as.u32) == NULL) {
-        FAIL_ALLOC();
-      }
-      CODE_SET(code_law_v, op->as.u32);
-      pc = 0;
+      CODE_SET_CURRENT_LABEL(op->as.u32);
     }
     DISPATCH();
+
+I_MAKE_SUSP: {
+    if (env == NULL) {
+      FAIL_TANK("missing bytecode env", (er_val)op->as.u32);
+    }
+    uint32_t susp_label_d = op->as.u32;
+    er_law* susp_law = er_resolve_law(env[0]);
+    if (susp_law == NULL || (size_t)susp_label_d >= susp_law->bc_s ||
+        er_law_label_code(susp_law, susp_label_d) == NULL) {
+      FAIL_TANK("bad suspension label", env[0]);
+    }
+    size_t frame_s = er_call_frame_size(env[0], susp_law->ari_d);
+    if (frame_s == 0) {
+      FAIL_TANK("bad suspension frame", env[0]);
+    }
+    GC_SYNC();
+    er_val env_v = er_thk_make_env_frame(vm->loc_a, frame_s, env);
+    CHECK_ALLOC(env_v);
+    vm->gc_tmp_v[0] = env_v;
+    vm->gc_tmp_s = 1;
+    r = er_thk_make_susp(vm->loc_a, susp_label_d, env_v, env[0]);
+    vm->gc_tmp_s = 0;
+    CHECK_ALLOC(r);
+    DPUSH(r);
+    DISPATCH();
+}
 
 I_EVAL:
     r = DPOP();
     GC_SYNC();
-    KPUSH_BYTECODE_RETURN(pc, env, code_law_v, code_label_d);
+    KPUSH_BYTECODE_RETURN(pc, env);
     goto FORCE_ENTRY;
 
 I_TAIL_EVAL:
@@ -1381,7 +1764,7 @@ I_TAIL_EVAL:
 I_FORCE:
     r = DPOP();
     GC_SYNC();
-    KPUSH_BYTECODE_RETURN(pc, env, code_law_v, code_label_d);
+    KPUSH_BYTECODE_RETURN(pc, env);
     KPUSH_NORMAL();
     goto FORCE_ENTRY;
 
@@ -1528,8 +1911,7 @@ FORCE_SUSP: {
       FAIL_TANK("bad suspension label", susp_law_v);
     }
     KPUSH_UPDATE(er_into(er_tag_thk, thk));
-    CODE_SET(susp_law_v, susp_label);
-    pc = 0;
+    CODE_SET_LABEL(susp_law_v, susp_label);
     env = fr->arg_v;
     dbase = dsp;
     thk->fun = ER_HOLE;
@@ -1571,8 +1953,7 @@ ENTER_CALL: {
     }
     KPUSH_UPDATE(self_v);
     thk->fun = ER_HOLE;
-    CODE_SET(f, 0);
-    pc  = 0;
+    CODE_SET_LABEL(f, 0);
     env = thk->arg_v;
     dbase = dsp;
     DISPATCH();
@@ -1584,13 +1965,8 @@ ENTER_CALL: {
 
 K_RETURN:
     dbase = kon.as.bytecode_return.dbase;
-    code = kon.as.bytecode_return.code;
-    vm->code = code;
-    code_law_v = kon.as.bytecode_return.code_law_v;
-    code_label_d = kon.as.bytecode_return.code_label_d;
-    vm->code_law_v = code_law_v;
-    vm->code_label_d = code_label_d;
     pc = kon.as.bytecode_return.pc;
+    vm->pc = pc;
     env = kon.as.bytecode_return.env;
 
     DPUSH(r);
@@ -1704,6 +2080,7 @@ K_OVERAPP:
 #undef CALLU_DISPATCH_MK_APP
 #undef PRIM_BAD_ARITY
 #undef PRIM_DONE_VALUE
+#undef PRIM_FORCE_VALUE_NF
 #undef PRIM_FORCE_VALUE_WHNF
 #undef CHECK_PRIM
 #undef FAIL_ALLOC
@@ -1715,8 +2092,9 @@ K_OVERAPP:
 #undef KPUSH_UPDATE
 #undef KPUSH_BYTECODE_RETURN
 #undef DISPATCH
-#undef CODE_REFRESH
-#undef CODE_SET
+#undef CODE_SET_CURRENT_LABEL
+#undef CODE_SET_LABEL
+#undef CODE_SET_PC
 #undef DPOP
 #undef DPUSH
 }
@@ -1727,31 +2105,15 @@ static er_val plan_eval_preserve(er_vm* vm, er_val val_v, er_eval_mode mode)
     er_kon* base_ksp = vm->ksp;
     er_val* saved_gc_rp = vm->gc_rp;
     size_t saved_gc_tmp_s = vm->gc_tmp_s;
-    er_op* saved_code = vm->code;
-    er_val saved_code_law_v = vm->code_law_v;
-    uint32_t saved_code_label_d = vm->code_label_d;
-    bool root_code_law_f = saved_code_law_v != 0;
-    if (root_code_law_f) {
-        *vm->ksp++ = (er_kon){
-            .tag = ER_K_VALUE_ROOT,
-            .as.value_root = {
-                .val_v = saved_code_law_v,
-            },
-        };
-    }
+    er_bcpc saved_pc = vm->pc;
 
     er_val out_v = plan_eval_whnf(vm, val_v, mode);
 
-    if (root_code_law_f) {
-        saved_code_law_v = base_ksp->as.value_root.val_v;
-    }
     vm->dsp = base_dsp;
     vm->ksp = base_ksp;
     vm->gc_rp = saved_gc_rp;
     vm->gc_tmp_s = saved_gc_tmp_s;
-    vm->code = saved_code;
-    vm->code_law_v = saved_code_law_v;
-    vm->code_label_d = saved_code_label_d;
+    vm->pc = saved_pc;
     return out_v;
 }
 

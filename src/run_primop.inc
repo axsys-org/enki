@@ -303,11 +303,108 @@ PRIM66_DECODE: {
         PRIM_FORCE_VALUE_WHNF(prim_c_v, prim_arg_v[2]);
         r = prim_arg_v[3];
         goto FORCE_ENTRY;
+    case OP66_SAP:
+        if (prim_arg_s != 2) {
+            PRIM_BAD_ARITY();
+        }
+        prim_a_v = prim_arg_v[0];
+        PRIM_FORCE_VALUE_WHNF(prim_b_v, prim_arg_v[1]);
+        GC_SYNC();
+        GC_ROOT_PRIMS();
+        r = er_thk_make_unk_app(vm->loc_a, 2, vm->gc_tmp_v);
+        GC_CLEAR_ROOTS();
+        CHECK_ALLOC(r);
+        goto FORCE_ENTRY;
+    case OP66_SAP2:
+        if (prim_arg_s != 3) {
+            PRIM_BAD_ARITY();
+        }
+        prim_a_v = prim_arg_v[0];
+        PRIM_FORCE_VALUE_WHNF(prim_b_v, prim_arg_v[1]);
+        PRIM_FORCE_VALUE_WHNF(prim_c_v, prim_arg_v[2]);
+        prim_d_v = prim_c_v;
+        GC_SYNC();
+        GC_ROOT_PRIMS();
+        r = er_thk_make_unk_app(vm->loc_a, 2, vm->gc_tmp_v);
+        GC_CLEAR_ROOTS();
+        CHECK_ALLOC(r);
+        GC_SYNC();
+        GC_ROOT_PRIMS();
+        prim_a_v = plan_eval_whnf_preserve(vm, r);
+        GC_CLEAR_ROOTS();
+        pc = vm->pc;
+        CHECK_PRIM(prim_a_v);
+        prim_b_v = prim_d_v;
+        GC_SYNC();
+        GC_ROOT_PRIMS();
+        r = er_thk_make_unk_app(vm->loc_a, 2, vm->gc_tmp_v);
+        GC_CLEAR_ROOTS();
+        CHECK_ALLOC(r);
+        goto FORCE_ENTRY;
+    case OP66_FORCE:
+        if (prim_arg_s != 1) {
+            PRIM_BAD_ARITY();
+        }
+        PRIM_FORCE_VALUE_NF(prim_a_v, prim_arg_v[0]);
+        PRIM_DONE_VALUE(prim_a_v);
+    case OP66_DEEPSEQ:
+        if (prim_arg_s != 2) {
+            PRIM_BAD_ARITY();
+        }
+        PRIM_FORCE_VALUE_NF(prim_a_v, prim_arg_v[0]);
+        r = prim_arg_v[1];
+        goto FORCE_ENTRY;
+    case OP66_TRY:
+        if (prim_arg_s != 2) {
+            PRIM_BAD_ARITY();
+        }
+        prim_a_v = prim_arg_v[0];
+        prim_b_v = prim_arg_v[1];
+        GC_SYNC();
+        GC_ROOT_PRIMS();
+        r = er_thk_make_unk_app(vm->loc_a, 2, vm->gc_tmp_v);
+        GC_CLEAR_ROOTS();
+        CHECK_ALLOC(r);
+        GC_SYNC();
+        prim_c_v = plan_eval_nf_inner(vm, r);
+        pc = vm->pc;
+        {
+            er_val tag_v = 0;
+            er_val try_val_v = prim_c_v;
+            er_tank* tank = er_outt(er_tag_tank, prim_c_v);
+            if (tank != NULL && tank->msg_c != NULL && strcmp(tank->msg_c, "throw") == 0) {
+                tag_v = 1;
+                try_val_v = tank->val_v;
+            } else {
+                er_app* thrown_app = er_outt(er_tag_app, prim_c_v);
+                if (thrown_app != NULL && thrown_app->arg_s == 1 &&
+                    (thrown_app->fn_v == PLAN_S5('T', 'h', 'r', 'o', 'w') ||
+                     thrown_app->fn_v == PLAN_S5('E', 'r', 'r', 'o', 'r'))) {
+                    tag_v = 1;
+                    try_val_v = thrown_app->arg_v[0];
+                }
+            }
+            if (tag_v == 1) {
+                PRIM_FORCE_VALUE_NF(try_val_v, try_val_v);
+            } else if (!er_is_good(prim_c_v)) {
+                vm->dsp = dsp;
+                vm->ksp = ksp;
+                return prim_c_v;
+            }
+            vm->gc_tmp_v[0] = try_val_v;
+            vm->gc_tmp_s = 1;
+            GC_SYNC();
+            r = er_app_make(vm->loc_a, tag_v, 1, vm->gc_tmp_v);
+            GC_CLEAR_ROOTS();
+            CHECK_ALLOC(r);
+        }
+        PRIM_DONE_VALUE(r);
     case OP66_THROW:
         if (prim_arg_s != 1) {
             PRIM_BAD_ARITY();
         }
-        FAIL_TANK("throw", prim_arg_v[0]);
+        PRIM_FORCE_VALUE_NF(prim_a_v, prim_arg_v[0]);
+        FAIL_TANK("throw", prim_a_v);
     default:
         break;
     }
@@ -330,8 +427,6 @@ PRIM_ROUTE_DISPATCH: {
     }
 
     size_t prim_route_slot_s = prim_route_depth_s++;
-    er_op* prim_code_v = prim_route_code_v[prim_route_slot_s];
-    size_t prim_code_s = 0;
     er_val prim_lit_v = 0;
     switch (prim_byte_op) {
     case OP_LOADN:
@@ -343,28 +438,27 @@ PRIM_ROUTE_DISPATCH: {
     default:
         break;
     }
-    if (!er_bc_emit_prim_route_fragment(prim_code_v, ER_PRIM_ROUTE_MAX_CODE, prim_byte_op,
-                                        prim_need_s, prim_route.arg_eval_v, prim_lit_v,
-                                        &prim_code_s)) {
+    er_bcpc prim_route_pc = ER_BCPC_NONE;
+    er_bcpc prim_route_end_pc = ER_BCPC_NONE;
+    if (!er_prim_route_intern(prim_byte_op, (uint32_t)prim_need_s, prim_route.arg_eval_v,
+                              prim_lit_v, &prim_route_pc, &prim_route_end_pc)) {
         FAIL_TANK("bad primitive route", prim_tag_v);
     }
-    prim_route_final_pc_v[prim_route_slot_s] = prim_code_s;
+    prim_route_start_pc_v[prim_route_slot_s] = prim_route_pc;
+    prim_route_final_pc_v[prim_route_slot_s] = prim_route_end_pc;
 
-    code = prim_code_v;
-    vm->code = code;
-    code_law_v = 0;
-    code_label_d = 0;
-    vm->code_law_v = 0;
-    vm->code_label_d = 0;
-    pc = 0;
+    CODE_SET_PC(prim_route_pc);
     DISPATCH();
 }
 
 PRIM_DONE: {
-    bool prim_route_done_f =
-        prim_route_depth_s > 0 &&
-        code == prim_route_code_v[prim_route_depth_s - 1u] &&
-        pc == prim_route_final_pc_v[prim_route_depth_s - 1u];
+    bool prim_route_done_f = false;
+    if (prim_route_depth_s > 0) {
+        er_bcpc route_start_pc = prim_route_start_pc_v[prim_route_depth_s - 1u];
+        er_bcpc route_end_pc = prim_route_final_pc_v[prim_route_depth_s - 1u];
+        prim_route_done_f = last_pc >= route_start_pc && last_pc < route_end_pc &&
+                            pc == route_end_pc;
+    }
     if (prim_route_done_f) {
       prim_route_depth_s--;
       r = DPOP();

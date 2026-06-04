@@ -45,6 +45,12 @@ typedef uint64_t er_val;
 
 #define er_bad er_into(er_tag_bad, 0)
 
+typedef uint32_t er_bcpc;
+
+enum {
+    ER_BCPC_NONE = UINT32_MAX,
+};
+
 static inline bool er_is_tank(er_val val_v)
 {
     return er_is_tag(er_tag_tank, val_v);
@@ -88,7 +94,7 @@ typedef struct er_pin {
 } er_pin;
 
 typedef struct er_law_label {
-  size_t off_s;
+  er_bcpc pc;
   size_t op_s;
 } er_law_label;
 
@@ -100,7 +106,6 @@ typedef struct er_law {
   uint32_t let_d; // size of letrec table
   size_t bc_s; // number of bytecode labels
   size_t op_s; // total bytecode instruction count
-  size_t code_o; // byte offset from law base to bytecode storage
   er_law_label bc_v[]; // bytecode label spans
 } er_law;
 
@@ -250,6 +255,11 @@ typedef enum {
   OP_CMP,
   OP_RET,
   OP_CALLP,
+  OP_JMP,
+  OP_CALLS,
+  OP_APPLY_UNK,
+  OP_APPLY_FAST,
+  OP_MAKE_SUSP,
   OP_COUNT
 } er_optag;
 
@@ -262,39 +272,12 @@ struct er_op {
     } as;
 };
 
-static inline er_op* er_law_code_base(er_law* law)
-{
-    return law == NULL ? NULL : (er_op*)((unsigned char*)law + law->code_o);
-}
-
-static inline const er_op* er_law_code_base_const(const er_law* law)
-{
-    return law == NULL ? NULL : (const er_op*)((const unsigned char*)law + law->code_o);
-}
-
-static inline er_op* er_law_label_code(er_law* law, size_t label_s)
-{
-    if (law == NULL || label_s >= law->bc_s) {
-        return NULL;
-    }
-    er_law_label label = law->bc_v[label_s];
-    if (label.op_s == 0 || label.off_s > law->op_s || label.op_s > law->op_s - label.off_s) {
-        return NULL;
-    }
-    return er_law_code_base(law) + label.off_s;
-}
-
-static inline const er_op* er_law_label_code_const(const er_law* law, size_t label_s)
-{
-    if (law == NULL || label_s >= law->bc_s) {
-        return NULL;
-    }
-    er_law_label label = law->bc_v[label_s];
-    if (label.op_s == 0 || label.off_s > law->op_s || label.op_s > law->op_s - label.off_s) {
-        return NULL;
-    }
-    return er_law_code_base_const(law) + label.off_s;
-}
+er_op* er_bytecode_at(er_bcpc pc);
+const er_op* er_bytecode_at_const(er_bcpc pc);
+bool er_bytecode_span_valid(er_bcpc pc, size_t op_s);
+size_t er_bytecode_arena_op_count(void);
+er_op* er_law_label_code(er_law* law, size_t label_s);
+const er_op* er_law_label_code_const(const er_law* law, size_t label_s);
 
 typedef enum er_kon_tag {
     ER_K_BYTECODE_RETURN = 1,
@@ -308,10 +291,7 @@ typedef enum er_kon_tag {
 
 typedef struct er_kon_bytecode_return {
     er_val* env;
-    uint32_t pc;
-    er_val code_law_v;
-    uint32_t code_label_d;
-    er_op* code;
+    er_bcpc pc;
     er_val* dbase;
 } er_kon_bytecode_return;
 
@@ -351,9 +331,7 @@ typedef struct er_kon {
 } er_kon;
 
 typedef struct {
-  er_op* code;
-  er_val code_law_v;
-  uint32_t code_label_d;
+  er_bcpc pc;
   const enki_allocator* loc_a;
 
   er_val* dstack;

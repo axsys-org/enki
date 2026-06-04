@@ -291,28 +291,37 @@ Test(wisp, law_body_plain_hash_list_is_not_compile_time_eval)
     assert_eval_fails("(#law \"plain\" (plain x) (# 42))", "unbound");
 }
 
-Test(wisp, numeric_pin66_wrapper_emits_direct_primitive_bytecode)
+Test(wisp, numeric_pin66_wrapper_compiles_pessimistically)
 {
     assert_small_strnat(eval_input("(#bind add (#law \"add\" (add x y) "
                                    "((#pin 66) (\"Add\" x y))))"),
                         "add");
     cr_assert_not_null(assert_law(eval_input("add")));
     er_law* law = assert_law(eval_input("(#law \"caller\" (caller ignored) (add 20 22))"));
-    er_op* code = er_law_label_code(law, 0);
+    const er_op* code = er_law_label_code_const(law, 0);
     cr_assert_not_null(code);
+    cr_assert_gt(law->bc_v[0].op_s, 0);
 
-    cr_assert_eq(code[0].tag, OP_PUSH_LIT);
-    cr_assert_eq(code[0].as.lit_v, 20);
-    cr_assert_eq(code[1].tag, OP_PUSH_LIT);
-    cr_assert_eq(code[1].as.lit_v, 22);
-    cr_assert_eq(code[2].tag, OP_ROTATE);
-    cr_assert_eq(code[2].as.u32, 2);
-    cr_assert_eq(code[3].tag, OP_EVAL);
-    cr_assert_eq(code[4].tag, OP_ROTATE);
-    cr_assert_eq(code[4].as.u32, 2);
-    cr_assert_eq(code[5].tag, OP_EVAL);
-    cr_assert_eq(code[6].tag, OP_ADD);
-    cr_assert_eq(code[7].tag, OP_RET);
+    size_t apply_s = 0;
+    for (size_t k = 0; k < law->bc_v[0].op_s; k++) {
+        switch (code[k].tag) {
+        case OP_PUSH_VAR:
+        case OP_PUSH_LIT:
+        case OP_APPLY_UNK:
+        case OP_RET:
+            break;
+        default:
+            cr_assert_fail("compiler emitted opcode %u at op %zu", (unsigned int)code[k].tag,
+                           k);
+        }
+        if (code[k].tag == OP_APPLY_UNK) {
+            cr_assert_eq(code[k].as.u32, 2);
+            apply_s++;
+        }
+    }
+    cr_assert_gt(apply_s, 0);
+    cr_assert_eq(code[law->bc_v[0].op_s - 1].tag, OP_RET);
+    cr_assert_eq(eval_input("((#law \"caller\" (caller ignored) (add 20 22)) 0)"), 42);
 }
 
 Test(wisp, macro_export_and_system_shadowing_match_plan_assembler)
