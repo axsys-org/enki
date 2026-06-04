@@ -1098,6 +1098,523 @@ static uint32_t er_arity(er_val val_v)
 static er_val plan_eval_nf_inner(er_vm* vm, er_val val_v);
 static er_val plan_eval_whnf_preserve(er_vm* vm, er_val val_v);
 
+static er_val op_eval_arg(er_vm* vm, er_app* app, size_t arg_s, er_bc_eval_req eval)
+{
+    if (app == NULL || arg_s >= app->arg_s) {
+        return er_tank_make(vm->loc_a, 0, "bad primitive argument");
+    }
+    if (eval == ER_BC_EVAL_NONE) {
+        return er_into(er_tag_app, app);
+    }
+
+    er_val* root_v = vm->dsp;
+    root_v[0] = er_into(er_tag_app, app);
+    root_v[1] = app->arg_v[arg_s];
+    vm->dsp = root_v + 2;
+
+    er_val out_v = eval == ER_BC_EVAL_NF ? plan_eval_nf_inner(vm, root_v[1])
+                                         : plan_eval_whnf_preserve(vm, root_v[1]);
+    if (!er_is_good(out_v)) {
+        vm->dsp = root_v;
+        return out_v;
+    }
+    app = er_outt(er_tag_app, root_v[0]);
+    if (app == NULL || arg_s >= app->arg_s) {
+        vm->dsp = root_v;
+        return er_tank_make(vm->loc_a, 0, "bad primitive argument");
+    }
+    app->arg_v[arg_s] = out_v;
+    er_val app_v = er_into(er_tag_app, app);
+    vm->dsp = root_v;
+    return app_v;
+}
+
+static er_val op_eval_arg_route_app(er_vm* vm, er_app* app, size_t arg_off_s,
+                                    size_t arg_s, const er_bc_prim_route* route)
+{
+    if (app == NULL) {
+        return er_tank_make(vm->loc_a, 0, "expected primitive row");
+    }
+    if (route == NULL || arg_s != route->arg_s || arg_s > ER_BC_MAX_PRIM_ARITY) {
+        return er_into(er_tag_app, app);
+    }
+    for (size_t k = 0; k < arg_s; k++) {
+        er_val row_v = op_eval_arg(vm, app, arg_off_s + k, route->arg_eval_v[k]);
+        if (!er_is_good(row_v)) {
+            return row_v;
+        }
+        app = er_outt(er_tag_app, row_v);
+    }
+    return er_into(er_tag_app, app);
+}
+
+static er_bc_prim_route op_arg_route(er_optag tag, size_t arg_s,
+                                     const er_bc_eval_req arg_eval_v[])
+{
+    er_bc_prim_route route = {
+        .tag = tag,
+        .arg_s = arg_s,
+        .valid_f = true,
+    };
+    for (size_t k = 0; k < arg_s && k < ER_BC_MAX_PRIM_ARITY; k++) {
+        route.arg_eval_v[k] = arg_eval_v[k];
+    }
+    return route;
+}
+
+static er_val op66_eval_arg_app(er_vm* vm, er_app* app)
+{
+    if (app == NULL) {
+        return er_tank_make(vm->loc_a, 0, "expected primitive row");
+    }
+
+    er_val tag_v = app->fn_v;
+    size_t arg_off_s = 0;
+    size_t arg_s = app->arg_s;
+    if (tag_v == 0 && app->arg_s > 0) {
+        tag_v = app->arg_v[0];
+        arg_off_s = 1;
+        arg_s = app->arg_s - 1u;
+    }
+
+    int op_i = 0;
+    er_app* desc = er_outt(er_tag_app, tag_v);
+    er_bc_prim_route route = {0};
+    if (desc != NULL) {
+        if (desc->arg_s != 1 || !er_prim66_op_from_descriptor(desc->fn_v, &op_i)) {
+            return er_into(er_tag_app, app);
+        }
+        er_val width_v = desc->arg_v[0];
+        switch (op_i) {
+        case OP66_LOAD:
+            (void)er_bc_prim_route_strict(width_v == 0 ? OP_LOAD : OP_LOADN,
+                                          width_v == 0 ? 3 : 2, &route);
+            return op_eval_arg_route_app(vm, app, arg_off_s, arg_s, &route);
+        case ER_OP66_STORE:
+            (void)er_bc_prim_route_strict(width_v == 0 ? OP_STORE : OP_STOREN,
+                                          width_v == 0 ? 4 : 3, &route);
+            return op_eval_arg_route_app(vm, app, arg_off_s, arg_s, &route);
+        case OP66_TRUNC:
+            (void)er_bc_prim_route_strict(width_v == 0 ? OP_TRUNC : OP_TRUNCN,
+                                          width_v == 0 ? 2 : 1, &route);
+            return op_eval_arg_route_app(vm, app, arg_off_s, arg_s, &route);
+        case ER_OP66_MET:
+            (void)er_bc_prim_route_strict(OP_MET, 1, &route);
+            return op_eval_arg_route_app(vm, app, arg_off_s, arg_s, &route);
+        default:
+            if (er_bc_prim66_route(op_i, &route)) {
+                return op_eval_arg_route_app(vm, app, arg_off_s, arg_s, &route);
+            }
+            return er_into(er_tag_app, app);
+        }
+    }
+
+    if (!eo_op66_from_tag(tag_v, &op_i)) {
+        return er_into(er_tag_app, app);
+    }
+
+    switch (op_i) {
+    case OP66_TYPE:
+    case OP66_IS_PIN:
+    case OP66_IS_LAW:
+    case OP66_IS_APP:
+    case OP66_IS_NAT:
+    case OP66_IX0:
+    case OP66_IX1:
+    case OP66_IX2:
+    case OP66_IX3:
+    case OP66_IX4:
+    case OP66_IX5:
+    case OP66_IX6:
+    case OP66_IX7: {
+        er_bc_eval_req eval_v[] = {ER_BC_EVAL_WHNF};
+        route = op_arg_route(OP_COUNT, 1, eval_v);
+        return op_eval_arg_route_app(vm, app, arg_off_s, arg_s, &route);
+    }
+    case OP66_NE:
+    case OP66_LT:
+    case OP66_GT:
+    case OP66_GE:
+    case OP66_SET:
+    case OP66_CLEAR:
+    case OP66_NIB: {
+        er_bc_eval_req eval_v[] = {ER_BC_EVAL_WHNF, ER_BC_EVAL_WHNF};
+        route = op_arg_route(OP_COUNT, 2, eval_v);
+        return op_eval_arg_route_app(vm, app, arg_off_s, arg_s, &route);
+    }
+    case OP66_CASE: {
+        er_bc_eval_req eval_v[] = {ER_BC_EVAL_WHNF, ER_BC_EVAL_WHNF, ER_BC_EVAL_NONE};
+        route = op_arg_route(OP_COUNT, 3, eval_v);
+        return op_eval_arg_route_app(vm, app, arg_off_s, arg_s, &route);
+    }
+    case OP66_CASE2:
+    case OP66_CASE3:
+    case OP66_CASE4:
+    case OP66_CASE5:
+    case OP66_CASE6:
+    case OP66_CASE7:
+    case OP66_CASE8:
+    case OP66_CASE9:
+    case OP66_CASE10:
+    case OP66_CASE11:
+    case OP66_CASE12:
+    case OP66_CASE13:
+    case OP66_CASE14:
+    case OP66_CASE15:
+    case OP66_CASE16: {
+        if (arg_s != (size_t)(op_i - OP66_CASE2 + 3)) {
+            return er_into(er_tag_app, app);
+        }
+        return op_eval_arg(vm, app, arg_off_s, ER_BC_EVAL_WHNF);
+    }
+    case OP66_IF:
+    case OP66_IFZ: {
+        er_bc_eval_req eval_v[] = {ER_BC_EVAL_WHNF, ER_BC_EVAL_NONE, ER_BC_EVAL_NONE};
+        route = op_arg_route(OP_COUNT, 3, eval_v);
+        return op_eval_arg_route_app(vm, app, arg_off_s, arg_s, &route);
+    }
+    case OP66_NOR: {
+        if (arg_s != 2) {
+            return er_into(er_tag_app, app);
+        }
+        er_val row_v = op_eval_arg(vm, app, arg_off_s, ER_BC_EVAL_WHNF);
+        if (!er_is_good(row_v)) {
+            return row_v;
+        }
+        app = er_outt(er_tag_app, row_v);
+        if (app->arg_v[arg_off_s] != 0) {
+            return row_v;
+        }
+        return op_eval_arg(vm, app, arg_off_s + 1u, ER_BC_EVAL_WHNF);
+    }
+    case OP66_ROW: {
+        er_bc_eval_req eval_v[] = {ER_BC_EVAL_WHNF, ER_BC_EVAL_WHNF, ER_BC_EVAL_NONE};
+        route = op_arg_route(OP_COUNT, 3, eval_v);
+        return op_eval_arg_route_app(vm, app, arg_off_s, arg_s, &route);
+    }
+    case OP66_SEQ: {
+        er_bc_eval_req eval_v[] = {ER_BC_EVAL_WHNF, ER_BC_EVAL_NONE};
+        route = op_arg_route(OP_COUNT, 2, eval_v);
+        return op_eval_arg_route_app(vm, app, arg_off_s, arg_s, &route);
+    }
+    case OP66_SEQ2: {
+        er_bc_eval_req eval_v[] = {ER_BC_EVAL_WHNF, ER_BC_EVAL_WHNF, ER_BC_EVAL_NONE};
+        route = op_arg_route(OP_COUNT, 3, eval_v);
+        return op_eval_arg_route_app(vm, app, arg_off_s, arg_s, &route);
+    }
+    case OP66_SEQ3: {
+        er_bc_eval_req eval_v[] = {ER_BC_EVAL_WHNF, ER_BC_EVAL_WHNF, ER_BC_EVAL_WHNF,
+                                   ER_BC_EVAL_NONE};
+        route = op_arg_route(OP_COUNT, 4, eval_v);
+        return op_eval_arg_route_app(vm, app, arg_off_s, arg_s, &route);
+    }
+    case OP66_SAP: {
+        er_bc_eval_req eval_v[] = {ER_BC_EVAL_NONE, ER_BC_EVAL_WHNF};
+        route = op_arg_route(OP_COUNT, 2, eval_v);
+        return op_eval_arg_route_app(vm, app, arg_off_s, arg_s, &route);
+    }
+    case OP66_SAP2: {
+        er_bc_eval_req eval_v[] = {ER_BC_EVAL_NONE, ER_BC_EVAL_WHNF, ER_BC_EVAL_WHNF};
+        route = op_arg_route(OP_COUNT, 3, eval_v);
+        return op_eval_arg_route_app(vm, app, arg_off_s, arg_s, &route);
+    }
+    case OP66_FORCE:
+    case OP66_THROW: {
+        er_bc_eval_req eval_v[] = {ER_BC_EVAL_NF};
+        route = op_arg_route(OP_COUNT, 1, eval_v);
+        return op_eval_arg_route_app(vm, app, arg_off_s, arg_s, &route);
+    }
+    case OP66_DEEPSEQ: {
+        er_bc_eval_req eval_v[] = {ER_BC_EVAL_NF, ER_BC_EVAL_NONE};
+        route = op_arg_route(OP_COUNT, 2, eval_v);
+        return op_eval_arg_route_app(vm, app, arg_off_s, arg_s, &route);
+    }
+    case OP66_TRACE: {
+        er_bc_eval_req eval_v[] = {ER_BC_EVAL_NONE, ER_BC_EVAL_NONE};
+        route = op_arg_route(OP_COUNT, 2, eval_v);
+        return op_eval_arg_route_app(vm, app, arg_off_s, arg_s, &route);
+    }
+    case OP66_EQUAL: {
+        er_bc_eval_req eval_v[] = {ER_BC_EVAL_WHNF, ER_BC_EVAL_WHNF};
+        route = op_arg_route(OP_COUNT, 2, eval_v);
+        return op_eval_arg_route_app(vm, app, arg_off_s, arg_s, &route);
+    }
+    default:
+        if (er_bc_prim66_route(op_i, &route)) {
+            return op_eval_arg_route_app(vm, app, arg_off_s, arg_s, &route);
+        }
+        return er_into(er_tag_app, app);
+    }
+}
+
+static er_val op0_eval_arg_app(er_vm* vm, er_app* app)
+{
+    if (app == NULL) {
+        return er_tank_make(vm->loc_a, 0, "expected primitive row");
+    }
+
+    er_val tag_v = app->fn_v;
+    size_t arg_off_s = 0;
+    size_t arg_s = app->arg_s;
+    if (tag_v == 0 && app->arg_s > 1) {
+        tag_v = app->arg_v[0];
+        arg_off_s = 1;
+        arg_s = app->arg_s - 1u;
+    }
+
+    size_t op_s = 0;
+    er_bc_prim_route route = {0};
+    if (!eo_nat_to_size(tag_v, &op_s) || !er_bc_prim0_route(op_s, &route)) {
+        return er_into(er_tag_app, app);
+    }
+    return op_eval_arg_route_app(vm, app, arg_off_s, arg_s, &route);
+}
+
+static bool op0_op_from_name(er_val tag_v, size_t* out_op_s)
+{
+    if (out_op_s == NULL) {
+        return false;
+    }
+    switch (tag_v) {
+    case PLAN_S3('P', 'i', 'n'):
+        *out_op_s = OP0_PIN;
+        return true;
+    case PLAN_S3('L', 'a', 'w'):
+        *out_op_s = OP0_LAW;
+        return true;
+    case PLAN_S4('E', 'l', 'i', 'm'):
+        *out_op_s = OP0_ELIM;
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool op0_named_app_view(er_app* app, size_t* out_op_s, size_t* out_arg_off_s,
+                               size_t* out_arg_s)
+{
+    if (app == NULL || out_op_s == NULL || out_arg_off_s == NULL || out_arg_s == NULL) {
+        return false;
+    }
+    er_val tag_v = app->fn_v;
+    size_t arg_off_s = 0;
+    size_t arg_s = app->arg_s;
+    if (tag_v == 0 && app->arg_s > 0) {
+        tag_v = app->arg_v[0];
+        arg_off_s = 1;
+        arg_s = app->arg_s - 1u;
+    }
+    if (!op0_op_from_name(tag_v, out_op_s)) {
+        return false;
+    }
+    *out_arg_off_s = arg_off_s;
+    *out_arg_s = arg_s;
+    return true;
+}
+
+static bool op66_exec_named_op0_app(er_vm* vm, er_app* app, er_val* out_v)
+{
+    size_t op_s = 0;
+    size_t arg_off_s = 0;
+    size_t arg_s = 0;
+    er_bc_prim_route route = {0};
+    if (!op0_named_app_view(app, &op_s, &arg_off_s, &arg_s)) {
+        return false;
+    }
+    if (!er_bc_prim0_route(op_s, &route)) {
+        *out_v = er_tank_make(vm->loc_a, (er_val)op_s, "bad primitive route");
+        return true;
+    }
+
+    er_val app_v = op_eval_arg_route_app(vm, app, arg_off_s, arg_s, &route);
+    if (!er_is_good(app_v)) {
+        *out_v = app_v;
+        return true;
+    }
+    app = er_outt(er_tag_app, app_v);
+    if (app == NULL) {
+        *out_v = er_tank_make(vm->loc_a, 0, "expected primitive row");
+        return true;
+    }
+    if (!op0_named_app_view(app, &op_s, &arg_off_s, &arg_s)) {
+        *out_v = er_tank_make(vm->loc_a, 0, "bad primitive tag");
+        return true;
+    }
+    *out_v = eo_exec_op0(vm->loc_a, (int)op_s, arg_s, app->arg_v + arg_off_s);
+    return true;
+}
+
+static bool op66_app_view(er_app* app, int* out_op_i, const er_val** out_arg_v,
+                          size_t* out_arg_s)
+{
+    if (app == NULL || out_op_i == NULL || out_arg_v == NULL || out_arg_s == NULL) {
+        return false;
+    }
+    er_val tag_v = app->fn_v;
+    const er_val* arg_v = app->arg_v;
+    size_t arg_s = app->arg_s;
+    if (tag_v == 0 && arg_s > 0) {
+        tag_v = app->arg_v[0];
+        arg_v = app->arg_v + 1;
+        arg_s = app->arg_s - 1u;
+    }
+    if (!eo_op66_from_tag(tag_v, out_op_i)) {
+        return false;
+    }
+    *out_arg_v = arg_v;
+    *out_arg_s = arg_s;
+    return true;
+}
+
+static er_val op66_exec_row_app(er_vm* vm, const er_val arg_v[], size_t arg_s)
+{
+    if (arg_s != 3) {
+        return er_tank_make(vm->loc_a, (er_val)arg_s, "bad primitive arity");
+    }
+
+    er_val* root_v = vm->dsp;
+    root_v[0] = arg_v[0];
+    root_v[1] = arg_v[1];
+    root_v[2] = arg_v[2];
+    vm->dsp = root_v + 3;
+
+    root_v[0] = plan_eval_whnf_preserve(vm, root_v[0]);
+    if (!er_is_good(root_v[0])) {
+        er_val err_v = root_v[0];
+        vm->dsp = root_v;
+        return err_v;
+    }
+    root_v[0] = eo_nat(root_v[0]);
+    root_v[1] = plan_eval_whnf_preserve(vm, root_v[1]);
+    if (!er_is_good(root_v[1])) {
+        er_val err_v = root_v[1];
+        vm->dsp = root_v;
+        return err_v;
+    }
+
+    size_t row_count_s = 0;
+    (void)eo_nat_to_size(root_v[1], &row_count_s);
+    if (row_count_s == 0) {
+        er_val out_v = root_v[0];
+        vm->dsp = root_v;
+        return out_v;
+    }
+
+    er_app* row_app = er_app_alloc(vm->loc_a, row_count_s);
+    if (row_app == NULL) {
+        vm->dsp = root_v;
+        return er_bad;
+    }
+    er_val row_v = er_app_init(row_app, root_v[0], row_count_s, NULL);
+    if (row_v == 0) {
+        vm->dsp = root_v;
+        return er_bad;
+    }
+
+    root_v[0] = row_v;
+    root_v[1] = root_v[2];
+    vm->dsp = root_v + 2;
+    for (size_t k = 0; k < row_count_s; k++) {
+        root_v[1] = plan_eval_whnf_preserve(vm, root_v[1]);
+        if (!er_is_good(root_v[1])) {
+            er_val err_v = root_v[1];
+            vm->dsp = root_v;
+            return err_v;
+        }
+        row_app = er_outt(er_tag_app, root_v[0]);
+        if (row_app == NULL) {
+            vm->dsp = root_v;
+            return er_bad;
+        }
+        row_app->arg_v[k] = eo_ix(0, root_v[1]);
+        root_v[1] = eo_ix(1, root_v[1]);
+    }
+
+    er_val out_v = root_v[0];
+    vm->dsp = root_v;
+    return out_v;
+}
+
+static er_val op66_exec_try_app(er_vm* vm, const er_val arg_v[], size_t arg_s)
+{
+    if (arg_s != 2) {
+        return er_tank_make(vm->loc_a, (er_val)arg_s, "bad primitive arity");
+    }
+
+    er_val* root_v = vm->dsp;
+    root_v[0] = arg_v[0];
+    root_v[1] = arg_v[1];
+    vm->dsp = root_v + 2;
+
+    er_val call_v = er_thk_make_unk_app(vm->loc_a, 2, root_v);
+    if (call_v == 0) {
+        vm->dsp = root_v;
+        return er_bad;
+    }
+    root_v[0] = call_v;
+    vm->dsp = root_v + 1;
+
+    er_val res_v = plan_eval_nf_inner(vm, root_v[0]);
+    er_val tag_v = 0;
+    er_val try_val_v = res_v;
+    er_tank* tank = er_outt(er_tag_tank, res_v);
+    if (tank != NULL && tank->msg_c != NULL && strcmp(tank->msg_c, "throw") == 0) {
+        tag_v = 1;
+        try_val_v = tank->val_v;
+    } else {
+        er_app* thrown_app = er_outt(er_tag_app, res_v);
+        if (thrown_app != NULL && thrown_app->arg_s == 1 &&
+            (thrown_app->fn_v == PLAN_S5('T', 'h', 'r', 'o', 'w') ||
+             thrown_app->fn_v == PLAN_S5('E', 'r', 'r', 'o', 'r'))) {
+            tag_v = 1;
+            try_val_v = thrown_app->arg_v[0];
+        }
+    }
+
+    if (tag_v == 1) {
+        root_v[0] = try_val_v;
+        vm->dsp = root_v + 1;
+        try_val_v = plan_eval_nf_inner(vm, root_v[0]);
+        if (!er_is_good(try_val_v)) {
+            vm->dsp = root_v;
+            return try_val_v;
+        }
+    } else if (!er_is_good(res_v)) {
+        vm->dsp = root_v;
+        return res_v;
+    }
+
+    root_v[0] = try_val_v;
+    vm->dsp = root_v + 1;
+    er_val out_v = er_app_make(vm->loc_a, tag_v, 1, root_v);
+    vm->dsp = root_v;
+    return out_v == 0 ? er_bad : out_v;
+}
+
+static bool op66_exec_special_app(er_vm* vm, er_app* app, er_val* out_v)
+{
+    if (op66_exec_named_op0_app(vm, app, out_v)) {
+        return true;
+    }
+
+    int op_i = 0;
+    const er_val* arg_v = NULL;
+    size_t arg_s = 0;
+    if (!op66_app_view(app, &op_i, &arg_v, &arg_s)) {
+        return false;
+    }
+    switch (op_i) {
+    case OP66_ROW:
+        *out_v = op66_exec_row_app(vm, arg_v, arg_s);
+        return true;
+    case OP66_TRY:
+        *out_v = op66_exec_try_app(vm, arg_v, arg_s);
+        return true;
+    default:
+        return false;
+    }
+}
+
 /*
  * (define (OP_PUSH_VAR val) ("OP_PUSH_VAR" val)) ;; [] -- a
 (define OP_PUSH_SELF ("OP_PUSH_SELF" 0)) ;; [] -- a
@@ -1184,7 +1701,6 @@ plan_eval_whnf(er_vm *vm, er_val val_v, er_eval_mode mode)
     er_kon* ksp   = vm->ksp;
 
     er_bcpc pc = vm->pc;
-    er_bcpc last_pc = ER_BCPC_NONE;
     er_val hd_v = er_bad;
     er_val* env = NULL;
     er_val r   = val_v;
@@ -1193,26 +1709,13 @@ plan_eval_whnf(er_vm *vm, er_val val_v, er_eval_mode mode)
     uint64_t prim_set;
     er_val prim_arg;
     er_app* prim_row;
-    er_app* prim_desc;
-    const er_val* prim_arg_v;
-    size_t prim_arg_s;
-    er_val prim_tag_v;
     er_val prim_word_v;
-    er_val prim_name_v;
-    int prim_op_i;
-    size_t prim_op_s;
     er_val prim_a_v = 0;
     er_val prim_b_v = 0;
     er_val prim_c_v = 0;
     er_val prim_d_v = 0;
     er_val prim_e_v = 0;
     er_val prim_f_v = 0;
-    er_optag prim_byte_op;
-    size_t prim_need_s;
-    er_bc_prim_route prim_route;
-    er_bcpc prim_route_start_pc_v[ER_PRIM_ROUTE_MAX_DEPTH] = {0};
-    er_bcpc prim_route_final_pc_v[ER_PRIM_ROUTE_MAX_DEPTH] = {0};
-    size_t prim_route_depth_s = 0;
 
     er_op op_storage = {0};
     er_op* op = &op_storage;
@@ -1293,7 +1796,6 @@ plan_eval_whnf(er_vm *vm, er_val val_v, er_eval_mode mode)
         if (dispatch_op == NULL) {                 \
             FAIL_TANK("missing bytecode", (er_val)pc); \
         }                                          \
-        last_pc = pc;                              \
         op_storage = *dispatch_op;                 \
         op = &op_storage;                          \
         pc++;                                      \
@@ -1858,7 +2360,32 @@ FORCE_XPRIM: {
       ksp = vm->ksp;
       CHECK_PRIM(prim_arg);
     }
-    goto PRIMOP;
+    prim_row = er_outt(er_tag_app, prim_arg);
+    if (prim_set == 66) {
+      if (op66_exec_special_app(vm, prim_row, &r)) {
+        dsp = vm->dsp;
+        ksp = vm->ksp;
+        CHECK_PRIM(r);
+        goto FORCE_ENTRY;
+      }
+      prim_arg = op66_eval_arg_app(vm, prim_row);
+      dsp = vm->dsp;
+      ksp = vm->ksp;
+      CHECK_PRIM(prim_arg);
+      prim_row = er_outt(er_tag_app, prim_arg);
+      r = eo_exec_op66_er_app(vm->loc_a, prim_row);
+    } else if (prim_set == 0) {
+      prim_arg = op0_eval_arg_app(vm, prim_row);
+      dsp = vm->dsp;
+      ksp = vm->ksp;
+      CHECK_PRIM(prim_arg);
+      prim_row = er_outt(er_tag_app, prim_arg);
+      r = eo_exec_op0_er_app(vm->loc_a, prim_row);
+    } else {
+      FAIL_TANK("bad primitive set", prim_arg);
+    }
+    CHECK_PRIM(r);
+    goto FORCE_ENTRY;
 }
 
 

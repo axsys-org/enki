@@ -67,6 +67,8 @@ er_val eo_elim(const enki_allocator* loc_a, er_val pin_f_v, er_val law_f_v, er_v
 
 bool eo_op66_from_tag(er_val tag_v, int* out_op);
 er_val eo_exec_op66(const enki_allocator* loc_a, int op, size_t arg_s, const er_val arg_v[]);
+er_val eo_exec_op66_er_app(const enki_allocator* loc_a, const er_app* app);
 er_val eo_exec_op66_app(const enki_allocator* loc_a, er_val row_v);
 er_val eo_exec_op0(const enki_allocator* loc_a, int op, size_t arg_s, const er_val arg_v[]);
+er_val eo_exec_op0_er_app(const enki_allocator* loc_a, const er_app* app);
 er_val eo_exec_op0_app(const enki_allocator* loc_a, er_val row_v);

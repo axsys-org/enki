@@ -324,6 +324,34 @@ Test(wisp, numeric_pin66_wrapper_compiles_pessimistically)
     cr_assert_eq(eval_input("((#law \"caller\" (caller ignored) (add 20 22)) 0)"), 42);
 }
 
+Test(wisp, dynamic_pin66_wrappers_force_arguments_like_static_primops)
+{
+    assert_small_strnat(eval_input("(#bind Ix "
+                                   "(#pin (#law \"Ix\" (Ix i r) "
+                                   "((#pin \"B\") (\"Ix\" i r)))))"),
+                        "Ix");
+    assert_small_strnat(eval_input("(#bind Up "
+                                   "(#pin (#law \"Up\" (() i v r) "
+                                   "((#pin \"B\") (\"Up\" i v r)))))"),
+                        "Up");
+    assert_small_strnat(eval_input("(#macro bplan "
+                                   "(#pin "
+                                   "(#law \"bplan\" (bplan e x) "
+                                   "sig(Ix 1 x) "
+                                   "nam(Ix 0 sig) "
+                                   "(0 \"#bind\" nam "
+                                   "(0 \"#pin\" "
+                                   "(0 \"#law\" (1 nam) sig "
+                                   "(0 (1 (#pin \"B\")) "
+                                   "(Up 0 (1 nam) sig))))))))"),
+                        "bplan");
+
+    assert_small_strnat(eval_input("(bplan (Pin x))"), "Pin");
+    er_pin* pin = er_outt(er_tag_pin, eval_input("Pin"));
+    cr_assert_not_null(pin);
+    cr_assert_not_null(assert_law(pin->val_v));
+}
+
 Test(wisp, macro_export_and_system_shadowing_match_plan_assembler)
 {
     assert_small_strnat(eval_input("(#macro zap (#law \"zap\" (zap env form) 0))"), "zap");

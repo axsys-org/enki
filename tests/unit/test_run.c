@@ -467,6 +467,43 @@ Test(run_ops, row_style_primitive_errors_do_not_fall_through)
     assert_tank_value(eo_exec_op0_app(loc_a, law_row_v), "bad primitive arity");
 }
 
+Test(run_ops, primitive_dispatch_accepts_er_app_pointer)
+{
+    const enki_allocator* loc_a = enki_allocator_system();
+    er_val args_v[] = {10, 32};
+    er_val row_v = make_app_value(PLAN_S3('A', 'd', 'd'), 2, args_v);
+    er_app* app = er_outt(er_tag_app, row_v);
+
+    cr_assert_eq(eo_exec_op66_er_app(loc_a, app), 42);
+}
+
+Test(run_ops, primitive_dispatch_seq2_returns_last_arg)
+{
+    const enki_allocator* loc_a = enki_allocator_system();
+    er_val args_v[] = {10, 20, 30};
+    er_val row_v = make_app_value(PLAN_S4('S', 'e', 'q', '2'), 3, args_v);
+    er_app* app = er_outt(er_tag_app, row_v);
+
+    cr_assert_eq(eo_exec_op66_er_app(loc_a, app), 30);
+    cr_assert_eq(eo_exec_op66_app(loc_a, row_v), 30);
+}
+
+Test(run_ops, primitive_dispatch_op0_accepts_er_app_pointer)
+{
+    const enki_allocator* loc_a = enki_allocator_system();
+    er_val args_v[] = {2, 111, 222};
+    er_val row_v = make_app_value(OP0_LAW, 3, args_v);
+    er_app* app = er_outt(er_tag_app, row_v);
+
+    er_val law_v = eo_exec_op0_er_app(loc_a, app);
+    er_law* law = er_outt(er_tag_law, law_v);
+
+    cr_assert_not_null(law);
+    cr_assert_eq(law->ari_d, 3);
+    cr_assert_eq(law->name_v, 111);
+    cr_assert_eq(law->body_v, 222);
+}
+
 typedef struct er_gc_test_root {
     er_val val_v;
 } er_gc_test_root;
