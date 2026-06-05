@@ -50,10 +50,28 @@
         "type": "github"
       }
     },
+    "reaver": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1778693203,
+        "narHash": "sha256-o33dYQ/61SX72J3V249DwoVlbyFkvR+QXWQhLAYoEWI=",
+        "owner": "sol-plunder",
+        "repo": "reaver",
+        "rev": "b8d3cb79c272e64460763c5de79ffdb245a62c1a",
+        "type": "github"
+      },
+      "original": {
+        "owner": "sol-plunder",
+        "repo": "reaver",
+        "rev": "b8d3cb79c272e64460763c5de79ffdb245a62c1a",
+        "type": "github"
+      }
+    },
     "root": {
       "inputs": {
         "flake-utils": "flake-utils",
         "nixpkgs": "nixpkgs",
+        "reaver": "reaver",
         "treefmt-nix": "treefmt-nix"
       }
     },

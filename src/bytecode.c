@@ -396,6 +396,20 @@ static bool er_bc_compile_app(er_bc_compiler* c, size_t depth_s, er_app* app,
            er_bc_emit_u32(code, OP_APPLY_UNK, 2);
   }
   return er_bc_emit_lit(code, er_into(er_tag_app, app));
+
+  // if (app->arg_s == 0) {
+  //   return er_bc_compile_expr(c, depth_s, app->fn_v, code);
+  // }
+  // if (!er_bc_compile_expr(c, depth_s, app->fn_v, code)) {
+  //   return false;
+  // }
+  // for (size_t k = 0; k < app->arg_s; k++) {
+  //   if (!er_bc_compile_expr(c, depth_s, app->arg_v[k], code) ||
+  //       !er_bc_emit_u32(code, OP_APPLY_UNK, 2)) {
+  //     return false;
+  //   }
+  // }
+  // return er_bc_emit_lit(code, er_into(er_tag_app, app));
 }
 
 static bool er_bc_compile_expr(er_bc_compiler* c, size_t depth_s, er_val val_v,
