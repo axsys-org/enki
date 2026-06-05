@@ -2,6 +2,7 @@
 #include <stddef.h>
 
 #include "enki/interp.h"
+#include "enki/nat.h"
 #include "enki/value.h"
 
 void op66_inc(enki_interpreter* i);
@@ -11,8 +12,9 @@ void op66_sub(enki_interpreter* i);
 void op66_mul(enki_interpreter* i);
 void op66_div(enki_interpreter* i);
 void op66_mod(enki_interpreter* i);
-enki_value op66_structural_eq(enki_value a, enki_value b);
+enki_value op66_structural_eq(enki_interpreter* i, enki_value a, enki_value b);
 void op66_eq(enki_interpreter* i);
+void op66_equal(enki_interpreter* i);
 void op66_ne(enki_interpreter* i);
 void op66_gt(enki_interpreter* i);
 void op66_ge(enki_interpreter* i);
@@ -97,3 +99,7 @@ void op66_sap(enki_interpreter* i);
 void op66_sap2(enki_interpreter* i);
 void op66_force(enki_interpreter* i);
 void op66_deepseq(enki_interpreter* i);
+void op66_save(enki_interpreter* i);
+void op66_load(enki_interpreter* i);
+void op66_try(enki_interpreter* i);
+void op66_throw(enki_interpreter* i);

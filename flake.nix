@@ -5,6 +5,10 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
     treefmt-nix.url = "github:numtide/treefmt-nix";
+    reaver = {
+      url = "github:sol-plunder/reaver/b8d3cb79c272e64460763c5de79ffdb245a62c1a";
+      flake = false;
+    };
   };
 
   outputs = {
@@ -12,6 +16,7 @@
     nixpkgs,
     flake-utils,
     treefmt-nix,
+    reaver,
   }:
     flake-utils.lib.eachDefaultSystem (
       system: let
@@ -75,18 +80,48 @@
         in
           import ./nix/mkenki.nix {
             inherit lib stdenv src;
-            inherit (pkgs) gnumake pkg-config criterion gmp;
+            inherit (pkgs) gnumake pkg-config criterion gmp lmdb openssl;
             inherit (selected) compiler cc;
           };
 
         mkenki = buildType:
-          mkWithCompiler buildType {
+          (mkWithCompiler buildType {
             pname = "enki${lib.optionalString (buildType != "release") "-${buildType}"}";
             inherit buildType;
-          };
+          }).overrideAttrs (_old: {
+            installPhase = ''
+              runHook preInstall
+              make install BUILD_TYPE=${buildType} PREFIX=$out
+              install -d $out/bin
+              install -m 0755 build/${buildType}/bin/wisp $out/bin/wisp
+              install -m 0755 build/${buildType}/bin/assembler $out/bin/assembler
+              runHook postInstall
+            '';
+          });
+
+        enkiRelease = mkenki "release";
+        mkBinPackage = name: extraInstall:
+          pkgs.runCommand "enki-${name}-0.1.0" {
+            meta = {
+              description = "${name} binary from enki";
+              homepage = "https://example.invalid/enki";
+              license = lib.licenses.mit;
+              mainProgram = name;
+              platforms = lib.platforms.unix;
+            };
+          } ''
+            mkdir -p $out/bin
+            ln -s ${enkiRelease}/bin/${name} $out/bin/${name}
+            ${extraInstall}
+          '';
+        wispPackage = mkBinPackage "wisp" ''
+          mkdir -p $out/share/enki/reaver
+          cp -R ${reaver}/src/plan $out/share/enki/reaver/plan
+        '';
+        assemblerPackage = mkBinPackage "assembler" "";
 
         mkCheck = kind: buildType:
-          mkWithCompiler buildType {
+          (mkWithCompiler buildType {
             pname = "enki-${kind}-${buildType}";
             inherit buildType;
             makeTarget =
@@ -94,7 +129,17 @@
               then "test-unit"
               else "test-property";
             installPackage = false;
-          };
+          }).overrideAttrs (old:
+            {
+              nativeBuildInputs =
+                old.nativeBuildInputs
+                ++ lib.optionals (kind == "unit-tests") [
+                  wispPackage
+                ];
+            }
+            // lib.optionalAttrs (kind == "unit-tests") {
+              ENKI_REAVER_PLAN_DIR = "${wispPackage}/share/enki/reaver/plan";
+            });
 
         testBuildTypes = ["debug" "asan" "ubsan" "tsan"];
         testChecks =
@@ -125,9 +170,13 @@
             (compilerFor "coverage").compiler
           ];
 
+          ENKI_REAVER_PLAN_DIR = "${wispPackage}/share/enki/reaver/plan";
           buildInputs = [
             pkgs.criterion
             pkgs.gmp
+            pkgs.lmdb
+            pkgs.openssl
+            wispPackage
           ];
 
           dontConfigure = true;
@@ -162,12 +211,15 @@
           buildInputs = [
             pkgs.criterion
             pkgs.gmp
+            pkgs.lmdb
+            pkgs.openssl
+            pkgs.compiledb
           ];
 
           dontConfigure = true;
           buildPhase = ''
             runHook preBuild
-            make BUILD_TYPE=debug CC=${pkgs.clang}/bin/clang compile-commands
+            compiledb BUILD_TYPE=debug CC=${pkgs.clang}/bin/clang make
             make BUILD_TYPE=debug CC=${pkgs.clang}/bin/clang tidy
             runHook postBuild
           '';
@@ -227,8 +279,10 @@
         };
       in {
         packages = {
-          default = mkenki "release";
-          enki = mkenki "release";
+          default = enkiRelease;
+          enki = enkiRelease;
+          wisp = wispPackage;
+          assembler = assemblerPackage;
           enki-debug = mkenki "debug";
           enki-asan = mkenki "asan";
           enki-ubsan = mkenki "ubsan";
@@ -241,11 +295,19 @@
           testChecks
           // {
             # tidy = tidyCheck;
-            #format = treefmtEval.config.build.check self;
+            format = treefmtEval.config.build.check self;
             #coverage = coverageReport;
           };
 
         apps = {
+          wisp = flake-utils.lib.mkApp {
+            drv = wispPackage;
+            name = "wisp";
+          };
+          assembler = flake-utils.lib.mkApp {
+            drv = assemblerPackage;
+            name = "assembler";
+          };
           # fuzz = flake-utils.lib.mkApp {drv = fuzzApp;};
           coverage-report = flake-utils.lib.mkApp {drv = coverageApp;};
         };
@@ -253,6 +315,8 @@
         formatter = treefmtEval.config.build.wrapper;
 
         devShells.default = pkgs.mkShell {
+          ENKI_REAVER_PLAN_DIR = "${wispPackage}/share/enki/reaver/plan";
+
           packages =
             [
               pkgs.gcc
@@ -262,12 +326,17 @@
               pkgs.gnumake
               pkgs.criterion
               pkgs.gmp
+              pkgs.lmdb
+              pkgs.openssl
               pkgs.lcov
               pkgs.gcovr
+              pkgs.compiledb
               pkgs.pkg-config
               pkgs.alejandra
               pkgs.mdformat
+              pkgs.samply
               treefmtEval.config.build.wrapper
+              wispPackage
             ]
             ++ lib.optionals stdenv.isLinux [
               pkgs.valgrind

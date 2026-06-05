@@ -6,6 +6,8 @@
   pkg-config,
   criterion,
   gmp,
+  lmdb,
+  openssl,
   compiler,
   cc,
   extraNativeBuildInputs ? [],
@@ -30,7 +32,8 @@ stdenv.mkDerivation {
   buildInputs = [
     criterion
     gmp
-
+    lmdb
+    openssl
   ];
 
   dontConfigure = true;
