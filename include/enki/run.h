@@ -4,14 +4,13 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-
 #include <enki/allocator.h>
 
 typedef struct enki_gc enki_gc;
 
 // yes if [v] is indirect
-#define er_is_ptr(v) (((v) & (UINT64_C(1) << 63)) != 0)
-#define er_is_cat(v) (!er_is_ptr(v))
+#define er_is_ptr(v)      (((v) & (UINT64_C(1) << 63)) != 0)
+#define er_is_cat(v)      (!er_is_ptr(v))
 /*
  * following conventions are used:
 u63 0nnnnnnnnnnnnnnn - 0x0000..0x7f(n=nat data)
@@ -21,22 +20,23 @@ LAW 1100100000000000 - 0xC800
 CLZ 11010000ttttzzzz - 0xD0tz (t=tag, z=size)
 THK 1110000000000000 - 0xE000
 */
-#define er_tag_shift 56
-#define er_ptr_mask UINT64_C(0x00ffffffffffffff)
-#define er_get_tag(v) ((uint8_t)((uint64_t)(v) >> er_tag_shift))
+#define er_tag_shift      56
+#define er_ptr_mask       UINT64_C(0x00ffffffffffffff)
+#define er_get_tag(v)     ((uint8_t)((uint64_t)(v) >> er_tag_shift))
 #define er_is_tag(tag, v) ((uint8_t)(tag) == er_get_tag(v))
-#define er_tag_bat 0x82
-#define er_tag_pin 0xc4
-#define er_tag_law 0xc8
-#define er_tag_app 0xd0
-#define er_tag_thk 0xe0
-#define er_tag_tank 0xfe
-#define er_tag_fwd 0xf0
-#define er_tag_bad 0xff
+#define er_tag_bat        0x82
+#define er_tag_pin        0xc4
+#define er_tag_law        0xc8
+#define er_tag_app        0xd0
+#define er_tag_thk        0xe0
+#define er_tag_tank       0xfe
+#define er_tag_fwd        0xf0
+#define er_tag_bad        0xff
 
-#define er_into(tag, ptr) \
-  ((((uint64_t)(tag)) << er_tag_shift) | (((uint64_t)(uintptr_t)(ptr)) & er_ptr_mask))
-#define er_outa(v) ((void*)(uintptr_t)(((uint64_t)(v)) & er_ptr_mask))
+#define er_into(tag, ptr)                                                      \
+  ((((uint64_t)(tag)) << er_tag_shift) |                                       \
+   (((uint64_t)(uintptr_t)(ptr)) & er_ptr_mask))
+#define er_outa(v)      ((void*)(uintptr_t)(((uint64_t)(v)) & er_ptr_mask))
 #define er_outt(tag, v) (er_is_tag(tag, v) ? er_outa(v) : NULL)
 
 #define er_is_whnf(v) (er_get_tag(v) <= er_tag_app)
@@ -48,25 +48,23 @@ typedef uint64_t er_val;
 typedef uint32_t er_bcpc;
 
 enum {
-    ER_BCPC_NONE = UINT32_MAX,
+  ER_BCPC_NONE = UINT32_MAX,
 };
 
-static inline bool er_is_tank(er_val val_v)
-{
-    return er_is_tag(er_tag_tank, val_v);
+static inline bool er_is_tank(er_val val_v) {
+  return er_is_tag(er_tag_tank, val_v);
 }
 
-static inline bool er_is_good(er_val val_v)
-{
-    return er_get_tag(val_v) < er_tag_tank;
+static inline bool er_is_good(er_val val_v) {
+  return er_get_tag(val_v) < er_tag_tank;
 }
 
 typedef struct er_op er_op;
 
 typedef struct er_head_raw {
-  uint64_t fwd_f: 1;
-  uint64_t nf_f: 1;
-  uint64_t pad_q: 62;
+  uint64_t fwd_f : 1;
+  uint64_t nf_f : 1;
+  uint64_t pad_q : 62;
 } er_head_raw;
 
 typedef union er_head {
@@ -103,9 +101,9 @@ typedef struct er_law {
   er_val name_v;
   er_val body_v;
   uint32_t ari_d;
-  uint32_t let_d; // size of letrec table
-  size_t bc_s; // number of bytecode labels
-  size_t op_s; // total bytecode instruction count
+  uint32_t let_d;      // size of letrec table
+  size_t bc_s;         // number of bytecode labels
+  size_t op_s;         // total bytecode instruction count
   er_law_label bc_v[]; // bytecode label spans
 } er_law;
 
@@ -119,9 +117,9 @@ typedef struct er_app {
 typedef enum er_execf {
   ER_XDONE = 0, // -> [res]
   ER_XUNK_APP,  // -> [f, ...args]
-  ER_CALL, // -> [f, ...args]
-//  ER_CALL_LET, // -> [num-let, f, ...args]
-  ER_XPRIM, // [op-set, arg]
+  ER_CALL,      // -> [f, ...args]
+                //  ER_CALL_LET, // -> [num-let, f, ...args]
+  ER_XPRIM,     // [op-set, arg]
   ER_HOLE,
   ER_SUSP, // -> [pc, frame]
 } er_execf;
@@ -133,25 +131,24 @@ typedef struct er_thk {
   er_val arg_v[];
 } er_thk;
 
-static inline bool er_is_nf(er_val val_v)
-{
-    if (er_is_cat(val_v)) {
-        return true;
-    }
-    if (!er_is_good(val_v)) {
-        return false;
-    }
-    switch (er_get_tag(val_v)) {
-    case er_tag_bat:
-    case er_tag_pin:
-    case er_tag_law:
-    case er_tag_app:
-        break;
-    default:
-        return false;
-    }
-    er_head* h = er_outa(val_v);
-    return h->raw.nf_f != 0;
+static inline bool er_is_nf(er_val val_v) {
+  if (er_is_cat(val_v)) {
+    return true;
+  }
+  if (!er_is_good(val_v)) {
+    return false;
+  }
+  switch (er_get_tag(val_v)) {
+  case er_tag_bat:
+  case er_tag_pin:
+  case er_tag_law:
+  case er_tag_app:
+    break;
+  default:
+    return false;
+  }
+  er_head* h = er_outa(val_v);
+  return h->raw.nf_f != 0;
 }
 
 er_tank* er_tank_alloc(const enki_allocator* allocator);
@@ -162,29 +159,31 @@ er_bat* er_bat_alloc(const enki_allocator* allocator, size_t lim_s);
 er_val er_bat_init(er_bat* bat, size_t lim_s, const uint64_t lim_q[]);
 
 er_pin* er_pin_alloc(const enki_allocator* allocator, size_t sub_s);
-er_val er_pin_init(er_pin* pin, const uint8_t hash_b[32], er_val val_v, size_t sub_s,
-    const er_val sub_v[]);
+er_val er_pin_init(er_pin* pin, const uint8_t hash_b[32], er_val val_v,
+                   size_t sub_s, const er_val sub_v[]);
 er_val er_pin_make(const enki_allocator* loc_a, er_val val_v);
 
 er_law* er_law_alloc(const enki_allocator* allocator, size_t bc_s, size_t op_s);
 er_val er_law_init(er_law* law, er_val name_v, er_val body_v, uint32_t ari_d,
-    uint32_t let_d, size_t bc_s, er_op* const bc_v[], const size_t bc_len_v[]);
+                   uint32_t let_d, size_t bc_s, er_op* const bc_v[],
+                   const size_t bc_len_v[]);
 er_val er_law_make_code(const enki_allocator* loc_a, er_val nam_v, er_val bod_v,
-    uint32_t ari_d, uint32_t let_d, size_t bc_s, er_op* const bc_v[],
-    const size_t bc_len_v[]);
-er_val er_law_make(const enki_allocator* loc_a, er_val nam_v, er_val bod_v, uint32_t ari_d);
+                        uint32_t ari_d, uint32_t let_d, size_t bc_s,
+                        er_op* const bc_v[], const size_t bc_len_v[]);
+er_val er_law_make(const enki_allocator* loc_a, er_val nam_v, er_val bod_v,
+                   uint32_t ari_d);
 
 er_app* er_app_alloc(const enki_allocator* allocator, size_t arg_s);
-er_val er_app_init(er_app* app, er_val fn_v, size_t arg_s, const er_val arg_v[]);
+er_val er_app_init(er_app* app, er_val fn_v, size_t arg_s,
+                   const er_val arg_v[]);
 
 er_thk* er_thk_alloc(const enki_allocator* allocator, size_t arg_s);
-er_val er_thk_init(er_thk* thk, er_execf fun, size_t arg_s, const er_val arg_v[]);
+er_val er_thk_init(er_thk* thk, er_execf fun, size_t arg_s,
+                   const er_val arg_v[]);
 
 er_val er_eval(const enki_allocator* loc_a, er_val val_v);
-er_thk* er_app_weld(const enki_allocator* allocator, er_val sin_v, er_val dex_v);
-
-
-
+er_thk* er_app_weld(const enki_allocator* allocator, er_val sin_v,
+                    er_val dex_v);
 
 typedef enum {
   OP_PUSH_VAR,
@@ -264,12 +263,12 @@ typedef enum {
 } er_optag;
 
 struct er_op {
-    er_optag tag;
-    union {
-        uint32_t   u32;
-        uintptr_t  slot;
-        er_val     lit_v;
-    } as;
+  er_optag tag;
+  union {
+    uint32_t u32;
+    uintptr_t slot;
+    er_val lit_v;
+  } as;
 };
 
 er_op* er_bytecode_at(er_bcpc pc);
@@ -280,55 +279,55 @@ er_op* er_law_label_code(er_law* law, size_t label_s);
 const er_op* er_law_label_code_const(const er_law* law, size_t label_s);
 
 typedef enum er_kon_tag {
-    ER_K_BYTECODE_RETURN = 1,
-    ER_K_UPDATE,
-    ER_K_APPHEAD,
-    ER_K_APP_IDX,
-    ER_K_OVERAPP,
-    ER_K_NORMAL,
-    ER_K_VALUE_ROOT,
+  ER_K_BYTECODE_RETURN = 1,
+  ER_K_UPDATE,
+  ER_K_APPHEAD,
+  ER_K_APP_IDX,
+  ER_K_OVERAPP,
+  ER_K_NORMAL,
+  ER_K_VALUE_ROOT,
 } er_kon_tag;
 
 typedef struct er_kon_bytecode_return {
-    er_val* env;
-    er_val env_v;
-    er_bcpc pc;
-    er_val* dbase;
+  er_val* env;
+  er_val env_v;
+  er_bcpc pc;
+  er_val* dbase;
 } er_kon_bytecode_return;
 
 typedef struct er_kon_update {
-    er_val target_v;
-    er_val* dbase;
+  er_val target_v;
+  er_val* dbase;
 } er_kon_update;
 
 typedef struct er_kon_apphead {
-    er_val app_v;
+  er_val app_v;
 } er_kon_apphead;
 
 typedef struct er_kon_app_idx {
-    er_val app_v;
-    size_t idx_s;
+  er_val app_v;
+  size_t idx_s;
 } er_kon_app_idx;
 
 typedef struct er_kon_overapp {
-    er_val app_v;
-    uint32_t split_d;
+  er_val app_v;
+  uint32_t split_d;
 } er_kon_overapp;
 
 typedef struct er_kon_value_root {
-    er_val val_v;
+  er_val val_v;
 } er_kon_value_root;
 
 typedef struct er_kon {
-    er_kon_tag tag;
-    union {
-        er_kon_bytecode_return bytecode_return;
-        er_kon_update update;
-        er_kon_apphead apphead;
-        er_kon_app_idx appidx;
-        er_kon_overapp overapp;
-        er_kon_value_root value_root;
-    } as;
+  er_kon_tag tag;
+  union {
+    er_kon_bytecode_return bytecode_return;
+    er_kon_update update;
+    er_kon_apphead apphead;
+    er_kon_app_idx appidx;
+    er_kon_overapp overapp;
+    er_kon_value_root value_root;
+  } as;
 } er_kon;
 
 typedef struct {
@@ -338,8 +337,8 @@ typedef struct {
   er_val* dstack;
   er_val* dsp;
 
-  er_kon *kbase;
-  er_kon *ksp;
+  er_kon* kbase;
+  er_kon* ksp;
   uint64_t b_count;
   uint64_t k_count;
 
@@ -353,10 +352,7 @@ typedef enum er_eval_mode {
   ER_EVAL_NF = 1,
 } er_eval_mode;
 
-
-
-er_val
-plan_eval(er_vm *vm, er_val val_v, er_eval_mode mode);
+er_val plan_eval(er_vm* vm, er_val val_v, er_eval_mode mode);
 
 er_val er_eval_to(const enki_allocator* loc_a, er_val val_v, er_eval_mode mode);
 er_val er_eval_gc(enki_gc* gc, er_val val_v);
@@ -377,11 +373,14 @@ er_val er_eval_gc(enki_gc* gc, er_val val_v);
 #define PLAN_S4(a, b, c, d) ((er_val)(PLAN_S3(a, b, c) | (PLAN_CH(d) << 24u)))
 #endif
 #ifndef PLAN_S5
-#define PLAN_S5(a, b, c, d, e) ((er_val)(PLAN_S4(a, b, c, d) | (PLAN_CH(e) << 32u)))
+#define PLAN_S5(a, b, c, d, e)                                                 \
+  ((er_val)(PLAN_S4(a, b, c, d) | (PLAN_CH(e) << 32u)))
 #endif
 #ifndef PLAN_S6
-#define PLAN_S6(a, b, c, d, e, f) ((er_val)(PLAN_S5(a, b, c, d, e) | (PLAN_CH(f) << 40u)))
+#define PLAN_S6(a, b, c, d, e, f)                                              \
+  ((er_val)(PLAN_S5(a, b, c, d, e) | (PLAN_CH(f) << 40u)))
 #endif
 #ifndef PLAN_S7
-#define PLAN_S7(a, b, c, d, e, f, g) ((er_val)(PLAN_S6(a, b, c, d, e, f) | (PLAN_CH(g) << 48u)))
+#define PLAN_S7(a, b, c, d, e, f, g)                                           \
+  ((er_val)(PLAN_S6(a, b, c, d, e, f) | (PLAN_CH(g) << 48u)))
 #endif

@@ -6,15 +6,15 @@
 
 wisp_rt* rt = NULL;
 
-static ssize_t repl(char** out_c)
-{
+static ssize_t repl(char** out_c) {
   size_t cap_s;
   fputs("> ", stdout);
   fflush(stdout);
 
   ssize_t len_s = getline(out_c, &cap_s, stdin);
-  if ( len_s < 0) {
-    if (feof(stdin)) return -1;
+  if (len_s < 0) {
+    if (feof(stdin))
+      return -1;
     if (errno == EINTR) {
       clearerr(stdin);
       return 0;
@@ -28,8 +28,7 @@ static ssize_t repl(char** out_c)
   return len_s;
 }
 
-int main()
-{
+int main() {
   const enki_allocator* loc_a = enki_allocator_system();
   rt = wisp_rt_alloc(loc_a);
 
@@ -40,7 +39,8 @@ int main()
     // printf("read@(%li): %s\n", inp_s, inp_c);
     char* txt_c = inp_c;
     if (setjmp(rt->errjmp)) {
-      if (rt->msg_c == NULL) rt->msg_c = "Unknown Error";
+      if (rt->msg_c == NULL)
+        rt->msg_c = "Unknown Error";
       printf("Failed to evaluate: %s\n", rt->msg_c);
       continue;
     } else {

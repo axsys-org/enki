@@ -8,111 +8,116 @@
 typedef uint64_t enki_value;
 typedef struct enki_gc enki_gc;
 
-
 // check if highest bit_v of v is set
-#define IS_PTR(v) (v & (1ULL << 63))
- // turn a_v real pointer into enki_value - set the higest bit_v
-#define PTR_TO_ENKI(v) (enki_value)((uintptr_t)v | (1ULL << 63))
+#define IS_PTR(v)          (v & (1ULL << 63))
+// turn a_v real pointer into enki_value - set the higest bit_v
+#define PTR_TO_ENKI(v)     (enki_value)((uintptr_t)v | (1ULL << 63))
 // turn an enki value_v into a_v real pointer - unset highest bit_v
-#define ENKI_AS(type, v) ((type*)((uintptr_t)(v) & ~(UINT64_C(1) << 63)))
-#define ENKI_TO_PTR(v) ENKI_AS(void, v)
-#define GET_PAYLOAD(v) (sizeof(enki_value_header) + (char*)ENKI_AS(void, v))
-#define ENKI_LAW_CONSTS(l)   ((enki_value*)((l)->data_b))
-#define ENKI_LAW_BC(l)  ((l)->data_b + ((l)->n_const_s * sizeof(enki_value)))
+#define ENKI_AS(type, v)   ((type*)((uintptr_t)(v) & ~(UINT64_C(1) << 63)))
+#define ENKI_TO_PTR(v)     ENKI_AS(void, v)
+#define GET_PAYLOAD(v)     (sizeof(enki_value_header) + (char*)ENKI_AS(void, v))
+#define ENKI_LAW_CONSTS(l) ((enki_value*)((l)->data_b))
+#define ENKI_LAW_BC(l)     ((l)->data_b + ((l)->n_const_s * sizeof(enki_value)))
 
-#define ENKI_TO_APP(v) \
-  ((IS_PTR(v) && ENKI_AS(obj_header, v)->kind_b == ENKI_APP) ? ENKI_AS(enki_app, v) : NULL)
-#define ENKI_TO_LAW(v) \
-  ((IS_PTR(v) && ENKI_AS(obj_header, v)->kind_b == ENKI_LAW) ? ENKI_AS(enki_law, v) : NULL)
+#define ENKI_TO_APP(v)                                                         \
+  ((IS_PTR(v) && ENKI_AS(obj_header, v)->kind_b == ENKI_APP)                   \
+       ? ENKI_AS(enki_app, v)                                                  \
+       : NULL)
+#define ENKI_TO_LAW(v)                                                         \
+  ((IS_PTR(v) && ENKI_AS(obj_header, v)->kind_b == ENKI_LAW)                   \
+       ? ENKI_AS(enki_law, v)                                                  \
+       : NULL)
 typedef enum {
-    ENKI_PIN,
-    ENKI_LAW,
-    ENKI_APP,
-    ENKI_BIG_NAT,
-    ENKI_IND,
-    ENKI_FWD,
-    ENKI_CONT,
+  ENKI_PIN,
+  ENKI_LAW,
+  ENKI_APP,
+  ENKI_BIG_NAT,
+  ENKI_IND,
+  ENKI_FWD,
+  ENKI_CONT,
 } TAGS;
 
-#define ENKI_NAT ENKI_BIG_NAT
+#define ENKI_NAT  ENKI_BIG_NAT
 #define ENKI_FRWD ENKI_FWD
-#define PIN ENKI_PIN
-#define LAW ENKI_LAW
-#define APP ENKI_APP
-#define NAT ENKI_NAT
-#define IND ENKI_IND
+#define PIN       ENKI_PIN
+#define LAW       ENKI_LAW
+#define APP       ENKI_APP
+#define NAT       ENKI_NAT
+#define IND       ENKI_IND
 typedef enum {
-    WHNF,
-    NF,
-    THUNK,
+  WHNF,
+  NF,
+  THUNK,
 } STATES;
 
 typedef struct {
-    uint8_t kind_b;
-    size_t size_s;
-    uint8_t state_b;
+  uint8_t kind_b;
+  size_t size_s;
+  uint8_t state_b;
 } obj_header;
 
 typedef obj_header enki_value_header;
 
 typedef struct {
-    obj_header h;
-    uint8_t hash_b[32];
-    enki_value inner_v;
-    size_t n_subpins_s;
-    enki_value subpins_v[];
+  obj_header h;
+  uint8_t hash_b[32];
+  enki_value inner_v;
+  size_t n_subpins_s;
+  enki_value subpins_v[];
 } enki_pin;
 
 typedef struct {
-    obj_header h;
-    uint32_t arity_s;
-    enki_value name_v;
-    enki_value body_v;
-    size_t bc_len_s;
-    size_t n_const_s;
-    uint8_t data_b[];
+  obj_header h;
+  uint32_t arity_s;
+  enki_value name_v;
+  enki_value body_v;
+  size_t bc_len_s;
+  size_t n_const_s;
+  uint8_t data_b[];
 } enki_law;
 
 typedef struct {
-    obj_header h;
-    size_t n_limbs_s;
-    mp_limb_t limbs[];
+  obj_header h;
+  size_t n_limbs_s;
+  mp_limb_t limbs[];
 } enki_nat;
 
 typedef struct {
-    obj_header h;
-    enki_value fn_v;
-    size_t n_args_s;
-    enki_value args_v[];
-}  enki_app;
+  obj_header h;
+  enki_value fn_v;
+  size_t n_args_s;
+  enki_value args_v[];
+} enki_app;
 
 typedef enki_app enki_ind;
 
-static inline enki_value enki_value_unind(enki_value val_v)
-{
-    while(IS_PTR(val_v)) {
-        enki_value_header* h = ENKI_AS(enki_value_header, val_v);
-        if(h->kind_b != ENKI_IND) return val_v;
-        enki_ind* ind = ENKI_AS(enki_ind, val_v);
-        val_v = ind->fn_v;
-    }
-    return val_v;
+static inline enki_value enki_value_unind(enki_value val_v) {
+  while (IS_PTR(val_v)) {
+    enki_value_header* h = ENKI_AS(enki_value_header, val_v);
+    if (h->kind_b != ENKI_IND)
+      return val_v;
+    enki_ind* ind = ENKI_AS(enki_ind, val_v);
+    val_v = ind->fn_v;
+  }
+  return val_v;
 }
 
 typedef struct {
-    obj_header h;
-    size_t n_args_s;
-    enki_value args_v[];
+  obj_header h;
+  size_t n_args_s;
+  enki_value args_v[];
 } enki_cont;
-
 
 void enki_trace_value(enki_gc* gc, void* obj);
 
 enki_value enki_alloc_nat(enki_gc* gc, mp_limb_t* out, size_t n_limbs_s);
 enki_value enki_alloc_big_nat(enki_gc* gc, size_t n_limbs_s, mp_limb_t limbs[]);
-enki_value enki_alloc_law(enki_gc* gc, size_t arity_s, enki_value name_v, enki_value body_v,
-    size_t bc_len_s, size_t n_const_s, uint8_t* bc_b, enki_value* const_table_v);
-enki_value enki_alloc_pin(enki_gc* gc, const uint8_t hash_b[32], enki_value inner_v, size_t n_subpins_s, enki_value subpins_v[]);
+enki_value enki_alloc_law(enki_gc* gc, size_t arity_s, enki_value name_v,
+                          enki_value body_v, size_t bc_len_s, size_t n_const_s,
+                          uint8_t* bc_b, enki_value* const_table_v);
+enki_value enki_alloc_pin(enki_gc* gc, const uint8_t hash_b[32],
+                          enki_value inner_v, size_t n_subpins_s,
+                          enki_value subpins_v[]);
 enki_value enki_alloc_app(enki_gc* gc, enki_value fn_v, size_t n_args_s);
 enki_value enki_alloc_cont(enki_gc* gc, size_t n_args_s, enki_value* bas_v);
 
@@ -146,9 +151,9 @@ enki_value enki_nat_trunc16(enki_gc* gc, enki_value a_v);
 enki_value enki_nat_trunc32(enki_gc* gc, enki_value a_v);
 enki_value enki_nat_trunc64(enki_gc* gc, enki_value a_v);
 enki_value enki_nat_load8(enki_gc* gc, enki_value index_i, enki_value a_v);
-enki_value enki_nat_store8(enki_gc* gc, enki_value index_i, enki_value byte_b, enki_value a_v);
+enki_value enki_nat_store8(enki_gc* gc, enki_value index_i, enki_value byte_b,
+                           enki_value a_v);
 enki_value enki_nat_nib(enki_gc* gc, enki_value index_i, enki_value a_v);
-
 
 enki_value enki_alloc_strnat(enki_gc* gc, char* str_c, size_t str_s);
 enki_value enki_alloc_cstrnat(enki_gc* gc, char* str_c);
@@ -156,9 +161,8 @@ enki_value enki_alloc_big_nat_bytes(enki_gc* gc, size_t lim_s, char* lim_b);
 
 enki_value enki_make_pin(enki_gc* gc, enki_value val_v);
 
-
-enki_value enki_app_weld(enki_gc* gc, enki_app* old, size_t add_s, enki_value*
-add_v);
+enki_value enki_app_weld(enki_gc* gc, enki_app* old, size_t add_s,
+                         enki_value* add_v);
 
 enki_value enki_unpin(enki_value pin_v);
 

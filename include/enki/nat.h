@@ -47,5 +47,6 @@ enki_value enki_nat_trunc16(enki_gc* gc, enki_value a_v);
 enki_value enki_nat_trunc32(enki_gc* gc, enki_value a_v);
 enki_value enki_nat_trunc64(enki_gc* gc, enki_value a_v);
 enki_value enki_nat_load8(enki_gc* gc, enki_value index_i, enki_value a_v);
-enki_value enki_nat_store8(enki_gc* gc, enki_value index_i, enki_value byte_b, enki_value a_v);
+enki_value enki_nat_store8(enki_gc* gc, enki_value index_i, enki_value byte_b,
+                           enki_value a_v);
 enki_value enki_nat_nib(enki_gc* gc, enki_value index_i, enki_value a_v);

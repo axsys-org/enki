@@ -1,52 +1,62 @@
+
 ---
+# .clang-tidy — aggressive, pruned for idiomatic C (VM / systems code).
+#
+# Strategy: enable whole useful families with wildcards, then subtract the
+# C++-only families and the individual checks that fight low-level C.
+
 Checks: >
   bugprone-*,
   cert-*,
   clang-analyzer-*,
+  concurrency-*,
+  misc-*,
   performance-*,
   portability-*,
   readability-*,
-  -bugprone-easily-swappable-parameters,
-  -bugprone-implicit-widening-of-multiplication-result,
-  -cert-err33-c,
-  -cert-msc30-c,
-  -cert-msc32-c,
-  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,
-  -performance-no-int-to-ptr,
-  -readability-function-cognitive-complexity,
-  -readability-identifier-length,
-  -readability-inconsistent-declaration-parameter-name,
-  -readability-magic-numbers,
-  -readability-named-parameter,
-  -readability-qualified-auto,
-  -readability-uppercase-literal-suffix
-WarningsAsErrors: '*'
-HeaderFilterRegex: '^(src|include|tests)/(?!property/vendor/theft).*'
-FormatStyle: file
-CheckOptions:
-  - key: readability-function-size.LineThreshold
-    value: '120'
-...
 
-# Disabled checks:
-# - bugprone-easily-swappable-parameters: allocator and test callbacks intentionally use adjacent
-#   pointer/size parameters matching C library conventions.
-# - bugprone-implicit-widening-of-multiplication-result: property generators use small bounded
-#   compile-time constants where widening is explicit in the receiving API.
-# - cert-err33-c: tests deliberately assert behavior around allocator failures and do not need to
-#   branch on every printf-like helper in failure-message paths.
-# - cert-msc30-c/cert-msc32-c: the vendored theft runner uses an explicit deterministic RNG instead
-#   of rand; the check is noisy around env-seeded property tests.
-# - clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling: diagnostics point at
-#   fprintf/snprintf in test failure messages, not production buffer handling.
-# - performance-no-int-to-ptr: vector tests intentionally use integer-shaped opaque pointer values
-#   without dereferencing them.
-# - readability-function-cognitive-complexity/readability-function-size: fuzz and property tests are
-#   intentionally branch-heavy to cover operation streams.
-# - readability-identifier-length: C APIs and tests use conventional short names such as ctx and i.
-# - readability-inconsistent-declaration-parameter-name: Criterion's Test macro expands to generated
-#   function declarations that look inconsistent to clang-tidy.
-# - readability-magic-numbers: test data and fuzz operation tags are clearer inline.
-# - readability-named-parameter: public typedef docs describe callback arguments.
-# - readability-qualified-auto: not relevant to C.
-# - readability-uppercase-literal-suffix: the codebase uses the conventional lowercase C suffix style.
+  -modernize-*,
+  -cppcoreguidelines-*,
+  -hicpp-*,
+  -fuchsia-*,
+  -llvm-*,
+  -llvmlibc-*,
+  -google-*,
+  -abseil-*,
+  -boost-*,
+  -mpi-*,
+  -openmp-*,
+  -zircon-*,
+  -android-*,
+  -darwin-*,
+  -objc-*,
+  -altera-*,
+
+  -readability-magic-numbers,
+  -readability-identifier-length,
+  -readability-function-cognitive-complexity,
+  -bugprone-easily-swappable-parameters,
+  -misc-no-recursion,
+  -bugprone-assignment-in-if-condition
+
+# Nothing is a hard error yet; promote specific checks once the tree is clean,
+# e.g. WarningsAsErrors: 'clang-analyzer-*,bugprone-*'
+WarningsAsErrors: ''
+
+# Lint your own headers. Narrow to e.g. '^(src|include)/' to skip vendored code.
+HeaderFilterRegex: '.*'
+
+# Auto-fixes are reformatted using your .clang-format.
+FormatStyle: file
+
+CheckOptions:
+  # Naming (C conventions). Struct/union/typedef cases are intentionally left
+  # unset — add them once you've settled on a convention (e.g. CamelCase types
+  # or a `_t` suffix).
+  - { key: readability-identifier-naming.FunctionCase,        value: lower_case }
+  - { key: readability-identifier-naming.VariableCase,        value: lower_case }
+  - { key: readability-identifier-naming.ParameterCase,       value: lower_case }
+  - { key: readability-identifier-naming.GlobalConstantCase,  value: UPPER_CASE }
+  - { key: readability-identifier-naming.EnumConstantCase,    value: UPPER_CASE }
+  - { key: readability-identifier-naming.MacroDefinitionCase, value: UPPER_CASE }
+
