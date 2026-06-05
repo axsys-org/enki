@@ -4,6 +4,10 @@ on:
   push:
   pull_request:
 
+permissions:
+  pull-requests: write
+  contents: read
+
 jobs:
   check:
     strategy:
