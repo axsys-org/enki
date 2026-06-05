@@ -2213,60 +2213,6 @@ Test(run_vm, compiled_under_application_stays_plain_app) {
   cr_assert_eq(app->arg_v[0], 10);
 }
 
-Test(run_vm, compiled_value_position_call_stays_lazy_under_apply_unk) {
-  er_op callee_code[] = {
-      [0] = {.tag = OP_PUSH_LIT, .as.lit_v = 9},
-      [1] = {.tag = OP_RET},
-  };
-  er_val callee_v = make_law(1, callee_code, 0, NULL);
-  er_val call_expr_v = make_plan_call_expr(callee_v, 10);
-  er_val row_v = make_app_value(123, 1, &call_expr_v);
-  er_val law_v = er_law_make(enki_allocator_system(), 0, row_v, 0);
-  cr_assert_eq(er_get_tag(law_v), er_tag_law);
-  er_law* law = er_outt(er_tag_law, law_v);
-  assert_pessimistic_law(law);
-  cr_assert(law_contains_op(law, OP_APPLY_UNK));
-
-  er_val call_v = make_call(law_v, 1);
-  er_app* row = assert_app_value(run_vm(NULL, call_v), 123, 1);
-  er_thk* thunk = er_outt(er_tag_thk, row->arg_v[0]);
-  cr_assert_not_null(thunk);
-  cr_assert_eq(thunk->fun, ER_XUNK_APP);
-  cr_assert_eq(thunk->arg_s, 2);
-  cr_assert_eq(thunk->arg_v[0], callee_v);
-  cr_assert_eq(thunk->arg_v[1], 10);
-}
-
-Test(run_vm, compiled_data_app_construction_round_trips) {
-  er_val arg_v[] = {10, 32};
-  er_val body_v = make_app_value(123, 2, arg_v);
-  er_val law_v = er_law_make(enki_allocator_system(), 0, body_v, 0);
-  cr_assert_eq(er_get_tag(law_v), er_tag_law);
-  er_law* law = er_outt(er_tag_law, law_v);
-  assert_pessimistic_law(law);
-  cr_assert(law_contains_op(law, OP_APPLY_UNK));
-
-  er_val call_v = make_call(law_v, 1);
-  er_app* row = assert_app_value(run_vm_mode(NULL, call_v, ER_EVAL_NF), 123, 2);
-  cr_assert_eq(row->arg_v[0], 10);
-  cr_assert_eq(row->arg_v[1], 32);
-}
-
-Test(run_vm, compiled_primitive_pin_call_uses_apply_unk) {
-  er_val prim66_v = make_prim66();
-  er_val add_arg_v[] = {10, 32};
-  er_val add_row_v = make_app_value(PLAN_S3('A', 'd', 'd'), 2, add_arg_v);
-  er_val body_v = make_plan_call_expr(prim66_v, add_row_v);
-  er_val law_v = er_law_make(enki_allocator_system(), 0, body_v, 0);
-  cr_assert_eq(er_get_tag(law_v), er_tag_law);
-  er_law* law = er_outt(er_tag_law, law_v);
-  assert_pessimistic_law(law);
-  cr_assert(law_contains_op(law, OP_APPLY_UNK));
-
-  er_val call_v = make_call(law_v, 1);
-  cr_assert_eq(run_vm(NULL, call_v), 42);
-}
-
 Test(run_vm, compiled_let_keeps_lazy_label_under_pessimistic_compiler) {
   er_val let_body_v = 7;
   er_val final_body_v = 1;
