@@ -27,7 +27,7 @@ BUILD_CFLAGS_profile := $(BUILD_CFLAGS_release) -g3 -fno-omit-frame-pointer -fde
 BUILD_CFLAGS_asan := -O1 -g3 -fsanitize=address -fno-omit-frame-pointer $(HARDEN_CFLAGS)
 BUILD_CFLAGS_ubsan := -O1 -g3 -fsanitize=undefined -fno-omit-frame-pointer $(HARDEN_CFLAGS)
 BUILD_CFLAGS_tsan := -O1 -g3 -fsanitize=thread -fno-omit-frame-pointer $(HARDEN_CFLAGS)
-BUILD_CFLAGS_coverage := -O1 -g3 --coverage $(HARDEN_CFLAGS)
+BUILD_CFLAGS_coverage := -O1 -g3 --coverage -Wno-pedantic $(HARDEN_CFLAGS)
 
 BUILD_LDFLAGS_debug :=
 BUILD_LDFLAGS_release :=

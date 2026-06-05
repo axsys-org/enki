@@ -75,7 +75,7 @@
         in
           import ./nix/mkenki.nix {
             inherit lib stdenv src;
-            inherit (pkgs) gnumake pkg-config criterion gmp lmdb;
+            inherit (pkgs) gnumake pkg-config criterion gmp lmdb openssl;
             inherit (selected) compiler cc;
           };
 
@@ -129,6 +129,7 @@
             pkgs.criterion
             pkgs.gmp
             pkgs.lmdb
+            pkgs.openssl
           ];
 
           dontConfigure = true;
@@ -164,6 +165,7 @@
             pkgs.criterion
             pkgs.gmp
             pkgs.lmdb
+            pkgs.openssl
           ];
 
           dontConfigure = true;
@@ -265,6 +267,7 @@
               pkgs.criterion
               pkgs.gmp
               pkgs.lmdb
+              pkgs.openssl
               pkgs.lcov
               pkgs.gcovr
               pkgs.compiledb

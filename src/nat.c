@@ -91,7 +91,7 @@ static void view_of_nat(enki_value a_v, enki_nat_view* v) {
         enki_nat* nat = ENKI_AS(enki_nat, a_v);
         v->limbs = nat->limbs;
         v->n_limbs_s = nat->n_limbs_s;
-        return;        
+        return;
     }
     if(a_v == 0) {
         v->limbs = v->small;
@@ -166,7 +166,7 @@ enki_value enki_nat_dec(enki_gc* gc, enki_value a_v) {
     if(a_nv.n_limbs_s == 0) return (enki_value)0;
     mp_limb_t* out = enki_nat_tmp_alloc(gc, a_nv.n_limbs_s * sizeof(mp_limb_t));
     mpn_sub_1(out, a_nv.limbs, a_nv.n_limbs_s, 1);
-    return enki_nat_alloc(gc, out, a_nv.n_limbs_s);   
+    return enki_nat_alloc(gc, out, a_nv.n_limbs_s);
 }
 enki_value enki_nat_add(enki_gc* gc, enki_value a_v, enki_value b_v) {
     ENKI_PROFILE_ZONE("enki_nat_add");
@@ -197,9 +197,9 @@ enki_value enki_nat_sub(enki_gc* gc, enki_value a_v, enki_value b_v) {
     enki_nat_view b_nv;
     view_of_nat(a_v, &a_nv);
     view_of_nat(b_v, &b_nv);
-    if(a_nv.n_limbs_s == 0) return (enki_value)0; // no negatives 
+    if(a_nv.n_limbs_s == 0) return (enki_value)0; // no negatives
     if(b_nv.n_limbs_s == 0) return a_v;
-    if(enki_nat_cmp_v(&a_nv, &b_nv) < 0) return (enki_value)0; // a_v < b_v 
+    if(enki_nat_cmp_v(&a_nv, &b_nv) < 0) return (enki_value)0; // a_v < b_v
     mp_limb_t* out = enki_nat_tmp_alloc(gc, a_nv.n_limbs_s * sizeof(mp_limb_t));
     mpn_sub(out, a_nv.limbs, a_nv.n_limbs_s, b_nv.limbs, b_nv.n_limbs_s);
     return enki_nat_alloc(gc, out, a_nv.n_limbs_s);
@@ -256,7 +256,7 @@ enki_value enki_nat_mod(enki_gc* gc, enki_value a_v, enki_value b_v) {
     mpn_tdiv_qr(Q, R, 0, a_nv.limbs, a_nv.n_limbs_s, b_nv.limbs, b_nv.n_limbs_s);
     return enki_nat_alloc(gc, R, b_nv.n_limbs_s);
 }
-// lower bits to higher posistions 
+// lower bits to higher posistions
 enki_value enki_nat_lsh(enki_gc* gc, enki_value a_v, enki_value shift_v) {
     ENKI_PROFILE_ZONE("enki_nat_lsh");
     if(!IS_PTR(a_v) && !IS_PTR(shift_v) && shift_v < 63 && a_v <= (ENKI_SMALL_MAX >> shift_v)) return a_v << shift_v;
@@ -277,7 +277,7 @@ enki_value enki_nat_lsh(enki_gc* gc, enki_value a_v, enki_value shift_v) {
     out[n_s - 1] = carry_q;
     return enki_nat_alloc(gc, out, n_s);
 }
-// higher order bits to lower positions 
+// higher order bits to lower positions
 enki_value enki_nat_rsh(enki_gc* gc, enki_value a_v, enki_value shift_v) {
     ENKI_PROFILE_ZONE("enki_nat_rsh");
     if(!IS_PTR(a_v) && !IS_PTR(shift_v)) return shift_v >= 63 ? 0 : a_v >> shift_v;
@@ -317,9 +317,9 @@ enki_value enki_nat_test(enki_gc* gc, enki_value bit_v, enki_value a_v) {
     view_of_nat(a_v, &a_nv);
     if(IS_PTR(bit_v)) enki_interp_throw(gc->root, ENKI_ERROR_TYPE, bit_v);
     size_t word_off_o = (size_t)bit_v / 64;
-    size_t bit_off_o = (size_t)bit_v % 64; 
+    size_t bit_off_o = (size_t)bit_v % 64;
     if(word_off_o >= a_nv.n_limbs_s) return (enki_value)0;
-    size_t res_v = (a_nv.limbs[word_off_o] & ((mp_limb_t)1 << bit_off_o)); 
+    size_t res_v = (a_nv.limbs[word_off_o] & ((mp_limb_t)1 << bit_off_o));
     return res_v != 0 ? (enki_value)1 : (enki_value)0;
 }
 enki_value enki_nat_set(enki_gc* gc, enki_value bit_v, enki_value a_v) {
@@ -328,13 +328,13 @@ enki_value enki_nat_set(enki_gc* gc, enki_value bit_v, enki_value a_v) {
     view_of_nat(a_v, &a_nv);
     if(IS_PTR(bit_v))  enki_interp_throw(gc->root, ENKI_ERROR_TYPE, bit_v);
     size_t word_off_o = (size_t)bit_v / 64;
-    size_t bit_off_o = (size_t)bit_v % 64; 
+    size_t bit_off_o = (size_t)bit_v % 64;
     size_t n_s = word_off_o + 1;
     if(n_s < a_nv.n_limbs_s) n_s = a_nv.n_limbs_s;
     mp_limb_t* out = enki_nat_tmp_alloc(gc, n_s * sizeof(mp_limb_t));
     memset(out, 0, n_s * sizeof(mp_limb_t));
     memcpy(out, a_nv.limbs, a_nv.n_limbs_s * sizeof(mp_limb_t));
-    out[word_off_o] = out[word_off_o] |= ((mp_limb_t)1 << bit_off_o);
+    out[word_off_o] |= ((mp_limb_t)1 << bit_off_o);
     return enki_nat_alloc(gc, out, n_s);
 }
 enki_value enki_nat_clear(enki_gc* gc, enki_value bit_v, enki_value a_v) {
@@ -343,7 +343,7 @@ enki_value enki_nat_clear(enki_gc* gc, enki_value bit_v, enki_value a_v) {
     view_of_nat(a_v, &a_nv);
     if(IS_PTR(bit_v))  enki_interp_throw(gc->root, ENKI_ERROR_TYPE, bit_v);
     size_t word_off_o = (size_t)bit_v / 64;
-    size_t bit_off_o = (size_t)bit_v % 64; 
+    size_t bit_off_o = (size_t)bit_v % 64;
     size_t n_s = word_off_o + 1;
     if(n_s < a_nv.n_limbs_s) n_s = a_nv.n_limbs_s;
     mp_limb_t* out = enki_nat_tmp_alloc(gc, n_s * sizeof(mp_limb_t));
@@ -368,12 +368,12 @@ enki_value enki_nat_bytes(enki_gc* gc, enki_value a_v) {
 }
 enki_value enki_nat_trunc(enki_gc* gc, enki_value width_v, enki_value a_v) {
     if(!IS_PTR(width_v) && !IS_PTR(a_v)) return width_v >= 63 ? a_v : (a_v & (((enki_value)1 << width_v) - 1));
-    if(IS_PTR(width_v))  enki_interp_throw(gc->root, ENKI_ERROR_TYPE, width_v); 
+    if(IS_PTR(width_v))  enki_interp_throw(gc->root, ENKI_ERROR_TYPE, width_v);
     enki_nat_view a_nv;
     view_of_nat(a_v, &a_nv);
     if(a_nv.n_limbs_s == 0) return (enki_value)0;
     size_t word_off_o = (size_t)width_v / 64;
-    size_t bit_off_o = (size_t)width_v % 64; 
+    size_t bit_off_o = (size_t)width_v % 64;
     size_t n_s = bit_off_o != 0 ? word_off_o + 1 : word_off_o;
     size_t keep_s = min_s(a_nv.n_limbs_s, n_s);
     if(keep_s == 0) return (enki_value)0;
@@ -412,7 +412,7 @@ enki_value enki_nat_load8(enki_gc* gc, enki_value index_i, enki_value a_v) {
     if(IS_PTR(index_i)) enki_interp_throw(gc->root, ENKI_ERROR_TYPE, index_i);
     enki_nat_view a_nv;
     view_of_nat(a_v, &a_nv);
-    // sizeof(mp_limb_t) = 8 for my machine 
+    // sizeof(mp_limb_t) = 8 for my machine
     size_t limb_index_i = (size_t)index_i / sizeof(mp_limb_t);
     size_t byte_offset_o = (size_t)index_i % sizeof(mp_limb_t);
     if(a_nv.n_limbs_s <= limb_index_i) return (enki_value)0;
@@ -435,7 +435,7 @@ enki_value enki_nat_store8(enki_gc* gc, enki_value index_i, enki_value byte_b, e
     mp_limb_t* out = enki_nat_tmp_alloc(gc, n_s * sizeof(mp_limb_t));
     memset(out, 0, n_s * sizeof(mp_limb_t));
     memcpy(out, a_nv.limbs, a_nv.n_limbs_s * sizeof(mp_limb_t));
-    mp_limb_t mask_q = (mp_limb_t)~(0xFFULL << (byte_offset_o * 8)); 
+    mp_limb_t mask_q = (mp_limb_t)~(0xFFULL << (byte_offset_o * 8));
     mp_limb_t byte_bits_q = (mp_limb_t)(byte_b & 0xFF) << (byte_offset_o * 8);
     out[limb_index_i] = (out[limb_index_i] & mask_q) | byte_bits_q;
     return enki_nat_alloc(gc, out, n_s);

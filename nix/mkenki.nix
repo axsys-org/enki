@@ -7,6 +7,7 @@
   criterion,
   gmp,
   lmdb,
+  openssl,
   compiler,
   cc,
   extraNativeBuildInputs ? [],
@@ -32,7 +33,7 @@ stdenv.mkDerivation {
     criterion
     gmp
     lmdb
-
+    openssl
   ];
 
   dontConfigure = true;

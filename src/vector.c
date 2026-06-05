@@ -128,10 +128,13 @@ static void vector_throw_status(enki_interpreter* i, enki_status status)
     switch(status) {
         case ENKI_ERR_ALLOC:
             enki_interp_throw(i, ENKI_ERROR_OOM, 0);
+            return;
         case ENKI_ERR_BOUNDS:
             enki_interp_throw(i, ENKI_ERROR_BOUNDS, 0);
+            return;
         case ENKI_ERR_INVALID:
             enki_interp_throw(i, ENKI_ERROR_TYPE, 0);
+            return;
         case ENKI_OK:
             return;
     }

@@ -1701,6 +1701,7 @@ plan_eval_whnf(er_vm *vm, er_val val_v, er_eval_mode mode)
     er_bcpc pc = vm->pc;
     er_val hd_v = er_bad;
     er_val* env = NULL;
+    er_val env_v = 0;
     er_val r   = val_v;
     er_thk* thk;
     uint32_t wan_d, hav_d;
@@ -1792,27 +1793,29 @@ plan_eval_whnf(er_vm *vm, er_val val_v, er_eval_mode mode)
         er_op* dispatch_op = er_bytecode_at(pc);   \
         ep_debug_if((dispatch_op == NULL), {                 \
             FAIL_TANK("missing bytecode", (er_val)pc); \
-        })                                          \
+        });                                         \
         op = *dispatch_op;                 \
         pc++;                                      \
         vm->pc = pc;                               \
         ep_debug_if(((size_t)op.tag >= OP_COUNT || dispatch[op.tag] == NULL), { \
             FAIL_TANK("bad bytecode op", (er_val)op.tag); \
-        })                                          \
+        });                                         \
         goto *dispatch[op.tag];                   \
     } while (0)
 
-#define KPUSH_BYTECODE_RETURN(_pc, _env)                   \
+#define KPUSH_BYTECODE_RETURN(_pc, _env, _env_v)           \
     do {                                                   \
         vm->k_count++;                                     \
         *ksp++ = (er_kon){                                 \
             .tag = ER_K_BYTECODE_RETURN,                   \
             .as.bytecode_return = {                        \
                 .env = (_env),                             \
+                .env_v = (_env_v),                         \
                 .pc = (_pc),                               \
                 .dbase = dbase,                            \
             },                                             \
         };                                                 \
+        vm->ksp = ksp;                                     \
     } while (0)
 
 #define KPUSH_UPDATE(_target)                              \
@@ -1824,6 +1827,7 @@ plan_eval_whnf(er_vm *vm, er_val val_v, er_eval_mode mode)
                 .dbase = dbase,                            \
             },                                             \
         };                                                 \
+        vm->ksp = ksp;                                     \
     } while (0)
 
 #define KPUSH_APPHEAD(_app)                                \
@@ -1834,6 +1838,7 @@ plan_eval_whnf(er_vm *vm, er_val val_v, er_eval_mode mode)
                 .app_v = (_app),                           \
             },                                             \
         };                                                 \
+        vm->ksp = ksp;                                     \
     } while (0)
 
 #define KPUSH_APP_IDX(_app, _idx)                          \
@@ -1845,6 +1850,7 @@ plan_eval_whnf(er_vm *vm, er_val val_v, er_eval_mode mode)
                 .idx_s = (_idx),                           \
             },                                             \
         };                                                 \
+        vm->ksp = ksp;                                     \
     } while (0)
 
 #define KPUSH_OVERAPP(_app, _split)                        \
@@ -1856,11 +1862,13 @@ plan_eval_whnf(er_vm *vm, er_val val_v, er_eval_mode mode)
                 .split_d = (uint32_t)(_split),             \
             },                                             \
         };                                                 \
+        vm->ksp = ksp;                                     \
     } while (0)
 
 #define KPUSH_NORMAL()                                     \
     do {                                                   \
         *ksp++ = (er_kon){.tag = ER_K_NORMAL};             \
+        vm->ksp = ksp;                                     \
     } while (0)
 
 #define RETURN(_r)                                 \
@@ -1877,6 +1885,7 @@ plan_eval_whnf(er_vm *vm, er_val val_v, er_eval_mode mode)
             return r;                              \
         }                                          \
         kon = *--ksp;                              \
+        vm->ksp = ksp;                             \
         switch (kon.tag) {                         \
         case ER_K_BYTECODE_RETURN:                 \
             goto K_RETURN;                         \
@@ -2063,7 +2072,7 @@ I_CALLF: {
     r = er_thk_make_call_frame(vm->loc_a, frame_s, call_s, call_base);
     CHECK_ALLOC(r);
     dsp = call_base;
-    KPUSH_BYTECODE_RETURN(pc, env);
+    KPUSH_BYTECODE_RETURN(pc, env, env_v);
     goto FORCE_ENTRY;
 }
 
@@ -2087,7 +2096,7 @@ I_CALLS: {
     r = er_thk_make_call_frame(vm->loc_a, frame_s, call_s, call_base);
     CHECK_ALLOC(r);
     dsp = call_base;
-    KPUSH_BYTECODE_RETURN(pc, env);
+    KPUSH_BYTECODE_RETURN(pc, env, env_v);
     goto FORCE_ENTRY;
 }
 
@@ -2240,11 +2249,11 @@ I_MAKE_SUSP: {
       FAIL_TANK("bad suspension frame", env[0]);
     }
     GC_SYNC();
-    er_val env_v = er_thk_make_env_frame(vm->loc_a, frame_s, env);
-    CHECK_ALLOC(env_v);
-    vm->gc_tmp_v[0] = env_v;
+    er_val susp_env_v = er_thk_make_env_frame(vm->loc_a, frame_s, env);
+    CHECK_ALLOC(susp_env_v);
+    vm->gc_tmp_v[0] = susp_env_v;
     vm->gc_tmp_s = 1;
-    r = er_thk_make_susp(vm->loc_a, susp_label_d, env_v, env[0]);
+    r = er_thk_make_susp(vm->loc_a, susp_label_d, susp_env_v, env[0]);
     vm->gc_tmp_s = 0;
     CHECK_ALLOC(r);
     DPUSH(r);
@@ -2254,7 +2263,7 @@ I_MAKE_SUSP: {
 I_EVAL:
     r = DPOP();
     GC_SYNC();
-    KPUSH_BYTECODE_RETURN(pc, env);
+    KPUSH_BYTECODE_RETURN(pc, env, env_v);
     goto FORCE_ENTRY;
 
 I_TAIL_EVAL:
@@ -2265,7 +2274,7 @@ I_TAIL_EVAL:
 I_FORCE:
     r = DPOP();
     GC_SYNC();
-    KPUSH_BYTECODE_RETURN(pc, env);
+    KPUSH_BYTECODE_RETURN(pc, env, env_v);
     KPUSH_NORMAL();
     goto FORCE_ENTRY;
 
@@ -2392,25 +2401,36 @@ FORCE_XPRIM: {
     }
     prim_row = er_outt(er_tag_app, prim_arg);
     if (prim_set == 66) {
+      GC_SYNC();
       if (op66_exec_special_app(vm, prim_row, &r)) {
         dsp = vm->dsp;
         ksp = vm->ksp;
         CHECK_PRIM(r);
         goto FORCE_ENTRY;
       }
+      GC_SYNC();
       prim_arg = op66_eval_arg_app(vm, prim_row);
       dsp = vm->dsp;
       ksp = vm->ksp;
       CHECK_PRIM(prim_arg);
       prim_row = er_outt(er_tag_app, prim_arg);
+      GC_SYNC();
+      vm->gc_tmp_v[0] = prim_arg;
+      vm->gc_tmp_s = 1;
       r = eo_exec_op66_er_app(vm->loc_a, prim_row);
+      vm->gc_tmp_s = 0;
     } else if (prim_set == 0) {
+      GC_SYNC();
       prim_arg = op0_eval_arg_app(vm, prim_row);
       dsp = vm->dsp;
       ksp = vm->ksp;
       CHECK_PRIM(prim_arg);
       prim_row = er_outt(er_tag_app, prim_arg);
+      GC_SYNC();
+      vm->gc_tmp_v[0] = prim_arg;
+      vm->gc_tmp_s = 1;
       r = eo_exec_op0_er_app(vm->loc_a, prim_row);
+      vm->gc_tmp_s = 0;
     } else {
       FAIL_TANK("bad primitive set", prim_arg);
     }
@@ -2469,6 +2489,7 @@ FORCE_SUSP: {
     }
     KPUSH_UPDATE(er_into(er_tag_thk, thk));
     CODE_SET_LABEL(susp_law_v, susp_label);
+    env_v = thk->arg_v[1];
     env = fr->arg_v;
     dbase = dsp;
     thk->fun = ER_HOLE;
@@ -2497,20 +2518,21 @@ ENTER_CALL: {
     }
     if (n_lets > 0) {
       GC_SYNC();
-      er_val env_v = er_thk_make_env_frame(vm->loc_a, thk->arg_s, thk->arg_v);
-      CHECK_ALLOC(env_v);
+      er_val env_frame_v = er_thk_make_env_frame(vm->loc_a, thk->arg_s, thk->arg_v);
+      CHECK_ALLOC(env_frame_v);
       for (size_t i = 0; i < n_lets; i++) {
         size_t slot_s = (size_t)law->ari_d + 1 + i;
         er_thk* susp = er_outt(er_tag_thk, thk->arg_v[slot_s]);
         if (susp == NULL || susp->fun != ER_SUSP || susp->arg_s < 2) {
           FAIL_TANK("bad suspension", thk->arg_v[slot_s]);
         }
-        susp->arg_v[1] = env_v;
+        susp->arg_v[1] = env_frame_v;
       }
     }
     KPUSH_UPDATE(self_v);
     thk->fun = ER_HOLE;
     CODE_SET_LABEL(f, 0);
+    env_v = self_v;
     env = thk->arg_v;
     dbase = dsp;
     DISPATCH();
@@ -2524,7 +2546,9 @@ K_RETURN:
     dbase = kon.as.bytecode_return.dbase;
     pc = kon.as.bytecode_return.pc;
     vm->pc = pc;
-    env = kon.as.bytecode_return.env;
+    env_v = kon.as.bytecode_return.env_v;
+    er_thk* return_env = er_outt(er_tag_thk, env_v);
+    env = return_env == NULL ? kon.as.bytecode_return.env : return_env->arg_v;
 
     DPUSH(r);
     DISPATCH();

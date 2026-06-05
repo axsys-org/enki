@@ -291,6 +291,7 @@ typedef enum er_kon_tag {
 
 typedef struct er_kon_bytecode_return {
     er_val* env;
+    er_val env_v;
     er_bcpc pc;
     er_val* dbase;
 } er_kon_bytecode_return;

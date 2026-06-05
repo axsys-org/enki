@@ -257,8 +257,12 @@ void enki_gc_trace_vm(enki_gc* gc, void* root)
 
     for (er_kon* cur = vm->kbase; cur < vm->ksp; cur++) {
         switch (cur->tag) {
-        case ER_K_BYTECODE_RETURN:
+        case ER_K_BYTECODE_RETURN: {
+            enki_gc_trace_ref(gc, &cur->as.bytecode_return.env_v);
+            er_thk* env = er_outt(er_tag_thk, cur->as.bytecode_return.env_v);
+            cur->as.bytecode_return.env = env == NULL ? NULL : env->arg_v;
             break;
+        }
         case ER_K_UPDATE:
             enki_gc_trace_ref(gc, &cur->as.update.target_v);
             break;
