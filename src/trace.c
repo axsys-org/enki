@@ -51,9 +51,9 @@ void enki_trace_value(enki_gc* gc, void* obj) {
           break;
         }
         case ENKI_CONT: {
-          enki_cont* cont_v = obj;
-          for (size_t k = 0; k < cont_v->n_args_s; k++) {
-            cont_v->args_v[k] = gc->copy(gc, cont_v->args_v[k]);
+          enki_cont* cont = obj;
+          for(size_t k = 0; k < cont->n_args_s; k++) {
+            cont->args_v[k] = gc->copy(gc, cont->args_v[k]);
           }
           break;
         }

@@ -9,6 +9,8 @@
 #include "enki/law.h"
 #include "enki/op66.h"
 #include "enki/op0.h"
+#include "enki/op82.h"
+#include "enki/scheduler.h"
 
 enki_interpreter* enki_interp_create(const enki_allocator* loc_a, size_t heap,
     const char* store_path_s, size_t store_size_s, size_t scratch_size_s) {
@@ -26,6 +28,8 @@ enki_interpreter* enki_interp_create(const enki_allocator* loc_a, size_t heap,
     i->cp = 0;
     i->sp = 0;
     i->hp = 0;
+    i->actor = NULL;
+    i->scheduler = NULL;
     enki_stats_reset(i);
     i->scratch_a = enki_arena_create(loc_a, scratch_size_s);
     if(!i->scratch_a) {
@@ -84,13 +88,22 @@ void enki_interp_throw(enki_interpreter* i, int error_code, enki_value val) {
 int enki_interp_run(enki_interpreter* i) {
     i->has_error_jmp = true;
     if(setjmp(i->error_jmp) == 0) {
-        while (!i->halted) {
-            enki_interp_step(i);
+        if(i->scheduler != NULL && i->actor != NULL) { // actor mode
+            enki_schedueler_enqueue(i->scheduler, i->actor);
+            enki_schedueler_run(i->scheduler);
             enki_arena_reset(i->scratch_a);
+            i->has_error_jmp = false;
+            return 0;
         }
-        enki_arena_reset(i->scratch_a);
-        i->has_error_jmp = false;
-        return 0;
+        else {
+            while (!i->halted) {
+                enki_interp_step(i);
+                enki_arena_reset(i->scratch_a);
+            }
+            enki_arena_reset(i->scratch_a);
+            i->has_error_jmp = false;
+            return 0;
+        }
     }
     enki_arena_reset(i->scratch_a);
     i->has_error_jmp = false;
@@ -117,6 +130,29 @@ static void enki_interp_dispatch_op0(enki_interpreter* i, uint8_t sub_t) {
         case 0: op0_pin(i);  break;
         case 1: op0_law(i);  break;
         case 2: op0_elim(i);  break;
+    }
+}
+
+
+static void enki_interp_dispatch_op82(enki_interpreter* i, uint8_t sub_b) {
+    switch (sub_b) {
+        case OP82_WRITE:        op82_write(i);        break;
+        case OP82_CLOSEFD:      op82_closefd(i);      break;
+        case OP82_READ:         op82_read(i);         break;
+        case OP82_OUTPUT:       op82_output(i);       break;
+        case OP82_WARN:         op82_warn(i);         break;
+        case OP82_INPUT:        op82_input(i);        break;
+        case OP82_NOW:          op82_now(i);          break;
+        case OP82_READ_FILE:    op82_read_file(i);    break;
+        case OP82_STAMP:        op82_stamp(i);        break;
+        case OP82_LISTEN:       op82_listen(i);       break;
+        case OP82_ACCEPT:       op82_accept(i);       break;
+        case OP82_SPAWN:        op82_spawn(i);        break;
+        case OP82_SEND:         op82_send(i);         break;
+        case OP82_SEND_CAPS:    op82_send_caps(i);    break;
+        case OP82_RCV:          op82_rcv(i);          break;
+        case OP82_CLOSE_HANDLE: op82_close_handle(i); break;
+        default: enki_interp_throw(i, ENKI_ERROR_BAD_TAG, sub_b);
     }
 }
 
@@ -251,6 +287,7 @@ void enki_interp_dispatch_op(enki_interpreter* i, uint8_t group) {
     switch (group) {
         case 0: enki_interp_dispatch_op0(i, (uint8_t)tag); break;
         case 66: enki_interp_dispatch_op66(i, (uint8_t)tag); break;
+        case 82: enki_interp_dispatch_op82(i, (uint8_t)tag); break;
         default: enki_interp_throw(i, ENKI_ERROR_BAD_TAG, tag);
     }
 }
@@ -350,6 +387,11 @@ void enki_interp_step(enki_interpreter* i) {
         case OP_OP66: {
             uint8_t sub_b = i->bc_b[i->pc++];
             enki_interp_dispatch_op66(i, sub_b);
+            break;
+        }
+        case OP_OP82: {
+            uint8_t sub_b = i->bc_b[i->pc++];
+            enki_interp_dispatch_op82(i, sub_b);
             break;
         }
         default:

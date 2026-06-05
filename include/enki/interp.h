@@ -12,6 +12,9 @@
 #define CALL_MAX 1024
 #define HANDLER_MAX 1024
 
+typedef struct enki_actor enki_actor;
+typedef struct enki_schedueler enki_schedueler;
+
 typedef enum {
     NO_OP              = 0x00,
     OP_PUSH_CONST      = 0x01,
@@ -34,6 +37,26 @@ typedef enum {
     OP0_LAW,
     OP0_ELIM,
 } enki_op0_sub;
+
+typedef enum {
+    OP82_WRITE = 0,
+    OP82_CLOSEFD,
+    OP82_READ,
+    OP82_OUTPUT,
+    OP82_WARN,
+    OP82_INPUT,
+    OP82_NOW,
+    OP82_READ_FILE,
+    OP82_STAMP,
+    OP82_LISTEN,
+    OP82_ACCEPT,
+
+    OP82_SPAWN,
+    OP82_SEND,
+    OP82_SEND_CAPS,
+    OP82_RCV,
+    OP82_CLOSE_HANDLE,
+} enki_op82_sub;
 
 typedef enum {
     OP66_INC = 0,
@@ -213,6 +236,8 @@ typedef struct enki_interpreter {
     enki_value error_v;
     enki_arena* scratch_a;
     enki_stats stats;
+    enki_actor* actor;
+    enki_schedueler* scheduler;
 } enki_interpreter;
 
 int enki_interp_run(enki_interpreter* i);

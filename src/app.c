@@ -155,7 +155,7 @@ void enki_app_apply(enki_interpreter* i, size_t n_args_s) {
             case NAT:
                 i->stats.apply_op_s++;
                 enki_interp_dispatch_op(i, (uint8_t)fn_v); return;
-            case LAW:
+            case LAW: {
                 size_t call_arity_s = n_args_s + old_args_s;
                 for(size_t k = n_args_s; k > 0; k--) {
                     size_t idx_i = k - 1;
@@ -169,6 +169,7 @@ void enki_app_apply(enki_interpreter* i, size_t n_args_s) {
                 i->stack_v[fn_index_i] = head_v; // self stays as original head/pin/partial
                 enki_law_enter(call_arity_s, fn_v, i);
                 return;
+            }
             default:
                 enki_interp_throw(i, ENKI_ERROR_BAD_TAG, fn_v);
         }

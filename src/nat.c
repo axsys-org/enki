@@ -37,6 +37,11 @@ uint8_t* enki_nat_to_bytes(enki_interpreter* i, enki_value a, size_t* len) {
     }
     return res;
 }
+
+enki_value enki_bytes_to_nat(enki_interpreter* i, uint8_t* bytes, size_t len) {
+    return enki_alloc_big_nat_bytes(i->gc, len, (char*)bytes);
+}
+
 static void view_of_nat(enki_value a_v, enki_nat_view* v);
 static int enki_nat_cmp_v(const enki_nat_view* a_nv, const enki_nat_view* b_nv);
 static size_t min_s(size_t a_v, size_t b_v) {

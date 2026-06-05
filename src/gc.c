@@ -7,11 +7,111 @@
 #include "enki/interp.h"
 #include "enki/trace.h"
 #include "enki/value.h"
+#include "stb_ds.h"
 
 static size_t enki_gc_align_offset(size_t off_o) {
     size_t align_s = _Alignof(enki_value_header);
     return (off_o + align_s - 1) & ~(align_s - 1);
 }
+
+static enki_value enki_import_copy(enki_import_ctx* ctx, enki_value val_v) {
+
+    if(!IS_PTR(val_v)) return val_v;
+
+    void* old = ENKI_AS(void, val_v);
+    ptrdiff_t idx = hmgeti(ctx->seen, old);
+    if(idx >= 0) return ctx->seen[idx].value;
+
+    enki_value_header* h = old;
+    if(h->kind_b == ENKI_FRWD) {
+        return enki_import_copy(ctx, PTR_TO_ENKI(*(void**)GET_PAYLOAD(val_v)));
+    }
+
+    void* new = enki_arena_alloc_aligned(
+        ctx->dst_i->gc->active_a,
+        h->size_s,
+        _Alignof(enki_value_header)
+    );
+    if(new == NULL) {
+        enki_interp_throw(ctx->dst_i, ENKI_ERROR_OOM, 0);
+    }
+
+    memcpy(new, old, h->size_s);
+
+    enki_value new_v = PTR_TO_ENKI(new);
+    hmput(ctx->seen, old, new_v);
+    arrput(ctx->work, new_v);
+
+    return new_v;
+}
+
+static void enki_import_fix(enki_import_ctx* ctx, enki_value val_v) {
+    enki_value_header* h = ENKI_AS(enki_value_header, val_v);
+    switch (h->kind_b) {
+        case ENKI_PIN: {
+          enki_pin* pin = ENKI_AS(enki_pin, val_v);
+          pin->inner_v = enki_import_copy(ctx, pin->inner_v);
+          for(size_t k = 0; k < pin->n_subpins_s; k++) {
+            pin->subpins_v[k] = enki_import_copy(ctx, pin->subpins_v[k]);
+          }
+          break;
+        }
+        case ENKI_LAW: {
+            enki_law* law = ENKI_AS(enki_law, val_v);
+            law->name_v = enki_import_copy(ctx, law->name_v);
+            law->body_v = enki_import_copy(ctx, law->body_v);
+            for(size_t k = 0; k < law->n_const_s; k++) {
+                ENKI_LAW_CONSTS(law)[k] =
+                    enki_import_copy(ctx, ENKI_LAW_CONSTS(law)[k]);
+            }
+            break;
+        }
+        case ENKI_APP: {
+            enki_app* app = ENKI_AS(enki_app, val_v);
+            app->fn_v = enki_import_copy(ctx, app->fn_v);
+            for(size_t k = 0; k < app->n_args_s; k++) {
+                app->args_v[k] = enki_import_copy(ctx, app->args_v[k]);
+            }
+            break;
+        }
+        case ENKI_IND: {
+          enki_ind* ind = ENKI_AS(enki_ind, val_v);
+          ind->fn_v = enki_import_copy(ctx, ind->fn_v);
+          break;
+        }
+        case ENKI_CONT: {
+          enki_cont* cont = ENKI_AS(enki_cont, val_v);
+          for(size_t k = 0; k < cont->n_args_s; k++) {
+              cont->args_v[k] = enki_import_copy(ctx, cont->args_v[k]);
+          }
+          break;
+        }
+        case ENKI_NAT:
+          break;
+        default:
+          abort();
+    }
+}
+
+enki_value enki_gc_import(enki_interpreter* dst_i, enki_value root_v) {
+    enki_import_ctx ctx = {
+        .dst_i = dst_i, 
+        .seen = NULL,
+        .work = NULL,
+    };
+
+    enki_value root_copy = enki_import_copy(&ctx, root_v);
+
+    for(size_t k = 0; k < (size_t)arrlen(ctx.work); k++) {
+        enki_import_fix(&ctx, ctx.work[k]);
+    }
+
+    hmfree(ctx.seen);
+    arrfree(ctx.work);
+
+    return root_copy;
+}
+
 
 enki_gc* enki_gc_create(const enki_allocator* loc_a, size_t cap_s, enki_interpreter* root) {
     if(!loc_a) return NULL;

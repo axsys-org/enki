@@ -13,6 +13,7 @@ typedef struct enki_interpreter enki_interpreter;
 enki_value enki_nat_alloc(enki_gc* gc, mp_limb_t* out, size_t n_limbs_s);
 enki_value enki_nat_alloc_big(enki_gc* gc, size_t n_limbs_s, mp_limb_t limbs[]);
 uint8_t* enki_nat_to_bytes(enki_interpreter* i, enki_value a, size_t* len);
+enki_value enki_bytes_to_nat(enki_interpreter* i, uint8_t* bytes, size_t len);
 
 enki_value enki_alloc_strnat(enki_gc* gc, char* str_c, size_t str_s);
 enki_value enki_alloc_cstrnat(enki_gc* gc, char* str_c);

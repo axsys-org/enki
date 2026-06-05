@@ -12,4 +12,5 @@ typedef enum {
     ENKI_STORE_NOT_FOUND = 8,
     ENKI_STORE_TOO_SMALL = 9,
     ENKI_STORE_ERROR = 10,
+    ENKI_ERROR_IO = 11,
 } enki_error;
