@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <enki/profile.h>
 
 typedef struct boot_module {
     er_val key_v;
@@ -581,6 +582,7 @@ int main(int argc, char** argv)
         boot_usage(argv[0]);
         return 2;
     }
+    wait_for_tracy(30.0);
 
     const enki_allocator* loc_a = enki_allocator_system();
     wisp_rt* rt = wisp_rt_alloc(loc_a);

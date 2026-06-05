@@ -271,6 +271,7 @@
               pkgs.pkg-config
               pkgs.alejandra
               pkgs.mdformat
+              pkgs.samply
               treefmtEval.config.build.wrapper
             ]
             ++ lib.optionals stdenv.isLinux [

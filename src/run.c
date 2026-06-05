@@ -14,6 +14,7 @@
 #include "enki/run_ops.h"
 #include "enki/util.h"
 #include "enki/print.h"
+#include "enki/perf.h"
 
 #include "run_opcode.def"
 
@@ -1021,9 +1022,6 @@ static er_law* er_resolve_law(er_val val_v)
   switch ( er_get_tag(val_v) ) {
     case er_tag_pin:
       pin = er_outa(val_v);
-      if (er_is_cat(pin->val_v)) {
-        return NULL;
-      }
       return er_outt(er_tag_law, pin->val_v);
     case er_tag_law:
       return er_outa(val_v);
@@ -1717,11 +1715,10 @@ plan_eval_whnf(er_vm *vm, er_val val_v, er_eval_mode mode)
     er_val prim_e_v = 0;
     er_val prim_f_v = 0;
 
-    er_op op_storage = {0};
-    er_op* op = &op_storage;
     er_val f, app, target;
     er_head* head;
     er_kon kon;
+    er_op op;
     uint32_t split;
     size_t idx_s;
 
@@ -1793,17 +1790,16 @@ plan_eval_whnf(er_vm *vm, er_val val_v, er_eval_mode mode)
     do {                                           \
         vm->b_count++;                             \
         er_op* dispatch_op = er_bytecode_at(pc);   \
-        if (dispatch_op == NULL) {                 \
+        ep_debug_if((dispatch_op == NULL), {                 \
             FAIL_TANK("missing bytecode", (er_val)pc); \
-        }                                          \
-        op_storage = *dispatch_op;                 \
-        op = &op_storage;                          \
+        })                                          \
+        op = *dispatch_op;                 \
         pc++;                                      \
         vm->pc = pc;                               \
-        if ((size_t)op->tag >= OP_COUNT || dispatch[op->tag] == NULL) { \
-            FAIL_TANK("bad bytecode op", (er_val)op->tag); \
-        }                                          \
-        goto *dispatch[op->tag];                   \
+        ep_debug_if(((size_t)op.tag >= OP_COUNT || dispatch[op.tag] == NULL), { \
+            FAIL_TANK("bad bytecode op", (er_val)op.tag); \
+        })                                          \
+        goto *dispatch[op.tag];                   \
     } while (0)
 
 #define KPUSH_BYTECODE_RETURN(_pc, _env)                   \
@@ -2023,17 +2019,17 @@ plan_eval_whnf(er_vm *vm, er_val val_v, er_eval_mode mode)
     // ---------------------------------------------------------------------
 
 I_PUSH_VAR:
-    r = env[op->as.slot];
+    r = env[op.as.slot];
     DPUSH(r);
     DISPATCH();
 
 I_PUSH_LIT:
-    r = op->as.lit_v;
+    r = op.as.lit_v;
     DPUSH(r);
     DISPATCH();
 
 I_MK_APP: {
-    size_t app_s = op->as.u32;
+    size_t app_s = op.as.u32;
     if (app_s == 0 || dsp < dbase || (size_t)(dsp - dbase) < app_s) {
       FAIL_ALLOC();
     }
@@ -2048,7 +2044,7 @@ I_MK_APP: {
 }
 
 I_CALLF: {
-    size_t arg_s = op->as.u32;
+    size_t arg_s = op.as.u32;
     size_t call_s = arg_s + 1;
     if (arg_s == SIZE_MAX || dsp < dbase || (size_t)(dsp - dbase) < call_s) {
       FAIL_ALLOC();
@@ -2072,7 +2068,7 @@ I_CALLF: {
 }
 
 I_CALLS: {
-    size_t arg_s = op->as.u32;
+    size_t arg_s = op.as.u32;
     size_t call_s = arg_s + 1;
     if (arg_s == SIZE_MAX || dsp < dbase || (size_t)(dsp - dbase) < call_s) {
       FAIL_ALLOC();
@@ -2096,7 +2092,7 @@ I_CALLS: {
 }
 
 I_APPLY_FAST: {
-    size_t call_s = op->as.u32;
+    size_t call_s = op.as.u32;
     if (call_s == 0 || dsp < dbase || (size_t)(dsp - dbase) < call_s) {
       FAIL_ALLOC();
     }
@@ -2120,7 +2116,7 @@ I_APPLY_FAST: {
 }
 
 I_CALLU: {
-    size_t arg_s = op->as.u32;
+    size_t arg_s = op.as.u32;
     size_t call_s = arg_s + 1;
     if (arg_s == SIZE_MAX || dsp < dbase || (size_t)(dsp - dbase) < call_s) {
       FAIL_ALLOC();
@@ -2135,7 +2131,7 @@ I_CALLU: {
 }
 
 I_APPLY_UNK: {
-    size_t call_s = op->as.u32;
+    size_t call_s = op.as.u32;
     if (call_s == 0 || dsp < dbase || (size_t)(dsp - dbase) < call_s) {
       FAIL_ALLOC();
     }
@@ -2198,7 +2194,7 @@ I_DROP:
     DISPATCH();
 
 I_ROTATE: {
-    size_t rotate_s = op->as.u32;
+    size_t rotate_s = op.as.u32;
     if (dsp < dbase || rotate_s > (size_t)(dsp - dbase)) {
       FAIL_ALLOC();
     }
@@ -2214,26 +2210,26 @@ I_ROTATE: {
 I_JUMP_IF_ZERO:
     r = DPOP();
     if (r == 0) {
-      CODE_SET_PC((er_bcpc)op->as.u32);
+      CODE_SET_PC((er_bcpc)op.as.u32);
     }
     DISPATCH();
 
 I_JMP:
-    CODE_SET_CURRENT_LABEL(op->as.u32);
+    CODE_SET_CURRENT_LABEL(op.as.u32);
     DISPATCH();
 
 I_JUMP_IF:
     r = DPOP();
     if (r != 0) {
-      CODE_SET_CURRENT_LABEL(op->as.u32);
+      CODE_SET_CURRENT_LABEL(op.as.u32);
     }
     DISPATCH();
 
 I_MAKE_SUSP: {
     if (env == NULL) {
-      FAIL_TANK("missing bytecode env", (er_val)op->as.u32);
+      FAIL_TANK("missing bytecode env", (er_val)op.as.u32);
     }
-    uint32_t susp_label_d = op->as.u32;
+    uint32_t susp_label_d = op.as.u32;
     er_law* susp_law = er_resolve_law(env[0]);
     if (susp_law == NULL || (size_t)susp_label_d >= susp_law->bc_s ||
         er_law_label_code(susp_law, susp_label_d) == NULL) {

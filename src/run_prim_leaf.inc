@@ -91,7 +91,7 @@ I_OP_TEST:
     PRIM_DONE_VALUE(eo_test(prim_a_v, prim_b_v));
 
 I_OP_LOADN:
-    prim_word_v = op->as.lit_v;
+    prim_word_v = op.as.lit_v;
     prim_b_v = DPOP();
     prim_a_v = DPOP();
     PRIM_DONE_VALUE(eo_loadn(vm->loc_a, prim_word_v, prim_a_v, prim_b_v));
@@ -103,7 +103,7 @@ I_OP_LOAD:
     PRIM_DONE_VALUE(eo_load(vm->loc_a, prim_a_v, prim_b_v, prim_c_v));
 
 I_OP_STOREN:
-    prim_word_v = op->as.lit_v;
+    prim_word_v = op.as.lit_v;
     prim_c_v = DPOP();
     prim_b_v = DPOP();
     prim_a_v = DPOP();
@@ -118,7 +118,7 @@ I_OP_STORE:
     PRIM_DONE_VALUE(eo_store(vm->loc_a, prim_a_v, prim_c_v, prim_b_v, prim_d_v));
 
 I_OP_TRUNCN:
-    prim_word_v = op->as.lit_v;
+    prim_word_v = op.as.lit_v;
     prim_a_v = DPOP();
     PRIM_DONE_VALUE(eo_truncn(vm->loc_a, prim_word_v, prim_a_v));
 
@@ -128,7 +128,7 @@ I_OP_TRUNC:
     PRIM_DONE_VALUE(eo_trunc(vm->loc_a, prim_a_v, prim_b_v));
 
 I_OP_MET:
-    prim_word_v = op->as.lit_v;
+    prim_word_v = op.as.lit_v;
     prim_a_v = DPOP();
     PRIM_DONE_VALUE(eo_met(prim_word_v, prim_a_v));
 

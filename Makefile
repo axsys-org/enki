@@ -5,7 +5,7 @@ PREFIX ?= /usr/local
 BUILD_DIR ?= build/$(BUILD_TYPE)
 AR ?= ar
 
-VALID_BUILD_TYPES := debug release asan ubsan tsan coverage
+VALID_BUILD_TYPES := debug release asan ubsan tsan coverage profile
 
 BASE_CPPFLAGS := -Iinclude -Itests/support -Itests/property/vendor/theft -isystem /opt/homebrew/include
 BASE_CFLAGS := -std=c23 -MMD -MP
@@ -23,6 +23,7 @@ HARDEN_CFLAGS := -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3 -fstack-protector-strong
 
 BUILD_CFLAGS_debug := -O0 -g3 -DDEBUG
 BUILD_CFLAGS_release := -O3 -DNDEBUG $(HARDEN_CFLAGS)
+BUILD_CFLAGS_profile := $(BUILD_CFLAGS_release) -g3 -fno-omit-frame-pointer -fdebug-info-for-profiling -fno-inline
 BUILD_CFLAGS_asan := -O1 -g3 -fsanitize=address -fno-omit-frame-pointer $(HARDEN_CFLAGS)
 BUILD_CFLAGS_ubsan := -O1 -g3 -fsanitize=undefined -fno-omit-frame-pointer $(HARDEN_CFLAGS)
 BUILD_CFLAGS_tsan := -O1 -g3 -fsanitize=thread -fno-omit-frame-pointer $(HARDEN_CFLAGS)
@@ -30,6 +31,7 @@ BUILD_CFLAGS_coverage := -O1 -g3 --coverage $(HARDEN_CFLAGS)
 
 BUILD_LDFLAGS_debug :=
 BUILD_LDFLAGS_release :=
+BUILD_LDFLAGS_profile :=
 BUILD_LDFLAGS_asan := -fsanitize=address
 BUILD_LDFLAGS_ubsan := -fsanitize=undefined
 BUILD_LDFLAGS_tsan := -fsanitize=thread
