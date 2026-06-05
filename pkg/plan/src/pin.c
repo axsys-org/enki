@@ -1,23 +1,30 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "axsys/allocator.h"
 #include "axsys/assume.h"
 #include "axsys/sha256.h"
 #include "axsys/stb_ds.h"
 #include "internal.h"
 #include "plan/build.h"
+#include "plan/canon.h"
 #include "plan/nat.h"
 #include "plan/store.h"
 #include "store_internal.h"
 
 /*
- * Pinning (§10).  The value is normalized, serialized to canonical bytes
- * (which include the sub-pin hashes), hashed, interned, and — on an
- * intern miss — deep-copied into the non-moving store region.  Nothing
- * here allocates on the moving heap, so the source graph is stable and
- * bare pointers are safe throughout.
+ * Pinning (§10).  The value is normalized, rendered to the canonical
+ * snapshot text (plan/canon.h), hashed with SHA-256 — exactly the
+ * reference mkPin — then interned, and on an intern miss deep-copied
+ * into the non-moving store region.  Nothing here allocates on the
+ * moving heap, so the source graph is stable and bare pointers are safe
+ * throughout.
  *
- * Canonical byte format (version 1):
+ * The persistence backend keeps a binary rendering (below), because
+ * rehydration must not depend on the enki-layer assembler; it is keyed
+ * by the same canonical-text hash.
+ *
+ * Backend byte format (version 1):
  *   u8  version
  *   u64 nsub                       (LE)
  *   32B * nsub                     (sub-pin hashes, first-occurrence LTR)
@@ -194,8 +201,14 @@ static pl_val pin_from_canon(pl_store* s, canon_ctx* c, pl_val body) {
   for (ptrdiff_t i = 0; i < arrlen(c->buf); i++)
     arrpush(full, c->buf[i]);
 
+  /* the content hash is SHA-256 of the canonical TEXT (mkPin) */
   uint8_t hash[32];
-  ax_sha256(full, (size_t)arrlen(full), hash);
+  {
+    size_t text_n;
+    char* text = pl_canonize(ax_allocator_system(), body, &text_n);
+    ax_sha256((const uint8_t*)text, text_n, hash);
+    ax_free(ax_allocator_system(), text);
+  }
 
   pl_val pin = pl_store_intern_get(s, hash);
   if (pin == 0) {
