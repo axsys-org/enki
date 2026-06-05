@@ -1,4 +1,3 @@
-
 ---
 # .clang-tidy — aggressive, pruned for idiomatic C (VM / systems code).
 #
@@ -7,7 +6,6 @@
 
 Checks: >
   bugprone-*,
-  cert-*,
   clang-analyzer-*,
   concurrency-*,
   misc-*,
@@ -16,6 +14,7 @@ Checks: >
   readability-*,
 
   -modernize-*,
+  -cert-*,
   -cppcoreguidelines-*,
   -hicpp-*,
   -fuchsia-*,
@@ -37,14 +36,20 @@ Checks: >
   -readability-function-cognitive-complexity,
   -bugprone-easily-swappable-parameters,
   -misc-no-recursion,
-  -bugprone-assignment-in-if-condition
+  -bugprone-assignment-in-if-condition,
+  -bugprone-multi-level-implicit-pointer-conversion,
+  -readability-implicit-bool-conversion,
+  -bugprone-multi-level-implicit-pointer-conversion,
+  -performance-no-int-to-ptr,
+  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,
+  -readability-avoid-nested-conditional-operator
 
 # Nothing is a hard error yet; promote specific checks once the tree is clean,
 # e.g. WarningsAsErrors: 'clang-analyzer-*,bugprone-*'
 WarningsAsErrors: ''
 
 # Lint your own headers. Narrow to e.g. '^(src|include)/' to skip vendored code.
-HeaderFilterRegex: '.*'
+HeaderFilterRegex: '^enki/'
 
 # Auto-fixes are reformatted using your .clang-format.
 FormatStyle: file
@@ -56,7 +61,7 @@ CheckOptions:
   - { key: readability-identifier-naming.FunctionCase,        value: lower_case }
   - { key: readability-identifier-naming.VariableCase,        value: lower_case }
   - { key: readability-identifier-naming.ParameterCase,       value: lower_case }
-  - { key: readability-identifier-naming.GlobalConstantCase,  value: UPPER_CASE }
-  - { key: readability-identifier-naming.EnumConstantCase,    value: UPPER_CASE }
-  - { key: readability-identifier-naming.MacroDefinitionCase, value: UPPER_CASE }
-
+# - { key: readability-identifier-naming.GlobalConstantCase,  value: UPPER_CASE }
+# - { key: readability-identifier-naming.EnumConstantCase,    value: UPPER_CASE }
+# - { key: readability-identifier-naming.MacroDefinitionCase, value: UPPER_CASE }
+...

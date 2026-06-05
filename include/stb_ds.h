@@ -532,7 +532,7 @@ extern void* stbds_shmode_func(size_t elemsize, int mode);
 #endif
 #endif
 
-#if !defined(__cplusplus)
+#ifndef __cplusplus
 #if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 199901L
 #define STBDS_HAS_LITERAL_ARRAY
 #endif

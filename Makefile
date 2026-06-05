@@ -7,7 +7,7 @@ AR ?= ar
 
 VALID_BUILD_TYPES := debug release asan ubsan tsan coverage profile
 
-BASE_CPPFLAGS := -Iinclude -Itests/support -Itests/property/vendor/theft -isystem /opt/homebrew/include
+BASE_CPPFLAGS := -Iinclude -Itests/support -Itests/property/vendor/theft $(NIX_CFLAGS_COMPILE)
 BASE_CFLAGS := -std=c23 -MMD -MP
 
 WARN_COMMON := -Wall -Wextra  \

@@ -6,14 +6,14 @@
 #include <setjmp.h>
 #include <stddef.h>
 
-typedef struct _wisp_env_entry {
+typedef struct wisp_env_entry {
   er_val key_v;
   er_val val_v;
   int mac_f;
-  struct _wisp_env_entry* next;
+  struct wisp_env_entry* next;
 } wisp_env_entry;
 
-typedef struct _wisp_rt {
+typedef struct wisp_rt {
   const enki_allocator* loc_a;
   jmp_buf errjmp;
   char err_f; // has errjmp been set
@@ -21,8 +21,8 @@ typedef struct _wisp_rt {
   wisp_env_entry* env;
 } wisp_rt;
 
-wisp_rt* wisp_rt_alloc(const enki_allocator* sys_a);
-void wisp_rt_free(const enki_allocator* sys_a, wisp_rt* rt);
+wisp_rt* wisp_rt_alloc(const enki_allocator* loc_a);
+void wisp_rt_free(const enki_allocator* loc_a, wisp_rt* rt);
 
 er_val wisp_parse(wisp_rt* rt, char** str);
 er_val wisp_macroexpand(wisp_rt* rt, er_val val_v);

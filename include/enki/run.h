@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ENKI_RUN_H
+#define ENKI_RUN_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -383,4 +384,6 @@ er_val er_eval_gc(enki_gc* gc, er_val val_v);
 #ifndef PLAN_S7
 #define PLAN_S7(a, b, c, d, e, f, g)                                           \
   ((er_val)(PLAN_S6(a, b, c, d, e, f) | (PLAN_CH(g) << 48u)))
+#endif
+
 #endif

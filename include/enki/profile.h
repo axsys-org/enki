@@ -1,10 +1,11 @@
-#pragma once
+#ifndef ENKI_PROFILE_H
+#define ENKI_PROFILE_H
 
 #if defined(TRACY_ENABLE) && !defined(_POSIX_C_SOURCE)
 #define _POSIX_C_SOURCE 200809L
 #endif
 
-#if defined(TRACY_ENABLE)
+#ifdef TRACY_ENABLE
 #include <tracy/TracyC.h>
 #include <time.h>
 #include <stdlib.h>
@@ -58,4 +59,5 @@ static void wait_for_tracy(double tim_df) {
   (void)tim_df;
 }
 
+#endif
 #endif

@@ -72,7 +72,7 @@ static inline void* ea_alloc_zero(const enki_allocator* loc_a, size_t elem_s,
 
 #define ea_calloc(loc_a, typ, count)                                           \
   (typ*)ea_alloc_zero((loc_a), sizeof(typ), (count))
-#define ea_free(loc_a, ptr) (loc_a->free(loc_a->ctx, ptr))
+#define ea_free(loc_a, ptr) ((loc_a)->free((loc_a)->ctx, ptr))
 
 #ifdef __cplusplus
 }

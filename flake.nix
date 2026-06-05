@@ -166,12 +166,13 @@
             pkgs.gmp
             pkgs.lmdb
             pkgs.openssl
+            pkgs.compiledb
           ];
 
           dontConfigure = true;
           buildPhase = ''
             runHook preBuild
-            make BUILD_TYPE=debug CC=${pkgs.clang}/bin/clang compile-commands
+            compiledb BUILD_TYPE=debug CC=${pkgs.clang}/bin/clang make
             make BUILD_TYPE=debug CC=${pkgs.clang}/bin/clang tidy
             runHook postBuild
           '';
@@ -245,8 +246,8 @@
           testChecks
           // {
             # tidy = tidyCheck;
-            #format = treefmtEval.config.build.check self;
-            #coverage = coverageReport;
+            format = treefmtEval.config.build.check self;
+            coverage = coverageReport;
           };
 
         apps = {

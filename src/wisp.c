@@ -1,3 +1,5 @@
+#include "enki/allocator.h"
+#include "enki/run.h"
 #include <enki/motes.h>
 #include <enki/print.h>
 #include <enki/profile.h>
@@ -5,7 +7,9 @@
 #include <enki/wisp.h>
 
 #include <gmp.h>
+#include <setjmp.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -87,7 +91,7 @@ static er_val wisp_app3(wisp_rt* rt, er_val fn_v, er_val a_v, er_val b_v,
   return wisp_app_make(rt, fn_v, 3, arg_v);
 }
 
-static er_val _wisp_quote(wisp_rt* rt, er_val val_v) {
+static er_val wisp_quote(wisp_rt* rt, er_val val_v) {
   return wisp_app1(rt, 1, val_v);
 }
 
@@ -135,12 +139,12 @@ static er_val wisp_bytes_nat(wisp_rt* rt, const char* bytes_c, size_t bytes_s) {
   if (bytes_s < sizeof(uint64_t)) {
     uint64_t out_q = 0;
     for (size_t i = 0; i < bytes_s; i++) {
-      out_q |= ((uint64_t)(uint8_t)bytes_c[i]) << (i * 8u);
+      out_q |= ((uint64_t)(uint8_t)bytes_c[i]) << (i * 8U);
     }
     return out_q;
   }
 
-  size_t limb_s = (bytes_s + sizeof(uint64_t) - 1u) / sizeof(uint64_t);
+  size_t limb_s = (bytes_s + sizeof(uint64_t) - 1U) / sizeof(uint64_t);
   uint64_t* limb_q = ea_calloc(rt->loc_a, uint64_t, limb_s);
   if (limb_q == NULL) {
     wisp_fail(rt, "oom");
@@ -175,7 +179,7 @@ static size_t wisp_nat_limb_s(er_val val_v) {
   }
 
   size_t lim_s = bat->lim_s;
-  while (lim_s > 0 && bat->lim_q[lim_s - 1u] == 0) {
+  while (lim_s > 0 && bat->lim_q[lim_s - 1U] == 0) {
     lim_s--;
   }
   return lim_s;
@@ -203,8 +207,8 @@ static int wisp_nat_cmp(er_val a_v, er_val b_v) {
     return a_s < b_s ? -1 : 1;
   }
   for (size_t i = a_s; i > 0; i--) {
-    uint64_t a_q = wisp_nat_limb(a_v, i - 1u);
-    uint64_t b_q = wisp_nat_limb(b_v, i - 1u);
+    uint64_t a_q = wisp_nat_limb(a_v, i - 1U);
+    uint64_t b_q = wisp_nat_limb(b_v, i - 1U);
     if (a_q != b_q) {
       return a_q < b_q ? -1 : 1;
     }
@@ -216,7 +220,8 @@ static bool wisp_nat_eq(er_val a_v, er_val b_v) {
   return wisp_nat_cmp(a_v, b_v) == 0;
 }
 
-static void _wisp_fail_with_val(wisp_rt* rt, const char* msg_c, er_val val_v) {
+[[noreturn]] static void wisp_fail_with_val(wisp_rt* rt, const char* msg_c,
+                                            er_val val_v) {
   char* key_c = wisp_print_value(rt, val_v, NULL);
   size_t str_s = strlen(msg_c) + strlen(key_c) + 5;
   char* str_c = ea_calloc(rt->loc_a, char, str_s);
@@ -227,18 +232,18 @@ static void _wisp_fail_with_val(wisp_rt* rt, const char* msg_c, er_val val_v) {
   wisp_fail(rt, str_c);
 }
 
-static void _wisp_fail_with_result(wisp_rt* rt, er_val result_v,
-                                   er_val fallback_v) {
+[[noreturn]] static void wisp_fail_with_result(wisp_rt* rt, er_val result_v,
+                                               er_val fallback_v) {
   er_tank* tank = er_outt(er_tag_tank, result_v);
   if (tank != NULL) {
-    _wisp_fail_with_val(rt, tank->msg_c, tank->val_v);
+    wisp_fail_with_val(rt, tank->msg_c, tank->val_v);
   }
-  _wisp_fail_with_val(rt, "runtime error", fallback_v);
+  wisp_fail_with_val(rt, "runtime error", fallback_v);
 }
 
-static er_val _wisp_run_apply_mode(wisp_rt* rt, size_t val_s,
-                                   const er_val* val_v, er_eval_mode mode) {
-  ENKI_PROFILE_ZONE("_wisp_run_apply");
+static er_val wisp_run_apply_mode(wisp_rt* rt, size_t val_s,
+                                  const er_val* val_v, er_eval_mode mode) {
+  ENKI_PROFILE_ZONE("wisp_run_apply");
   if (val_s == 0) {
     return 0;
   }
@@ -246,7 +251,7 @@ static er_val _wisp_run_apply_mode(wisp_rt* rt, size_t val_s,
     er_val out_v =
         mode == ER_EVAL_WHNF ? val_v[0] : er_eval_to(rt->loc_a, val_v[0], mode);
     if (!er_is_good(out_v)) {
-      _wisp_fail_with_result(rt, out_v, val_v[0]);
+      wisp_fail_with_result(rt, out_v, val_v[0]);
     }
     return out_v;
   }
@@ -261,13 +266,13 @@ static er_val _wisp_run_apply_mode(wisp_rt* rt, size_t val_s,
   }
   er_val res_v = er_eval_to(rt->loc_a, thk_v, mode);
   if (!er_is_good(res_v)) {
-    _wisp_fail_with_result(rt, res_v, thk_v);
+    wisp_fail_with_result(rt, res_v, thk_v);
   }
   return res_v;
 }
 
-static er_val _wisp_run_apply(wisp_rt* rt, size_t val_s, const er_val* val_v) {
-  return _wisp_run_apply_mode(rt, val_s, val_v, ER_EVAL_WHNF);
+static er_val wisp_run_apply(wisp_rt* rt, size_t val_s, const er_val* val_v) {
+  return wisp_run_apply_mode(rt, val_s, val_v, ER_EVAL_WHNF);
 }
 
 // MARK: - Printing
@@ -282,7 +287,7 @@ static bool wisp_is_juxt(er_val val_v) {
   return val_v == MOTE_HJUXT;
 }
 
-typedef enum _char_class {
+typedef enum char_class {
   CL_EOF = 0,
   CL_WS = 1,
   CL_STR = 2,
@@ -338,7 +343,7 @@ static bool wisp_eat(char** str) {
   return false;
 }
 
-static er_val _wisp_parse_str(wisp_rt* rt, char** str_c) {
+static er_val wisp_parse_str(wisp_rt* rt, char** str_c) {
   char* sin_c = *str_c + 1; // drop opening quote
   char* cur_c = sin_c;
 
@@ -352,34 +357,34 @@ static er_val _wisp_parse_str(wisp_rt* rt, char** str_c) {
 
   size_t val_s = (size_t)(cur_c - sin_c);
   *str_c = cur_c + 1; // drop closing quote
-  return _wisp_quote(rt, wisp_bytes_nat(rt, sin_c, val_s));
+  return wisp_quote(rt, wisp_bytes_nat(rt, sin_c, val_s));
 }
 
-static bool _wisp_is_close(char c) {
-  return c == ')' || c == ']' || c == '}';
+static bool wisp_is_close(char c) {
+  return (c == ')' || c == ']' || c == '}') != 0;
 }
 
-static bool _wisp_is_gap(char c) {
-  return c == ' ' || c == '\n' || c == ';';
+static bool wisp_is_gap(char c) {
+  return (c == ' ' || c == '\n' || c == ';') != 0;
 }
 
-static void _wisp_expect_open(wisp_rt* rt, char** cur_c, char open_c) {
+static void wisp_expect_open(wisp_rt* rt, char** cur_c, char open_c) {
   if (**cur_c != open_c) {
     wisp_fail(rt, "expected opening delimiter");
   }
   (*cur_c)++;
 }
 
-static bool _wisp_take_seq_close(wisp_rt* rt, char** cur_c) {
+static bool wisp_take_seq_close(wisp_rt* rt, char** cur_c) {
   UNUSED(rt);
-  if (_wisp_is_close(**cur_c)) {
+  if (wisp_is_close(**cur_c)) {
     (*cur_c)++;
     return true;
   }
   return false;
 }
 
-static er_val _wisp_parse_par(wisp_rt* rt, char** str_c) {
+static er_val wisp_parse_par(wisp_rt* rt, char** str_c) {
   char* cur_c = *str_c;
   er_val* stack_v = NULL;
   bool first_f = true;
@@ -388,17 +393,17 @@ static er_val _wisp_parse_par(wisp_rt* rt, char** str_c) {
     if (*cur_c == 0) {
       wisp_fail(rt, "eof in list");
     }
-    if (_wisp_take_seq_close(rt, &cur_c)) {
+    if (wisp_take_seq_close(rt, &cur_c)) {
       break;
     }
-    if (!first_f && !_wisp_is_gap(*cur_c)) {
+    if (!first_f && !wisp_is_gap(*cur_c)) {
       wisp_fail(rt, "bad list");
     }
     if (!first_f) {
       if (wisp_eat(&cur_c)) {
         wisp_fail(rt, "eof in list");
       }
-      if (_wisp_take_seq_close(rt, &cur_c)) {
+      if (wisp_take_seq_close(rt, &cur_c)) {
         break;
       }
     }
@@ -416,8 +421,8 @@ static er_val _wisp_parse_par(wisp_rt* rt, char** str_c) {
   return ret_v;
 }
 
-static er_val _wisp_parse_seq(wisp_rt* rt, er_val tag_v, char** str_c,
-                              char close_c) {
+static er_val wisp_parse_seq(wisp_rt* rt, er_val tag_v, char** str_c,
+                             char close_c) {
   char* cur_c = *str_c;
   er_val* stack_v = NULL;
   arrpush(stack_v, tag_v);
@@ -428,17 +433,17 @@ static er_val _wisp_parse_seq(wisp_rt* rt, er_val tag_v, char** str_c,
     if (*cur_c == 0) {
       wisp_fail(rt, "eof in list");
     }
-    if (_wisp_take_seq_close(rt, &cur_c)) {
+    if (wisp_take_seq_close(rt, &cur_c)) {
       break;
     }
-    if (!first_f && !_wisp_is_gap(*cur_c)) {
+    if (!first_f && !wisp_is_gap(*cur_c)) {
       wisp_fail(rt, "bad list");
     }
     if (!first_f) {
       if (wisp_eat(&cur_c)) {
         wisp_fail(rt, "eof in list");
       }
-      if (_wisp_take_seq_close(rt, &cur_c)) {
+      if (wisp_take_seq_close(rt, &cur_c)) {
         break;
       }
     }
@@ -453,16 +458,16 @@ static er_val _wisp_parse_seq(wisp_rt* rt, er_val tag_v, char** str_c,
   return ret_v;
 }
 
-static er_val _wisp_parse_seq_cur(wisp_rt* rt, char** str_c) {
-  return _wisp_parse_seq(rt, wisp_bytes_nat(rt, "#curl", 5), str_c, '}');
+static er_val wisp_parse_seq_cur(wisp_rt* rt, char** str_c) {
+  return wisp_parse_seq(rt, wisp_bytes_nat(rt, "#curl", 5), str_c, '}');
 }
 
-static er_val _wisp_parse_seq_bra(wisp_rt* rt, char** str_c) {
-  return _wisp_parse_seq(rt, wisp_bytes_nat(rt, "#brak", 5), str_c, ']');
+static er_val wisp_parse_seq_bra(wisp_rt* rt, char** str_c) {
+  return wisp_parse_seq(rt, wisp_bytes_nat(rt, "#brak", 5), str_c, ']');
 }
 
-static er_val _wisp_parse_num(wisp_rt* rt, char* str_c, size_t str_s) {
-  char* buf_c = ea_calloc(rt->loc_a, char, str_s + 1u);
+static er_val wisp_parse_num(wisp_rt* rt, char* str_c, size_t str_s) {
+  char* buf_c = ea_calloc(rt->loc_a, char, str_s + 1U);
   if (buf_c == NULL) {
     wisp_fail(rt, "oom");
   }
@@ -481,7 +486,7 @@ static er_val _wisp_parse_num(wisp_rt* rt, char* str_c, size_t str_s) {
   return out_v;
 }
 
-static er_val _wisp_parse_sym(wisp_rt* rt, char** str_c) {
+static er_val wisp_parse_sym(wisp_rt* rt, char** str_c) {
   char* cur_c = *str_c;
   bool num_f = true;
   while (wisp_class(*cur_c) == CL_SYM) {
@@ -494,13 +499,13 @@ static er_val _wisp_parse_sym(wisp_rt* rt, char** str_c) {
   size_t ret_s = (size_t)(cur_c - sin_c);
 
   if (num_f) {
-    return _wisp_quote(rt, _wisp_parse_num(rt, sin_c, ret_s));
+    return wisp_quote(rt, wisp_parse_num(rt, sin_c, ret_s));
   }
   return wisp_bytes_nat(rt, sin_c, ret_s);
 }
 
-static er_val _wisp_parse_atom(wisp_rt* rt, char** str_c) {
-  er_val sym_v = _wisp_parse_sym(rt, str_c);
+static er_val wisp_parse_atom(wisp_rt* rt, char** str_c) {
+  er_val sym_v = wisp_parse_sym(rt, str_c);
   char* cur_c = *str_c;
   char_class nex_b = wisp_class(*cur_c);
   bool has_jux = false;
@@ -508,19 +513,19 @@ static er_val _wisp_parse_atom(wisp_rt* rt, char** str_c) {
 
   if (nex_b == CL_PAR) {
     has_jux = true;
-    _wisp_expect_open(rt, &cur_c, '(');
-    jux_v = _wisp_parse_par(rt, &cur_c);
+    wisp_expect_open(rt, &cur_c, '(');
+    jux_v = wisp_parse_par(rt, &cur_c);
   } else if (nex_b == CL_BRA) {
     has_jux = true;
-    _wisp_expect_open(rt, &cur_c, '[');
-    jux_v = _wisp_parse_seq_bra(rt, &cur_c);
+    wisp_expect_open(rt, &cur_c, '[');
+    jux_v = wisp_parse_seq_bra(rt, &cur_c);
   } else if (nex_b == CL_CUR) {
     has_jux = true;
-    _wisp_expect_open(rt, &cur_c, '{');
-    jux_v = _wisp_parse_seq_cur(rt, &cur_c);
+    wisp_expect_open(rt, &cur_c, '{');
+    jux_v = wisp_parse_seq_cur(rt, &cur_c);
   } else if (nex_b == CL_STR) {
     has_jux = true;
-    jux_v = _wisp_parse_str(rt, &cur_c);
+    jux_v = wisp_parse_str(rt, &cur_c);
   }
   *str_c = cur_c;
   if (has_jux) {
@@ -542,26 +547,26 @@ er_val wisp_parse(wisp_rt* rt, char** str_c) {
   case CL_WS:
     wisp_fail(rt, "invariant: failed to consume whitespace");
   case CL_STR:
-    ret = _wisp_parse_str(rt, &cur_c);
+    ret = wisp_parse_str(rt, &cur_c);
     *str_c = cur_c;
     return ret;
   case CL_SYM:
-    ret = _wisp_parse_atom(rt, &cur_c);
+    ret = wisp_parse_atom(rt, &cur_c);
     *str_c = cur_c;
     return ret;
   case CL_PAR:
-    _wisp_expect_open(rt, &cur_c, '(');
-    ret = _wisp_parse_par(rt, &cur_c);
+    wisp_expect_open(rt, &cur_c, '(');
+    ret = wisp_parse_par(rt, &cur_c);
     *str_c = cur_c;
     return ret;
   case CL_BRA:
-    _wisp_expect_open(rt, &cur_c, '[');
-    ret = _wisp_parse_seq_bra(rt, &cur_c);
+    wisp_expect_open(rt, &cur_c, '[');
+    ret = wisp_parse_seq_bra(rt, &cur_c);
     *str_c = cur_c;
     return ret;
   case CL_CUR:
-    _wisp_expect_open(rt, &cur_c, '{');
-    ret = _wisp_parse_seq_cur(rt, &cur_c);
+    wisp_expect_open(rt, &cur_c, '{');
+    ret = wisp_parse_seq_cur(rt, &cur_c);
     *str_c = cur_c;
     return ret;
   case CL_END:
@@ -588,7 +593,7 @@ static wisp_env_entry* wisp_getenv(wisp_rt* rt, er_val key_v) {
 
 static void wisp_putenv(wisp_rt* rt, er_val key_v, bool mac_f, er_val val_v) {
   if (!wisp_is_nat(key_v)) {
-    _wisp_fail_with_val(rt, "bad env key", key_v);
+    wisp_fail_with_val(rt, "bad env key", key_v);
   }
   wisp_env_entry* ent = wisp_getenv(rt, key_v);
   if (ent == NULL) {
@@ -600,7 +605,7 @@ static void wisp_putenv(wisp_rt* rt, er_val key_v, bool mac_f, er_val val_v) {
     ent->next = rt->env;
     rt->env = ent;
   }
-  ent->mac_f = mac_f;
+  ent->mac_f = (int)mac_f;
   ent->val_v = val_v;
 }
 
@@ -665,7 +670,7 @@ static er_val wisp_env_value(wisp_rt* rt) {
 
   wisp_env_tmp* root = NULL;
   for (size_t i = (size_t)arrlen(ent_v); i > 0; i--) {
-    root = wisp_env_tmp_put(rt, root, ent_v[i - 1u]);
+    root = wisp_env_tmp_put(rt, root, ent_v[i - 1U]);
   }
   arrfree(ent_v);
 
@@ -677,7 +682,7 @@ static er_val wisp_env_value(wisp_rt* rt) {
 static er_val wisp_expand_user(wisp_rt* rt, er_val mac_v, er_val val_v) {
   er_val env_v = wisp_env_value(rt);
   er_val args_v[] = {mac_v, env_v, val_v};
-  return _wisp_run_apply_mode(rt, 3, args_v, ER_EVAL_NF);
+  return wisp_run_apply_mode(rt, 3, args_v, ER_EVAL_NF);
 }
 
 static er_val wisp_pin(wisp_rt* rt, er_val val_v) {
@@ -685,12 +690,12 @@ static er_val wisp_pin(wisp_rt* rt, er_val val_v) {
   if (pin_v == 0) {
     wisp_fail(rt, "oom");
   }
-  return _wisp_quote(rt, pin_v);
+  return wisp_quote(rt, pin_v);
 }
 
 static er_val wisp_app(wisp_rt* rt, size_t exp_s, er_val* exp_v) {
   if (exp_s == 0) {
-    return _wisp_quote(rt, 0);
+    return wisp_quote(rt, 0);
   }
 
   er_val* val_v = malloc(exp_s * sizeof(er_val));
@@ -702,9 +707,9 @@ static er_val wisp_app(wisp_rt* rt, size_t exp_s, er_val* exp_v) {
     val_v[i] = wisp_eval(rt, exp_v[i]);
   }
 
-  er_val res_v = _wisp_run_apply(rt, exp_s, val_v);
+  er_val res_v = wisp_run_apply(rt, exp_s, val_v);
   free(val_v);
-  return _wisp_quote(rt, res_v);
+  return wisp_quote(rt, res_v);
 }
 
 static void wisp_parse_bind(wisp_rt* rt, er_val bin_v, er_val* nam_v,
@@ -712,13 +717,13 @@ static void wisp_parse_bind(wisp_rt* rt, er_val bin_v, er_val* nam_v,
   er_app* app = wisp_as_app(bin_v);
   if (app == NULL || app->arg_s != 3 || !wisp_is_juxt(app->arg_v[0]) ||
       !wisp_is_nat(app->arg_v[1])) {
-    _wisp_fail_with_val(rt, "bad bind", bin_v);
+    wisp_fail_with_val(rt, "bad bind", bin_v);
   }
   *nam_v = app->arg_v[1];
   *exp_v = app->arg_v[2];
 }
 
-typedef struct _wisp_local {
+typedef struct wisp_local {
   er_val nam_v;
   uint64_t idx_q;
   er_val exp_v; // 0 if argument and no expression
@@ -727,8 +732,8 @@ typedef struct _wisp_local {
 static bool wisp_quote_payload(er_val val_v, er_val* out_v);
 static er_val compile_expr(wisp_rt* rt, size_t loc_s, wisp_local* loc,
                            er_val val_v);
-static er_val _wisp_macroexpand(wisp_rt* rt, size_t loc_s, wisp_local* loc,
-                                er_val val_v);
+static er_val wisp_macroexpand_inn(wisp_rt* rt, size_t loc_s, wisp_local* loc,
+                                   er_val val_v);
 
 static bool wisp_find_local(size_t loc_s, wisp_local* loc, er_val nam_v,
                             uint64_t* idx_q) {
@@ -765,7 +770,7 @@ static er_val compile_expr(wisp_rt* rt, size_t loc_s, wisp_local* loc,
     }
     wisp_env_entry* ent = wisp_getenv(rt, val_v);
     if (ent == NULL) {
-      _wisp_fail_with_val(rt, "unbound", val_v);
+      wisp_fail_with_val(rt, "unbound", val_v);
     }
     return law_quote(ent->val_v);
   }
@@ -802,20 +807,20 @@ static er_val wisp_law(wisp_rt* rt, er_val tag_v, er_val sig_v, er_val bod_v,
   er_val teg_v = wisp_eval(rt, tag_v);
   er_app* app = wisp_as_app(sig_v);
   if (app == NULL || app->fn_v != 0 || app->arg_s < 2) {
-    _wisp_fail_with_val(rt, "bad law signature", sig_v);
+    wisp_fail_with_val(rt, "bad law signature", sig_v);
   }
   er_val nam_v = app->arg_v[0];
   if (!wisp_is_nat(nam_v)) {
-    _wisp_fail_with_val(rt, "bad law name", nam_v);
+    wisp_fail_with_val(rt, "bad law name", nam_v);
   }
 
-  size_t arg_s = app->arg_s - 1u;
+  size_t arg_s = app->arg_s - 1U;
   if (arg_s > UINT32_MAX) {
-    _wisp_fail_with_val(rt, "law arity overflow", sig_v);
+    wisp_fail_with_val(rt, "law arity overflow", sig_v);
   }
   er_val* arg_v = app->arg_v + 1;
 
-  size_t loc_s = arg_s + bin_s + 1u;
+  size_t loc_s = arg_s + bin_s + 1U;
   wisp_local* loc = ea_calloc(rt->loc_a, wisp_local, loc_s);
   if (loc == NULL) {
     wisp_fail(rt, "oom");
@@ -826,14 +831,14 @@ static er_val wisp_law(wisp_rt* rt, er_val tag_v, er_val sig_v, er_val bod_v,
   size_t i;
   for (i = 1; i <= arg_s; i++) {
     if (!wisp_is_nat(arg_v[i - 1])) {
-      _wisp_fail_with_val(rt, "bad law argument", arg_v[i - 1]);
+      wisp_fail_with_val(rt, "bad law argument", arg_v[i - 1]);
     }
     loc[i].nam_v = arg_v[i - 1];
     loc[i].idx_q = i;
     loc[i].exp_v = 0;
   }
   for (; i < loc_s; i++) {
-    size_t idx_s = i - arg_s - 1u;
+    size_t idx_s = i - arg_s - 1U;
     loc[i].idx_q = i;
     wisp_parse_bind(rt, bin_v[idx_s], &loc[i].nam_v, &loc[i].exp_v);
   }
@@ -841,10 +846,10 @@ static er_val wisp_law(wisp_rt* rt, er_val tag_v, er_val sig_v, er_val bod_v,
   er_val* exp_v = NULL;
   for (size_t j = 0; j < bin_s; j++) {
     arrpush(exp_v,
-            _wisp_macroexpand(rt, loc_s, loc, loc[j + arg_s + 1u].exp_v));
+            wisp_macroexpand_inn(rt, loc_s, loc, loc[j + arg_s + 1U].exp_v));
   }
 
-  er_val bod_exp_v = _wisp_macroexpand(rt, loc_s, loc, bod_v);
+  er_val bod_exp_v = wisp_macroexpand_inn(rt, loc_s, loc, bod_v);
 
   er_val* let_v = NULL;
   for (size_t j = 0; j < bin_s; j++) {
@@ -854,36 +859,36 @@ static er_val wisp_law(wisp_rt* rt, er_val tag_v, er_val sig_v, er_val bod_v,
 
   bod_exp_v = compile_expr(rt, loc_s, loc, bod_exp_v);
   for (size_t j = bin_s; j > 0; j--) {
-    bod_exp_v = wisp_app2(rt, 1, let_v[j - 1u], bod_exp_v);
+    bod_exp_v = wisp_app2(rt, 1, let_v[j - 1U], bod_exp_v);
   }
   arrfree(let_v);
 
   er_val law_v = er_law_make(rt->loc_a, teg_v, bod_exp_v, (uint32_t)arg_s);
   if (law_v == 0) {
-    _wisp_fail_with_val(rt, "failed to compile law", bod_exp_v);
+    wisp_fail_with_val(rt, "failed to compile law", bod_exp_v);
   }
   ea_free(rt->loc_a, loc);
-  return _wisp_quote(rt, law_v);
+  return wisp_quote(rt, law_v);
 }
 
 static er_val wisp_bind(wisp_rt* rt, er_val nam_v, er_val val_v, bool mac_f) {
   if (!wisp_is_nat(nam_v)) {
-    _wisp_fail_with_val(rt, "bad env key", nam_v);
+    wisp_fail_with_val(rt, "bad env key", nam_v);
   }
   er_val vel_v = wisp_eval(rt, val_v);
   wisp_putenv(rt, nam_v, mac_f, vel_v);
-  return _wisp_quote(rt, nam_v);
+  return wisp_quote(rt, nam_v);
 }
 
 static er_val wisp_export(wisp_rt* rt, size_t sym_s, const er_val sym_v[]) {
   wisp_env_entry** keep_v = NULL;
   for (size_t i = 0; i < sym_s; i++) {
     if (!wisp_is_nat(sym_v[i])) {
-      _wisp_fail_with_val(rt, "bad export", sym_v[i]);
+      wisp_fail_with_val(rt, "bad export", sym_v[i]);
     }
     wisp_env_entry* ent = wisp_getenv(rt, sym_v[i]);
     if (ent == NULL) {
-      _wisp_fail_with_val(rt, "unbound export", sym_v[i]);
+      wisp_fail_with_val(rt, "unbound export", sym_v[i]);
     }
     arrpush(keep_v, ent);
   }
@@ -896,8 +901,8 @@ static er_val wisp_export(wisp_rt* rt, size_t sym_s, const er_val sym_v[]) {
   return 0;
 }
 
-static er_val _wisp_expand1(wisp_rt* rt, size_t loc_s, wisp_local* loc,
-                            uint64_t mac_q, er_val val_v) {
+static er_val wisp_expand1(wisp_rt* rt, size_t loc_s, wisp_local* loc,
+                           uint64_t mac_q, er_val val_v) {
   (void)loc_s;
   (void)loc;
 
@@ -909,36 +914,36 @@ static er_val _wisp_expand1(wisp_rt* rt, size_t loc_s, wisp_local* loc,
   switch (mac_q) {
   case MOTE_HBIND:
     if (app->arg_s != 3) {
-      _wisp_fail_with_val(rt, "invalid #bind", val_v);
+      wisp_fail_with_val(rt, "invalid #bind", val_v);
     }
     return wisp_bind(rt, app->arg_v[1], app->arg_v[2], false);
   case MOTE_HMACRO:
     if (app->arg_s != 3) {
-      _wisp_fail_with_val(rt, "invalid #macro", val_v);
+      wisp_fail_with_val(rt, "invalid #macro", val_v);
     }
     return wisp_bind(rt, app->arg_v[1], app->arg_v[2], true);
   case MOTE_HPIN:
     if (app->arg_s != 2) {
-      _wisp_fail_with_val(rt, "invalid #pin", val_v);
+      wisp_fail_with_val(rt, "invalid #pin", val_v);
     }
     return wisp_pin(rt, app->arg_v[1]);
   case MOTE_HLAW:
     if (app->arg_s < 4) {
-      _wisp_fail_with_val(rt, "invalid #law", val_v);
+      wisp_fail_with_val(rt, "invalid #law", val_v);
     }
     return wisp_law(rt, app->arg_v[1], app->arg_v[2],
-                    app->arg_v[app->arg_s - 1u], app->arg_s - 4u,
+                    app->arg_v[app->arg_s - 1U], app->arg_s - 4U,
                     &app->arg_v[3]);
   case MOTE_HAPP: {
     if (app->arg_s < 1) {
-      _wisp_fail_with_val(rt, "invalid #app", val_v);
+      wisp_fail_with_val(rt, "invalid #app", val_v);
     }
-    return wisp_app(rt, app->arg_s - 1u, app->arg_v + 1);
+    return wisp_app(rt, app->arg_s - 1U, app->arg_v + 1);
   }
   case MOTE_HEXPORT:
-    return wisp_export(rt, app->arg_s - 1u, app->arg_v + 1);
+    return wisp_export(rt, app->arg_s - 1U, app->arg_v + 1);
   default:
-    _wisp_fail_with_val(rt, "unknown macro", mac_q);
+    wisp_fail_with_val(rt, "unknown macro", mac_q);
   }
   return 0;
 }
@@ -946,12 +951,12 @@ static er_val _wisp_expand1(wisp_rt* rt, size_t loc_s, wisp_local* loc,
 static bool is_sys_macro(uint64_t mac_q) {
   return ((mac_q == MOTE_HBIND) || (mac_q == MOTE_HLAW) ||
           (mac_q == MOTE_HPIN) || (mac_q == MOTE_HMACRO) ||
-          (mac_q == MOTE_HAPP) || (mac_q == MOTE_HEXPORT));
+          (mac_q == MOTE_HAPP) || (mac_q == MOTE_HEXPORT)) != 0;
 }
 
-static er_val _wisp_macroexpand(wisp_rt* rt, size_t loc_s, wisp_local* loc,
-                                er_val val_v) {
-  ENKI_PROFILE_ZONE("_wisp_macroexpand");
+static er_val wisp_macroexpand_inn(wisp_rt* rt, size_t loc_s, wisp_local* loc,
+                                   er_val val_v) {
+  ENKI_PROFILE_ZONE("wisp_macroexpand");
 
   if (wisp_is_nat(val_v)) {
     return val_v;
@@ -966,9 +971,9 @@ static er_val _wisp_macroexpand(wisp_rt* rt, size_t loc_s, wisp_local* loc,
     return val_v;
   }
 
-  if (app->arg_s == 3 && wisp_is_juxt(app->arg_v[0]) && app->arg_v[1] == '#' &&
-      loc_s > 0) {
-    er_val inn_v = _wisp_macroexpand(rt, loc_s, loc, app->arg_v[2]);
+  if (app->arg_s == 3 && (int)wisp_is_juxt(app->arg_v[0]) &&
+      app->arg_v[1] == '#' && loc_s > 0) {
+    er_val inn_v = wisp_macroexpand_inn(rt, loc_s, loc, app->arg_v[2]);
     return wisp_app3(rt, 0, app->arg_v[0], '#', inn_v);
   }
 
@@ -977,39 +982,38 @@ static er_val _wisp_macroexpand(wisp_rt* rt, size_t loc_s, wisp_local* loc,
   }
 
   uint64_t local_idx_q = 0;
-  bool head_is_local = wisp_is_nat(app->arg_v[0]) &&
-                       wisp_find_local(loc_s, loc, app->arg_v[0], &local_idx_q);
-  if (!head_is_local && wisp_is_nat(app->arg_v[0])) {
+  bool head_is_local =
+      (int)(wisp_is_nat(app->arg_v[0]) &&
+            (int)wisp_find_local(loc_s, loc, app->arg_v[0], &local_idx_q)) != 0;
+  if (!head_is_local && (int)wisp_is_nat(app->arg_v[0])) {
     wisp_env_entry* ent = wisp_getenv(rt, app->arg_v[0]);
     if (ent != NULL) {
       if (ent->mac_f) {
         er_val out_v = wisp_expand_user(rt, ent->val_v, val_v);
-        return _wisp_macroexpand(rt, loc_s, loc, out_v);
+        return wisp_macroexpand_inn(rt, loc_s, loc, out_v);
       }
     } else if (is_sys_macro(app->arg_v[0])) {
-      er_val out_v = _wisp_expand1(rt, loc_s, loc, app->arg_v[0], val_v);
-      return _wisp_macroexpand(rt, loc_s, loc, out_v);
+      er_val out_v = wisp_expand1(rt, loc_s, loc, app->arg_v[0], val_v);
+      return wisp_macroexpand_inn(rt, loc_s, loc, out_v);
     }
   }
 
   er_val* nex_v = NULL;
   for (size_t i = 0; i < app->arg_s; i++) {
-    arrpush(nex_v, _wisp_macroexpand(rt, loc_s, loc, app->arg_v[i]));
+    arrpush(nex_v, wisp_macroexpand_inn(rt, loc_s, loc, app->arg_v[i]));
   }
   er_val out_v = wisp_app_make(rt, 0, arrlen(nex_v), nex_v);
   arrfree(nex_v);
   return out_v;
 }
 
-static er_val _wisp_apple(wisp_rt* rt, size_t val_s, er_val* val_v) {
-  return _wisp_run_apply(rt, val_s, val_v);
+static er_val wisp_apple(wisp_rt* rt, size_t val_s, er_val* val_v) {
+  return wisp_run_apply(rt, val_s, val_v);
 }
 
-static er_val _wisp_thunk(wisp_rt* rt, er_val val_v);
-static er_val _wisp_delay(wisp_rt* rt, er_val val_v);
+static er_val wisp_delay_inn(wisp_rt* rt, er_val val_v);
 
-static er_val _wisp_delay_apply(wisp_rt* rt, size_t val_s,
-                                const er_val* val_v) {
+static er_val wisp_delay_apply(wisp_rt* rt, size_t val_s, const er_val* val_v) {
   if (val_s == 0) {
     return 0;
   }
@@ -1027,14 +1031,14 @@ static er_val _wisp_delay_apply(wisp_rt* rt, size_t val_s,
   return thk_v;
 }
 
-static er_val _wisp_delay(wisp_rt* rt, er_val val_v) {
+static er_val wisp_delay(wisp_rt* rt, er_val val_v) {
   if (val_v == 0) {
     return 0;
   }
   if (wisp_is_nat(val_v)) {
     wisp_env_entry* ent = wisp_getenv(rt, val_v);
     if (!ent) {
-      _wisp_fail_with_val(rt, "unbound thk", val_v);
+      wisp_fail_with_val(rt, "unbound thk", val_v);
     }
     return ent->val_v;
   }
@@ -1047,7 +1051,7 @@ static er_val _wisp_delay(wisp_rt* rt, er_val val_v) {
     return app->arg_v[0];
   }
   if (app->fn_v != 0) {
-    _wisp_fail_with_val(rt, "thunk: expected list", val_v);
+    wisp_fail_with_val(rt, "thunk: expected list", val_v);
   }
 
   er_val* nex_v = malloc(app->arg_s * sizeof(er_val));
@@ -1055,22 +1059,22 @@ static er_val _wisp_delay(wisp_rt* rt, er_val val_v) {
     wisp_fail(rt, "oom");
   }
   for (size_t i = 0; i < app->arg_s; i++) {
-    nex_v[i] = _wisp_delay(rt, app->arg_v[i]);
+    nex_v[i] = wisp_delay(rt, app->arg_v[i]);
   }
-  er_val ret_v = _wisp_delay_apply(rt, app->arg_s, nex_v);
+  er_val ret_v = wisp_delay_apply(rt, app->arg_s, nex_v);
   free(nex_v);
   return ret_v;
 }
 
-static er_val _wisp_thunk(wisp_rt* rt, er_val val_v) {
-  ENKI_PROFILE_ZONE("_wisp_thunk");
+er_val wisp_thunk(wisp_rt* rt, er_val val_v) {
+  ENKI_PROFILE_ZONE("wisp_thunk");
   if (val_v == 0) {
     return 0;
   }
   if (wisp_is_nat(val_v)) {
     wisp_env_entry* ent = wisp_getenv(rt, val_v);
     if (!ent) {
-      _wisp_fail_with_val(rt, "unbound thk", val_v);
+      wisp_fail_with_val(rt, "unbound thk", val_v);
     }
     return ent->val_v;
   }
@@ -1083,7 +1087,7 @@ static er_val _wisp_thunk(wisp_rt* rt, er_val val_v) {
     return app->arg_v[0];
   }
   if (app->fn_v != 0) {
-    _wisp_fail_with_val(rt, "thunk: expected list", val_v);
+    wisp_fail_with_val(rt, "thunk: expected list", val_v);
   }
 
   er_val* nex_v = malloc(app->arg_s * sizeof(er_val));
@@ -1091,20 +1095,16 @@ static er_val _wisp_thunk(wisp_rt* rt, er_val val_v) {
     wisp_fail(rt, "oom");
   }
   for (size_t i = 0; i < app->arg_s; i++) {
-    nex_v[i] = i == 0 ? _wisp_thunk(rt, app->arg_v[i])
-                      : _wisp_delay(rt, app->arg_v[i]);
+    nex_v[i] =
+        i == 0 ? wisp_thunk(rt, app->arg_v[i]) : wisp_delay(rt, app->arg_v[i]);
   }
-  er_val ret_v = _wisp_apple(rt, app->arg_s, nex_v);
+  er_val ret_v = wisp_apple(rt, app->arg_s, nex_v);
   free(nex_v);
   return ret_v;
 }
 
 er_val wisp_macroexpand(wisp_rt* rt, er_val val_v) {
-  return _wisp_macroexpand(rt, 0, NULL, val_v);
-}
-
-er_val wisp_thunk(wisp_rt* rt, er_val val_v) {
-  return _wisp_thunk(rt, val_v);
+  return wisp_macroexpand_inn(rt, 0, NULL, val_v);
 }
 
 er_val wisp_eval(wisp_rt* rt, er_val val_v) {

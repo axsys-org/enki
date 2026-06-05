@@ -7,11 +7,11 @@
 #include <ctype.h>
 #include "stb_ds.h"
 
-#define shr_ceil(x, n) ((x >> n) + ((x & ((1 << n) - 1)) != 0))
-#define max(x, y)      (x > y ? x : y)
-#define min(x, y)      (x > y ? y : x)
-#define die(msg)       assert((msg && 0))
-#define UNUSED(x)      ((void)x)
+#define shr_ceil(x, n) (((x) >> (n)) + (((x) & ((1 << (n)) - 1)) != 0))
+#define max(x, y)      ((x) > (y) ? (x) : (y))
+#define min(x, y)      ((x) > (y) ? (y) : (x))
+#define die(msg)       assert(((msg) && 0))
+#define UNUSED(x)      ((void)(x))
 
 #include <stdio.h>
 #include <stdlib.h>
