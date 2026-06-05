@@ -1,10 +1,11 @@
 #pragma once
 
-
+#if defined(TRACY_ENABLE) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200809L
+#endif
 
 #if defined(TRACY_ENABLE)
 #include <tracy/TracyC.h>
-#include <unistd.h>
 #include <time.h>
 #include <stdlib.h>
 
@@ -25,8 +26,9 @@ static inline void enki_profile_zone_end(enki_profile_zone_ctx* ctx)
 static void wait_for_tracy(double tim_df)
 {
     double deadline_s = now_s() + tim_df;
+    const struct timespec sleep_ts = {.tv_sec = 0, .tv_nsec = 10000000L};
     while(!TracyCIsConnected && now_s() < deadline_s) {
-        usleep(10000);
+        nanosleep(&sleep_ts, NULL);
     }
 }
 

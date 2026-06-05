@@ -6,6 +6,7 @@
 #include "enki/value.h"
 
 #include <criterion/criterion.h>
+#include <inttypes.h>
 
 static enki_interpreter* fixture_interp;
 
@@ -104,7 +105,7 @@ Test(op66_rows, slice_weld_and_up_allocate_expected_rows)
     cr_assert_eq(updated_v->n_args_s, 3);
     cr_assert_eq(updated_v->args_v[0], 10);
     cr_assert_eq(updated_v->args_v[1], 77);
-    cr_assert_eq(updated_v->args_v[2], 30, "actual args_v[2]=%llu", (unsigned long long)updated_v->args_v[2]);
+    cr_assert_eq(updated_v->args_v[2], 30, "actual args_v[2]=%" PRIu64, updated_v->args_v[2]);
 }
 
 Test(op66_rows, case_and_boolean_ops_choose_expected_values)

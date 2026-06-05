@@ -1,3 +1,7 @@
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include "test_interp.h"
 #include "enki/allocator.h"
 #include "enki/app.h"
@@ -12,7 +16,9 @@
 #include "enki/vector.h"
 
 #include <criterion/criterion.h>
+#include <inttypes.h>
 #include <stdint.h>
+#include <time.h>
 
 static uint64_t wisp_now_ns(void)
 {
@@ -154,14 +160,14 @@ Test(runtime_stats, small_nat_inc_stays_on_immediate_fast_path)
     }
 
     cr_log_info(
-        "small inc stats: tmp_alloc=%llu tmp_bytes=%llu heap_alloc=%llu "
-        "heap_bytes=%llu immediate_results=%llu big_results=%llu",
-        (unsigned long long)fixture_interp->stats.nat_tmp_alloc_s,
-        (unsigned long long)fixture_interp->stats.nat_tmp_bytes_s,
-        (unsigned long long)fixture_interp->stats.nat_heap_alloc_s,
-        (unsigned long long)fixture_interp->stats.nat_heap_bytes_s,
-        (unsigned long long)fixture_interp->stats.nat_immediate_result_s,
-        (unsigned long long)fixture_interp->stats.nat_big_result_s);
+        "small inc stats: tmp_alloc=%" PRIu64 " tmp_bytes=%" PRIu64 " heap_alloc=%" PRIu64
+        " heap_bytes=%" PRIu64 " immediate_results=%" PRIu64 " big_results=%" PRIu64,
+        fixture_interp->stats.nat_tmp_alloc_s,
+        fixture_interp->stats.nat_tmp_bytes_s,
+        fixture_interp->stats.nat_heap_alloc_s,
+        fixture_interp->stats.nat_heap_bytes_s,
+        fixture_interp->stats.nat_immediate_result_s,
+        fixture_interp->stats.nat_big_result_s);
 
     cr_assert_eq(fixture_interp->stats.nat_tmp_alloc_s, 0);
     cr_assert_eq(fixture_interp->stats.nat_tmp_bytes_s, 0);
@@ -179,14 +185,14 @@ Test(runtime_stats, big_nat_fallback_still_records_scratch_and_heap_churn)
     cr_assert(IS_PTR(bigger));
 
     cr_log_info(
-        "big inc stats: tmp_alloc=%llu tmp_bytes=%llu heap_alloc=%llu "
-        "heap_bytes=%llu immediate_results=%llu big_results=%llu",
-        (unsigned long long)fixture_interp->stats.nat_tmp_alloc_s,
-        (unsigned long long)fixture_interp->stats.nat_tmp_bytes_s,
-        (unsigned long long)fixture_interp->stats.nat_heap_alloc_s,
-        (unsigned long long)fixture_interp->stats.nat_heap_bytes_s,
-        (unsigned long long)fixture_interp->stats.nat_immediate_result_s,
-        (unsigned long long)fixture_interp->stats.nat_big_result_s);
+        "big inc stats: tmp_alloc=%" PRIu64 " tmp_bytes=%" PRIu64 " heap_alloc=%" PRIu64
+        " heap_bytes=%" PRIu64 " immediate_results=%" PRIu64 " big_results=%" PRIu64,
+        fixture_interp->stats.nat_tmp_alloc_s,
+        fixture_interp->stats.nat_tmp_bytes_s,
+        fixture_interp->stats.nat_heap_alloc_s,
+        fixture_interp->stats.nat_heap_bytes_s,
+        fixture_interp->stats.nat_immediate_result_s,
+        fixture_interp->stats.nat_big_result_s);
 
     cr_assert_gt(fixture_interp->stats.nat_tmp_alloc_s, 0);
     cr_assert_gt(fixture_interp->stats.nat_heap_alloc_s, 0);
@@ -214,14 +220,14 @@ Test(runtime_stats, bytecode_law_inc_records_apply_eval_and_op_counts)
     run_until_base_frame();
 
     cr_log_info(
-        "law inc stats: steps=%llu law_enter=%llu apply=%llu exact=%llu "
-        "op66_inc=%llu nat_tmp_alloc=%llu",
-        (unsigned long long)fixture_interp->stats.interp_step_s,
-        (unsigned long long)fixture_interp->stats.law_enter_s,
-        (unsigned long long)fixture_interp->stats.apply_s,
-        (unsigned long long)fixture_interp->stats.apply_exact_s,
-        (unsigned long long)fixture_interp->stats.op66_s[OP66_INC],
-        (unsigned long long)fixture_interp->stats.nat_tmp_alloc_s);
+        "law inc stats: steps=%" PRIu64 " law_enter=%" PRIu64 " apply=%" PRIu64
+        " exact=%" PRIu64 " op66_inc=%" PRIu64 " nat_tmp_alloc=%" PRIu64,
+        fixture_interp->stats.interp_step_s,
+        fixture_interp->stats.law_enter_s,
+        fixture_interp->stats.apply_s,
+        fixture_interp->stats.apply_exact_s,
+        fixture_interp->stats.op66_s[OP66_INC],
+        fixture_interp->stats.nat_tmp_alloc_s);
 
     cr_assert_eq(fixture_interp->stack_v[0], 42);
     cr_assert_eq(fixture_interp->stats.apply_exact_s, 1);
@@ -291,18 +297,19 @@ Test(runtime_stats, app_apply_shape_surface_reports_under_exact_and_over)
     cr_assert_eq(forced_v, 42);
 
     cr_log_info(
-        "apply shape stats: apply=%llu row=%llu exact=%llu under=%llu over=%llu "
-        "law_enter=%llu steps=%llu whnf=%llu thunk_forces=%llu nat_heap=%llu",
-        (unsigned long long)fixture_interp->stats.apply_s,
-        (unsigned long long)fixture_interp->stats.apply_row_s,
-        (unsigned long long)fixture_interp->stats.apply_exact_s,
-        (unsigned long long)fixture_interp->stats.apply_under_s,
-        (unsigned long long)fixture_interp->stats.apply_over_s,
-        (unsigned long long)fixture_interp->stats.law_enter_s,
-        (unsigned long long)fixture_interp->stats.interp_step_s,
-        (unsigned long long)fixture_interp->stats.whnf_s,
-        (unsigned long long)fixture_interp->stats.whnf_app_thunk_s,
-        (unsigned long long)fixture_interp->stats.nat_heap_alloc_s);
+        "apply shape stats: apply=%" PRIu64 " row=%" PRIu64 " exact=%" PRIu64
+        " under=%" PRIu64 " over=%" PRIu64 " law_enter=%" PRIu64 " steps=%" PRIu64
+        " whnf=%" PRIu64 " thunk_forces=%" PRIu64 " nat_heap=%" PRIu64,
+        fixture_interp->stats.apply_s,
+        fixture_interp->stats.apply_row_s,
+        fixture_interp->stats.apply_exact_s,
+        fixture_interp->stats.apply_under_s,
+        fixture_interp->stats.apply_over_s,
+        fixture_interp->stats.law_enter_s,
+        fixture_interp->stats.interp_step_s,
+        fixture_interp->stats.whnf_s,
+        fixture_interp->stats.whnf_app_thunk_s,
+        fixture_interp->stats.nat_heap_alloc_s);
 
     cr_assert_geq(fixture_interp->stats.apply_under_s, 1);
     cr_assert_geq(fixture_interp->stats.apply_exact_s, 2);
@@ -412,15 +419,16 @@ Test(runtime_stats, op66_immediate_nat_surface_stays_off_nat_allocators)
     run_until_base_frame();
 
     cr_log_info(
-        "op66 immediate surface stats: steps=%llu nat_tmp=%llu nat_heap=%llu "
-        "add=%llu mul=%llu bits=%llu store8=%llu",
-        (unsigned long long)fixture_interp->stats.interp_step_s,
-        (unsigned long long)fixture_interp->stats.nat_tmp_alloc_s,
-        (unsigned long long)fixture_interp->stats.nat_heap_alloc_s,
-        (unsigned long long)fixture_interp->stats.op66_s[OP66_ADD],
-        (unsigned long long)fixture_interp->stats.op66_s[OP66_MUL],
-        (unsigned long long)fixture_interp->stats.op66_s[OP66_BITS],
-        (unsigned long long)fixture_interp->stats.op66_s[OP66_STORE8]);
+        "op66 immediate surface stats: steps=%" PRIu64 " nat_tmp=%" PRIu64
+        " nat_heap=%" PRIu64 " add=%" PRIu64 " mul=%" PRIu64 " bits=%" PRIu64
+        " store8=%" PRIu64,
+        fixture_interp->stats.interp_step_s,
+        fixture_interp->stats.nat_tmp_alloc_s,
+        fixture_interp->stats.nat_heap_alloc_s,
+        fixture_interp->stats.op66_s[OP66_ADD],
+        fixture_interp->stats.op66_s[OP66_MUL],
+        fixture_interp->stats.op66_s[OP66_BITS],
+        fixture_interp->stats.op66_s[OP66_STORE8]);
 
     cr_assert_eq(fixture_interp->stack_v[0], 42);
     cr_assert_eq(fixture_interp->stats.nat_tmp_alloc_s, 0);
@@ -509,16 +517,16 @@ Test(runtime_stats, row_structural_ops_survive_nat_heap_churn)
     assert_leaf(updated->args_v[2], 40, 41);
 
     cr_log_info(
-        "row structural nat heap churn stats: nat_tmp=%llu nat_heap=%llu "
-        "nat_heap_bytes=%llu gc_collect=%llu gc_copy=%llu gc_live=%llu "
-        "gc_high=%llu final_sp=%zu",
-        (unsigned long long)fixture_interp->stats.nat_tmp_alloc_s,
-        (unsigned long long)fixture_interp->stats.nat_heap_alloc_s,
-        (unsigned long long)fixture_interp->stats.nat_heap_bytes_s,
-        (unsigned long long)fixture_interp->stats.gc_collect_s,
-        (unsigned long long)fixture_interp->stats.gc_copy_s,
-        (unsigned long long)fixture_interp->stats.gc_live_bytes_s,
-        (unsigned long long)fixture_interp->stats.gc_high_water_bytes_s,
+        "row structural nat heap churn stats: nat_tmp=%" PRIu64 " nat_heap=%" PRIu64
+        " nat_heap_bytes=%" PRIu64 " gc_collect=%" PRIu64 " gc_copy=%" PRIu64
+        " gc_live=%" PRIu64 " gc_high=%" PRIu64 " final_sp=%zu",
+        fixture_interp->stats.nat_tmp_alloc_s,
+        fixture_interp->stats.nat_heap_alloc_s,
+        fixture_interp->stats.nat_heap_bytes_s,
+        fixture_interp->stats.gc_collect_s,
+        fixture_interp->stats.gc_copy_s,
+        fixture_interp->stats.gc_live_bytes_s,
+        fixture_interp->stats.gc_high_water_bytes_s,
         fixture_interp->sp);
 
     cr_assert_gt(fixture_interp->stats.nat_heap_alloc_s, 0);
@@ -561,16 +569,17 @@ Test(runtime_stats, eval_whnf_ind_cache_prevents_second_thunk_apply)
     uint64_t second_thunk_delta_s = fixture_interp->stats.whnf_app_thunk_s - first_thunk_s;
 
     fprintf(stderr,
-        "eval thunk cache stats: first_whnf=%llu first_apply=%llu first_steps=%llu "
-        "second_whnf_delta=%llu second_apply_delta=%llu second_step_delta=%llu "
-        "second_thunk_delta=%llu",
-        (unsigned long long)first_whnf_s,
-        (unsigned long long)first_apply_s,
-        (unsigned long long)first_steps_s,
-        (unsigned long long)second_whnf_delta_s,
-        (unsigned long long)second_apply_delta_s,
-        (unsigned long long)second_step_delta_s,
-        (unsigned long long)second_thunk_delta_s);
+        "eval thunk cache stats: first_whnf=%" PRIu64 " first_apply=%" PRIu64
+        " first_steps=%" PRIu64 " second_whnf_delta=%" PRIu64
+        " second_apply_delta=%" PRIu64 " second_step_delta=%" PRIu64
+        " second_thunk_delta=%" PRIu64,
+        first_whnf_s,
+        first_apply_s,
+        first_steps_s,
+        second_whnf_delta_s,
+        second_apply_delta_s,
+        second_step_delta_s,
+        second_thunk_delta_s);
 
     cr_assert_eq(second_v, 42);
     cr_assert_eq(second_apply_delta_s, 0);
@@ -609,16 +618,17 @@ Test(runtime_stats, eval_nf_pin_law_app_surface_forces_hashes_and_caches)
     enki_pin* pin = ENKI_AS(enki_pin, result_v);
 
     cr_log_info(
-        "eval nf pin/law/app stats: whnf=%llu thunk_forces=%llu apply=%llu "
-        "exact=%llu steps=%llu law_enter=%llu nat_tmp=%llu nat_heap=%llu",
-        (unsigned long long)fixture_interp->stats.whnf_s,
-        (unsigned long long)fixture_interp->stats.whnf_app_thunk_s,
-        (unsigned long long)fixture_interp->stats.apply_s,
-        (unsigned long long)fixture_interp->stats.apply_exact_s,
-        (unsigned long long)fixture_interp->stats.interp_step_s,
-        (unsigned long long)fixture_interp->stats.law_enter_s,
-        (unsigned long long)fixture_interp->stats.nat_tmp_alloc_s,
-        (unsigned long long)fixture_interp->stats.nat_heap_alloc_s);
+        "eval nf pin/law/app stats: whnf=%" PRIu64 " thunk_forces=%" PRIu64
+        " apply=%" PRIu64 " exact=%" PRIu64 " steps=%" PRIu64
+        " law_enter=%" PRIu64 " nat_tmp=%" PRIu64 " nat_heap=%" PRIu64,
+        fixture_interp->stats.whnf_s,
+        fixture_interp->stats.whnf_app_thunk_s,
+        fixture_interp->stats.apply_s,
+        fixture_interp->stats.apply_exact_s,
+        fixture_interp->stats.interp_step_s,
+        fixture_interp->stats.law_enter_s,
+        fixture_interp->stats.nat_tmp_alloc_s,
+        fixture_interp->stats.nat_heap_alloc_s);
 
     cr_assert_eq(result_v, pin_v);
     cr_assert_eq(pin->h.state_b, NF);
@@ -690,23 +700,25 @@ Test(runtime_stats, eval_bytecode_factorial_uses_eval_whnf_without_exploding)
 
 
     fprintf(stderr,
-        "eval fac 8 stats: time %llu ns, result=%llu whnf=%llu whnf_thunk=%llu apply=%llu "
-        "exact=%llu under=%llu over=%llu steps=%llu law_enter=%llu op66_force=%llu "
-        "op66_mul=%llu nat_tmp=%llu nat_heap=%llu",
+        "eval fac 8 stats: time %" PRIu64 " ns, result=%" PRIu64 " whnf=%" PRIu64
+        " whnf_thunk=%" PRIu64 " apply=%" PRIu64 " exact=%" PRIu64 " under=%" PRIu64
+        " over=%" PRIu64 " steps=%" PRIu64 " law_enter=%" PRIu64
+        " op66_force=%" PRIu64 " op66_mul=%" PRIu64 " nat_tmp=%" PRIu64
+        " nat_heap=%" PRIu64,
         (dex_q - sin_q),
-        (unsigned long long)result_v,
-        (unsigned long long)fixture_interp->stats.whnf_s,
-        (unsigned long long)fixture_interp->stats.whnf_app_thunk_s,
-        (unsigned long long)fixture_interp->stats.apply_s,
-        (unsigned long long)fixture_interp->stats.apply_exact_s,
-        (unsigned long long)fixture_interp->stats.apply_under_s,
-        (unsigned long long)fixture_interp->stats.apply_over_s,
-        (unsigned long long)fixture_interp->stats.interp_step_s,
-        (unsigned long long)fixture_interp->stats.law_enter_s,
-        (unsigned long long)fixture_interp->stats.op66_s[OP66_FORCE],
-        (unsigned long long)fixture_interp->stats.op66_s[OP66_MUL],
-        (unsigned long long)fixture_interp->stats.nat_tmp_alloc_s,
-        (unsigned long long)fixture_interp->stats.nat_heap_alloc_s);
+        result_v,
+        fixture_interp->stats.whnf_s,
+        fixture_interp->stats.whnf_app_thunk_s,
+        fixture_interp->stats.apply_s,
+        fixture_interp->stats.apply_exact_s,
+        fixture_interp->stats.apply_under_s,
+        fixture_interp->stats.apply_over_s,
+        fixture_interp->stats.interp_step_s,
+        fixture_interp->stats.law_enter_s,
+        fixture_interp->stats.op66_s[OP66_FORCE],
+        fixture_interp->stats.op66_s[OP66_MUL],
+        fixture_interp->stats.nat_tmp_alloc_s,
+        fixture_interp->stats.nat_heap_alloc_s);
 
     cr_assert_eq(result_v, 40320);
     cr_assert_lt(fixture_interp->stats.whnf_s, 10000);
@@ -850,31 +862,33 @@ Test(runtime_stats, full_surface_one_shot_reports_runtime_oom_perf)
     cr_assert_eq(enki_nat_bits(fixture_interp->gc, big_sum), 71);
 
     cr_log_info(
-        "FULL_SURFACE oom-perf: steps=%llu law_enter=%llu apply=%llu exact=%llu "
-        "under=%llu over=%llu whnf=%llu thunk_forces=%llu op66_inc=%llu "
-        "op66_add=%llu nat_tmp=%llu nat_tmp_bytes=%llu nat_heap=%llu "
-        "nat_heap_bytes=%llu gc_alloc=%llu gc_locked=%llu gc_collect=%llu "
-        "gc_copy=%llu gc_live=%llu gc_high=%llu sp=%zu",
-        (unsigned long long)fixture_interp->stats.interp_step_s,
-        (unsigned long long)fixture_interp->stats.law_enter_s,
-        (unsigned long long)fixture_interp->stats.apply_s,
-        (unsigned long long)fixture_interp->stats.apply_exact_s,
-        (unsigned long long)fixture_interp->stats.apply_under_s,
-        (unsigned long long)fixture_interp->stats.apply_over_s,
-        (unsigned long long)fixture_interp->stats.whnf_s,
-        (unsigned long long)fixture_interp->stats.whnf_app_thunk_s,
-        (unsigned long long)fixture_interp->stats.op66_s[OP66_INC],
-        (unsigned long long)fixture_interp->stats.op66_s[OP66_ADD],
-        (unsigned long long)fixture_interp->stats.nat_tmp_alloc_s,
-        (unsigned long long)fixture_interp->stats.nat_tmp_bytes_s,
-        (unsigned long long)fixture_interp->stats.nat_heap_alloc_s,
-        (unsigned long long)fixture_interp->stats.nat_heap_bytes_s,
-        (unsigned long long)fixture_interp->stats.gc_alloc_s,
-        (unsigned long long)fixture_interp->stats.gc_locked_alloc_s,
-        (unsigned long long)fixture_interp->stats.gc_collect_s,
-        (unsigned long long)fixture_interp->stats.gc_copy_s,
-        (unsigned long long)fixture_interp->stats.gc_live_bytes_s,
-        (unsigned long long)fixture_interp->stats.gc_high_water_bytes_s,
+        "FULL_SURFACE oom-perf: steps=%" PRIu64 " law_enter=%" PRIu64
+        " apply=%" PRIu64 " exact=%" PRIu64 " under=%" PRIu64 " over=%" PRIu64
+        " whnf=%" PRIu64 " thunk_forces=%" PRIu64 " op66_inc=%" PRIu64
+        " op66_add=%" PRIu64 " nat_tmp=%" PRIu64 " nat_tmp_bytes=%" PRIu64
+        " nat_heap=%" PRIu64 " nat_heap_bytes=%" PRIu64 " gc_alloc=%" PRIu64
+        " gc_locked=%" PRIu64 " gc_collect=%" PRIu64 " gc_copy=%" PRIu64
+        " gc_live=%" PRIu64 " gc_high=%" PRIu64 " sp=%zu",
+        fixture_interp->stats.interp_step_s,
+        fixture_interp->stats.law_enter_s,
+        fixture_interp->stats.apply_s,
+        fixture_interp->stats.apply_exact_s,
+        fixture_interp->stats.apply_under_s,
+        fixture_interp->stats.apply_over_s,
+        fixture_interp->stats.whnf_s,
+        fixture_interp->stats.whnf_app_thunk_s,
+        fixture_interp->stats.op66_s[OP66_INC],
+        fixture_interp->stats.op66_s[OP66_ADD],
+        fixture_interp->stats.nat_tmp_alloc_s,
+        fixture_interp->stats.nat_tmp_bytes_s,
+        fixture_interp->stats.nat_heap_alloc_s,
+        fixture_interp->stats.nat_heap_bytes_s,
+        fixture_interp->stats.gc_alloc_s,
+        fixture_interp->stats.gc_locked_alloc_s,
+        fixture_interp->stats.gc_collect_s,
+        fixture_interp->stats.gc_copy_s,
+        fixture_interp->stats.gc_live_bytes_s,
+        fixture_interp->stats.gc_high_water_bytes_s,
         fixture_interp->sp);
 
     cr_assert_lt(fixture_interp->stats.interp_step_s, 256);

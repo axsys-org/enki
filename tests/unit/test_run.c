@@ -4,6 +4,7 @@
 #include "enki/run_ops.h"
 
 #include <criterion/criterion.h>
+#include <inttypes.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -2522,5 +2523,5 @@ Test(run_vm, recursive_factorial_uses_bytecode_calls_and_primop_set)
     call->arg_v[2] = 1;
 
     er_val result_v = run_vm(code, call_v);
-    cr_assert_eq(result_v, 40320, "got %llu", (unsigned long long)result_v);
+    cr_assert_eq(result_v, 40320, "got %" PRIu64, result_v);
 }

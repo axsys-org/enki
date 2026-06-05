@@ -1,3 +1,7 @@
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include "test_interp.h"
 
 #include "enki/allocator.h"
@@ -13,6 +17,7 @@
 #include "enki/value.h"
 #include "enki/wisp.h"
 
+#include <inttypes.h>
 #include <setjmp.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -20,7 +25,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <unistd.h>
 
 typedef struct {
     const char* name_c;
@@ -455,25 +459,27 @@ static void maybe_collect_interp(enki_interpreter* i)
 static void print_interp_result(const char* workload_c, size_t n, enki_value last_v,
     size_t iterations_s, enki_interpreter* i)
 {
-    printf("profile_runtime: workload=%s n=%zu result=%llu iterations=%zu "
-           "steps=%llu apply=%llu exact=%llu under=%llu over=%llu row=%llu op=%llu whnf=%llu "
-           "gc_alloc=%llu gc_locked=%llu gc_collect=%llu gc_bytes=%llu\n",
+    printf("profile_runtime: workload=%s n=%zu result=%" PRIu64 " iterations=%zu "
+           "steps=%" PRIu64 " apply=%" PRIu64 " exact=%" PRIu64 " under=%" PRIu64
+           " over=%" PRIu64 " row=%" PRIu64 " op=%" PRIu64 " whnf=%" PRIu64
+           " gc_alloc=%" PRIu64 " gc_locked=%" PRIu64 " gc_collect=%" PRIu64
+           " gc_bytes=%" PRIu64 "\n",
         workload_c,
         n,
-        (unsigned long long)last_v,
+        last_v,
         iterations_s,
-        (unsigned long long)i->stats.interp_step_s,
-        (unsigned long long)i->stats.apply_s,
-        (unsigned long long)i->stats.apply_exact_s,
-        (unsigned long long)i->stats.apply_under_s,
-        (unsigned long long)i->stats.apply_over_s,
-        (unsigned long long)i->stats.apply_row_s,
-        (unsigned long long)i->stats.apply_op_s,
-        (unsigned long long)i->stats.whnf_s,
-        (unsigned long long)i->stats.gc_alloc_s,
-        (unsigned long long)i->stats.gc_locked_alloc_s,
-        (unsigned long long)i->stats.gc_collect_s,
-        (unsigned long long)i->stats.gc_alloc_bytes_s);
+        i->stats.interp_step_s,
+        i->stats.apply_s,
+        i->stats.apply_exact_s,
+        i->stats.apply_under_s,
+        i->stats.apply_over_s,
+        i->stats.apply_row_s,
+        i->stats.apply_op_s,
+        i->stats.whnf_s,
+        i->stats.gc_alloc_s,
+        i->stats.gc_locked_alloc_s,
+        i->stats.gc_collect_s,
+        i->stats.gc_alloc_bytes_s);
 }
 
 static int run_bytecode_fac(size_t n, double seconds)
@@ -530,10 +536,10 @@ static int run_planvm_fac(size_t n, double seconds)
         ENKI_PROFILE_PLOT_I("iterations", (int64_t)iterations_s);
     }
 
-    printf("profile_runtime: workload=planvm_fac n=%zu result=%llu iterations=%zu "
-           "arena_peak_bytes=%zu bytecode_steps=%llu reductions=%llu\n",
+    printf("profile_runtime: workload=planvm_fac n=%zu result=%" PRIu64 " iterations=%zu "
+           "arena_peak_bytes=%zu bytecode_steps=%" PRIu64 " reductions=%" PRIu64 "\n",
         n,
-        (unsigned long long)last_v,
+        last_v,
         iterations_s,
         peak_s, b_count, k_count);
     planvm_arena_destroy(&arena);
@@ -572,10 +578,10 @@ static int run_planvm_fib(size_t n, double seconds)
         ENKI_PROFILE_PLOT_I("iterations", (int64_t)iterations_s);
     }
 
-    printf("profile_runtime: workload=planvm_fib n=%zu result=%llu iterations=%zu "
-           "arena_peak_bytes=%zu bytecode_steps=%llu reductions=%llu\n",
+    printf("profile_runtime: workload=planvm_fib n=%zu result=%" PRIu64 " iterations=%zu "
+           "arena_peak_bytes=%zu bytecode_steps=%" PRIu64 " reductions=%" PRIu64 "\n",
         n,
-        (unsigned long long)last_v,
+        last_v,
         iterations_s,
         peak_s, b_count, k_count);
     planvm_arena_destroy(&arena);
@@ -800,8 +806,9 @@ static void wait_for_tracy(void)
 {
 #if defined(TRACY_ENABLE)
     double deadline_s = now_s() + 10.0;
+    const struct timespec sleep_ts = {.tv_sec = 0, .tv_nsec = 10000000L};
     while(!TracyCIsConnected && now_s() < deadline_s) {
-        usleep(10000);
+        nanosleep(&sleep_ts, NULL);
     }
 #endif
 }
