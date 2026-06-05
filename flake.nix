@@ -247,7 +247,7 @@
           // {
             # tidy = tidyCheck;
             format = treefmtEval.config.build.check self;
-            coverage = coverageReport;
+            #coverage = coverageReport;
           };
 
         apps = {

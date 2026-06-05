@@ -16,6 +16,7 @@ jobs:
       - uses: cachix/install-nix-action@v31
       - uses: DeterminateSystems/magic-nix-cache-action@v8
       - run: nix flake check -L
+
   #
   # fuzz-smoke:
   #   runs-on: ubuntu-latest
@@ -32,7 +33,7 @@ jobs:
       - uses: cachix/install-nix-action@v31
       - uses: DeterminateSystems/magic-nix-cache-action@v8
       - run: nix build .#coverage
-      - uses: actions/upload-artifact@v4
+      - uses: romeovs/lcov-reporter-action@v0.3.1
         with:
-          name: enki-coverage
-          path: result/
+          lcov-file: ./result/enki.info
+

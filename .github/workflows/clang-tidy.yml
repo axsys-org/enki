@@ -1,0 +1,42 @@
+name: clang-tidy
+
+on:
+  pull_request:
+    paths: ['**.c', '**.h']   # don't even spin up unless C sources changed
+
+jobs:
+  tidy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # full history so we can diff against the PR base
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v30   # check for a newer tag
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      # bear + clang-tools (clang-tidy, run-clang-tidy) must be in your devShell.
+      - name: Generate compile_commands.json
+        run: nix develop --command bear -- make
+
+      - name: clang-tidy on changed files
+        run: |
+          set -euo pipefail
+          base="${{ github.event.pull_request.base.sha }}"
+          mapfile -t changed < <(
+            git diff --name-only --diff-filter=ACMR "$base"...HEAD -- '*.c' '*.h'
+          )
+          if [ ${#changed[@]} -eq 0 ]; then
+            echo "No C sources changed."; exit 0
+          fi
+          printf 'Linting:\n'; printf '  %s\n' "${changed[@]}"
+          nix develop --command \
+            run-clang-tidy -p . -quiet "${changed[@]}" 2>&1 | tee tidy.log
+          if grep -Eq '(warning|error):' tidy.log; then
+            echo "::error::clang-tidy reported issues on changed files"
+            exit 1
+          fi
