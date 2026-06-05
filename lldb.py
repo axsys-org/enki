@@ -1,20 +1,22 @@
 # enki_lldb.py
 #
-# LLDB helpers for the enki_value tagged-pointer representation from enki/value.h.
+# LLDB helpers for the er_val top-byte tagged representation from enki/run.h.
 #
 # Load in LLDB:
-#   (lldb) command script import /absolute/path/to/enki_lldb.py
+#   (lldb) command script import /absolute/path/to/lldb.py
 #
 # Then try:
 #   (lldb) enki x_v
 #   (lldb) enki -d 4 app_v
-#   (lldb) enki-obj some_enki_app_ptr
+#   (lldb) enki-obj -t app some_er_app_ptr
 #   (lldb) enki-header x_v
-#   (lldb) enki-tag some_raw_ptr
+#   (lldb) enki-obj-header some_er_app_ptr
+#   (lldb) enki-tag -t app some_raw_ptr
 #   (lldb) enki-untag x_v
 #   (lldb) enki-layout
 #
-# The module also registers a type summary for variables whose debug type is `enki_value`.
+# The module also registers type summaries for variables whose debug type is
+# `er_val` or the older `enki_value` alias.
 
 from __future__ import annotations
 
@@ -25,27 +27,69 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 try:
     import lldb  # type: ignore
-except Exception:  # lets `python -m py_compile enki_lldb.py` work outside LLDB
+except Exception:  # lets `python -m py_compile lldb.py` work outside LLDB
     lldb = None  # type: ignore
 
 
-TAG_BIT = 1 << 63
 VALUE_MASK = (1 << 64) - 1
-PTR_MASK = VALUE_MASK ^ TAG_BIT
+ER_TAG_SHIFT = 56
+ER_PTR_MASK = 0x00FFFFFFFFFFFFFF
+ER_PTR_BIT = 1 << 63
+
+ER_TAG_BAT = 0x82
+ER_TAG_PIN = 0xC4
+ER_TAG_LAW = 0xC8
+ER_TAG_APP = 0xD0
+ER_TAG_THK = 0xE0
+ER_TAG_FWD = 0xF0
+ER_TAG_TANK = 0xFE
+ER_TAG_BAD = 0xFF
 
 TAGS = {
-    0: "PIN",
-    1: "LAW",
-    2: "APP",
-    3: "BIG_NAT",
-    4: "FWD",
-    5: "CONT",
+    ER_TAG_BAT: "BAT",
+    ER_TAG_PIN: "PIN",
+    ER_TAG_LAW: "LAW",
+    ER_TAG_APP: "APP",
+    ER_TAG_THK: "THK",
+    ER_TAG_FWD: "FWD",
+    ER_TAG_TANK: "TANK",
+    ER_TAG_BAD: "BAD",
 }
 
-STATES = {
-    0: "WHNF",
-    1: "NF",
-    2: "THUNK",
+TAG_NAMES = {
+    "bat": ER_TAG_BAT,
+    "big_nat": ER_TAG_BAT,
+    "bignat": ER_TAG_BAT,
+    "nat": ER_TAG_BAT,
+    "pin": ER_TAG_PIN,
+    "law": ER_TAG_LAW,
+    "app": ER_TAG_APP,
+    "thk": ER_TAG_THK,
+    "thunk": ER_TAG_THK,
+    "fwd": ER_TAG_FWD,
+    "forward": ER_TAG_FWD,
+    "tank": ER_TAG_TANK,
+    "bad": ER_TAG_BAD,
+}
+
+HEADED_TAGS = {
+    ER_TAG_BAT,
+    ER_TAG_PIN,
+    ER_TAG_LAW,
+    ER_TAG_APP,
+    ER_TAG_THK,
+    ER_TAG_FWD,
+}
+
+KNOWN_TAGS = HEADED_TAGS | {ER_TAG_TANK, ER_TAG_BAD}
+
+EXECF = {
+    0: "ER_XDONE",
+    1: "ER_XUNK_APP",
+    2: "ER_CALL",
+    3: "ER_XPRIM",
+    4: "ER_HOLE",
+    5: "ER_SUSP",
 }
 
 
@@ -69,16 +113,49 @@ def _hex_addr(v: int, addr_size: int = 8) -> str:
     return f"0x{v:0{width}x}"
 
 
+def er_get_tag(v: int) -> int:
+    return ((v & VALUE_MASK) >> ER_TAG_SHIFT) & 0xFF
+
+
+def tag_name(tag: int) -> str:
+    return TAGS.get(tag, f"UNKNOWN(0x{tag:02x})")
+
+
+def is_er_ptr(v: int) -> bool:
+    return bool(v & ER_PTR_BIT)
+
+
+def is_er_cat(v: int) -> bool:
+    return not is_er_ptr(v)
+
+
+def er_outa(v: int) -> int:
+    return v & ER_PTR_MASK
+
+
+def er_into(tag: int, ptr: int) -> int:
+    return (((tag & 0xFF) << ER_TAG_SHIFT) | (ptr & ER_PTR_MASK)) & VALUE_MASK
+
+
+def is_good_tag(tag: int) -> bool:
+    return tag < ER_TAG_TANK
+
+
+def is_whnf_tag(tag: int) -> bool:
+    return tag <= ER_TAG_APP
+
+
+# Backward-compatible names used by callers and older examples.
 def is_enki_ptr(v: int) -> bool:
-    return bool(v & TAG_BIT)
+    return is_er_ptr(v)
 
 
 def enki_to_ptr(v: int) -> int:
-    return v & PTR_MASK
+    return er_outa(v)
 
 
-def ptr_to_enki(p: int) -> int:
-    return (p | TAG_BIT) & VALUE_MASK
+def ptr_to_enki(p: int, tag: int = ER_TAG_APP) -> int:
+    return er_into(tag, p)
 
 
 def _parse_int_literal(expr: str) -> Optional[int]:
@@ -101,6 +178,24 @@ def _parse_int_literal(expr: str) -> Optional[int]:
         return int(s, 0) & VALUE_MASK
     except Exception:
         return None
+
+
+def _parse_tag(s: str) -> Optional[int]:
+    cleaned = s.strip()
+    if not cleaned:
+        return None
+    lowered = cleaned.lower()
+    if lowered.startswith("er_tag_"):
+        lowered = lowered[len("er_tag_") :]
+    if lowered in TAG_NAMES:
+        return TAG_NAMES[lowered]
+    try:
+        tag = int(cleaned, 0)
+    except Exception:
+        return None
+    if 0 <= tag <= 0xFF:
+        return tag
+    return None
 
 
 def _selected_frame(debugger):
@@ -162,19 +257,16 @@ class StructDesc:
 
 
 class Layout:
-    """Target-dependent object layout.
-
-    Uses DWARF type info when available; otherwise falls back to normal LP64 C layout for
-    the header in the question. The fallback is deliberately explicit because padding in
-    obj_header matters.
-    """
+    """Target-dependent object layout for the run.h runtime."""
 
     def __init__(self, target):
         self.target = target
         self.addr_size = 8
         self.size_t_size = 8
-        self.enki_value_size = 8
-        self.mp_limb_size = 8
+        self.er_val_size = 8
+        self.limb_size = 8
+        self.execf_size = 4
+        self.bcpc_size = 4
         self.byte_order = "little"
 
         if _is_valid(target):
@@ -184,107 +276,150 @@ class Layout:
                 pass
             self.byte_order = self._target_byte_order(target)
             self.size_t_size = self._sizeof_first(["size_t"], self.addr_size)
-            self.enki_value_size = self._sizeof_first(["enki_value", "uint64_t"], 8)
-            self.mp_limb_size = self._sizeof_first(["mp_limb_t", "unsigned long"], self.addr_size)
+            self.er_val_size = self._sizeof_first(["er_val", "enki_value", "uint64_t"], 8)
+            self.limb_size = self._sizeof_first(["uint64_t"], 8)
+            self.execf_size = self._sizeof_first(["er_execf"], 4)
+            self.bcpc_size = self._sizeof_first(["er_bcpc", "uint32_t"], 4)
 
-        self.obj_header = self._struct_or_fallback(
-            ["obj_header", "enki_value_header"],
-            StructDesc(
-                "obj_header",
-                24,
-                {
-                    "kind_b": (0, 1),
-                    "size_s": (8, self.size_t_size),
-                    "state_b": (16, 1),
-                },
-                False,
-            ),
-        )
-
-        h = self.obj_header.size
-        ev = self.enki_value_size
         ss = self.size_t_size
-        limb = self.mp_limb_size
+        ev = self.er_val_size
+        hsz = ss
 
-        self.pin = self._struct_or_fallback(
-            ["enki_pin"],
+        self.head = self._struct_or_fallback(
+            ["er_head"],
             StructDesc(
-                "enki_pin",
-                h + 32 + ev + ss,
+                "er_head",
+                hsz,
                 {
-                    "h": (0, h),
-                    "hash_b": (h, 32),
-                    "inner_v": (h + 32, ev),
-                    "n_subpins_s": (h + 32 + ev, ss),
-                    "subpins_v": (h + 32 + ev + ss, ev),
+                    "siz_s": (0, ss),
+                    "raw": (0, ss),
                 },
                 False,
             ),
         )
 
-        # LP64 fallback: obj_header is 24 bytes; uint32_t arity at 24; padding to 32.
-        law_arity_off = h
-        law_name_off = _align_up(law_arity_off + 4, ev)
-        self.law = self._struct_or_fallback(
-            ["enki_law"],
+        h = self.head.size
+
+        self.tank = self._struct_or_fallback(
+            ["er_tank"],
             StructDesc(
-                "enki_law",
-                law_name_off + ev * 2 + ss * 2,
+                "er_tank",
+                ev + self.addr_size,
                 {
-                    "h": (0, h),
-                    "arity_s": (law_arity_off, 4),
-                    "name_v": (law_name_off, ev),
-                    "body_v": (law_name_off + ev, ev),
-                    "bc_len_s": (law_name_off + ev * 2, ss),
-                    "n_const_s": (law_name_off + ev * 2 + ss, ss),
-                    "data_b": (law_name_off + ev * 2 + ss * 2, 1),
+                    "val_v": (0, ev),
+                    "msg_c": (_align_up(ev, self.addr_size), self.addr_size),
                 },
                 False,
             ),
         )
 
-        self.nat = self._struct_or_fallback(
-            ["enki_nat"],
+        self.bat = self._struct_or_fallback(
+            ["er_bat"],
             StructDesc(
-                "enki_nat",
+                "er_bat",
                 h + ss,
                 {
+                    "hed": (0, h),
+                    "lim_s": (h, ss),
+                    "lim_q": (h + ss, self.limb_size),
+                },
+                False,
+            ),
+        )
+
+        self.pin = self._struct_or_fallback(
+            ["er_pin"],
+            StructDesc(
+                "er_pin",
+                h + 32 + ev + ss,
+                {
+                    "hed": (0, h),
+                    "hash_b": (h, 32),
+                    "val_v": (h + 32, ev),
+                    "sub_s": (h + 32 + ev, ss),
+                    "sub_v": (h + 32 + ev + ss, ev),
+                },
+                False,
+            ),
+        )
+
+        self.law_label = self._struct_or_fallback(
+            ["er_law_label"],
+            StructDesc(
+                "er_law_label",
+                _align_up(self.bcpc_size, ss) + ss,
+                {
+                    "pc": (0, self.bcpc_size),
+                    "op_s": (_align_up(self.bcpc_size, ss), ss),
+                },
+                False,
+            ),
+        )
+
+        law_ari_off = h + ev * 2
+        law_let_off = law_ari_off + 4
+        law_bc_s_off = _align_up(law_let_off + 4, ss)
+        law_op_s_off = law_bc_s_off + ss
+        law_bc_v_off = law_op_s_off + ss
+        self.law = self._struct_or_fallback(
+            ["er_law"],
+            StructDesc(
+                "er_law",
+                law_bc_v_off,
+                {
                     "h": (0, h),
-                    "n_limbs_s": (h, ss),
-                    "limbs": (h + ss, limb),
+                    "name_v": (h, ev),
+                    "body_v": (h + ev, ev),
+                    "ari_d": (law_ari_off, 4),
+                    "let_d": (law_let_off, 4),
+                    "bc_s": (law_bc_s_off, ss),
+                    "op_s": (law_op_s_off, ss),
+                    "bc_v": (law_bc_v_off, self.law_label.size),
                 },
                 False,
             ),
         )
 
         self.app = self._struct_or_fallback(
-            ["enki_app"],
+            ["er_app"],
             StructDesc(
-                "enki_app",
+                "er_app",
                 h + ev + ss,
                 {
                     "h": (0, h),
                     "fn_v": (h, ev),
-                    "n_args_s": (h + ev, ss),
-                    "args_v": (h + ev + ss, ev),
+                    "arg_s": (h + ev, ss),
+                    "arg_v": (h + ev + ss, ev),
                 },
                 False,
             ),
         )
 
-        self.cont = self._struct_or_fallback(
-            ["enki_cont"],
+        thk_fun_off = h
+        thk_arg_s_off = _align_up(thk_fun_off + self.execf_size, ss)
+        thk_arg_v_off = thk_arg_s_off + ss
+        self.thk = self._struct_or_fallback(
+            ["er_thk"],
             StructDesc(
-                "enki_cont",
-                h + ss,
+                "er_thk",
+                thk_arg_v_off,
                 {
-                    "h": (0, h),
-                    "n_args_s": (h, ss),
-                    "args_v": (h + ss, ev),
+                    "hed": (0, h),
+                    "fun": (thk_fun_off, self.execf_size),
+                    "arg_s": (thk_arg_s_off, ss),
+                    "arg_v": (thk_arg_v_off, ev),
                 },
                 False,
             ),
         )
+
+    @property
+    def enki_value_size(self) -> int:
+        return self.er_val_size
+
+    @property
+    def mp_limb_size(self) -> int:
+        return self.limb_size
 
     def _target_byte_order(self, target) -> str:
         try:
@@ -364,7 +499,7 @@ class Layout:
         return fallback
 
     def all_descs(self) -> List[StructDesc]:
-        return [self.obj_header, self.pin, self.law, self.nat, self.app, self.cont]
+        return [self.head, self.tank, self.bat, self.pin, self.law_label, self.law, self.app, self.thk]
 
 
 def _align_up(n: int, align: int) -> int:
@@ -374,18 +509,29 @@ def _align_up(n: int, align: int) -> int:
 
 
 @dataclass
-class Header:
-    kind: int
-    size: int
-    state: int
+class Head:
+    raw: int
 
     @property
-    def kind_name(self) -> str:
-        return TAGS.get(self.kind, f"UNKNOWN({self.kind})")
+    def size(self) -> int:
+        return self.raw & ~0x3
 
     @property
-    def state_name(self) -> str:
-        return STATES.get(self.state, f"UNKNOWN({self.state})")
+    def fwd(self) -> int:
+        return self.raw & 0x1
+
+    @property
+    def nf(self) -> int:
+        return (self.raw >> 1) & 0x1
+
+    def state_name(self, tag: int) -> str:
+        if self.fwd:
+            return "FWD"
+        if tag == ER_TAG_THK:
+            return "THUNK"
+        if tag in (ER_TAG_BAT, ER_TAG_PIN, ER_TAG_LAW, ER_TAG_APP):
+            return "NF" if self.nf else "WHNF"
+        return "HEAD"
 
 
 class Memory:
@@ -419,21 +565,29 @@ class Memory:
         data = self.read_bytes(addr, size)
         return int.from_bytes(data, self.layout.byte_order, signed=False)
 
-    def read_u8(self, addr: int) -> int:
-        return self.read_uint(addr, 1)
+    def read_er_val(self, addr: int) -> int:
+        return self.read_uint(addr, self.layout.er_val_size) & VALUE_MASK
 
-    def read_size_t(self, addr: int) -> int:
-        return self.read_uint(addr, self.layout.size_t_size)
+    def read_ptr(self, addr: int) -> int:
+        return self.read_uint(addr, self.layout.addr_size)
 
-    def read_enki_value(self, addr: int) -> int:
-        return self.read_uint(addr, self.layout.enki_value_size) & VALUE_MASK
+    def read_head(self, ptr: int) -> Head:
+        d = self.layout.head
+        raw = self.read_uint(ptr + d.off("siz_s", 0), d.width("siz_s", self.layout.size_t_size))
+        return Head(raw=raw)
 
-    def read_header(self, ptr: int) -> Header:
-        h = self.layout.obj_header
-        kind = self.read_u8(ptr + h.off("kind_b"))
-        size = self.read_uint(ptr + h.off("size_s"), h.width("size_s", self.layout.size_t_size))
-        state = self.read_u8(ptr + h.off("state_b"))
-        return Header(kind=kind, size=size, state=state)
+    def read_cstring(self, addr: int, max_bytes: int = 256) -> str:
+        if addr == 0:
+            return "<null>"
+        chunks: List[int] = []
+        for off in range(max_bytes):
+            b = self.read_uint(addr + off, 1)
+            if b == 0:
+                break
+            chunks.append(b)
+        else:
+            chunks.extend(ord(c) for c in "...")
+        return bytes(chunks).decode("utf-8", errors="replace")
 
 
 class EnkiInspector:
@@ -443,35 +597,74 @@ class EnkiInspector:
 
     def brief(self, v: int) -> str:
         v &= VALUE_MASK
-        if not is_enki_ptr(v):
-            return f"imm {_hex(v)} ({v})"
-        ptr = enki_to_ptr(v)
+        if is_er_cat(v):
+            return f"cat {_hex(v)} ({v})"
+
+        tag = er_get_tag(v)
+        ptr = er_outa(v)
+        name = tag_name(tag)
+        if tag == ER_TAG_BAD:
+            return f"{name} tagged={_hex(v)} ptr={_hex_addr(ptr, self.layout.addr_size)}"
+        if tag == ER_TAG_TANK:
+            return f"{name} tagged={_hex(v)} ptr={_hex_addr(ptr, self.layout.addr_size)}"
+        if tag not in HEADED_TAGS:
+            return f"{name} tagged={_hex(v)} ptr={_hex_addr(ptr, self.layout.addr_size)}"
+
         try:
-            h = self.mem.read_header(ptr)
+            h = self.mem.read_head(ptr)
             return (
-                f"{h.kind_name}/{h.state_name} "
+                f"{name}/{h.state_name(tag)} "
                 f"tagged={_hex(v)} ptr={_hex_addr(ptr, self.layout.addr_size)} size={h.size}"
             )
         except Exception as e:
-            return f"ptr tagged={_hex(v)} ptr={_hex_addr(ptr, self.layout.addr_size)} unreadable: {e}"
+            return f"{name} tagged={_hex(v)} ptr={_hex_addr(ptr, self.layout.addr_size)} unreadable: {e}"
 
-    def header_lines(self, v_or_ptr: int, *, raw_ptr: bool = False) -> List[str]:
-        if raw_ptr:
-            ptr = enki_to_ptr(v_or_ptr) if is_enki_ptr(v_or_ptr) else v_or_ptr
-            tagged = ptr_to_enki(ptr)
-        else:
-            if not is_enki_ptr(v_or_ptr):
-                return [f"not a tagged enki pointer: {_hex(v_or_ptr)} ({v_or_ptr})"]
-            tagged = v_or_ptr & VALUE_MASK
-            ptr = enki_to_ptr(tagged)
-        h = self.mem.read_header(ptr)
-        return [
-            f"tagged: {_hex(tagged)}",
+    def head_lines(self, ptr: int, *, tag: Optional[int] = None) -> List[str]:
+        h = self.mem.read_head(ptr)
+        lines = [
             f"ptr:    {_hex_addr(ptr, self.layout.addr_size)}",
-            f"kind:   {h.kind} ({h.kind_name})",
-            f"state:  {h.state} ({h.state_name})",
+            f"head:   {_hex(h.raw)}",
             f"size:   {h.size}",
+            f"fwd_f:  {h.fwd}",
+            f"nf_f:   {h.nf}",
         ]
+        if tag is not None:
+            lines.insert(0, f"tagged: {_hex(er_into(tag, ptr))}")
+            lines.insert(2, f"tag:    0x{tag:02x} ({tag_name(tag)})")
+            lines.append(f"state:  {h.state_name(tag)}")
+        if h.fwd:
+            slot = ptr + self.layout.head.size
+            try:
+                target = self.mem.read_er_val(slot)
+                lines.append(f"fwd_to: {self.brief(target)}")
+            except Exception as e:
+                lines.append(f"fwd_to: unreadable at {_hex_addr(slot, self.layout.addr_size)}: {e}")
+        return lines
+
+    def header_lines(self, v_or_ptr: int, *, raw_ptr: bool = False, tag: Optional[int] = None) -> List[str]:
+        if raw_ptr:
+            ptr = er_outa(v_or_ptr) if is_er_ptr(v_or_ptr) else v_or_ptr
+            return self.head_lines(ptr, tag=tag)
+
+        if is_er_cat(v_or_ptr):
+            return [f"not a tagged er_val pointer: {_hex(v_or_ptr)} ({v_or_ptr})"]
+
+        tagged = v_or_ptr & VALUE_MASK
+        tag = er_get_tag(tagged)
+        ptr = er_outa(tagged)
+        lines = [
+            f"tagged: {_hex(tagged)}",
+            f"tag:    0x{tag:02x} ({tag_name(tag)})",
+            f"ptr:    {_hex_addr(ptr, self.layout.addr_size)}",
+        ]
+        if tag == ER_TAG_TANK:
+            lines.append("head:   <none; er_tank is not headed>")
+            return lines
+        if tag == ER_TAG_BAD:
+            lines.append("head:   <none; er_bad sentinel>")
+            return lines
+        lines.extend(self.head_lines(ptr, tag=tag)[3:])
+        return lines
 
     def describe(
         self,
@@ -489,51 +682,74 @@ class EnkiInspector:
             _seen = set()
         ind = "  " * _indent
 
-        if not is_enki_ptr(v):
-            return [f"{ind}imm {_hex(v)} ({v})"]
+        if is_er_cat(v):
+            return [f"{ind}cat {_hex(v)} ({v})"]
 
-        ptr = enki_to_ptr(v)
+        tag = er_get_tag(v)
+        ptr = er_outa(v)
+        name = tag_name(tag)
+
+        if tag == ER_TAG_BAD:
+            return [f"{ind}{name} tagged={_hex(v)} ptr={_hex_addr(ptr, self.layout.addr_size)}"]
+
+        if tag == ER_TAG_TANK:
+            head = f"{ind}{name} tagged={_hex(v)} ptr={_hex_addr(ptr, self.layout.addr_size)}"
+            if depth <= 0:
+                return [head]
+            if ptr in _seen:
+                return [head + " (seen)"]
+            _seen.add(ptr)
+            try:
+                lines = [head]
+                lines.extend(self._describe_tank(ptr, depth, max_items, max_bytes, max_nat_limbs, _indent + 1, _seen))
+                return lines
+            except Exception as e:
+                return [head, f"{ind}  error while decoding payload: {e}"]
+
+        if tag not in HEADED_TAGS:
+            return [f"{ind}{name} tagged={_hex(v)} ptr={_hex_addr(ptr, self.layout.addr_size)}"]
+
         try:
-            h = self.mem.read_header(ptr)
+            h = self.mem.read_head(ptr)
         except Exception as e:
-            return [f"{ind}ptr tagged={_hex(v)} ptr={_hex_addr(ptr, self.layout.addr_size)} unreadable: {e}"]
+            return [f"{ind}{name} tagged={_hex(v)} ptr={_hex_addr(ptr, self.layout.addr_size)} unreadable: {e}"]
 
         head = (
-            f"{ind}{h.kind_name}/{h.state_name} "
+            f"{ind}{name}/{h.state_name(tag)} "
             f"tagged={_hex(v)} ptr={_hex_addr(ptr, self.layout.addr_size)} size={h.size}"
         )
         if depth <= 0:
             return [head]
         if ptr in _seen:
-            return [head + "  ↩ seen"]
+            return [head + " (seen)"]
         _seen.add(ptr)
 
         try:
-            if h.kind == 0:
-                lines = [head]
-                lines.extend(self._describe_pin(ptr, depth, max_items, max_bytes, max_nat_limbs, _indent + 1, _seen))
-                return lines
-            if h.kind == 1:
-                lines = [head]
-                lines.extend(self._describe_law(ptr, depth, max_items, max_bytes, max_nat_limbs, _indent + 1, _seen))
-                return lines
-            if h.kind == 2:
-                lines = [head]
-                lines.extend(self._describe_app(ptr, depth, max_items, max_bytes, max_nat_limbs, _indent + 1, _seen))
-                return lines
-            if h.kind == 3:
-                lines = [head]
-                lines.extend(self._describe_nat(ptr, max_nat_limbs, _indent + 1))
-                return lines
-            if h.kind == 4:
+            if h.fwd or tag == ER_TAG_FWD:
                 lines = [head]
                 lines.extend(self._describe_fwd(ptr, depth, max_items, max_bytes, max_nat_limbs, _indent + 1, _seen))
                 return lines
-            if h.kind == 5:
+            if tag == ER_TAG_BAT:
                 lines = [head]
-                lines.extend(self._describe_cont(ptr, depth, max_items, max_bytes, max_nat_limbs, _indent + 1, _seen))
+                lines.extend(self._describe_bat(ptr, max_nat_limbs, _indent + 1))
                 return lines
-            return [head, f"{ind}  unknown kind; raw payload starts at +{self.layout.obj_header.size}"]
+            if tag == ER_TAG_PIN:
+                lines = [head]
+                lines.extend(self._describe_pin(ptr, depth, max_items, max_bytes, max_nat_limbs, _indent + 1, _seen))
+                return lines
+            if tag == ER_TAG_LAW:
+                lines = [head]
+                lines.extend(self._describe_law(ptr, depth, max_items, max_bytes, max_nat_limbs, _indent + 1, _seen))
+                return lines
+            if tag == ER_TAG_APP:
+                lines = [head]
+                lines.extend(self._describe_app(ptr, depth, max_items, max_bytes, max_nat_limbs, _indent + 1, _seen))
+                return lines
+            if tag == ER_TAG_THK:
+                lines = [head]
+                lines.extend(self._describe_thk(ptr, depth, max_items, max_bytes, max_nat_limbs, _indent + 1, _seen))
+                return lines
+            return [head, f"{ind}  unknown headed tag; raw payload starts at +{self.layout.head.size}"]
         except Exception as e:
             return [head, f"{ind}  error while decoding payload: {e}"]
 
@@ -550,7 +766,7 @@ class EnkiInspector:
     ) -> List[str]:
         ind = "  " * indent
         lines = [f"{ind}{label}: {self.brief(value)}"]
-        if depth > 1 and is_enki_ptr(value):
+        if depth > 1 and is_er_ptr(value) and er_get_tag(value) in KNOWN_TAGS:
             lines.extend(
                 self.describe(
                     value,
@@ -564,78 +780,84 @@ class EnkiInspector:
             )
         return lines
 
+    def _describe_tank(self, ptr: int, depth: int, max_items: int, max_bytes: int, max_nat_limbs: int, indent: int, seen: set) -> List[str]:
+        d = self.layout.tank
+        ind = "  " * indent
+        val = self.mem.read_er_val(ptr + d.off("val_v"))
+        msg_ptr = self.mem.read_ptr(ptr + d.off("msg_c"))
+        msg = self.mem.read_cstring(msg_ptr, max_bytes)
+        lines = [f"{ind}msg_c: {msg!r} @ {_hex_addr(msg_ptr, self.layout.addr_size)}"]
+        lines.extend(self._describe_child_value("val_v", val, depth, max_items, max_bytes, max_nat_limbs, indent, seen))
+        return lines
+
     def _describe_pin(self, ptr: int, depth: int, max_items: int, max_bytes: int, max_nat_limbs: int, indent: int, seen: set) -> List[str]:
         d = self.layout.pin
         ind = "  " * indent
         hash_b = self.mem.read_bytes(ptr + d.off("hash_b"), min(32, d.width("hash_b", 32)))[:32]
-        inner = self.mem.read_enki_value(ptr + d.off("inner_v"))
-        n_sub = self.mem.read_uint(ptr + d.off("n_subpins_s"), d.width("n_subpins_s", self.layout.size_t_size))
-        sub_base = ptr + d.off("subpins_v")
+        val = self.mem.read_er_val(ptr + d.off("val_v"))
+        sub_s = self.mem.read_uint(ptr + d.off("sub_s"), d.width("sub_s", self.layout.size_t_size))
+        sub_base = ptr + d.off("sub_v")
 
-        lines = [f"{ind}hash: {hash_b.hex()}"]
-        lines.extend(self._describe_child_value("inner_v", inner, depth, max_items, max_bytes, max_nat_limbs, indent, seen))
-        lines.append(f"{ind}n_subpins_s: {n_sub}")
-        for i in range(min(n_sub, max_items)):
-            sv = self.mem.read_enki_value(sub_base + i * self.layout.enki_value_size)
-            lines.extend(self._describe_child_value(f"subpins_v[{i}]", sv, depth, max_items, max_bytes, max_nat_limbs, indent + 1, seen))
-        if n_sub > max_items:
-            lines.append(f"{ind}  ... {n_sub - max_items} more subpin(s) not shown")
+        lines = [f"{ind}hash_b: {hash_b.hex()}"]
+        lines.extend(self._describe_child_value("val_v", val, depth, max_items, max_bytes, max_nat_limbs, indent, seen))
+        lines.append(f"{ind}sub_s: {sub_s}")
+        for i in range(min(sub_s, max_items)):
+            sv = self.mem.read_er_val(sub_base + i * self.layout.er_val_size)
+            lines.extend(self._describe_child_value(f"sub_v[{i}]", sv, depth, max_items, max_bytes, max_nat_limbs, indent + 1, seen))
+        if sub_s > max_items:
+            lines.append(f"{ind}  ... {sub_s - max_items} more sub value(s) not shown")
         return lines
 
     def _describe_law(self, ptr: int, depth: int, max_items: int, max_bytes: int, max_nat_limbs: int, indent: int, seen: set) -> List[str]:
         d = self.layout.law
+        ld = self.layout.law_label
         ind = "  " * indent
-        arity = self.mem.read_uint(ptr + d.off("arity_s"), d.width("arity_s", 4))
-        name = self.mem.read_enki_value(ptr + d.off("name_v"))
-        body = self.mem.read_enki_value(ptr + d.off("body_v"))
-        bc_len = self.mem.read_uint(ptr + d.off("bc_len_s"), d.width("bc_len_s", self.layout.size_t_size))
-        n_const = self.mem.read_uint(ptr + d.off("n_const_s"), d.width("n_const_s", self.layout.size_t_size))
-        data = ptr + d.off("data_b")
-        const_base = data
-        bc_base = data + n_const * self.layout.enki_value_size
+        name = self.mem.read_er_val(ptr + d.off("name_v"))
+        body = self.mem.read_er_val(ptr + d.off("body_v"))
+        ari = self.mem.read_uint(ptr + d.off("ari_d"), d.width("ari_d", 4))
+        let = self.mem.read_uint(ptr + d.off("let_d"), d.width("let_d", 4))
+        bc_s = self.mem.read_uint(ptr + d.off("bc_s"), d.width("bc_s", self.layout.size_t_size))
+        op_s = self.mem.read_uint(ptr + d.off("op_s"), d.width("op_s", self.layout.size_t_size))
+        label_base = ptr + d.off("bc_v")
 
         lines = [
-            f"{ind}arity_s:   {arity}",
-            f"{ind}bc_len_s:  {bc_len}",
-            f"{ind}n_const_s: {n_const}",
+            f"{ind}ari_d: {ari}",
+            f"{ind}let_d: {let}",
+            f"{ind}bc_s:  {bc_s}",
+            f"{ind}op_s:  {op_s}",
         ]
         lines.extend(self._describe_child_value("name_v", name, depth, max_items, max_bytes, max_nat_limbs, indent, seen))
         lines.extend(self._describe_child_value("body_v", body, depth, max_items, max_bytes, max_nat_limbs, indent, seen))
 
-        lines.append(f"{ind}const_table_v @ {_hex_addr(const_base, self.layout.addr_size)}")
-        for i in range(min(n_const, max_items)):
-            cv = self.mem.read_enki_value(const_base + i * self.layout.enki_value_size)
-            lines.extend(self._describe_child_value(f"const[{i}]", cv, depth, max_items, max_bytes, max_nat_limbs, indent + 1, seen))
-        if n_const > max_items:
-            lines.append(f"{ind}  ... {n_const - max_items} more const(s) not shown")
-
-        n = min(bc_len, max_bytes)
-        bc = self.mem.read_bytes(bc_base, n) if n else b""
-        lines.append(f"{ind}bc_b @ {_hex_addr(bc_base, self.layout.addr_size)}")
-        lines.append(f"{ind}bc_hex[{n}/{bc_len}]: {_format_bytes(bc)}")
-        if bc_len > max_bytes:
-            lines.append(f"{ind}  ... {bc_len - max_bytes} byte(s) not shown")
+        lines.append(f"{ind}bc_v @ {_hex_addr(label_base, self.layout.addr_size)}")
+        for i in range(min(bc_s, max_items)):
+            base = label_base + i * ld.size
+            pc = self.mem.read_uint(base + ld.off("pc"), ld.width("pc", self.layout.bcpc_size))
+            ops = self.mem.read_uint(base + ld.off("op_s"), ld.width("op_s", self.layout.size_t_size))
+            lines.append(f"{ind}  bc_v[{i}]: pc={pc} op_s={ops}")
+        if bc_s > max_items:
+            lines.append(f"{ind}  ... {bc_s - max_items} more label(s) not shown")
         return lines
 
-    def _describe_nat(self, ptr: int, max_nat_limbs: int, indent: int) -> List[str]:
-        d = self.layout.nat
+    def _describe_bat(self, ptr: int, max_nat_limbs: int, indent: int) -> List[str]:
+        d = self.layout.bat
         ind = "  " * indent
-        n_limbs = self.mem.read_uint(ptr + d.off("n_limbs_s"), d.width("n_limbs_s", self.layout.size_t_size))
-        limb_base = ptr + d.off("limbs")
-        limb_size = self.layout.mp_limb_size
+        lim_s = self.mem.read_uint(ptr + d.off("lim_s"), d.width("lim_s", self.layout.size_t_size))
+        limb_base = ptr + d.off("lim_q")
+        limb_size = self.layout.limb_size
         limb_bits = limb_size * 8
-        n_show = min(n_limbs, max_nat_limbs)
+        n_show = min(lim_s, max_nat_limbs)
         limbs = [self.mem.read_uint(limb_base + i * limb_size, limb_size) for i in range(n_show)]
 
-        lines = [f"{ind}n_limbs_s: {n_limbs}", f"{ind}limbs @ {_hex_addr(limb_base, self.layout.addr_size)}"]
-        if n_limbs <= max_nat_limbs:
+        lines = [f"{ind}lim_s: {lim_s}", f"{ind}lim_q @ {_hex_addr(limb_base, self.layout.addr_size)}"]
+        if lim_s <= max_nat_limbs:
             value = 0
             for i, limb in enumerate(limbs):
                 value |= limb << (i * limb_bits)
             lines.append(f"{ind}value_dec: {value}")
             lines.append(f"{ind}value_hex: {hex(value)}")
         else:
-            lines.append(f"{ind}value_dec: <not computed; {n_limbs} limbs exceeds max {max_nat_limbs}>")
+            lines.append(f"{ind}value_dec: <not computed; {lim_s} limbs exceeds max {max_nat_limbs}>")
         if limbs:
             rendered = ", ".join(f"{i}:{_limb_hex(x, limb_size)}" for i, x in enumerate(limbs[: min(len(limbs), 16)]))
             lines.append(f"{ind}limbs[least-significant first]: {rendered}")
@@ -643,51 +865,49 @@ class EnkiInspector:
                 lines.append(f"{ind}  ... {n_show - 16} more displayed limb(s) omitted from this line")
         else:
             lines.append(f"{ind}limbs: []")
-        if n_limbs > max_nat_limbs:
-            lines.append(f"{ind}  ... {n_limbs - max_nat_limbs} limb(s) not read")
+        if lim_s > max_nat_limbs:
+            lines.append(f"{ind}  ... {lim_s - max_nat_limbs} limb(s) not read")
         return lines
 
     def _describe_app(self, ptr: int, depth: int, max_items: int, max_bytes: int, max_nat_limbs: int, indent: int, seen: set) -> List[str]:
         d = self.layout.app
         ind = "  " * indent
-        fn = self.mem.read_enki_value(ptr + d.off("fn_v"))
-        n_args = self.mem.read_uint(ptr + d.off("n_args_s"), d.width("n_args_s", self.layout.size_t_size))
-        args_base = ptr + d.off("args_v")
+        fn = self.mem.read_er_val(ptr + d.off("fn_v"))
+        arg_s = self.mem.read_uint(ptr + d.off("arg_s"), d.width("arg_s", self.layout.size_t_size))
+        args_base = ptr + d.off("arg_v")
         lines = []
         lines.extend(self._describe_child_value("fn_v", fn, depth, max_items, max_bytes, max_nat_limbs, indent, seen))
-        lines.append(f"{ind}n_args_s: {n_args}")
-        for i in range(min(n_args, max_items)):
-            av = self.mem.read_enki_value(args_base + i * self.layout.enki_value_size)
-            lines.extend(self._describe_child_value(f"args_v[{i}]", av, depth, max_items, max_bytes, max_nat_limbs, indent + 1, seen))
-        if n_args > max_items:
-            lines.append(f"{ind}  ... {n_args - max_items} more arg(s) not shown")
+        lines.append(f"{ind}arg_s: {arg_s}")
+        for i in range(min(arg_s, max_items)):
+            av = self.mem.read_er_val(args_base + i * self.layout.er_val_size)
+            lines.extend(self._describe_child_value(f"arg_v[{i}]", av, depth, max_items, max_bytes, max_nat_limbs, indent + 1, seen))
+        if arg_s > max_items:
+            lines.append(f"{ind}  ... {arg_s - max_items} more arg(s) not shown")
         return lines
 
-    def _describe_cont(self, ptr: int, depth: int, max_items: int, max_bytes: int, max_nat_limbs: int, indent: int, seen: set) -> List[str]:
-        d = self.layout.cont
+    def _describe_thk(self, ptr: int, depth: int, max_items: int, max_bytes: int, max_nat_limbs: int, indent: int, seen: set) -> List[str]:
+        d = self.layout.thk
         ind = "  " * indent
-        n_args = self.mem.read_uint(ptr + d.off("n_args_s"), d.width("n_args_s", self.layout.size_t_size))
-        args_base = ptr + d.off("args_v")
-        lines = [f"{ind}n_args_s: {n_args}"]
-        for i in range(min(n_args, max_items)):
-            av = self.mem.read_enki_value(args_base + i * self.layout.enki_value_size)
-            lines.extend(self._describe_child_value(f"args_v[{i}]", av, depth, max_items, max_bytes, max_nat_limbs, indent + 1, seen))
-        if n_args > max_items:
-            lines.append(f"{ind}  ... {n_args - max_items} more arg(s) not shown")
+        fun = self.mem.read_uint(ptr + d.off("fun"), d.width("fun", self.layout.execf_size))
+        arg_s = self.mem.read_uint(ptr + d.off("arg_s"), d.width("arg_s", self.layout.size_t_size))
+        args_base = ptr + d.off("arg_v")
+        lines = [f"{ind}fun: {fun} ({EXECF.get(fun, 'UNKNOWN')})", f"{ind}arg_s: {arg_s}"]
+        for i in range(min(arg_s, max_items)):
+            av = self.mem.read_er_val(args_base + i * self.layout.er_val_size)
+            lines.extend(self._describe_child_value(f"arg_v[{i}]", av, depth, max_items, max_bytes, max_nat_limbs, indent + 1, seen))
+        if arg_s > max_items:
+            lines.append(f"{ind}  ... {arg_s - max_items} more arg(s) not shown")
         return lines
 
     def _describe_fwd(self, ptr: int, depth: int, max_items: int, max_bytes: int, max_nat_limbs: int, indent: int, seen: set) -> List[str]:
-        # The posted header declares the tag but not the concrete forwarding object shape.
-        # Treat the first payload word as an enki_value-sized forwarding target, which is
-        # the usual moving-GC shape. If your runtime uses another layout, update this only.
         ind = "  " * indent
-        payload = ptr + self.layout.obj_header.size
+        payload = ptr + self.layout.head.size
         try:
-            target = self.mem.read_enki_value(payload)
+            target = self.mem.read_er_val(payload)
         except Exception as e:
-            return [f"{ind}fwd payload unreadable at {_hex_addr(payload, self.layout.addr_size)}: {e}"]
-        lines = [f"{ind}fwd_payload[0] @ {_hex_addr(payload, self.layout.addr_size)}: {self.brief(target)}"]
-        if depth > 1 and is_enki_ptr(target):
+            return [f"{ind}forwarding slot unreadable at {_hex_addr(payload, self.layout.addr_size)}: {e}"]
+        lines = [f"{ind}forwarding slot @ {_hex_addr(payload, self.layout.addr_size)}: {self.brief(target)}"]
+        if depth > 1 and is_er_ptr(target) and er_get_tag(target) in KNOWN_TAGS:
             lines.extend(
                 self.describe(
                     target,
@@ -704,12 +924,6 @@ class EnkiInspector:
 
 def _limb_hex(x: int, limb_size: int) -> str:
     return f"0x{x:0{limb_size * 2}x}"
-
-
-def _format_bytes(data: bytes) -> str:
-    if not data:
-        return ""
-    return " ".join(f"{b:02x}" for b in data)
 
 
 def _get_inspector(debugger) -> EnkiInspector:
@@ -736,9 +950,15 @@ def _set_error(result, msg: str) -> None:
         print(msg)
 
 
-def _parse_common(command: str) -> Tuple[Dict[str, int], str]:
+def _parse_common(command: str, *, allow_tag: bool = False) -> Tuple[Dict[str, Optional[int]], str]:
     tokens = shlex.split(command)
-    opts = {"depth": 2, "max_items": 16, "max_bytes": 64, "max_nat_limbs": 256}
+    opts: Dict[str, Optional[int]] = {
+        "depth": 2,
+        "max_items": 16,
+        "max_bytes": 64,
+        "max_nat_limbs": 256,
+        "tag": None,
+    }
     expr_tokens: List[str] = []
     i = 0
     while i < len(tokens):
@@ -763,10 +983,29 @@ def _parse_common(command: str) -> Tuple[Dict[str, int], str]:
             if i >= len(tokens):
                 raise EnkiError("missing value after --max-limbs")
             opts["max_nat_limbs"] = int(tokens[i], 0)
+        elif allow_tag and t in ("-t", "--tag"):
+            i += 1
+            if i >= len(tokens):
+                raise EnkiError("missing value after --tag")
+            tag = _parse_tag(tokens[i])
+            if tag is None:
+                raise EnkiError(f"unknown er_val tag {tokens[i]!r}")
+            opts["tag"] = tag
+        elif allow_tag and t.startswith("--tag="):
+            tag = _parse_tag(t.split("=", 1)[1])
+            if tag is None:
+                raise EnkiError(f"unknown er_val tag {t!r}")
+            opts["tag"] = tag
         elif t == "--":
             expr_tokens = tokens[i + 1 :]
             break
         else:
+            if allow_tag and opts["tag"] is None and i + 1 < len(tokens):
+                tag = _parse_tag(t)
+                if tag is not None:
+                    opts["tag"] = tag
+                    expr_tokens = tokens[i + 1 :]
+                    break
             expr_tokens = tokens[i:]
             break
         i += 1
@@ -775,6 +1014,13 @@ def _parse_common(command: str) -> Tuple[Dict[str, int], str]:
     if not expr:
         raise EnkiError("missing expression")
     return opts, expr
+
+
+def _int_opt(opts: Dict[str, Optional[int]], key: str) -> int:
+    value = opts[key]
+    if value is None:
+        raise EnkiError(f"missing option {key}")
+    return value
 
 
 def _guarded(fn):
@@ -791,7 +1037,7 @@ def _guarded(fn):
 
 @_guarded
 def enki_cmd(debugger, command, result, internal_dict):
-    """Pretty-print an enki_value expression."""
+    """Pretty-print an er_val expression."""
     opts, expr = _parse_common(command)
     v = eval_u64(debugger, expr)
     ins = _get_inspector(debugger)
@@ -799,37 +1045,42 @@ def enki_cmd(debugger, command, result, internal_dict):
         result,
         ins.describe(
             v,
-            depth=opts["depth"],
-            max_items=opts["max_items"],
-            max_bytes=opts["max_bytes"],
-            max_nat_limbs=opts["max_nat_limbs"],
+            depth=_int_opt(opts, "depth"),
+            max_items=_int_opt(opts, "max_items"),
+            max_bytes=_int_opt(opts, "max_bytes"),
+            max_nat_limbs=_int_opt(opts, "max_nat_limbs"),
         ),
     )
 
 
 @_guarded
 def enki_obj_cmd(debugger, command, result, internal_dict):
-    """Pretty-print a raw enki heap object pointer, tagging it temporarily."""
-    opts, expr = _parse_common(command)
+    """Pretty-print a raw er_* heap object pointer with an explicit top-byte tag."""
+    opts, expr = _parse_common(command, allow_tag=True)
     raw = eval_u64(debugger, expr)
-    ptr = enki_to_ptr(raw) if is_enki_ptr(raw) else raw
-    v = ptr_to_enki(ptr)
+    if is_er_ptr(raw):
+        v = raw
+    else:
+        tag = opts["tag"]
+        if tag is None:
+            raise EnkiError("raw object pointers do not encode kind; pass -t/--tag (app, law, pin, bat, thk, tank)")
+        v = er_into(tag, raw)
     ins = _get_inspector(debugger)
     _append_lines(
         result,
         ins.describe(
             v,
-            depth=opts["depth"],
-            max_items=opts["max_items"],
-            max_bytes=opts["max_bytes"],
-            max_nat_limbs=opts["max_nat_limbs"],
+            depth=_int_opt(opts, "depth"),
+            max_items=_int_opt(opts, "max_items"),
+            max_bytes=_int_opt(opts, "max_bytes"),
+            max_nat_limbs=_int_opt(opts, "max_nat_limbs"),
         ),
     )
 
 
 @_guarded
 def enki_header_cmd(debugger, command, result, internal_dict):
-    """Print the obj_header for a tagged enki_value."""
+    """Print the er_val tag and er_head for a tagged value."""
     opts, expr = _parse_common(command)
     del opts
     v = eval_u64(debugger, expr)
@@ -839,85 +1090,89 @@ def enki_header_cmd(debugger, command, result, internal_dict):
 
 @_guarded
 def enki_obj_header_cmd(debugger, command, result, internal_dict):
-    """Print the obj_header for a raw heap object pointer."""
-    opts, expr = _parse_common(command)
-    del opts
+    """Print the er_head for a raw heap object pointer."""
+    opts, expr = _parse_common(command, allow_tag=True)
     ptr = eval_u64(debugger, expr)
     ins = _get_inspector(debugger)
-    _append_lines(result, ins.header_lines(ptr, raw_ptr=True))
+    _append_lines(result, ins.header_lines(ptr, raw_ptr=True, tag=opts["tag"]))
 
 
 @_guarded
 def enki_tag_cmd(debugger, command, result, internal_dict):
-    """Apply PTR_TO_ENKI to a pointer expression/literal."""
-    opts, expr = _parse_common(command)
-    del opts
+    """Apply er_into(tag, pointer) to a pointer expression/literal."""
+    opts, expr = _parse_common(command, allow_tag=True)
+    tag = opts["tag"]
+    if tag is None:
+        raise EnkiError("missing tag; use -t/--tag (app, law, pin, bat, thk, tank) or pass the tag before the expression")
     p = eval_u64(debugger, expr)
-    tagged = ptr_to_enki(p)
+    tagged = er_into(tag, p)
     lines = [
-        f"ptr:    {_hex_addr(p & PTR_MASK)}",
+        f"tag:    0x{tag:02x} ({tag_name(tag)})",
+        f"ptr:    {_hex_addr(p & ER_PTR_MASK)}",
         f"tagged: {_hex(tagged)}",
-        f"lldb expr: (enki_value)((uintptr_t){expr} | (1ULL << 63))",
+        f"lldb expr: (er_val)(((uint64_t)0x{tag:02x} << 56) | ((uint64_t)(uintptr_t){expr} & UINT64_C(0x00ffffffffffffff)))",
     ]
     _append_lines(result, lines)
 
 
 @_guarded
 def enki_untag_cmd(debugger, command, result, internal_dict):
-    """Apply ENKI_TO_PTR to an enki_value expression/literal."""
+    """Apply er_get_tag and er_outa to an er_val expression/literal."""
     opts, expr = _parse_common(command)
     del opts
     v = eval_u64(debugger, expr)
-    ptr = enki_to_ptr(v)
+    tag = er_get_tag(v)
+    ptr = er_outa(v)
     lines = [
         f"value:  {_hex(v)}",
-        f"is_ptr: {1 if is_enki_ptr(v) else 0}",
+        f"tag:    0x{tag:02x} ({tag_name(tag)})",
+        f"is_ptr: {1 if is_er_ptr(v) else 0}",
+        f"is_cat: {1 if is_er_cat(v) else 0}",
         f"ptr:    {_hex_addr(ptr)}",
-        f"lldb expr: (void*)((uintptr_t){expr} & ~(1ULL << 63))",
+        f"lldb tag expr: (uint8_t)((uint64_t){expr} >> 56)",
+        f"lldb ptr expr: (void*)((uint64_t){expr} & UINT64_C(0x00ffffffffffffff))",
     ]
     _append_lines(result, lines)
 
 
 @_guarded
 def enki_nat_cmd(debugger, command, result, internal_dict):
-    """Decode an enki_nat / BIG_NAT value as decimal, hex, and limbs."""
+    """Decode a cat immediate or BAT value as decimal, hex, and limbs."""
     opts, expr = _parse_common(command)
     v = eval_u64(debugger, expr)
     ins = _get_inspector(debugger)
-    if not is_enki_ptr(v):
-        _append_lines(result, [f"not a BIG_NAT heap pointer; immediate {_hex(v)} ({v})"])
+    if is_er_cat(v):
+        _append_lines(result, [f"cat {_hex(v)} ({v})"])
         return
-    ptr = enki_to_ptr(v)
-    h = ins.mem.read_header(ptr)
-    if h.kind != 3:
-        _append_lines(result, [f"warning: kind is {h.kind_name}, not BIG_NAT"] + ins.describe(v, depth=0))
+    tag = er_get_tag(v)
+    if tag != ER_TAG_BAT:
+        _append_lines(result, [f"warning: tag is {tag_name(tag)}, not BAT"] + ins.describe(v, depth=0))
         return
-    lines = ins.describe(v, depth=1, max_nat_limbs=opts["max_nat_limbs"])
+    lines = ins.describe(v, depth=1, max_nat_limbs=_int_opt(opts, "max_nat_limbs"))
     _append_lines(result, lines)
 
 
 @_guarded
 def enki_law_cmd(debugger, command, result, internal_dict):
-    """Decode an enki_law, including const table and bytecode prefix."""
+    """Decode an er_law, including bytecode label metadata."""
     opts, expr = _parse_common(command)
     v = eval_u64(debugger, expr)
     ins = _get_inspector(debugger)
-    if not is_enki_ptr(v):
-        _append_lines(result, [f"not a LAW heap pointer; immediate {_hex(v)} ({v})"])
+    if is_er_cat(v):
+        _append_lines(result, [f"not a LAW heap pointer; cat {_hex(v)} ({v})"])
         return
-    ptr = enki_to_ptr(v)
-    h = ins.mem.read_header(ptr)
-    if h.kind != 1:
-        _append_lines(result, [f"warning: kind is {h.kind_name}, not LAW"] + ins.describe(v, depth=0))
+    tag = er_get_tag(v)
+    if tag != ER_TAG_LAW:
+        _append_lines(result, [f"warning: tag is {tag_name(tag)}, not LAW"] + ins.describe(v, depth=0))
         return
     _append_lines(
         result,
         ins.describe(
             v,
-            depth=opts["depth"],
-            max_items=opts["max_items"],
-            max_bytes=opts["max_bytes"],
-            max_nat_limbs=opts["max_nat_limbs"],
+            depth=_int_opt(opts, "depth"),
+            max_items=_int_opt(opts, "max_items"),
+            max_bytes=_int_opt(opts, "max_bytes"),
+            max_nat_limbs=_int_opt(opts, "max_nat_limbs"),
         ),
     )
 
@@ -930,44 +1185,47 @@ def enki_layout_cmd(debugger, command, result, internal_dict):
         raise EnkiError("no selected target")
     layout = Layout(target)
     lines = [
-        f"addr_size={layout.addr_size} size_t={layout.size_t_size} enki_value={layout.enki_value_size} mp_limb_t={layout.mp_limb_size} byte_order={layout.byte_order}",
+        f"addr_size={layout.addr_size} size_t={layout.size_t_size} er_val={layout.er_val_size} limb={layout.limb_size} byte_order={layout.byte_order}",
+        "tags: " + ", ".join(f"{name}=0x{tag:02x}" for tag, name in sorted(TAGS.items())),
+        f"ptr_mask=0x{ER_PTR_MASK:016x} tag_shift={ER_TAG_SHIFT}",
     ]
     for desc in layout.all_descs():
         src = "DWARF" if desc.from_debug_info else "fallback"
         lines.append(f"{desc.name}: size={desc.size} source={src}")
         for name, (off, width) in sorted(desc.fields.items(), key=lambda kv: kv[1][0]):
-            lines.append(f"  +{off:<3} {name:<14} width={width}")
+            lines.append(f"  +{off:<3} {name:<10} width={width}")
     _append_lines(result, lines)
 
 
 def enki_value_summary(valobj, internal_dict):
-    """One-line LLDB type summary for enki_value."""
+    """One-line LLDB type summary for er_val/enki_value."""
     try:
         v = valobj.GetValueAsUnsigned(0) & VALUE_MASK
-        if not is_enki_ptr(v):
-            return f"imm {_hex(v)} ({v})"
+        if is_er_cat(v):
+            return f"cat {_hex(v)} ({v})"
         target = valobj.GetTarget()
         if not _is_valid(target) or not _is_valid(target.GetProcess()):
-            return f"ptr tagged={_hex(v)} ptr={_hex_addr(enki_to_ptr(v))}"
+            tag = er_get_tag(v)
+            return f"{tag_name(tag)} tagged={_hex(v)} ptr={_hex_addr(er_outa(v))}"
         return EnkiInspector(target).brief(v)
     except Exception as e:
         try:
             raw = valobj.GetValue()
         except Exception:
             raw = "?"
-        return f"enki_value({raw}) decode-error: {e}"
+        return f"er_val({raw}) decode-error: {e}"
 
 
 _COMMANDS = [
-    ("enki", "enki_cmd", "pretty-print an enki_value expression; options: -d/--depth, -n/--max-items, -b/--max-bytes, -l/--max-limbs"),
-    ("enki-obj", "enki_obj_cmd", "pretty-print a raw enki heap object pointer"),
-    ("enki-header", "enki_header_cmd", "print obj_header for a tagged enki_value"),
-    ("enki-obj-header", "enki_obj_header_cmd", "print obj_header for a raw heap object pointer"),
-    ("enki-tag", "enki_tag_cmd", "print PTR_TO_ENKI(pointer)"),
-    ("enki-untag", "enki_untag_cmd", "print ENKI_TO_PTR(value)"),
-    ("enki-nat", "enki_nat_cmd", "decode a BIG_NAT/NAT value"),
+    ("enki", "enki_cmd", "pretty-print an er_val expression; options: -d/--depth, -n/--max-items, -b/--max-bytes, -l/--max-limbs"),
+    ("enki-obj", "enki_obj_cmd", "pretty-print a raw er_* heap object pointer; requires -t/--tag unless the expression is already tagged"),
+    ("enki-header", "enki_header_cmd", "print er_val tag and er_head for a tagged er_val"),
+    ("enki-obj-header", "enki_obj_header_cmd", "print er_head for a raw heap object pointer; optional -t/--tag annotates kind"),
+    ("enki-tag", "enki_tag_cmd", "print er_into(tag, pointer); requires -t/--tag"),
+    ("enki-untag", "enki_untag_cmd", "print er_get_tag(value) and er_outa(value)"),
+    ("enki-nat", "enki_nat_cmd", "decode a cat immediate or BAT value"),
     ("enki-law", "enki_law_cmd", "decode a LAW value"),
-    ("enki-layout", "enki_layout_cmd", "show decoded struct offsets"),
+    ("enki-layout", "enki_layout_cmd", "show decoded struct offsets and tag constants"),
 ]
 
 
@@ -985,9 +1243,10 @@ def __lldb_init_module(debugger, internal_dict):
         del help_text
         _run_lldb_command(debugger, f"command script add -f {module}.{fn} {name}")
 
-    # Put the summary in its own category so it is easy to disable:
+    # Put the summaries in their own category so they are easy to disable:
     #   (lldb) type category disable enki
     _run_lldb_command(debugger, "type category define enki")
+    _run_lldb_command(debugger, "type summary add -w enki -F %s.enki_value_summary er_val" % module)
     _run_lldb_command(debugger, "type summary add -w enki -F %s.enki_value_summary enki_value" % module)
     _run_lldb_command(debugger, "type category enable enki")
 

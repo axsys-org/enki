@@ -1990,6 +1990,7 @@ plan_eval_whnf(er_vm *vm, er_val val_v, er_eval_mode mode)
         if (thk->arg_s == 0 || thk->arg_s > UINT32_MAX) { \
             FAIL_ALLOC();                          \
         }                                          \
+        er_val callu_source_v = er_into(er_tag_thk, thk); \
         for (size_t app_k_s = 0; app_k_s < thk->arg_s; app_k_s++) { \
             DPUSH(thk->arg_v[app_k_s]);            \
         }                                          \
@@ -2000,6 +2001,8 @@ plan_eval_whnf(er_vm *vm, er_val val_v, er_eval_mode mode)
             FAIL_ALLOC();                          \
         }                                          \
         (void)app_route_end_pc;                    \
+        KPUSH_UPDATE(callu_source_v);              \
+        thk->fun = ER_HOLE;                        \
         CODE_SET_PC(app_route_pc);                 \
         DISPATCH();                                \
     } while (0)
@@ -2296,19 +2299,33 @@ FORCE_UNK_APP: {
       if (hav_s == 0) {
         CALLU_DISPATCH_MK_APP();
       }
-      if (hav_s > 1) {
-        KPUSH_OVERAPP(er_into(er_tag_thk, thk), 1);
-      }
+      target = er_into(er_tag_thk, thk);
       GC_SYNC();
       r = er_thk_make_prim(vm->loc_a, pin->val_v, thk->arg_v[1]);
       CHECK_ALLOC(r);
+      KPUSH_UPDATE(target);
+      thk = er_outt(er_tag_thk, target);
+      if (thk == NULL) {
+        FAIL_TANK("bad primitive app", target);
+      }
+      thk->fun = ER_HOLE;
+      if (hav_s > 1) {
+        KPUSH_OVERAPP(target, 1);
+      }
       goto FORCE_ENTRY;
     }
 
     if (er_is_tag(er_tag_app, f)) {
+      target = er_into(er_tag_thk, thk);
       GC_SYNC();
       r = er_thk_make_unk_app_flat(vm->loc_a, f, hav_s, &thk->arg_v[1]);
       CHECK_ALLOC(r);
+      KPUSH_UPDATE(target);
+      thk = er_outt(er_tag_thk, target);
+      if (thk == NULL) {
+        FAIL_TANK("bad flat app", target);
+      }
+      thk->fun = ER_HOLE;
       goto FORCE_ENTRY;
     }
 
@@ -2327,9 +2344,16 @@ FORCE_UNK_APP: {
         thk->fun = ER_CALL;
         goto FORCE_ENTRY;
       }
+      er_val source_thk_v = er_into(er_tag_thk, thk);
       GC_SYNC();
       r = er_thk_take_call(vm->loc_a, thk, frame_s);
       CHECK_ALLOC(r);
+      thk = er_outt(er_tag_thk, source_thk_v);
+      if (thk == NULL) {
+        FAIL_TANK("bad call frame", source_thk_v);
+      }
+      KPUSH_UPDATE(source_thk_v);
+      thk->fun = ER_HOLE;
       goto FORCE_ENTRY;
     } else if ( hav_d < wan_d ) {
       CALLU_DISPATCH_MK_APP();
@@ -2339,10 +2363,17 @@ FORCE_UNK_APP: {
       if (frame_s == 0) {
         FAIL_TANK("bad call frame", f);
       }
+      target = er_into(er_tag_thk, thk);
       GC_SYNC();
       r = er_thk_make_call_frame(vm->loc_a, frame_s, (size_t)wan_d + 1, thk->arg_v);
       CHECK_ALLOC(r);
-      KPUSH_OVERAPP(er_into(er_tag_thk, thk), split);
+      KPUSH_UPDATE(target);
+      thk = er_outt(er_tag_thk, target);
+      if (thk == NULL) {
+        FAIL_TANK("bad call frame", target);
+      }
+      thk->fun = ER_HOLE;
+      KPUSH_OVERAPP(target, split);
       goto FORCE_ENTRY;
     }
 }
@@ -2353,6 +2384,9 @@ FORCE_XPRIM: {
     }
     prim_set = thk->arg_v[0];
     prim_arg = thk->arg_v[1];
+    target = er_into(er_tag_thk, thk);
+    KPUSH_UPDATE(target);
+    thk->fun = ER_HOLE;
     if (!er_is_whnf(prim_arg)) {
       GC_SYNC();
       prim_arg = plan_eval_whnf_preserve(vm, prim_arg);
