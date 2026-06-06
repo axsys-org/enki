@@ -136,7 +136,9 @@ static er_val wisp_mpz_to_nat(wisp_rt* rt, const mpz_t z) {
 }
 
 static er_val wisp_bytes_nat(wisp_rt* rt, const char* bytes_c, size_t bytes_s) {
-  if (bytes_s < sizeof(uint64_t)) {
+  if (bytes_s < sizeof(uint64_t) ||
+      (bytes_s == sizeof(uint64_t) &&
+       (((uint8_t)bytes_c[bytes_s - 1U]) & 0x80U) == 0)) {
     uint64_t out_q = 0;
     for (size_t i = 0; i < bytes_s; i++) {
       out_q |= ((uint64_t)(uint8_t)bytes_c[i]) << (i * 8U);
@@ -863,7 +865,7 @@ static er_val wisp_law(wisp_rt* rt, er_val tag_v, er_val sig_v, er_val bod_v,
   }
   arrfree(let_v);
 
-  er_val law_v = er_law_make(rt->loc_a, teg_v, bod_exp_v, (uint32_t)arg_s);
+  er_val law_v = wisp_law_make(rt, teg_v, bod_exp_v, (uint32_t)arg_s);
   if (law_v == 0) {
     wisp_fail_with_val(rt, "failed to compile law", bod_exp_v);
   }
@@ -1101,6 +1103,50 @@ er_val wisp_thunk(wisp_rt* rt, er_val val_v) {
   er_val ret_v = wisp_apple(rt, app->arg_s, nex_v);
   free(nex_v);
   return ret_v;
+}
+
+static er_val wisp_emit_law_asm(const enki_allocator* loc_a, void* ctx,
+                                er_val nam_v, er_val bod_v, uint32_t ari_d) {
+  (void)loc_a;
+  wisp_rt* rt = ctx;
+  if (rt == NULL || rt->law_compiler_v == 0) {
+    return 0;
+  }
+  er_val arg_v[] = {rt->law_compiler_v, nam_v, (er_val)ari_d, bod_v};
+  wisp_env_entry* old_env = rt->env;
+  if (rt->law_compiler_env != NULL) {
+    rt->env = rt->law_compiler_env;
+  }
+  er_val out_v = wisp_run_apply_mode(rt, 4, arg_v, ER_EVAL_NF);
+  rt->env = old_env;
+  return out_v;
+}
+
+bool wisp_rt_set_law_compiler(wisp_rt* rt, er_val compiler_v,
+                              wisp_env_entry* compiler_env) {
+  if (rt == NULL) {
+    return false;
+  }
+  rt->law_compiler_v = compiler_v;
+  rt->law_compiler_env = compiler_env;
+  rt->law_compiler = (er_law_compiler){
+      .emit_asm = compiler_v == 0 ? NULL : wisp_emit_law_asm,
+      .ctx = rt,
+      .enabled_f = compiler_v != 0,
+  };
+  return true;
+}
+
+er_val wisp_law_make(wisp_rt* rt, er_val nam_v, er_val bod_v, uint32_t ari_d) {
+  if (rt == NULL || rt->compiling_law_f || !rt->law_compiler.enabled_f) {
+    return er_law_make(rt == NULL ? NULL : rt->loc_a, nam_v, bod_v, ari_d);
+  }
+
+  rt->compiling_law_f = true;
+  er_val law_v = er_law_make_with_compiler(rt->loc_a, &rt->law_compiler, nam_v,
+                                           bod_v, ari_d);
+  rt->compiling_law_f = false;
+  return law_v;
 }
 
 er_val wisp_macroexpand(wisp_rt* rt, er_val val_v) {

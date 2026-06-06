@@ -20,12 +20,76 @@ TestSuite(wisp, .init = setup, .fini = teardown);
 
 static er_val small_strnat(const char* str_c) {
   size_t str_s = strlen(str_c);
-  cr_assert_lt(str_s, 8);
+  cr_assert(str_s < 8 ||
+            (str_s == 8 && (((uint8_t)str_c[str_s - 1U]) & 0x80U) == 0));
   er_val out_v = 0;
   for (size_t i = 0; i < str_s; i++) {
     out_v |= ((er_val)(uint8_t)str_c[i]) << (i * 8u);
   }
   return out_v;
+}
+
+static er_val strnat(const char* str_c) {
+  size_t str_s = strlen(str_c);
+  if (str_s < 8 ||
+      (str_s == 8 && (((uint8_t)str_c[str_s - 1U]) & 0x80U) == 0)) {
+    return small_strnat(str_c);
+  }
+
+  size_t limb_s = (str_s + sizeof(uint64_t) - 1u) / sizeof(uint64_t);
+  uint64_t* limb_q = calloc(limb_s, sizeof(uint64_t));
+  cr_assert_not_null(limb_q);
+  memcpy(limb_q, str_c, str_s);
+
+  er_bat* bat = er_bat_alloc(&sys_a, limb_s);
+  cr_assert_not_null(bat);
+  er_val out_v = er_bat_init(bat, limb_s, limb_q);
+  free(limb_q);
+  cr_assert_eq(er_get_tag(out_v), er_tag_bat);
+  return out_v;
+}
+
+static er_val make_app_value(er_val fn_v, size_t arg_s, const er_val arg_v[]) {
+  er_app* app = er_app_alloc(&sys_a, arg_s);
+  cr_assert_not_null(app);
+  er_val app_v = er_app_init(app, fn_v, arg_s, arg_v);
+  cr_assert_eq(er_get_tag(app_v), er_tag_app);
+  return app_v;
+}
+
+static er_val make_call_value(er_val fun_v, size_t frame_s) {
+  er_thk* thk = er_thk_alloc(&sys_a, frame_s);
+  cr_assert_not_null(thk);
+  er_val* arg_v = calloc(frame_s, sizeof(er_val));
+  cr_assert_not_null(arg_v);
+  arg_v[0] = fun_v;
+  er_val call_v = er_thk_init(thk, ER_CALL, frame_s, arg_v);
+  free(arg_v);
+  cr_assert_eq(er_get_tag(call_v), er_tag_thk);
+  return call_v;
+}
+
+static er_val make_lit_asm(er_val lit_v) {
+  er_val push_arg_v[] = {strnat("PUSH_LIT"), lit_v};
+  er_val ret_arg_v[] = {strnat("RET")};
+  er_val op_v[] = {
+      make_app_value(0, 2, push_arg_v),
+      make_app_value(0, 1, ret_arg_v),
+  };
+  er_val label_v = make_app_value(0, 2, op_v);
+  er_val labels_arg_v[] = {label_v};
+  er_val labels_v = make_app_value(0, 1, labels_arg_v);
+  er_val asm_arg_v[] = {0, labels_v};
+  return make_app_value(0, 2, asm_arg_v);
+}
+
+static er_val emit_lit_asm(const enki_allocator* loc_a, void* ctx, er_val nam_v,
+                           er_val bod_v, uint32_t ari_d) {
+  (void)loc_a;
+  (void)nam_v;
+  (void)bod_v;
+  (void)ari_d;
+  return make_lit_asm((er_val)(uintptr_t)ctx);
 }
 
 static void assert_small_strnat(er_val value_v, const char* expected_c) {
@@ -35,7 +99,9 @@ static void assert_small_strnat(er_val value_v, const char* expected_c) {
 static void assert_strnat_bytes(er_val value_v, const char* expected_c) {
   size_t expected_s = strlen(expected_c);
 
-  if (expected_s < 8) {
+  if (expected_s < 8 ||
+      (expected_s == 8 &&
+       (((uint8_t)expected_c[expected_s - 1U]) & 0x80U) == 0)) {
     assert_small_strnat(value_v, expected_c);
     return;
   }
@@ -269,6 +335,31 @@ Test(wisp, law_body_hash_juxtaposition_splices_raw_expression) {
 
 Test(wisp, law_body_plain_hash_list_is_not_compile_time_eval) {
   assert_eval_fails("(#law \"plain\" (plain x) (# 42))", "unbound");
+}
+
+Test(wisp, bytecode_asm_accepts_wisp_opcode_strings) {
+  er_bc_asm_error err = {0};
+  er_val law_v =
+      er_law_make_asm(&sys_a, strnat("lit"), 0, 0, make_lit_asm(42), &err);
+
+  cr_assert_eq(err.status, ER_BC_ASM_OK);
+  er_law* law = assert_law(law_v);
+  const er_op* code = er_law_label_code_const(law, 0);
+  cr_assert_not_null(code);
+  cr_assert_eq(code[0].tag, OP_PUSH_LIT);
+  cr_assert_eq(code[0].as.lit_v, 42);
+  cr_assert_eq(code[1].tag, OP_RET);
+  cr_assert_eq(er_eval_to(&sys_a, make_call_value(law_v, 1), ER_EVAL_NF), 42);
+}
+
+Test(wisp, law_macro_uses_installed_bytecode_compiler) {
+  rt->law_compiler = (er_law_compiler){
+      .emit_asm = emit_lit_asm,
+      .ctx = (void*)(uintptr_t)99,
+      .enabled_f = true,
+  };
+
+  cr_assert_eq(eval_input("((#law \"ignored\" (ignored x) x) 42)"), 99);
 }
 
 Test(wisp, numeric_pin66_wrapper_compiles_pessimistically) {

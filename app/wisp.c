@@ -332,6 +332,23 @@ static char* boot_module_path(boot_ctx* ctx, const char* mod_c) {
   return path_c;
 }
 
+static bool boot_module_file_exists(boot_ctx* ctx, const char* mod_c) {
+  if (!boot_ok_module_name(mod_c)) {
+    return false;
+  }
+  char* path_c = boot_module_path(ctx, mod_c);
+  if (path_c == NULL) {
+    return false;
+  }
+  FILE* file = fopen(path_c, "rb");
+  ctx->loc_a->free(ctx->loc_a->ctx, path_c);
+  if (file == NULL) {
+    return false;
+  }
+  fclose(file);
+  return true;
+}
+
 static char* boot_read_file(boot_ctx* ctx, const char* path_c) {
   FILE* file = fopen(path_c, "rb");
   if (file == NULL) {
@@ -501,6 +518,91 @@ static er_val boot_repl_fun(er_val fun_v) {
   }
 }
 
+static bool boot_env_value(boot_ctx* ctx, const char* name_c, er_val* out) {
+  er_val key_v = boot_string_nat(ctx, name_c);
+  wisp_env_entry* ent = boot_env_find(ctx->rt->env, key_v);
+  if (ent == NULL) {
+    fprintf(stderr, "wisp: bytecode compiler unbound: %s\n", name_c);
+    return false;
+  }
+  *out = ent->val_v;
+  return true;
+}
+
+static bool boot_apply1(boot_ctx* ctx, er_val fun_v, er_val arg_v,
+                        er_val* out) {
+  er_val call_arg_v[] = {boot_repl_fun(fun_v), arg_v};
+  er_thk* thk = er_thk_alloc(ctx->loc_a, 2);
+  if (thk == NULL) {
+    return false;
+  }
+  er_val call_v = er_thk_init(thk, ER_XUNK_APP, 2, call_arg_v);
+  if (call_v == 0) {
+    return false;
+  }
+  er_val out_v = er_eval_to(ctx->loc_a, call_v, ER_EVAL_WHNF);
+  if (!er_is_good(out_v)) {
+    fprintf(stderr, "wisp: failed to configure bytecode compiler\n");
+    return false;
+  }
+  *out = out_v;
+  return true;
+}
+
+static bool boot_disabled_env(const char* val_c) {
+  return val_c != NULL &&
+         (val_c[0] == '\0' || strcmp(val_c, "0") == 0 ||
+          strcmp(val_c, "off") == 0 || strcmp(val_c, "none") == 0);
+}
+
+static bool boot_install_bytecode_compiler(boot_ctx* ctx) {
+  const char* mod_env_c = getenv("ENKI_WISP_BYTECODE_COMPILER_MODULE");
+  if (boot_disabled_env(mod_env_c)) {
+    return true;
+  }
+
+  const char* mod_c = mod_env_c == NULL ? "bytecode-compiler" : mod_env_c;
+  if (!boot_module_file_exists(ctx, mod_c)) {
+    if (mod_env_c == NULL) {
+      return true;
+    }
+    fprintf(stderr, "wisp: missing bytecode compiler module: %s\n", mod_c);
+    return false;
+  }
+
+  bool emit_top_level_f = ctx->emit_top_level_f;
+  ctx->emit_top_level_f = false;
+  bool ok_f = boot_process_file(ctx, mod_c);
+  ctx->emit_top_level_f = emit_top_level_f;
+  if (!ok_f) {
+    return false;
+  }
+
+  const char* factory_c = getenv("ENKI_WISP_BYTECODE_COMPILER_FACTORY");
+  if (factory_c == NULL || factory_c[0] == '\0') {
+    factory_c = "make-bytecode-compiler";
+  }
+  const char* optimizer_c = getenv("ENKI_WISP_BYTECODE_OPTIMIZER");
+  if (optimizer_c == NULL || optimizer_c[0] == '\0') {
+    optimizer_c = "bytecode-opt-none";
+  }
+
+  er_val factory_v = 0;
+  er_val optimizer_v = 0;
+  er_val compiler_v = 0;
+  wisp_env_entry* compiler_env = ctx->rt->env;
+  if (!boot_env_value(ctx, factory_c, &factory_v) ||
+      !boot_env_value(ctx, optimizer_c, &optimizer_v) ||
+      !boot_apply1(ctx, factory_v, optimizer_v, &compiler_v)) {
+    return false;
+  }
+  if (!wisp_rt_set_law_compiler(ctx->rt, compiler_v, compiler_env)) {
+    fprintf(stderr, "wisp: failed to install bytecode compiler\n");
+    return false;
+  }
+  return true;
+}
+
 static bool boot_run_function(boot_ctx* ctx, er_val fun_v, int argc,
                               char** argv) {
   wisp_env_entry* old_env = ctx->rt->env;
@@ -588,6 +690,10 @@ int main(int argc, char** argv) {
   const char* fn_c = argc >= 4 ? argv[3] : NULL;
   int run_argc = argc >= 5 ? argc - 4 : 0;
   char** run_argv = argc >= 5 ? argv + 4 : NULL;
+  if (!boot_install_bytecode_compiler(&ctx)) {
+    wisp_rt_free(loc_a, rt);
+    return 1;
+  }
   bool ok_f = boot_load_assembly(&ctx, argv[2], fn_c, run_argc, run_argv);
   wisp_rt_free(loc_a, rt);
   return ok_f ? 0 : 1;
