@@ -10,3 +10,7 @@
 #define MOTE_HPIN    ea_s4('#', 'p', 'i', 'n')
 #define MOTE_HAPP    ea_s4('#', 'a', 'p', 'p')
 #define MOTE_HEXPORT ea_s7('#', 'e', 'x', 'p', 'o', 'r', 't')
+
+#define MOTE_UNK_APP  ea_s7('U', 'N', 'K', '_', 'A', 'P', 'P')
+#define MOTE_PUSH_VAR ea_s8('P', 'U', 'S', 'H', '_', 'V', 'A', 'R')
+#define MOTE_PUSH_LIT ea_s8('P', 'U', 'S', 'H', '_', 'L', 'I', 'T')

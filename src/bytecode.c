@@ -10,6 +10,8 @@
 #include "enki/gc.h"
 #include "enki/profile.h"
 #include "enki/run_ops.h"
+#include "enki/run.h"
+#include "enki/motes.h"
 
 typedef struct er_bc_code {
   const enki_allocator* loc_a;
@@ -536,6 +538,88 @@ cleanup:
   }
   er_bc_compiler_free(&c, true);
   return law_v;
+}
+
+/// Wisp bytecode emission
+///
+///
+static er_bc_asm_status er_bc_asm_op_decode(er_val op_v, er_op* out) {
+  er_app* app = er_outt(er_tag_app, op_v);
+  if (!app)
+    return ER_BC_ASM_BAD_SHAPE;
+
+  er_val cod_v = app->arg_v[0];
+#define GUARD(len)                                                             \
+  if (app->arg_s != (len))                                                     \
+    return ER_BC_ASM_BAD_OPERAND;
+#define OK return ER_BC_ASM_OK
+  switch (cod_v) {
+  case MOTE_UNK_APP:
+    GUARD(2)
+    out->tag = OP_APPLY_UNK;
+    // XX: should guard?
+    out->as.u32 = (uint32_t)app->arg_v[1];
+    OK;
+  case MOTE_PUSH_VAR:
+    GUARD(2)
+    out->tag = OP_PUSH_VAR;
+    out->as.u32 = (uint32_t)app->arg_v[1];
+    OK;
+  case MOTE_PUSH_LIT:
+    GUARD(2)
+    out->tag = OP_PUSH_VAR;
+    out->as.lit_v = app->arg_v[1];
+    OK;
+  default:
+    return ER_BC_ASM_BAD_OPCODE;
+  }
+#undef GUARD
+#undef OK
+}
+
+static er_bc_asm_status er_bc_asm_label_decode(const enki_allocator* work_a,
+                                               er_val lab_v,
+                                               er_bc_asm_label* out) {
+  er_app* lab = er_outt(er_tag_app, lab_v);
+  if (!lab)
+    return ER_BC_ASM_BAD_SHAPE;
+
+  out->op_v = ea_calloc(work_a, er_op, lab->arg_s);
+  out->op_s = lab->arg_s;
+
+  er_bc_asm_status stat;
+  for (size_t i = 0; i < out->op_s; i++) {
+    stat = er_bc_asm_op_decode(lab->arg_v[i], &out->op_v[i]);
+    if (stat != ER_BC_ASM_OK)
+      return stat;
+  }
+
+  return ER_BC_ASM_OK;
+}
+
+er_bc_asm_status er_bc_asm_decode(const enki_allocator* work_a, er_val asm_v,
+                                  er_bc_asm* out) {
+  er_bc_asm_status stat = ER_BC_ASM_OK;
+  er_app* app = er_outt(er_tag_app, asm_v);
+  if (!app || app->arg_s != 2 || !er_is_cat(app->arg_v[0]))
+    return ER_BC_ASM_BAD_SHAPE;
+  out->let_d = (uint32_t)app->arg_v[0];
+
+  er_app* labs = er_outt(er_tag_app, app->arg_v[1]);
+  if (!labs || labs->arg_s < out->let_d)
+    return ER_BC_ASM_BAD_SHAPE;
+
+  out->label_s = labs->arg_s;
+  out->label = ea_calloc(work_a, er_bc_asm_label, labs->arg_s);
+
+  for (size_t i = 0; i < labs->arg_s; i++) {
+    stat = er_bc_asm_label_decode(work_a, labs->arg_v[i], &out->label[i]);
+    if (stat != ER_BC_ASM_OK) {
+      return stat;
+    }
+  }
+
+  return stat;
 }
 
 #undef ER_BC_N
