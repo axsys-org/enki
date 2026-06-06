@@ -1113,14 +1113,22 @@ static er_val wisp_emit_law_asm(const enki_allocator* loc_a, void* ctx,
     return 0;
   }
   er_val arg_v[] = {rt->law_compiler_v, nam_v, (er_val)ari_d, bod_v};
-  return wisp_run_apply_mode(rt, 4, arg_v, ER_EVAL_NF);
+  wisp_env_entry* old_env = rt->env;
+  if (rt->law_compiler_env != NULL) {
+    rt->env = rt->law_compiler_env;
+  }
+  er_val out_v = wisp_run_apply_mode(rt, 4, arg_v, ER_EVAL_NF);
+  rt->env = old_env;
+  return out_v;
 }
 
-bool wisp_rt_set_law_compiler(wisp_rt* rt, er_val compiler_v) {
+bool wisp_rt_set_law_compiler(wisp_rt* rt, er_val compiler_v,
+                              wisp_env_entry* compiler_env) {
   if (rt == NULL) {
     return false;
   }
   rt->law_compiler_v = compiler_v;
+  rt->law_compiler_env = compiler_env;
   rt->law_compiler = (er_law_compiler){
       .emit_asm = compiler_v == 0 ? NULL : wisp_emit_law_asm,
       .ctx = rt,
