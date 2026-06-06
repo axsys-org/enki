@@ -6,15 +6,15 @@
 
 #include "enki/run.h"
 
-typedef struct er_bc_asm_label {
+typedef struct er_bc_code_span {
   er_op* op_v;
   size_t op_s;
-} er_bc_asm_label;
+} er_bc_code_span;
 
 typedef struct er_bc_asm {
   uint32_t let_d;
   size_t label_s;
-  er_bc_asm_label* label;
+  er_bc_code_span* label_v;
 } er_bc_asm;
 
 typedef enum er_bc_asm_status {

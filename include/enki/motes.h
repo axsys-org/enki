@@ -14,3 +14,4 @@
 #define MOTE_UNK_APP  ea_s7('U', 'N', 'K', '_', 'A', 'P', 'P')
 #define MOTE_PUSH_VAR ea_s8('P', 'U', 'S', 'H', '_', 'V', 'A', 'R')
 #define MOTE_PUSH_LIT ea_s8('P', 'U', 'S', 'H', '_', 'L', 'I', 'T')
+#define MOTE_RET      ea_s3('R', 'E', 'T')

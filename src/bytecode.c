@@ -8,10 +8,10 @@
 #include "bytecode_internal.h"
 
 #include "enki/gc.h"
+#include "enki/motes.h"
 #include "enki/profile.h"
 #include "enki/run_ops.h"
 #include "enki/run.h"
-#include "enki/motes.h"
 
 typedef struct er_bc_code {
   const enki_allocator* loc_a;
@@ -542,84 +542,291 @@ cleanup:
 
 /// Wisp bytecode emission
 ///
-///
-static er_bc_asm_status er_bc_asm_op_decode(er_val op_v, er_op* out) {
-  er_app* app = er_outt(er_tag_app, op_v);
-  if (!app)
-    return ER_BC_ASM_BAD_SHAPE;
-
-  er_val cod_v = app->arg_v[0];
-#define GUARD(len)                                                             \
-  if (app->arg_s != (len))                                                     \
-    return ER_BC_ASM_BAD_OPERAND;
-#define OK return ER_BC_ASM_OK
-  switch (cod_v) {
-  case MOTE_UNK_APP:
-    GUARD(2)
-    out->tag = OP_APPLY_UNK;
-    // XX: should guard?
-    out->as.u32 = (uint32_t)app->arg_v[1];
-    OK;
-  case MOTE_PUSH_VAR:
-    GUARD(2)
-    out->tag = OP_PUSH_VAR;
-    out->as.u32 = (uint32_t)app->arg_v[1];
-    OK;
-  case MOTE_PUSH_LIT:
-    GUARD(2)
-    out->tag = OP_PUSH_VAR;
-    out->as.lit_v = app->arg_v[1];
-    OK;
-  default:
-    return ER_BC_ASM_BAD_OPCODE;
+static er_bc_asm_status er_bc_asm_fail(er_bc_asm_error* err,
+                                       er_bc_asm_status status, er_val at_v,
+                                       size_t label_s, size_t op_s,
+                                       const char* msg_c) {
+  if (err != NULL) {
+    *err = (er_bc_asm_error){
+        .status = status,
+        .at_v = at_v,
+        .label_s = label_s,
+        .op_s = op_s,
+        .msg_c = msg_c,
+    };
   }
-#undef GUARD
-#undef OK
+  return status;
 }
 
-static er_bc_asm_status er_bc_asm_label_decode(const enki_allocator* work_a,
-                                               er_val lab_v,
-                                               er_bc_asm_label* out) {
-  er_app* lab = er_outt(er_tag_app, lab_v);
-  if (!lab)
-    return ER_BC_ASM_BAD_SHAPE;
+static bool er_bc_asm_u32(er_val val_v, uint32_t* out) {
+  if (!er_is_cat(val_v) || val_v > UINT32_MAX || out == NULL) {
+    return false;
+  }
+  *out = (uint32_t)val_v;
+  return true;
+}
 
-  out->op_v = ea_calloc(work_a, er_op, lab->arg_s);
-  out->op_s = lab->arg_s;
+static er_bc_asm_status er_bc_asm_op_decode(er_val op_v, size_t label_count_s,
+                                            size_t label_s, size_t op_s,
+                                            er_op* out, er_bc_asm_error* err) {
+#define FAIL_AT(status, at, msg)                                               \
+  er_bc_asm_fail(err, (status), (at), label_s, op_s, (msg))
+#define FAIL(status, msg) FAIL_AT((status), op_v, (msg))
+#define BAD_SHAPE(msg)    FAIL(ER_BC_ASM_BAD_SHAPE, (msg))
+#define BAD_OPERAND(msg)  FAIL(ER_BC_ASM_BAD_OPERAND, (msg))
 
-  er_bc_asm_status stat;
-  for (size_t i = 0; i < out->op_s; i++) {
-    stat = er_bc_asm_op_decode(lab->arg_v[i], &out->op_v[i]);
-    if (stat != ER_BC_ASM_OK)
-      return stat;
+  (void)label_count_s;
+  if (out == NULL) {
+    return BAD_SHAPE("missing output opcode");
   }
 
+  er_app* op = er_outt(er_tag_app, op_v);
+  if (op == NULL || op->fn_v != 0 || op->arg_s == 0) {
+    return BAD_SHAPE("opcode row is empty");
+  }
+
+  er_val tag_v = op->arg_v[0];
+  const er_val* arg_v = op->arg_v + 1u;
+  size_t arg_s = op->arg_s - 1u;
+
+  switch (tag_v) {
+  case MOTE_PUSH_VAR:
+    if (arg_s != 1 || !er_is_cat(arg_v[0])) {
+      return BAD_OPERAND("PUSH_VAR expects one cat slot");
+    }
+    *out = (er_op){.tag = OP_PUSH_VAR};
+    out->as.slot = (uintptr_t)arg_v[0];
+    return ER_BC_ASM_OK;
+
+  case MOTE_PUSH_LIT:
+    if (arg_s != 1) {
+      return BAD_OPERAND("PUSH_LIT expects one literal");
+    }
+    *out = (er_op){.tag = OP_PUSH_LIT};
+    out->as.lit_v = arg_v[0];
+    return ER_BC_ASM_OK;
+
+  case MOTE_UNK_APP:
+    if (arg_s != 1 || !er_bc_asm_u32(arg_v[0], &out->as.u32)) {
+      return BAD_OPERAND("UNK_APP expects one u32 operand");
+    }
+    out->tag = OP_APPLY_UNK;
+    return ER_BC_ASM_OK;
+
+  case MOTE_RET:
+    if (arg_s != 0) {
+      return BAD_OPERAND("RET expects no operands");
+    }
+    *out = (er_op){.tag = OP_RET};
+    return ER_BC_ASM_OK;
+
+  default:
+    return FAIL_AT(ER_BC_ASM_BAD_OPCODE, tag_v, "bad opcode");
+  }
+
+#undef BAD_OPERAND
+#undef BAD_SHAPE
+#undef FAIL
+#undef FAIL_AT
+}
+
+static er_bc_asm_status
+er_bc_asm_label_decode(const enki_allocator* work_a, er_val lab_v,
+                       size_t label_count_s, size_t label_s,
+                       er_bc_code_span* out, er_bc_asm_error* err) {
+#define FAIL_AT(status, at, op, msg)                                           \
+  er_bc_asm_fail(err, (status), (at), label_s, (op), (msg))
+#define FAIL(status, msg) FAIL_AT((status), lab_v, 0, (msg))
+#define BAD_SHAPE(msg)    FAIL(ER_BC_ASM_BAD_SHAPE, (msg))
+#define MISSING_RET(msg)  FAIL(ER_BC_ASM_MISSING_RET, (msg))
+#define OOM(msg)          FAIL(ER_BC_ASM_OOM, (msg))
+
+  er_app* lab = er_outt(er_tag_app, lab_v);
+  if (lab == NULL || lab->fn_v != 0) {
+    return BAD_SHAPE("label is not an opcode row");
+  }
+  if (lab->arg_s == 0) {
+    return MISSING_RET("label is empty");
+  }
+
+  out->op_v = ea_calloc(work_a, er_op, lab->arg_s);
+  if (out->op_v == NULL) {
+    return OOM("failed to allocate opcode span");
+  }
+  out->op_s = lab->arg_s;
+
+  for (size_t k = 0; k < out->op_s; k++) {
+    er_bc_asm_status status = er_bc_asm_op_decode(
+        lab->arg_v[k], label_count_s, label_s, k, &out->op_v[k], err);
+    if (status != ER_BC_ASM_OK) {
+      return status;
+    }
+  }
+  if (out->op_v[out->op_s - 1u].tag != OP_RET) {
+    return FAIL_AT(ER_BC_ASM_MISSING_RET, lab->arg_v[out->op_s - 1u],
+                   out->op_s - 1u, "label must end in RET");
+  }
   return ER_BC_ASM_OK;
+
+#undef OOM
+#undef MISSING_RET
+#undef BAD_SHAPE
+#undef FAIL
+#undef FAIL_AT
+}
+
+void er_bc_asm_free(const enki_allocator* work_a, er_bc_asm* asm_b) {
+  if (asm_b == NULL) {
+    return;
+  }
+  if (work_a != NULL && work_a->free != NULL && asm_b->label_v != NULL) {
+    for (size_t k = 0; k < asm_b->label_s; k++) {
+      if (asm_b->label_v[k].op_v != NULL) {
+        work_a->free(work_a->ctx, asm_b->label_v[k].op_v);
+      }
+    }
+    work_a->free(work_a->ctx, asm_b->label_v);
+  }
+  *asm_b = (er_bc_asm){0};
+}
+
+static er_bc_asm_status er_bc_asm_decode_inner(const enki_allocator* work_a,
+                                               er_val asm_v, er_bc_asm* out,
+                                               er_bc_asm_error* err) {
+#define FAIL_AT(status, at, msg)                                               \
+  er_bc_asm_fail(err, (status), (at), 0, 0, (msg))
+#define FAIL(status, msg)     FAIL_AT((status), asm_v, (msg))
+#define BAD_SHAPE(msg)        FAIL(ER_BC_ASM_BAD_SHAPE, (msg))
+#define BAD_SHAPE_AT(at, msg) FAIL_AT(ER_BC_ASM_BAD_SHAPE, (at), (msg))
+#define OOM(msg)              FAIL(ER_BC_ASM_OOM, (msg))
+#define OOM_AT(at, msg)       FAIL_AT(ER_BC_ASM_OOM, (at), (msg))
+
+  if (err != NULL) {
+    *err = (er_bc_asm_error){.status = ER_BC_ASM_OK};
+  }
+  if (out == NULL) {
+    return BAD_SHAPE("missing output assembly");
+  }
+  *out = (er_bc_asm){0};
+  if (work_a == NULL || work_a->alloc == NULL || work_a->free == NULL) {
+    return OOM("missing work allocator");
+  }
+
+  er_app* top = er_outt(er_tag_app, asm_v);
+  if (top == NULL || top->fn_v != 0 || top->arg_s != 2 ||
+      !er_bc_asm_u32(top->arg_v[0], &out->let_d)) {
+    return BAD_SHAPE("assembly must be (let-count labels)");
+  }
+
+  er_app* labels = er_outt(er_tag_app, top->arg_v[1]);
+  if (labels == NULL || labels->fn_v != 0 ||
+      labels->arg_s < (size_t)out->let_d + 1u) {
+    return BAD_SHAPE_AT(top->arg_v[1], "assembly has too few labels");
+  }
+  out->label_s = labels->arg_s;
+  out->label_v = ea_calloc(work_a, er_bc_code_span, out->label_s);
+  if (out->label_v == NULL) {
+    return OOM_AT(top->arg_v[1], "failed to allocate label table");
+  }
+
+  for (size_t k = 0; k < out->label_s; k++) {
+    er_bc_asm_status status = er_bc_asm_label_decode(
+        work_a, labels->arg_v[k], out->label_s, k, &out->label_v[k], err);
+    if (status != ER_BC_ASM_OK) {
+      er_bc_asm_free(work_a, out);
+      return status;
+    }
+  }
+  return ER_BC_ASM_OK;
+
+#undef OOM_AT
+#undef OOM
+#undef BAD_SHAPE_AT
+#undef BAD_SHAPE
+#undef FAIL
+#undef FAIL_AT
 }
 
 er_bc_asm_status er_bc_asm_decode(const enki_allocator* work_a, er_val asm_v,
                                   er_bc_asm* out) {
-  er_bc_asm_status stat = ER_BC_ASM_OK;
-  er_app* app = er_outt(er_tag_app, asm_v);
-  if (!app || app->arg_s != 2 || !er_is_cat(app->arg_v[0]))
-    return ER_BC_ASM_BAD_SHAPE;
-  out->let_d = (uint32_t)app->arg_v[0];
+  return er_bc_asm_decode_inner(work_a, asm_v, out, NULL);
+}
 
-  er_app* labs = er_outt(er_tag_app, app->arg_v[1]);
-  if (!labs || labs->arg_s < out->let_d)
-    return ER_BC_ASM_BAD_SHAPE;
+er_val er_law_make_asm(const enki_allocator* loc_a, er_val nam_v, er_val bod_v,
+                       uint32_t ari_d, er_val asm_v, er_bc_asm_error* err) {
+#define FAIL(status, msg) er_bc_asm_fail(err, (status), asm_v, 0, 0, (msg))
+#define OOM(msg)          FAIL(ER_BC_ASM_OOM, (msg))
+#define BAD_TARGET(msg)   FAIL(ER_BC_ASM_BAD_TARGET, (msg))
 
-  out->label_s = labs->arg_s;
-  out->label = ea_calloc(work_a, er_bc_asm_label, labs->arg_s);
-
-  for (size_t i = 0; i < labs->arg_s; i++) {
-    stat = er_bc_asm_label_decode(work_a, labs->arg_v[i], &out->label[i]);
-    if (stat != ER_BC_ASM_OK) {
-      return stat;
-    }
+  if (err != NULL) {
+    *err = (er_bc_asm_error){.status = ER_BC_ASM_OK};
+  }
+  if (loc_a == NULL || loc_a->alloc == NULL || loc_a->free == NULL) {
+    OOM("missing law allocator");
+    return 0;
   }
 
-  return stat;
+  enki_gc* gc = enki_gc_from_allocator(loc_a);
+  const enki_allocator* work_a =
+      gc == NULL ? loc_a : enki_gc_parent_allocator(gc);
+  if (work_a == NULL || work_a->alloc == NULL || work_a->free == NULL) {
+    OOM("missing work allocator");
+    return 0;
+  }
+
+  er_bc_asm asm_b = {0};
+  er_bc_asm_status status = er_bc_asm_decode_inner(work_a, asm_v, &asm_b, err);
+  if (status != ER_BC_ASM_OK) {
+    return 0;
+  }
+
+  er_val law_v = 0;
+  er_op** code_v = work_a->alloc(work_a->ctx, asm_b.label_s * sizeof(er_op*));
+  size_t* code_len_v =
+      work_a->alloc(work_a->ctx, asm_b.label_s * sizeof(size_t));
+  if (code_v == NULL || code_len_v == NULL) {
+    OOM("failed to allocate bytecode vectors");
+    goto cleanup;
+  }
+
+  for (size_t k = 0; k < asm_b.label_s; k++) {
+    code_v[k] = asm_b.label_v[k].op_v;
+    code_len_v[k] = asm_b.label_v[k].op_s;
+  }
+
+  law_v = er_law_make_code(loc_a, nam_v, bod_v, ari_d, asm_b.let_d,
+                           asm_b.label_s, code_v, code_len_v);
+  if (law_v == 0 && err != NULL && err->status == ER_BC_ASM_OK) {
+    BAD_TARGET("assembled law failed runtime validation");
+  }
+
+cleanup:
+  if (code_len_v != NULL) {
+    work_a->free(work_a->ctx, code_len_v);
+  }
+  if (code_v != NULL) {
+    work_a->free(work_a->ctx, code_v);
+  }
+  er_bc_asm_free(work_a, &asm_b);
+  return law_v;
+
+#undef BAD_TARGET
+#undef OOM
+#undef FAIL
+}
+
+er_val er_law_make_with_compiler(const enki_allocator* loc_a,
+                                 const er_law_compiler* compiler, er_val nam_v,
+                                 er_val bod_v, uint32_t ari_d) {
+  if (compiler == NULL || !compiler->enabled_f || compiler->emit_asm == NULL) {
+    return er_law_compile(loc_a, nam_v, bod_v, ari_d);
+  }
+
+  er_val asm_v = compiler->emit_asm(loc_a, compiler->ctx, nam_v, bod_v, ari_d);
+  if (asm_v == 0) {
+    return 0;
+  }
+  return er_law_make_asm(loc_a, nam_v, bod_v, ari_d, asm_v, NULL);
 }
 
 #undef ER_BC_N
