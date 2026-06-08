@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stdbool.h>
 #include <stddef.h>
 
 #include "enki/allocator.h"
@@ -22,6 +23,7 @@ struct enki_gc {
   enki_allocator our_a;
   enki_allocator allocator_a;
   size_t lock_depth;
+  bool immortal_f;
 
   /*
    * Kept for existing old-interpreter allocation code that still records
@@ -44,10 +46,12 @@ struct enki_gc {
 
 enki_gc* enki_gc_create(const enki_allocator* our_a, size_t cap_s,
                         enki_interpreter* root);
+enki_gc* enki_gc_create_immortal(const enki_allocator* our_a, size_t cap_s);
 void enki_gc_destroy(enki_gc* gc);
 void enki_gc_lock(enki_gc* gc);
 void enki_gc_unlock(enki_gc* gc);
 void enki_gc_collect(enki_gc* gc);
+bool enki_gc_contains(const enki_gc* gc, const void* ptr);
 
 void enki_gc_set_trace_root(enki_gc* gc, void* root, enki_gc_trace_fn trace_fn);
 void enki_gc_trace_ref(enki_gc* gc, er_val* ref_v);

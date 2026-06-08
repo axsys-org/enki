@@ -172,8 +172,7 @@ er_val er_pin_init(enki_gc* gc, er_pin* pin, const uint8_t hash_b[32],
                    er_val val_v, size_t sub_s, const er_val sub_v[]);
 er_val er_pin_make(enki_gc* gc, er_val val_v);
 
-enki_error er_pin_freeze(enki_store* store, enki_gc* gc,
-                         const enki_allocator* work_a, er_val pin_v,
+enki_error er_pin_freeze(enki_store* store, er_val* pin_io_v,
                          uint8_t hash_b[32]);
 
 er_law* er_law_alloc(enki_gc* gc, size_t bc_s, size_t op_s);

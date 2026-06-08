@@ -1,6 +1,16 @@
 #include "enki/arena.h"
+
+#include <stdint.h>
+#include <sys/mman.h>
+
+#ifndef MAP_ANONYMOUS
+#define MAP_ANONYMOUS MAP_ANON
+#endif
+
 enki_arena* enki_arena_create(const enki_allocator* loc_a, size_t cap_s) {
   if (!loc_a)
+    return NULL;
+  if (cap_s > SIZE_MAX - sizeof(enki_arena))
     return NULL;
   size_t siz_s = sizeof(enki_arena) + cap_s;
   enki_arena* a = (enki_arena*)loc_a->alloc(loc_a->ctx, siz_s);
@@ -11,6 +21,7 @@ enki_arena* enki_arena_create(const enki_allocator* loc_a, size_t cap_s) {
   a->ptr = (unsigned char*)a;
   a->cap_s = siz_s;
   a->our_a = *loc_a;
+  a->mmap_f = false;
   a->allocator_a = (enki_allocator){
       .ctx = a,
       .alloc = enki_arena_alloc,
@@ -19,9 +30,37 @@ enki_arena* enki_arena_create(const enki_allocator* loc_a, size_t cap_s) {
   };
   return a;
 }
+
+enki_arena* enki_arena_create_overcommit(size_t cap_s) {
+  if (cap_s > SIZE_MAX - sizeof(enki_arena))
+    return NULL;
+  size_t siz_s = sizeof(enki_arena) + cap_s;
+  void* mem = mmap(NULL, siz_s, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (mem == MAP_FAILED)
+    return NULL;
+  enki_arena* a = mem;
+  a->off_o = sizeof(enki_arena);
+  a->ptr = (unsigned char*)a;
+  a->cap_s = siz_s;
+  a->our_a = (enki_allocator){0};
+  a->mmap_f = true;
+  a->allocator_a = (enki_allocator){
+      .ctx = a,
+      .alloc = enki_arena_alloc,
+      .realloc = NULL,
+      .free = enki_arena_free,
+  };
+  return a;
+}
+
 void enki_arena_destroy(enki_arena* a) {
   if (!a)
     return;
+  if (a->mmap_f) {
+    (void)munmap(a, a->cap_s);
+    return;
+  }
   a->our_a.free(a->our_a.ctx, a);
 }
 void* enki_arena_alloc(void* ctx, size_t size_s) {

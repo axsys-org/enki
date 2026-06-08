@@ -252,13 +252,12 @@ er_pin* er_pin_alloc(enki_gc* gc, size_t sub_s) {
 
 static er_ice* er_ice_alloc(enki_gc* gc, const uint8_t hash_b[32], bool frz_f,
                             size_t sub_s, const er_val sub_v[]) {
-  const enki_allocator* a = enki_gc_parent_allocator(gc);
   size_t size_s = 0;
-  if (a == NULL ||
+  if (gc == NULL ||
       !er_alloc_size(sizeof(er_ice), sub_s, sizeof(er_val), &size_s)) {
     return NULL;
   }
-  er_ice* ice = a->alloc(a->ctx, size_s);
+  er_ice* ice = er_alloc_bytes(gc, size_s, _Alignof(er_ice));
   if (ice == NULL) {
     return NULL;
   }
@@ -2171,7 +2170,11 @@ static er_val op66_exec_save_app(er_vm* vm, const er_val arg_v[],
   if (arg_s != 1) {
     return er_tank_make(vm->gc, (er_val)arg_s, "bad primitive arity");
   }
-  if (vm->store == NULL || vm->work_a == NULL) {
+  enki_store* store = enki_store_current();
+  if (store == NULL) {
+    store = vm->store;
+  }
+  if (store == NULL) {
     return er_tank_make(vm->gc, arg_v[0], "save without store");
   }
 
@@ -2195,10 +2198,11 @@ static er_val op66_exec_save_app(er_vm* vm, const er_val arg_v[],
   }
 
   uint8_t hash_b[32];
-  enki_error err = er_pin_freeze(vm->store, vm->gc, vm->work_a, pin_v, hash_b);
+  enki_error err = er_pin_freeze(store, &pin_v, hash_b);
   if (err == ENKI_ERROR_OK) {
-    err = er_store_write_root_hash(vm->store, hash_b);
+    err = er_store_write_root_hash(store, hash_b);
   }
+  vm->gc_tmp_v[old_tmp_s] = pin_v;
   vm->gc_tmp_s = old_tmp_s;
   if (err != ENKI_ERROR_OK) {
     return er_tank_make(vm->gc, (er_val)err, "save failed");

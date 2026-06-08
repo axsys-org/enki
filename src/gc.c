@@ -5,6 +5,7 @@
 
 #include "enki/gc.h"
 #include "enki/profile.h"
+#include "enki/store.h"
 
 static bool enki_gc_is_known_tag(er_val val_v) {
   switch (er_get_tag(val_v)) {
@@ -83,8 +84,8 @@ const enki_allocator* enki_gc_parent_allocator(enki_gc* gc) {
   return gc == NULL ? NULL : &gc->our_a;
 }
 
-enki_gc* enki_gc_create(const enki_allocator* loc_a, size_t cap_s,
-                        enki_interpreter* root) {
+static enki_gc* enki_gc_create_base(const enki_allocator* loc_a, size_t cap_s,
+                                    enki_interpreter* root, bool immortal_f) {
   if (!loc_a) {
     return NULL;
   }
@@ -102,15 +103,29 @@ enki_gc* enki_gc_create(const enki_allocator* loc_a, size_t cap_s,
   };
   gc->cap_s = cap_s;
   gc->root = root;
+  gc->immortal_f = immortal_f;
   gc->copy = enki_gc_copy;
   gc->alloc = enki_gc_alloc;
-  gc->active_a = enki_arena_create(loc_a, cap_s);
-  gc->idle_a = enki_arena_create(loc_a, cap_s);
-  if (!gc->active_a || !gc->idle_a) {
+  if (immortal_f) {
+    gc->active_a = enki_arena_create_overcommit(cap_s);
+  } else {
+    gc->active_a = enki_arena_create(loc_a, cap_s);
+    gc->idle_a = enki_arena_create(loc_a, cap_s);
+  }
+  if (!gc->active_a || (!immortal_f && !gc->idle_a)) {
     enki_gc_destroy(gc);
     return NULL;
   }
   return gc;
+}
+
+enki_gc* enki_gc_create(const enki_allocator* loc_a, size_t cap_s,
+                        enki_interpreter* root) {
+  return enki_gc_create_base(loc_a, cap_s, root, false);
+}
+
+enki_gc* enki_gc_create_immortal(const enki_allocator* loc_a, size_t cap_s) {
+  return enki_gc_create_base(loc_a, cap_s, NULL, true);
 }
 
 void enki_gc_set_trace_root(enki_gc* gc, void* root,
@@ -154,6 +169,9 @@ void* enki_gc_alloc(enki_gc* gc, size_t size_s, size_t align_s) {
     abort();
   }
   void* new_p = enki_arena_alloc_aligned(gc->active_a, size_s, align_s);
+  if (gc->immortal_f && new_p == NULL) {
+    abort();
+  }
   if (new_p == NULL) {
     if (gc->lock_depth > 0) {
       abort();
@@ -181,6 +199,30 @@ void* enki_gc_alloc_locked(enki_gc* gc, size_t size_s, size_t align_s) {
   return new_p;
 }
 
+bool enki_gc_contains(const enki_gc* gc, const void* ptr) {
+  if (gc == NULL || ptr == NULL) {
+    return false;
+  }
+  const unsigned char* p = ptr;
+  const unsigned char* active_start = enki_arena_start(gc->active_a);
+  const unsigned char* active_end = enki_arena_end(gc->active_a);
+  if (active_start != NULL && p >= active_start && p < active_end) {
+    return true;
+  }
+  const unsigned char* idle_start = enki_arena_start(gc->idle_a);
+  const unsigned char* idle_end = enki_arena_end(gc->idle_a);
+  return idle_start != NULL && p >= idle_start && p < idle_end;
+}
+
+static bool enki_gc_is_store_value(const enki_gc* gc, er_val val_v) {
+  if (gc == NULL || er_is_cat(val_v)) {
+    return false;
+  }
+  enki_store* store = enki_store_current();
+  return store != NULL && store->gc != NULL && store->gc != gc &&
+         enki_gc_contains(store->gc, er_outa(val_v));
+}
+
 er_val enki_gc_copy(enki_gc* gc, er_val val_v) {
   ENKI_PROFILE_ZONE("enki_gc_copy");
   if (gc == NULL || er_is_cat(val_v)) {
@@ -188,6 +230,9 @@ er_val enki_gc_copy(enki_gc* gc, er_val val_v) {
   }
   if (!enki_gc_is_known_tag(val_v)) {
     abort();
+  }
+  if (enki_gc_is_store_value(gc, val_v)) {
+    return val_v;
   }
   if (er_is_tank(val_v)) {
     er_tank* tank = er_outa(val_v);
@@ -282,6 +327,9 @@ static void enki_gc_trace_object(enki_gc* gc, er_val val_v) {
     return;
   case er_tag_pin: {
     er_pin* pin = er_outa(val_v);
+    if (pin->ice != NULL && pin->ice->frz_f) {
+      return;
+    }
     enki_gc_trace_ref(gc, &pin->val_v);
     if (pin->ice != NULL) {
       for (size_t k = 0; k < pin->ice->sub_s; k++) {
@@ -335,6 +383,9 @@ static void enki_gc_trace_object(enki_gc* gc, er_val val_v) {
 void enki_gc_collect(enki_gc* gc) {
   ENKI_PROFILE_ZONE("enki_gc_collect");
   if (!gc) {
+    return;
+  }
+  if (gc->immortal_f) {
     return;
   }
   if (gc->lock_depth > 0) {

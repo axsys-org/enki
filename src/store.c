@@ -1,13 +1,19 @@
 #include "enki/store.h"
 
+#include "enki/allocator.h"
+#include "enki/arena.h"
+#include "enki/gc.h"
+
 #include <openssl/sha.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 
-#define ER_STORE_VERSION   0x02u
-#define ER_STORE_SMALL_MAX UINT64_C(0x7fffffffffffffff)
+#define ER_STORE_VERSION       0x02u
+#define ER_STORE_SMALL_MAX     UINT64_C(0x7fffffffffffffff)
+#define ER_STORE_GC_CAP_S      ((size_t)1 << 40u)
+#define ER_STORE_SCRATCH_CAP_S ((size_t)1 << 30u)
 
 typedef struct er_store_buf {
   const enki_allocator* a;
@@ -24,9 +30,26 @@ typedef struct er_store_vals {
 } er_store_vals;
 
 static const uint8_t er_store_root_key_b[32] = {'r', 'o', 'o', 't'};
+static enki_store* enki_store_current_v;
+
+enki_store* enki_store_current(void) {
+  return enki_store_current_v;
+}
 
 static bool er_store_allocator_ok(const enki_allocator* a) {
   return a != NULL && a->alloc != NULL && a->free != NULL;
+}
+
+static const enki_allocator* er_store_scratch(enki_store* store) {
+  return store == NULL || store->scratch_a == NULL
+             ? NULL
+             : enki_arena_as_allocator(store->scratch_a);
+}
+
+static void er_store_scratch_reset(enki_store* store) {
+  if (store != NULL) {
+    enki_arena_reset(store->scratch_a);
+  }
 }
 
 static bool er_store_mul_size(size_t a_s, size_t b_s, size_t* out_s) {
@@ -371,6 +394,134 @@ static enki_error er_store_collect_subpins(er_store_vals* pins, er_val val_v) {
   return ENKI_ERROR_BAD_TAG;
 }
 
+typedef struct er_store_pin_map {
+  const er_val* orig_v;
+  const er_val* frozen_v;
+  size_t len_s;
+} er_store_pin_map;
+
+static enki_error er_pin_freeze_with_work(enki_store* store,
+                                          const enki_allocator* work_a,
+                                          er_val* pin_io_v, uint8_t hash_b[32]);
+static enki_error er_store_load_pin_with_work(enki_store* store,
+                                              const enki_allocator* work_a,
+                                              const uint8_t hash_b[32],
+                                              er_val* out_v);
+
+static size_t er_store_obj_size(const er_head* h) {
+  return h->siz_s & ~(size_t)0x3u;
+}
+
+static bool er_store_map_find(const er_store_pin_map* map, er_val orig_v,
+                              er_val* out_v) {
+  if (map == NULL) {
+    return false;
+  }
+  for (size_t k = 0; k < map->len_s; k++) {
+    if (map->orig_v[k] == orig_v) {
+      *out_v = map->frozen_v[k];
+      return true;
+    }
+  }
+  return false;
+}
+
+static enki_error er_store_freeze_value(enki_store* store,
+                                        const enki_allocator* work_a,
+                                        const er_store_pin_map* map,
+                                        er_val val_v, er_val* out_v) {
+  if (out_v == NULL) {
+    return ENKI_STORE_ERROR;
+  }
+  *out_v = 0;
+  if (er_is_cat(val_v)) {
+    *out_v = val_v;
+    return ENKI_ERROR_OK;
+  }
+  if (store == NULL || store->gc == NULL || !er_store_allocator_ok(work_a)) {
+    return ENKI_STORE_ERROR;
+  }
+
+  er_pin* pin = er_outt(er_tag_pin, val_v);
+  if (pin != NULL) {
+    if (er_store_map_find(map, val_v, out_v)) {
+      return ENKI_ERROR_OK;
+    }
+    er_val frozen_v = val_v;
+    uint8_t hash_b[32];
+    enki_error err = er_pin_freeze_with_work(store, work_a, &frozen_v, hash_b);
+    if (err == ENKI_ERROR_OK) {
+      *out_v = frozen_v;
+    }
+    return err;
+  }
+
+  er_bat* bat = er_outt(er_tag_bat, val_v);
+  if (bat != NULL) {
+    er_head* h = er_outa(val_v);
+    size_t size_s = er_store_obj_size(h);
+    void* new_p = enki_gc_alloc(store->gc, size_s, _Alignof(er_head));
+    memcpy(new_p, h, size_s);
+    *out_v = er_into(er_tag_bat, new_p);
+    return ENKI_ERROR_OK;
+  }
+
+  er_law* law = er_outt(er_tag_law, val_v);
+  if (law != NULL) {
+    er_val name_v = 0;
+    enki_error err =
+        er_store_freeze_value(store, work_a, map, law->name_v, &name_v);
+    if (err != ENKI_ERROR_OK) {
+      return err;
+    }
+    er_val body_v = 0;
+    err = er_store_freeze_value(store, work_a, map, law->body_v, &body_v);
+    if (err != ENKI_ERROR_OK) {
+      return err;
+    }
+    *out_v = er_law_make(store->gc, name_v, body_v, law->ari_d);
+    return *out_v == 0 ? ENKI_ERROR_OOM : ENKI_ERROR_OK;
+  }
+
+  er_app* app = er_outt(er_tag_app, val_v);
+  if (app != NULL) {
+    er_val fn_v = 0;
+    enki_error err =
+        er_store_freeze_value(store, work_a, map, app->fn_v, &fn_v);
+    if (err != ENKI_ERROR_OK) {
+      return err;
+    }
+    er_val* arg_v = NULL;
+    if (app->arg_s > 0) {
+      size_t arg_bytes_s = 0;
+      if (!er_store_mul_size(app->arg_s, sizeof(er_val), &arg_bytes_s)) {
+        return ENKI_ERROR_OOM;
+      }
+      arg_v = work_a->alloc(work_a->ctx, arg_bytes_s);
+      if (arg_v == NULL) {
+        return ENKI_ERROR_OOM;
+      }
+    }
+    for (size_t k = 0; k < app->arg_s; k++) {
+      err = er_store_freeze_value(store, work_a, map, app->arg_v[k], &arg_v[k]);
+      if (err != ENKI_ERROR_OK) {
+        work_a->free(work_a->ctx, arg_v);
+        return err;
+      }
+    }
+    er_app* frozen_app = er_app_alloc(store->gc, app->arg_s);
+    if (frozen_app == NULL) {
+      work_a->free(work_a->ctx, arg_v);
+      return ENKI_ERROR_OOM;
+    }
+    *out_v = er_app_init(frozen_app, fn_v, app->arg_s, arg_v);
+    work_a->free(work_a->ctx, arg_v);
+    return *out_v == 0 ? ENKI_ERROR_OOM : ENKI_ERROR_OK;
+  }
+
+  return ENKI_ERROR_BAD_TAG;
+}
+
 static enki_error er_store_deserialize_value(enki_gc* gc,
                                              const enki_allocator* work_a,
                                              const uint8_t* data_b,
@@ -545,6 +696,7 @@ static enki_error er_store_deserialize_value(enki_gc* gc,
 enki_error enki_store_init(const char* path, size_t size_s, enki_store* store) {
   if (store == NULL)
     return ENKI_STORE_ERROR;
+  memset(store, 0, sizeof(*store));
   MDB_env* env;
   int rc = mdb_env_create(&env);
   if (rc != 0)
@@ -577,12 +729,29 @@ enki_error enki_store_init(const char* path, size_t size_s, enki_store* store) {
     mdb_env_close(env);
     return ENKI_STORE_ERROR;
   }
+  enki_gc* gc =
+      enki_gc_create_immortal(enki_allocator_system(), ER_STORE_GC_CAP_S);
+  if (gc == NULL) {
+    mdb_dbi_close(env, dbi);
+    mdb_env_close(env);
+    return ENKI_STORE_ERROR;
+  }
+  enki_arena* scratch_a = enki_arena_create_overcommit(ER_STORE_SCRATCH_CAP_S);
+  if (scratch_a == NULL) {
+    enki_gc_destroy(gc);
+    mdb_dbi_close(env, dbi);
+    mdb_env_close(env);
+    return ENKI_STORE_ERROR;
+  }
   store->size_s = size_s;
   store->read = enki_store_read;
   store->write = enki_store_write;
   store->size = enki_store_size;
   store->env = env;
   store->dbi = dbi;
+  store->gc = gc;
+  store->scratch_a = scratch_a;
+  enki_store_current_v = store;
   return ENKI_ERROR_OK;
 }
 enki_error enki_store_size(enki_store* store, const uint8_t* key_b,
@@ -674,12 +843,21 @@ enki_error enki_store_write(enki_store* store, const uint8_t* key_b,
   return ENKI_ERROR_OK;
 }
 void enki_store_close(enki_store* store) {
-  if (store == NULL || store->env == NULL)
+  if (store == NULL)
     return;
-  mdb_dbi_close(store->env, store->dbi);
-  mdb_env_close(store->env);
+  if (enki_store_current_v == store) {
+    enki_store_current_v = NULL;
+  }
+  if (store->env != NULL) {
+    mdb_dbi_close(store->env, store->dbi);
+    mdb_env_close(store->env);
+  }
+  enki_gc_destroy(store->gc);
+  enki_arena_destroy(store->scratch_a);
   store->env = NULL;
   store->dbi = 0;
+  store->gc = NULL;
+  store->scratch_a = NULL;
 }
 
 enki_error er_store_write_root_hash(enki_store* store,
@@ -690,13 +868,15 @@ enki_error er_store_write_root_hash(enki_store* store,
   return enki_store_write(store, er_store_root_key_b, hash_b, 32);
 }
 
-enki_error er_pin_freeze(enki_store* store, enki_gc* gc,
-                         const enki_allocator* work_a, er_val pin_v,
-                         uint8_t hash_b[32]) {
-  if (store == NULL || hash_b == NULL || gc == NULL ||
-      !er_store_allocator_ok(work_a)) {
+static enki_error er_pin_freeze_with_work(enki_store* store,
+                                          const enki_allocator* work_a,
+                                          er_val* pin_io_v,
+                                          uint8_t hash_b[32]) {
+  if (store == NULL || store->gc == NULL || hash_b == NULL ||
+      pin_io_v == NULL || !er_store_allocator_ok(work_a)) {
     return ENKI_STORE_ERROR;
   }
+  er_val pin_v = *pin_io_v;
   er_pin* pin = er_outt(er_tag_pin, pin_v);
   if (pin == NULL) {
     return ENKI_ERROR_TYPE;
@@ -718,22 +898,58 @@ enki_error er_pin_freeze(enki_store* store, enki_gc* gc,
   if (err == ENKI_ERROR_OK) {
     err = er_store_buf_push_u64(&buf, (uint64_t)subpins.len_s);
   }
+  er_val* frozen_subpin_v = NULL;
+  if (err == ENKI_ERROR_OK && subpins.len_s > 0) {
+    size_t subpin_bytes_s = 0;
+    if (!er_store_mul_size(subpins.len_s, sizeof(er_val), &subpin_bytes_s)) {
+      err = ENKI_ERROR_OOM;
+    } else {
+      frozen_subpin_v = work_a->alloc(work_a->ctx, subpin_bytes_s);
+      if (frozen_subpin_v == NULL) {
+        err = ENKI_ERROR_OOM;
+      }
+    }
+  }
   for (size_t k = 0; err == ENKI_ERROR_OK && k < subpins.len_s; k++) {
+    frozen_subpin_v[k] = subpins.val_v[k];
+    for (size_t j = 0; j < k; j++) {
+      if (subpins.val_v[j] == subpins.val_v[k]) {
+        frozen_subpin_v[k] = frozen_subpin_v[j];
+        break;
+      }
+    }
     uint8_t sub_hash_b[32];
-    err = er_pin_freeze(store, gc, work_a, subpins.val_v[k], sub_hash_b);
+    err =
+        er_pin_freeze_with_work(store, work_a, &frozen_subpin_v[k], sub_hash_b);
     if (err == ENKI_ERROR_OK) {
       err = er_store_buf_push(&buf, sub_hash_b, sizeof(sub_hash_b));
     }
   }
+  er_val frozen_inner_v = 0;
   if (err == ENKI_ERROR_OK) {
-    err = er_store_serialize_value(&buf, pin->val_v);
+    er_store_pin_map map = {
+        .orig_v = subpins.val_v,
+        .frozen_v = frozen_subpin_v,
+        .len_s = subpins.len_s,
+    };
+    err =
+        er_store_freeze_value(store, work_a, &map, pin->val_v, &frozen_inner_v);
+  }
+  if (err == ENKI_ERROR_OK) {
+    err = er_store_serialize_value(&buf, frozen_inner_v);
   }
   if (err == ENKI_ERROR_OK) {
     SHA256(buf.data_b, buf.len_s, hash_b);
+    er_pin* frozen_pin = er_pin_alloc(store->gc, 0);
     er_val frozen_v =
-        er_pin_init(gc, pin, hash_b, pin->val_v, subpins.len_s, subpins.val_v);
+        frozen_pin == NULL
+            ? 0
+            : er_pin_init(store->gc, frozen_pin, hash_b, frozen_inner_v,
+                          subpins.len_s, frozen_subpin_v);
     if (frozen_v == 0) {
       err = ENKI_ERROR_OOM;
+    } else {
+      *pin_io_v = frozen_v;
     }
   }
   if (err == ENKI_ERROR_OK) {
@@ -741,20 +957,35 @@ enki_error er_pin_freeze(enki_store* store, enki_gc* gc,
   }
 
   er_store_buf_free(&buf);
+  if (frozen_subpin_v != NULL) {
+    work_a->free(work_a->ctx, frozen_subpin_v);
+  }
   er_store_vals_free(&subpins);
   return err;
 }
 
-enki_error er_store_save_pin(enki_store* store, enki_gc* gc,
-                             const enki_allocator* work_a, er_val pin_v,
-                             uint8_t hash_b[32]) {
-  return er_pin_freeze(store, gc, work_a, pin_v, hash_b);
+enki_error er_pin_freeze(enki_store* store, er_val* pin_io_v,
+                         uint8_t hash_b[32]) {
+  const enki_allocator* work_a = er_store_scratch(store);
+  if (!er_store_allocator_ok(work_a)) {
+    return ENKI_STORE_ERROR;
+  }
+  er_store_scratch_reset(store);
+  enki_error err = er_pin_freeze_with_work(store, work_a, pin_io_v, hash_b);
+  er_store_scratch_reset(store);
+  return err;
 }
 
-enki_error er_store_load_pin(enki_store* store, enki_gc* gc,
-                             const enki_allocator* work_a,
-                             const uint8_t hash_b[32], er_val* out_v) {
-  if (store == NULL || hash_b == NULL || out_v == NULL || gc == NULL ||
+enki_error er_store_save_pin(enki_store* store, er_val* pin_io_v,
+                             uint8_t hash_b[32]) {
+  return er_pin_freeze(store, pin_io_v, hash_b);
+}
+
+static enki_error er_store_load_pin_with_work(enki_store* store,
+                                              const enki_allocator* work_a,
+                                              const uint8_t hash_b[32],
+                                              er_val* out_v) {
+  if (store == NULL || store->gc == NULL || hash_b == NULL || out_v == NULL ||
       !er_store_allocator_ok(work_a)) {
     return ENKI_STORE_ERROR;
   }
@@ -816,23 +1047,23 @@ enki_error er_store_load_pin(enki_store* store, enki_gc* gc,
     uint8_t sub_hash_b[32];
     memcpy(sub_hash_b, data_b + off_s, 32);
     off_s += 32u;
-    err = er_store_load_pin(store, gc, work_a, sub_hash_b, &subpin_v[k]);
+    err = er_store_load_pin_with_work(store, work_a, sub_hash_b, &subpin_v[k]);
   }
 
   er_val inner_v = 0;
   if (err == ENKI_ERROR_OK) {
-    err =
-        er_store_deserialize_value(gc, work_a, data_b, len_s, &off_s, &inner_v);
+    err = er_store_deserialize_value(store->gc, work_a, data_b, len_s, &off_s,
+                                     &inner_v);
   }
   if (err == ENKI_ERROR_OK && off_s != len_s) {
     err = ENKI_ERROR_BAD_PIN;
   }
   if (err == ENKI_ERROR_OK) {
-    er_pin* pin = er_pin_alloc(gc, 0);
+    er_pin* pin = er_pin_alloc(store->gc, 0);
     if (pin == NULL) {
       err = ENKI_ERROR_OOM;
     } else {
-      *out_v = er_pin_init(gc, pin, hash_b, inner_v, subpin_s, subpin_v);
+      *out_v = er_pin_init(store->gc, pin, hash_b, inner_v, subpin_s, subpin_v);
       if (*out_v == 0) {
         err = ENKI_ERROR_OOM;
       }
@@ -846,18 +1077,28 @@ enki_error er_store_load_pin(enki_store* store, enki_gc* gc,
   return err;
 }
 
-enki_error er_store_save_root(enki_store* store, enki_gc* gc,
-                              const enki_allocator* work_a, er_val pin_v) {
+enki_error er_store_load_pin(enki_store* store, const uint8_t hash_b[32],
+                             er_val* out_v) {
+  const enki_allocator* work_a = er_store_scratch(store);
+  if (!er_store_allocator_ok(work_a)) {
+    return ENKI_STORE_ERROR;
+  }
+  er_store_scratch_reset(store);
+  enki_error err = er_store_load_pin_with_work(store, work_a, hash_b, out_v);
+  er_store_scratch_reset(store);
+  return err;
+}
+
+enki_error er_store_save_root(enki_store* store, er_val* pin_io_v) {
   uint8_t hash_b[32];
-  enki_error err = er_pin_freeze(store, gc, work_a, pin_v, hash_b);
+  enki_error err = er_pin_freeze(store, pin_io_v, hash_b);
   if (err != ENKI_ERROR_OK) {
     return err;
   }
   return er_store_write_root_hash(store, hash_b);
 }
 
-enki_error er_store_load_root(enki_store* store, enki_gc* gc,
-                              const enki_allocator* work_a, er_val* out_v) {
+enki_error er_store_load_root(enki_store* store, er_val* out_v) {
   uint8_t hash_b[32];
   size_t len_s = 0;
   enki_error err = enki_store_read(store, er_store_root_key_b, hash_b,
@@ -868,5 +1109,5 @@ enki_error er_store_load_root(enki_store* store, enki_gc* gc,
   if (len_s != sizeof(hash_b)) {
     return ENKI_ERROR_BAD_PIN;
   }
-  return er_store_load_pin(store, gc, work_a, hash_b, out_v);
+  return er_store_load_pin(store, hash_b, out_v);
 }

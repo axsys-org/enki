@@ -99,7 +99,6 @@ static er_val er_test_bat(enki_gc* gc) {
 
 Test(store, er_pin_save_and_load_roundtrip_new_value_rep) {
   enki_gc* gc = fixture_interp->gc;
-  const enki_allocator* work_a = enki_gc_parent_allocator(gc);
   er_val child_v = er_pin_make(gc, 11);
   cr_assert_eq(er_get_tag(child_v), er_tag_pin);
   er_pin* child = er_outt(er_tag_pin, child_v);
@@ -115,29 +114,39 @@ Test(store, er_pin_save_and_load_roundtrip_new_value_rep) {
   cr_assert_null(parent->ice);
 
   uint8_t hash_b[32];
-  cr_assert_eq(
-      er_store_save_pin(&fixture_interp->store, gc, work_a, parent_v, hash_b),
-      ENKI_ERROR_OK);
+  cr_assert_eq(er_store_save_pin(&fixture_interp->store, &parent_v, hash_b),
+               ENKI_ERROR_OK);
+  cr_assert_null(parent->ice);
+  cr_assert_null(child->ice);
+
+  parent = er_outt(er_tag_pin, parent_v);
+  cr_assert_not_null(parent);
+  cr_assert(enki_gc_contains(fixture_interp->store.gc, parent));
   cr_assert_not_null(parent->ice);
   cr_assert(parent->ice->frz_f);
   cr_assert_eq(parent->ice->sub_s, 1);
   cr_assert_eq(memcmp(parent->ice->hash_b, hash_b, 32), 0);
-  cr_assert_not_null(child->ice);
-  cr_assert(child->ice->frz_f);
+  er_pin* frozen_child = er_outt(er_tag_pin, parent->ice->sub_v[0]);
+  cr_assert_not_null(frozen_child);
+  cr_assert(enki_gc_contains(fixture_interp->store.gc, frozen_child));
+  cr_assert_not_null(frozen_child->ice);
+  cr_assert(frozen_child->ice->frz_f);
 
   uint8_t hash_again_b[32];
+  er_val same_parent_v = parent_v;
   cr_assert_eq(
-      er_pin_freeze(&fixture_interp->store, gc, work_a, parent_v, hash_again_b),
+      er_pin_freeze(&fixture_interp->store, &same_parent_v, hash_again_b),
       ENKI_ERROR_OK);
+  cr_assert_eq(same_parent_v, parent_v);
   cr_assert_eq(memcmp(hash_again_b, hash_b, 32), 0);
 
   er_val loaded_v = 0;
-  cr_assert_eq(
-      er_store_load_pin(&fixture_interp->store, gc, work_a, hash_b, &loaded_v),
-      ENKI_ERROR_OK);
+  cr_assert_eq(er_store_load_pin(&fixture_interp->store, hash_b, &loaded_v),
+               ENKI_ERROR_OK);
 
   er_pin* loaded = er_outt(er_tag_pin, loaded_v);
   cr_assert_not_null(loaded);
+  cr_assert(enki_gc_contains(fixture_interp->store.gc, loaded));
   cr_assert_not_null(loaded->ice);
   cr_assert(loaded->ice->frz_f);
   cr_assert_eq(loaded->ice->sub_s, 1);
@@ -145,6 +154,7 @@ Test(store, er_pin_save_and_load_roundtrip_new_value_rep) {
 
   er_pin* loaded_child = er_outt(er_tag_pin, loaded->ice->sub_v[0]);
   cr_assert_not_null(loaded_child);
+  cr_assert(enki_gc_contains(fixture_interp->store.gc, loaded_child));
   cr_assert_not_null(loaded_child->ice);
   cr_assert(loaded_child->ice->frz_f);
   cr_assert_eq(loaded_child->val_v, 11);
@@ -156,6 +166,7 @@ Test(store, er_pin_save_and_load_roundtrip_new_value_rep) {
 
   er_pin* child_ref = er_outt(er_tag_pin, inner->arg_v[0]);
   cr_assert_not_null(child_ref);
+  cr_assert(enki_gc_contains(fixture_interp->store.gc, child_ref));
   cr_assert_not_null(child_ref->ice);
   cr_assert_eq(memcmp(child_ref->ice->hash_b, loaded_child->ice->hash_b, 32),
                0);
@@ -169,18 +180,18 @@ Test(store, er_pin_save_and_load_roundtrip_new_value_rep) {
 
 Test(store, er_root_save_and_load_roundtrip_new_value_rep) {
   enki_gc* gc = fixture_interp->gc;
-  const enki_allocator* work_a = enki_gc_parent_allocator(gc);
   er_val pin_v = er_pin_make(gc, 1234);
-  cr_assert_eq(er_store_save_root(&fixture_interp->store, gc, work_a, pin_v),
+  cr_assert_eq(er_store_save_root(&fixture_interp->store, &pin_v),
                ENKI_ERROR_OK);
+  cr_assert(enki_gc_contains(fixture_interp->store.gc, er_outa(pin_v)));
 
   er_val loaded_v = 0;
-  cr_assert_eq(
-      er_store_load_root(&fixture_interp->store, gc, work_a, &loaded_v),
-      ENKI_ERROR_OK);
+  cr_assert_eq(er_store_load_root(&fixture_interp->store, &loaded_v),
+               ENKI_ERROR_OK);
 
   er_pin* loaded = er_outt(er_tag_pin, loaded_v);
   cr_assert_not_null(loaded);
+  cr_assert(enki_gc_contains(fixture_interp->store.gc, loaded));
   cr_assert_not_null(loaded->ice);
   cr_assert(loaded->ice->frz_f);
   cr_assert_eq(loaded->val_v, 1234);
@@ -206,19 +217,17 @@ Test(store, er_op66_save_freezes_pin_and_writes_root_new_value_rep) {
   er_val result_v =
       er_eval_to_store(gc, &fixture_interp->store, work_a, thk_v, ER_EVAL_WHNF);
   cr_assert_eq(result_v, 0);
-  cr_assert_not_null(pin->ice);
-  cr_assert(pin->ice->frz_f);
+  cr_assert_null(pin->ice);
 
   er_val loaded_v = 0;
-  cr_assert_eq(
-      er_store_load_root(&fixture_interp->store, gc, work_a, &loaded_v),
-      ENKI_ERROR_OK);
+  cr_assert_eq(er_store_load_root(&fixture_interp->store, &loaded_v),
+               ENKI_ERROR_OK);
   er_pin* loaded = er_outt(er_tag_pin, loaded_v);
   cr_assert_not_null(loaded);
+  cr_assert(enki_gc_contains(fixture_interp->store.gc, loaded));
   cr_assert_not_null(loaded->ice);
   cr_assert(loaded->ice->frz_f);
   cr_assert_eq(loaded->val_v, 5678);
-  cr_assert_eq(memcmp(loaded->ice->hash_b, pin->ice->hash_b, 32), 0);
 }
 
 Test(store, rejects_invalid_arguments) {

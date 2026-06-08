@@ -213,7 +213,10 @@ void enki_pin_save_root(enki_interpreter* i, enki_value val) {
   uint8_t hash_b[32];
   enki_pin_save(i, val, hash_b);
   uint8_t key[32] = "root";
-  enki_error st = i->store.write(&i->store, key, hash_b, 32);
+  enki_store* store = enki_store_current();
+  if (store == NULL)
+    enki_interp_throw(i, ENKI_STORE_ERROR, val);
+  enki_error st = store->write(store, key, hash_b, 32);
   if (st != ENKI_ERROR_OK)
     enki_interp_throw(i, (int)st, val);
 }
@@ -221,7 +224,10 @@ enki_value enki_pin_load_root(enki_interpreter* i) {
   uint8_t key[32] = "root";
   size_t n_out;
   uint8_t hash_b[32];
-  enki_error st = i->store.read(&i->store, key, hash_b, 32, &n_out);
+  enki_store* store = enki_store_current();
+  if (store == NULL)
+    enki_interp_throw(i, ENKI_STORE_ERROR, 0);
+  enki_error st = store->read(store, key, hash_b, 32, &n_out);
   if (st != ENKI_ERROR_OK)
     enki_interp_throw(i, (int)st, 0);
   if (n_out != 32)
@@ -279,7 +285,10 @@ void enki_pin_save(enki_interpreter* i, enki_value val, uint8_t* hash_b) {
   memcpy(pin->hash_b, hash_b, 32);
   uint8_t* out = enki_vector_data(out_v);
   size_t n_out = enki_vector_len(out_v);
-  enki_error st = i->store.write(&i->store, hash_b, out, n_out);
+  enki_store* store = enki_store_current();
+  if (store == NULL)
+    enki_interp_throw(i, ENKI_STORE_ERROR, val);
+  enki_error st = store->write(store, hash_b, out, n_out);
   if (st != ENKI_ERROR_OK) {
     enki_interp_throw(i, (int)st, val);
   }
@@ -287,7 +296,10 @@ void enki_pin_save(enki_interpreter* i, enki_value val, uint8_t* hash_b) {
 enki_value enki_pin_load(enki_interpreter* i, uint8_t* hash) {
   size_t off = 0;
   size_t n_out;
-  enki_error st = i->store.size(&i->store, hash, &n_out);
+  enki_store* store = enki_store_current();
+  if (store == NULL)
+    enki_interp_throw(i, ENKI_STORE_ERROR, 0);
+  enki_error st = store->size(store, hash, &n_out);
   if (st != ENKI_ERROR_OK) {
     enki_interp_throw(i, (int)st, 0);
   }
@@ -295,7 +307,7 @@ enki_value enki_pin_load(enki_interpreter* i, uint8_t* hash) {
   if (!out) {
     enki_interp_throw(i, ENKI_ERROR_OOM, 0);
   }
-  st = i->store.read(&i->store, hash, out, n_out, &n_out);
+  st = store->read(store, hash, out, n_out, &n_out);
   if (st != ENKI_ERROR_OK) {
     enki_interp_throw(i, (int)st, 0);
   }
