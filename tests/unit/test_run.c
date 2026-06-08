@@ -280,7 +280,7 @@ static er_val make_law_with_labels(uint32_t arity_d, uint32_t let_d,
 static er_val make_prim66(void) {
   er_pin* pin = er_pin_alloc(test_gc(), 0);
   cr_assert_not_null(pin);
-  er_val pin_v = er_pin_init(pin, NULL, 66, 0, NULL);
+  er_val pin_v = er_pin_init(test_gc(), pin, NULL, 66, 0, NULL);
   cr_assert_eq(er_get_tag(pin_v), er_tag_pin);
   return pin_v;
 }
@@ -288,7 +288,7 @@ static er_val make_prim66(void) {
 static er_val make_prim0(void) {
   er_pin* pin = er_pin_alloc(test_gc(), 0);
   cr_assert_not_null(pin);
-  er_val pin_v = er_pin_init(pin, NULL, 0, 0, NULL);
+  er_val pin_v = er_pin_init(test_gc(), pin, NULL, 0, 0, NULL);
   cr_assert_eq(er_get_tag(pin_v), er_tag_pin);
   return pin_v;
 }
@@ -1323,10 +1323,9 @@ Test(run_vm, op_force_reduces_stack_value_to_nf) {
 
 Test(run_vm, plan_eval_nf_keeps_pin_fields_lazy) {
   er_val inner_v = make_done_thunk(42);
-  er_val sub_v[] = {make_done_thunk(10)};
-  er_pin* pin = er_pin_alloc(test_gc(), 1);
+  er_pin* pin = er_pin_alloc(test_gc(), 0);
   cr_assert_not_null(pin);
-  er_val pin_v = er_pin_init(pin, NULL, inner_v, 1, sub_v);
+  er_val pin_v = er_pin_init(test_gc(), pin, NULL, inner_v, 0, NULL);
   cr_assert_eq(er_get_tag(pin_v), er_tag_pin);
 
   er_val result_v = run_vm_mode(NULL, pin_v, ER_EVAL_NF);
@@ -1336,7 +1335,7 @@ Test(run_vm, plan_eval_nf_keeps_pin_fields_lazy) {
   cr_assert_eq(result_v, pin_v);
   cr_assert_eq(pin->hed.raw.nf_f, 1);
   cr_assert_eq(pin->val_v, inner_v);
-  cr_assert_eq(pin->sub_v[0], sub_v[0]);
+  cr_assert_null(pin->ice);
 }
 
 Test(run_vm, plan_eval_nf_keeps_law_fields_lazy) {

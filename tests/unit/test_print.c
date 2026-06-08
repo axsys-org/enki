@@ -71,7 +71,7 @@ static er_val make_app(er_val fn_v, size_t arg_s, const er_val* arg_v) {
 static er_val make_pin(er_val value_v) {
   er_pin* pin = er_pin_alloc(fixture_gc, 0);
   cr_assert_not_null(pin);
-  er_val pin_v = er_pin_init(pin, NULL, value_v, 0, NULL);
+  er_val pin_v = er_pin_init(fixture_gc, pin, NULL, value_v, 0, NULL);
   cr_assert_eq(er_get_tag(pin_v), er_tag_pin);
   return pin_v;
 }

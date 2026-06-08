@@ -280,11 +280,14 @@ static enki_error er_store_serialize_value(er_store_buf* buf, er_val val_v) {
 
   er_pin* pin = er_outt(er_tag_pin, val_v);
   if (pin != NULL) {
+    if (pin->ice == NULL || !pin->ice->frz_f) {
+      return ENKI_ERROR_BAD_PIN;
+    }
     enki_error err = er_store_buf_push_u8(buf, er_tag_pin);
     if (err != ENKI_ERROR_OK) {
       return err;
     }
-    return er_store_buf_push(buf, pin->hash_b, sizeof(pin->hash_b));
+    return er_store_buf_push(buf, pin->ice->hash_b, sizeof(pin->ice->hash_b));
   }
 
   er_law* law = er_outt(er_tag_law, val_v);
@@ -430,7 +433,7 @@ static enki_error er_store_deserialize_pin_ref(enki_gc* gc,
   if (pin == NULL) {
     return ENKI_ERROR_OOM;
   }
-  *out_v = er_pin_init(pin, data_b + *off_s, 0, 0, NULL);
+  *out_v = er_pin_init(gc, pin, data_b + *off_s, 0, 0, NULL);
   *off_s += 32u;
   return *out_v == 0 ? ENKI_ERROR_OOM : ENKI_ERROR_OK;
 }
@@ -679,9 +682,17 @@ void enki_store_close(enki_store* store) {
   store->dbi = 0;
 }
 
-enki_error er_store_save_pin(enki_store* store, enki_gc* gc,
-                             const enki_allocator* work_a, er_val pin_v,
-                             uint8_t hash_b[32]) {
+enki_error er_store_write_root_hash(enki_store* store,
+                                    const uint8_t hash_b[32]) {
+  if (hash_b == NULL) {
+    return ENKI_STORE_ERROR;
+  }
+  return enki_store_write(store, er_store_root_key_b, hash_b, 32);
+}
+
+enki_error er_pin_freeze(enki_store* store, enki_gc* gc,
+                         const enki_allocator* work_a, er_val pin_v,
+                         uint8_t hash_b[32]) {
   if (store == NULL || hash_b == NULL || gc == NULL ||
       !er_store_allocator_ok(work_a)) {
     return ENKI_STORE_ERROR;
@@ -689,6 +700,10 @@ enki_error er_store_save_pin(enki_store* store, enki_gc* gc,
   er_pin* pin = er_outt(er_tag_pin, pin_v);
   if (pin == NULL) {
     return ENKI_ERROR_TYPE;
+  }
+  if (pin->ice != NULL && pin->ice->frz_f) {
+    memcpy(hash_b, pin->ice->hash_b, sizeof(pin->ice->hash_b));
+    return ENKI_ERROR_OK;
   }
 
   er_store_vals subpins = {.a = work_a};
@@ -705,7 +720,7 @@ enki_error er_store_save_pin(enki_store* store, enki_gc* gc,
   }
   for (size_t k = 0; err == ENKI_ERROR_OK && k < subpins.len_s; k++) {
     uint8_t sub_hash_b[32];
-    err = er_store_save_pin(store, gc, work_a, subpins.val_v[k], sub_hash_b);
+    err = er_pin_freeze(store, gc, work_a, subpins.val_v[k], sub_hash_b);
     if (err == ENKI_ERROR_OK) {
       err = er_store_buf_push(&buf, sub_hash_b, sizeof(sub_hash_b));
     }
@@ -715,13 +730,25 @@ enki_error er_store_save_pin(enki_store* store, enki_gc* gc,
   }
   if (err == ENKI_ERROR_OK) {
     SHA256(buf.data_b, buf.len_s, hash_b);
-    memcpy(pin->hash_b, hash_b, 32);
+    er_val frozen_v =
+        er_pin_init(gc, pin, hash_b, pin->val_v, subpins.len_s, subpins.val_v);
+    if (frozen_v == 0) {
+      err = ENKI_ERROR_OOM;
+    }
+  }
+  if (err == ENKI_ERROR_OK) {
     err = enki_store_write(store, hash_b, buf.data_b, buf.len_s);
   }
 
   er_store_buf_free(&buf);
   er_store_vals_free(&subpins);
   return err;
+}
+
+enki_error er_store_save_pin(enki_store* store, enki_gc* gc,
+                             const enki_allocator* work_a, er_val pin_v,
+                             uint8_t hash_b[32]) {
+  return er_pin_freeze(store, gc, work_a, pin_v, hash_b);
 }
 
 enki_error er_store_load_pin(enki_store* store, enki_gc* gc,
@@ -801,11 +828,11 @@ enki_error er_store_load_pin(enki_store* store, enki_gc* gc,
     err = ENKI_ERROR_BAD_PIN;
   }
   if (err == ENKI_ERROR_OK) {
-    er_pin* pin = er_pin_alloc(gc, subpin_s);
+    er_pin* pin = er_pin_alloc(gc, 0);
     if (pin == NULL) {
       err = ENKI_ERROR_OOM;
     } else {
-      *out_v = er_pin_init(pin, hash_b, inner_v, subpin_s, subpin_v);
+      *out_v = er_pin_init(gc, pin, hash_b, inner_v, subpin_s, subpin_v);
       if (*out_v == 0) {
         err = ENKI_ERROR_OOM;
       }
@@ -822,11 +849,11 @@ enki_error er_store_load_pin(enki_store* store, enki_gc* gc,
 enki_error er_store_save_root(enki_store* store, enki_gc* gc,
                               const enki_allocator* work_a, er_val pin_v) {
   uint8_t hash_b[32];
-  enki_error err = er_store_save_pin(store, gc, work_a, pin_v, hash_b);
+  enki_error err = er_pin_freeze(store, gc, work_a, pin_v, hash_b);
   if (err != ENKI_ERROR_OK) {
     return err;
   }
-  return enki_store_write(store, er_store_root_key_b, hash_b, sizeof(hash_b));
+  return er_store_write_root_hash(store, hash_b);
 }
 
 enki_error er_store_load_root(enki_store* store, enki_gc* gc,

@@ -225,7 +225,7 @@ static er_val planvm_make_prim66(enki_gc* gc) {
   if (pin == NULL) {
     return 0;
   }
-  return er_pin_init(pin, NULL, 66, 0, NULL);
+  return er_pin_init(gc, pin, NULL, 66, 0, NULL);
 }
 
 static er_val planvm_make_law(enki_gc* gc, uint32_t arity_d, er_op* entry_v,

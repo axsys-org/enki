@@ -60,7 +60,7 @@ Test(gc_runtime, collect_moves_and_traces_er_runtime_tags) {
   er_val sub_v[] = {bat_v};
   er_pin* pin = er_pin_alloc(gc, 1);
   cr_assert_not_null(pin);
-  er_val pin_v = er_pin_init(pin, NULL, law_v, 1, sub_v);
+  er_val pin_v = er_pin_init(gc, pin, NULL, law_v, 1, sub_v);
   cr_assert_eq(er_get_tag(pin_v), er_tag_pin);
   er_pin* old_pin = er_outt(er_tag_pin, pin_v);
 
@@ -88,7 +88,8 @@ Test(gc_runtime, collect_moves_and_traces_er_runtime_tags) {
   er_pin* moved_pin = er_outt(er_tag_pin, moved_app->fn_v);
   cr_assert_not_null(moved_pin);
   cr_assert_neq(moved_pin, old_pin);
-  cr_assert_eq(moved_pin->sub_s, 1);
+  cr_assert_not_null(moved_pin->ice);
+  cr_assert_eq(moved_pin->ice->sub_s, 1);
 
   er_law* moved_law = er_outt(er_tag_law, moved_pin->val_v);
   cr_assert_not_null(moved_law);
@@ -106,7 +107,7 @@ Test(gc_runtime, collect_moves_and_traces_er_runtime_tags) {
   cr_assert_eq(moved_bat->lim_s, 2);
   cr_assert_eq(moved_bat->lim_q[0], limbs_q[0]);
   cr_assert_eq(moved_bat->lim_q[1], limbs_q[1]);
-  cr_assert_eq(moved_pin->sub_v[0], moved_law->body_v);
+  cr_assert_eq(moved_pin->ice->sub_v[0], moved_law->body_v);
   cr_assert_eq(moved_app->arg_v[0], moved_pin->val_v);
   cr_assert_eq(moved_app->arg_v[1], moved_law->body_v);
 

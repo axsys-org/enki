@@ -12,6 +12,7 @@
 #include "enki/profile.h"
 #include "enki/run.h"
 #include "enki/run_ops.h"
+#include "enki/store.h"
 #include "enki/util.h"
 #include "enki/print.h"
 #include "enki/perf.h"
@@ -236,42 +237,61 @@ static er_val er_bat_qword(enki_gc* gc, const uint64_t lim_q) {
 
 er_pin* er_pin_alloc(enki_gc* gc, size_t sub_s) {
   ENKI_PROFILE_ZONE("er_pin_alloc");
-  size_t size_s = 0;
-  if (!er_alloc_size(sizeof(er_pin), sub_s, sizeof(er_val), &size_s)) {
-    return NULL;
-  }
+  (void)sub_s;
+  size_t size_s = sizeof(er_pin);
   er_pin* pin = (er_pin*)er_alloc_bytes(gc, size_s, _Alignof(er_pin));
   if (pin == NULL) {
     return NULL;
   }
   er_head_alloc_init(&pin->hed, size_s);
-  memset(pin->hash_b, 0, sizeof(pin->hash_b));
+  pin->fwd_v = 0;
   pin->val_v = 0;
-  pin->sub_s = sub_s;
+  pin->ice = NULL;
   return pin;
 }
 
-er_val er_pin_init(er_pin* pin, const uint8_t hash_b[32], er_val val_v,
-                   size_t sub_s, const er_val sub_v[]) {
+static er_ice* er_ice_alloc(enki_gc* gc, const uint8_t hash_b[32], bool frz_f,
+                            size_t sub_s, const er_val sub_v[]) {
+  const enki_allocator* a = enki_gc_parent_allocator(gc);
+  size_t size_s = 0;
+  if (a == NULL ||
+      !er_alloc_size(sizeof(er_ice), sub_s, sizeof(er_val), &size_s)) {
+    return NULL;
+  }
+  er_ice* ice = a->alloc(a->ctx, size_s);
+  if (ice == NULL) {
+    return NULL;
+  }
+  if (hash_b != NULL) {
+    memcpy(ice->hash_b, hash_b, sizeof(ice->hash_b));
+  } else {
+    memset(ice->hash_b, 0, sizeof(ice->hash_b));
+  }
+  ice->frz_f = frz_f;
+  ice->sub_s = sub_s;
+  if (sub_s > 0) {
+    if (sub_v != NULL) {
+      memcpy(ice->sub_v, sub_v, sub_s * sizeof(er_val));
+    } else {
+      memset(ice->sub_v, 0, sub_s * sizeof(er_val));
+    }
+  }
+  return ice;
+}
+
+er_val er_pin_init(enki_gc* gc, er_pin* pin, const uint8_t hash_b[32],
+                   er_val val_v, size_t sub_s, const er_val sub_v[]) {
   if (pin == NULL) {
     return 0;
   }
-  if (!er_flex_fits(&pin->hed, sizeof(er_pin), sub_s, sizeof(er_val))) {
-    return 0;
-  }
   pin->hed.raw.nf_f = 1;
+  pin->fwd_v = 0;
   pin->val_v = val_v;
-  pin->sub_s = sub_s;
-  if (hash_b != NULL) {
-    memcpy(pin->hash_b, hash_b, sizeof(pin->hash_b));
-  } else {
-    memset(pin->hash_b, 0, sizeof(pin->hash_b));
-  }
-  if (sub_s > 0) {
-    if (sub_v != NULL) {
-      memcpy(pin->sub_v, sub_v, sub_s * sizeof(er_val));
-    } else {
-      memset(pin->sub_v, 0, sub_s * sizeof(er_val));
+  pin->ice = NULL;
+  if (hash_b != NULL || sub_s > 0) {
+    pin->ice = er_ice_alloc(gc, hash_b, true, sub_s, sub_v);
+    if (pin->ice == NULL) {
+      return 0;
     }
   }
   return er_into(er_tag_pin, pin);
@@ -279,7 +299,7 @@ er_val er_pin_init(er_pin* pin, const uint8_t hash_b[32], er_val val_v,
 
 er_val er_pin_make(enki_gc* gc, er_val val_v) {
   er_pin* pin = er_pin_alloc(gc, 0);
-  return er_pin_init(pin, NULL, val_v, 0, NULL);
+  return er_pin_init(gc, pin, NULL, val_v, 0, NULL);
 }
 
 static bool er_law_layout(size_t bc_s, size_t* size_s) {
@@ -749,6 +769,189 @@ static er_val er_thk_make_unk_app_flat(enki_gc* gc, er_val fn_v, size_t arg_s,
   return out_v;
 }
 
+static er_val er_thk_make_prim_rooted(er_vm* vm, er_val source_v,
+                                      er_val prim_set_v, er_val prim_arg_v,
+                                      er_val* out_source_v) {
+  size_t old_tmp_s = vm->gc_tmp_s;
+  size_t add_s = source_v == 0 ? 1u : 2u;
+  if (old_tmp_s + add_s > sizeof(vm->gc_tmp_v) / sizeof(vm->gc_tmp_v[0])) {
+    return 0;
+  }
+  size_t arg_i = old_tmp_s;
+  if (source_v != 0) {
+    vm->gc_tmp_v[old_tmp_s] = source_v;
+    arg_i = old_tmp_s + 1u;
+  }
+  vm->gc_tmp_v[arg_i] = prim_arg_v;
+  vm->gc_tmp_s = old_tmp_s + add_s;
+  er_thk* thk = er_thk_alloc(vm->gc, 2);
+  if (thk == NULL) {
+    vm->gc_tmp_s = old_tmp_s;
+    return 0;
+  }
+  if (out_source_v != NULL && source_v != 0) {
+    *out_source_v = vm->gc_tmp_v[old_tmp_s];
+  }
+  er_val arg_v[] = {prim_set_v, vm->gc_tmp_v[arg_i]};
+  er_val out_v = er_thk_init(thk, ER_XPRIM, 2, arg_v);
+  vm->gc_tmp_s = old_tmp_s;
+  return out_v;
+}
+
+static er_val er_thk_make_susp_rooted(er_vm* vm, uint32_t pc, er_val frame_v,
+                                      er_val law_v) {
+  size_t old_tmp_s = vm->gc_tmp_s;
+  if (old_tmp_s + 2u > sizeof(vm->gc_tmp_v) / sizeof(vm->gc_tmp_v[0])) {
+    return 0;
+  }
+  vm->gc_tmp_v[old_tmp_s] = frame_v;
+  vm->gc_tmp_v[old_tmp_s + 1u] = law_v;
+  vm->gc_tmp_s = old_tmp_s + 2u;
+  er_thk* thk = er_thk_alloc(vm->gc, 3);
+  if (thk == NULL) {
+    vm->gc_tmp_s = old_tmp_s;
+    return 0;
+  }
+  er_val arg_v[] = {
+      (er_val)pc,
+      vm->gc_tmp_v[old_tmp_s],
+      vm->gc_tmp_v[old_tmp_s + 1u],
+  };
+  er_val out_v = er_thk_init(thk, ER_SUSP, 3, arg_v);
+  vm->gc_tmp_s = old_tmp_s;
+  return out_v;
+}
+
+static er_val er_thk_make_call_frame_from_thk_rooted(er_vm* vm,
+                                                     er_val source_thk_v,
+                                                     size_t frame_s,
+                                                     size_t copy_s,
+                                                     er_val* out_source_v) {
+  if (copy_s > frame_s) {
+    return 0;
+  }
+  size_t old_tmp_s = vm->gc_tmp_s;
+  if (old_tmp_s >= sizeof(vm->gc_tmp_v) / sizeof(vm->gc_tmp_v[0])) {
+    return 0;
+  }
+  vm->gc_tmp_v[old_tmp_s] = source_thk_v;
+  vm->gc_tmp_s = old_tmp_s + 1u;
+  er_thk* thk = er_thk_alloc(vm->gc, frame_s);
+  if (thk == NULL) {
+    vm->gc_tmp_s = old_tmp_s;
+    return 0;
+  }
+  er_val out_v = er_thk_init(thk, ER_CALL, frame_s, NULL);
+  if (out_source_v != NULL) {
+    *out_source_v = vm->gc_tmp_v[old_tmp_s];
+  }
+  er_thk* source_thk = er_outt(er_tag_thk, vm->gc_tmp_v[old_tmp_s]);
+  if (out_v != 0 && source_thk != NULL && copy_s > 0) {
+    memcpy(thk->arg_v, source_thk->arg_v, copy_s * sizeof(er_val));
+  }
+  vm->gc_tmp_s = old_tmp_s;
+  return source_thk == NULL ? 0 : out_v;
+}
+
+static er_val er_thk_make_env_frame_from_thk_rooted(er_vm* vm,
+                                                    er_val source_thk_v,
+                                                    size_t frame_s,
+                                                    er_val* out_source_v) {
+  er_thk* source_thk = er_outt(er_tag_thk, source_thk_v);
+  if (source_thk == NULL || source_thk->arg_s < frame_s) {
+    return 0;
+  }
+  size_t old_tmp_s = vm->gc_tmp_s;
+  if (old_tmp_s >= sizeof(vm->gc_tmp_v) / sizeof(vm->gc_tmp_v[0])) {
+    return 0;
+  }
+  vm->gc_tmp_v[old_tmp_s] = source_thk_v;
+  vm->gc_tmp_s = old_tmp_s + 1u;
+  er_thk* thk = er_thk_alloc(vm->gc, frame_s);
+  if (thk == NULL) {
+    vm->gc_tmp_s = old_tmp_s;
+    return 0;
+  }
+  if (out_source_v != NULL) {
+    *out_source_v = vm->gc_tmp_v[old_tmp_s];
+  }
+  source_thk = er_outt(er_tag_thk, vm->gc_tmp_v[old_tmp_s]);
+  er_val out_v = source_thk == NULL
+                     ? 0
+                     : er_thk_init(thk, ER_XDONE, frame_s, source_thk->arg_v);
+  vm->gc_tmp_s = old_tmp_s;
+  return out_v;
+}
+
+static er_val er_thk_take_call_rooted(er_vm* vm, er_val source_thk_v,
+                                      size_t arg_s, er_val* out_source_v) {
+  er_thk* old = er_outt(er_tag_thk, source_thk_v);
+  if (old == NULL) {
+    return 0;
+  }
+  size_t copy_s = old->arg_s < arg_s ? old->arg_s : arg_s;
+  return er_thk_make_call_frame_from_thk_rooted(vm, source_thk_v, arg_s, copy_s,
+                                                out_source_v);
+}
+
+static er_val er_thk_make_unk_app_flat_from_thk_rooted(er_vm* vm,
+                                                       er_val source_thk_v,
+                                                       size_t arg_s,
+                                                       er_val* out_source_v) {
+  er_thk* source_thk = er_outt(er_tag_thk, source_thk_v);
+  if (source_thk == NULL || source_thk->arg_s < arg_s + 1u) {
+    return 0;
+  }
+  er_val fn_v = source_thk->arg_v[0];
+  er_val flat_fn_v = fn_v;
+  size_t total_arg_s = 0;
+  if (!er_app_spine_count(fn_v, arg_s, &flat_fn_v, &total_arg_s) ||
+      total_arg_s > UINT32_MAX) {
+    return 0;
+  }
+
+  size_t old_tmp_s = vm->gc_tmp_s;
+  if (old_tmp_s >= sizeof(vm->gc_tmp_v) / sizeof(vm->gc_tmp_v[0])) {
+    return 0;
+  }
+  vm->gc_tmp_v[old_tmp_s] = source_thk_v;
+  vm->gc_tmp_s = old_tmp_s + 1u;
+  er_thk* thk = er_thk_alloc(vm->gc, total_arg_s + 1u);
+  if (thk == NULL) {
+    vm->gc_tmp_s = old_tmp_s;
+    return 0;
+  }
+
+  source_thk = er_outt(er_tag_thk, vm->gc_tmp_v[old_tmp_s]);
+  if (out_source_v != NULL) {
+    *out_source_v = vm->gc_tmp_v[old_tmp_s];
+  }
+  if (source_thk == NULL || source_thk->arg_s < arg_s + 1u) {
+    vm->gc_tmp_s = old_tmp_s;
+    return 0;
+  }
+  fn_v = source_thk->arg_v[0];
+  flat_fn_v = fn_v;
+  total_arg_s = 0;
+  if (!er_app_spine_count(fn_v, arg_s, &flat_fn_v, &total_arg_s) ||
+      total_arg_s > UINT32_MAX) {
+    vm->gc_tmp_s = old_tmp_s;
+    return 0;
+  }
+  er_val out_v = er_thk_init(thk, ER_XUNK_APP, total_arg_s + 1u, NULL);
+  if (out_v != 0) {
+    thk->arg_v[0] = flat_fn_v;
+    size_t copied_s = 0;
+    er_app_spine_copy(fn_v, thk->arg_v + 1, &copied_s);
+    if (arg_s > 0) {
+      memcpy(thk->arg_v + 1 + copied_s, &source_thk->arg_v[1],
+             arg_s * sizeof(er_val));
+    }
+  }
+  vm->gc_tmp_s = old_tmp_s;
+  return out_v;
+}
+
 static er_val er_thk_make_susp(enki_gc* gc, uint32_t pc, er_val frame_v,
                                er_val law_v) {
   er_val arg_v[] = {
@@ -846,9 +1049,49 @@ static er_val er_app_make_flat(enki_gc* gc, er_val fn_v, size_t arg_s,
   return out_v;
 }
 
-static er_val er_eval_with_heap(enki_gc* gc, er_val val_v, er_eval_mode mode) {
+static er_val er_app_make_flat_stack_rooted(er_vm* vm, er_val* app_base,
+                                            size_t app_s) {
+  if (app_s == 0) {
+    return 0;
+  }
+  size_t arg_s = app_s - 1u;
+  er_val flat_fn_v = app_base[0];
+  size_t total_s = arg_s;
+  if (!er_app_spine_count(app_base[0], arg_s, &flat_fn_v, &total_s)) {
+    return 0;
+  }
+  er_app* app = er_app_alloc(vm->gc, total_s);
+  if (app == NULL) {
+    return 0;
+  }
+
+  er_val moved_fn_v = app_base[0];
+  flat_fn_v = moved_fn_v;
+  size_t moved_total_s = arg_s;
+  if (!er_app_spine_count(moved_fn_v, arg_s, &flat_fn_v, &moved_total_s) ||
+      moved_total_s != total_s) {
+    return 0;
+  }
+
+  er_val out_v = er_app_init(app, flat_fn_v, total_s, NULL);
+  if (out_v == 0) {
+    return 0;
+  }
+  size_t copied_s = 0;
+  er_app_spine_copy(moved_fn_v, app->arg_v, &copied_s);
+  if (arg_s > 0) {
+    memcpy(app->arg_v + copied_s, app_base + 1, arg_s * sizeof(er_val));
+  }
+  return out_v;
+}
+
+static er_val er_eval_with_heap(enki_gc* gc, enki_store* store,
+                                const enki_allocator* work_a, er_val val_v,
+                                er_eval_mode mode) {
   ENKI_PROFILE_ZONE("er_eval");
-  const enki_allocator* work_a = enki_gc_parent_allocator(gc);
+  if (work_a == NULL) {
+    work_a = enki_gc_parent_allocator(gc);
+  }
   if (gc == NULL || work_a == NULL || work_a->alloc == NULL ||
       work_a->free == NULL) {
     return er_bad;
@@ -882,6 +1125,8 @@ static er_val er_eval_with_heap(enki_gc* gc, er_val val_v, er_eval_mode mode) {
       .ksp = kstack_v,
       .b_count = 0,
       .k_count = 0,
+      .store = store,
+      .work_a = work_a,
       .gc_rp = NULL,
       .gc_tmp_s = 0,
       .outer_trace_root = NULL,
@@ -908,18 +1153,24 @@ static er_val er_eval_with_heap(enki_gc* gc, er_val val_v, er_eval_mode mode) {
 }
 
 er_val er_eval(enki_gc* gc, er_val val_v) {
-  return er_eval_with_heap(gc, val_v, ER_EVAL_WHNF);
+  return er_eval_with_heap(gc, NULL, NULL, val_v, ER_EVAL_WHNF);
+}
+
+er_val er_eval_to_store(enki_gc* gc, enki_store* store,
+                        const enki_allocator* work_a, er_val val_v,
+                        er_eval_mode mode) {
+  return er_eval_with_heap(gc, store, work_a, val_v, mode);
 }
 
 er_val er_eval_to(enki_gc* gc, er_val val_v, er_eval_mode mode) {
-  return er_eval_with_heap(gc, val_v, mode);
+  return er_eval_with_heap(gc, NULL, NULL, val_v, mode);
 }
 
 er_val er_eval_gc(enki_gc* gc, er_val val_v) {
   if (gc == NULL) {
     return er_bad;
   }
-  return er_eval_with_heap(gc, val_v, ER_EVAL_WHNF);
+  return er_eval_with_heap(gc, NULL, NULL, val_v, ER_EVAL_WHNF);
 }
 
 static er_val er_app_take(enki_gc* gc, er_app* old, size_t arg_s) {
@@ -977,6 +1228,41 @@ static er_val er_app_drop_coup(enki_gc* gc, er_thk* old, er_val fn_v,
   if (siz_s > 0) {
     memcpy(thk->arg_v + 1, &old->arg_v[dop_s + 1], siz_s * sizeof(er_val));
   }
+  return out_v;
+}
+
+static er_val er_app_drop_coup_rooted(er_vm* vm, er_val old_thk_v, er_val fn_v,
+                                      size_t dop_s) {
+  er_thk* old = er_outt(er_tag_thk, old_thk_v);
+  if (old == NULL || old->arg_s <= dop_s) {
+    return 0;
+  }
+  size_t siz_s = old->arg_s - dop_s - 1;
+  size_t old_tmp_s = vm->gc_tmp_s;
+  if (old_tmp_s + 2u > sizeof(vm->gc_tmp_v) / sizeof(vm->gc_tmp_v[0])) {
+    return 0;
+  }
+  vm->gc_tmp_v[old_tmp_s] = old_thk_v;
+  vm->gc_tmp_v[old_tmp_s + 1u] = fn_v;
+  vm->gc_tmp_s = old_tmp_s + 2u;
+  er_thk* thk = er_thk_alloc(vm->gc, siz_s + 1);
+  if (thk == NULL) {
+    vm->gc_tmp_s = old_tmp_s;
+    return 0;
+  }
+  old = er_outt(er_tag_thk, vm->gc_tmp_v[old_tmp_s]);
+  if (old == NULL || old->arg_s <= dop_s) {
+    vm->gc_tmp_s = old_tmp_s;
+    return 0;
+  }
+  er_val out_v = er_thk_init(thk, ER_XUNK_APP, siz_s + 1, NULL);
+  if (out_v != 0) {
+    thk->arg_v[0] = vm->gc_tmp_v[old_tmp_s + 1u];
+    if (siz_s > 0) {
+      memcpy(thk->arg_v + 1, &old->arg_v[dop_s + 1], siz_s * sizeof(er_val));
+    }
+  }
+  vm->gc_tmp_s = old_tmp_s;
   return out_v;
 }
 
@@ -1055,17 +1341,18 @@ static uint32_t er_arity(er_val val_v) {
 static er_val plan_eval_nf_inner(er_vm* vm, er_val val_v);
 static er_val plan_eval_whnf_preserve(er_vm* vm, er_val val_v);
 
-static er_val op_eval_arg(er_vm* vm, er_app* app, size_t arg_s,
+static er_val op_eval_arg(er_vm* vm, er_val app_v, size_t arg_s,
                           er_bc_eval_req eval) {
+  er_app* app = er_outt(er_tag_app, app_v);
   if (app == NULL || arg_s >= app->arg_s) {
     return er_tank_make(vm->gc, 0, "bad primitive argument");
   }
   if (eval == ER_BC_EVAL_NONE) {
-    return er_into(er_tag_app, app);
+    return app_v;
   }
 
   er_val* root_v = vm->dsp;
-  root_v[0] = er_into(er_tag_app, app);
+  root_v[0] = app_v;
   root_v[1] = app->arg_v[arg_s];
   vm->dsp = root_v + 2;
 
@@ -1081,28 +1368,29 @@ static er_val op_eval_arg(er_vm* vm, er_app* app, size_t arg_s,
     return er_tank_make(vm->gc, 0, "bad primitive argument");
   }
   app->arg_v[arg_s] = out_v;
-  er_val app_v = er_into(er_tag_app, app);
+  app_v = er_into(er_tag_app, app);
   vm->dsp = root_v;
   return app_v;
 }
 
-static er_val op_eval_arg_route_app(er_vm* vm, er_app* app, size_t arg_off_s,
+static er_val op_eval_arg_route_app(er_vm* vm, er_val app_v, size_t arg_off_s,
                                     size_t arg_s,
                                     const er_bc_prim_route* route) {
+  er_app* app = er_outt(er_tag_app, app_v);
   if (app == NULL) {
     return er_tank_make(vm->gc, 0, "expected primitive row");
   }
   if (route == NULL || arg_s != route->arg_s || arg_s > ER_BC_MAX_PRIM_ARITY) {
-    return er_into(er_tag_app, app);
+    return app_v;
   }
   for (size_t k = 0; k < arg_s; k++) {
-    er_val row_v = op_eval_arg(vm, app, arg_off_s + k, route->arg_eval_v[k]);
+    er_val row_v = op_eval_arg(vm, app_v, arg_off_s + k, route->arg_eval_v[k]);
     if (!er_is_good(row_v)) {
       return row_v;
     }
-    app = er_outt(er_tag_app, row_v);
+    app_v = row_v;
   }
-  return er_into(er_tag_app, app);
+  return app_v;
 }
 
 static er_bc_prim_route op_arg_route(er_optag tag, size_t arg_s,
@@ -1118,7 +1406,8 @@ static er_bc_prim_route op_arg_route(er_optag tag, size_t arg_s,
   return route;
 }
 
-static er_val op66_eval_arg_app(er_vm* vm, er_app* app) {
+static er_val op66_eval_arg_app(er_vm* vm, er_val app_v) {
+  er_app* app = er_outt(er_tag_app, app_v);
   if (app == NULL) {
     return er_tank_make(vm->gc, 0, "expected primitive row");
   }
@@ -1144,28 +1433,28 @@ static er_val op66_eval_arg_app(er_vm* vm, er_app* app) {
     case OP66_LOAD:
       (void)er_bc_prim_route_strict(width_v == 0 ? OP_LOAD : OP_LOADN,
                                     width_v == 0 ? 3 : 2, &route);
-      return op_eval_arg_route_app(vm, app, arg_off_s, arg_s, &route);
+      return op_eval_arg_route_app(vm, app_v, arg_off_s, arg_s, &route);
     case ER_OP66_STORE:
       (void)er_bc_prim_route_strict(width_v == 0 ? OP_STORE : OP_STOREN,
                                     width_v == 0 ? 4 : 3, &route);
-      return op_eval_arg_route_app(vm, app, arg_off_s, arg_s, &route);
+      return op_eval_arg_route_app(vm, app_v, arg_off_s, arg_s, &route);
     case OP66_TRUNC:
       (void)er_bc_prim_route_strict(width_v == 0 ? OP_TRUNC : OP_TRUNCN,
                                     width_v == 0 ? 2 : 1, &route);
-      return op_eval_arg_route_app(vm, app, arg_off_s, arg_s, &route);
+      return op_eval_arg_route_app(vm, app_v, arg_off_s, arg_s, &route);
     case ER_OP66_MET:
       (void)er_bc_prim_route_strict(OP_MET, 1, &route);
-      return op_eval_arg_route_app(vm, app, arg_off_s, arg_s, &route);
+      return op_eval_arg_route_app(vm, app_v, arg_off_s, arg_s, &route);
     default:
       if (er_bc_prim66_route(op_i, &route)) {
-        return op_eval_arg_route_app(vm, app, arg_off_s, arg_s, &route);
+        return op_eval_arg_route_app(vm, app_v, arg_off_s, arg_s, &route);
       }
-      return er_into(er_tag_app, app);
+      return app_v;
     }
   }
 
   if (!eo_op66_from_tag(tag_v, &op_i)) {
-    return er_into(er_tag_app, app);
+    return app_v;
   }
 
   switch (op_i) {
@@ -1184,7 +1473,7 @@ static er_val op66_eval_arg_app(er_vm* vm, er_app* app) {
   case OP66_IX7: {
     er_bc_eval_req eval_v[] = {ER_BC_EVAL_WHNF};
     route = op_arg_route(OP_COUNT, 1, eval_v);
-    return op_eval_arg_route_app(vm, app, arg_off_s, arg_s, &route);
+    return op_eval_arg_route_app(vm, app_v, arg_off_s, arg_s, &route);
   }
   case OP66_NE:
   case OP66_LT:
@@ -1195,13 +1484,13 @@ static er_val op66_eval_arg_app(er_vm* vm, er_app* app) {
   case OP66_NIB: {
     er_bc_eval_req eval_v[] = {ER_BC_EVAL_WHNF, ER_BC_EVAL_WHNF};
     route = op_arg_route(OP_COUNT, 2, eval_v);
-    return op_eval_arg_route_app(vm, app, arg_off_s, arg_s, &route);
+    return op_eval_arg_route_app(vm, app_v, arg_off_s, arg_s, &route);
   }
   case OP66_CASE: {
     er_bc_eval_req eval_v[] = {ER_BC_EVAL_WHNF, ER_BC_EVAL_WHNF,
                                ER_BC_EVAL_NONE};
     route = op_arg_route(OP_COUNT, 3, eval_v);
-    return op_eval_arg_route_app(vm, app, arg_off_s, arg_s, &route);
+    return op_eval_arg_route_app(vm, app_v, arg_off_s, arg_s, &route);
   }
   case OP66_CASE2:
   case OP66_CASE3:
@@ -1219,22 +1508,22 @@ static er_val op66_eval_arg_app(er_vm* vm, er_app* app) {
   case OP66_CASE15:
   case OP66_CASE16: {
     if (arg_s != (size_t)(op_i - OP66_CASE2 + 3)) {
-      return er_into(er_tag_app, app);
+      return app_v;
     }
-    return op_eval_arg(vm, app, arg_off_s, ER_BC_EVAL_WHNF);
+    return op_eval_arg(vm, app_v, arg_off_s, ER_BC_EVAL_WHNF);
   }
   case OP66_IF:
   case OP66_IFZ: {
     er_bc_eval_req eval_v[] = {ER_BC_EVAL_WHNF, ER_BC_EVAL_NONE,
                                ER_BC_EVAL_NONE};
     route = op_arg_route(OP_COUNT, 3, eval_v);
-    return op_eval_arg_route_app(vm, app, arg_off_s, arg_s, &route);
+    return op_eval_arg_route_app(vm, app_v, arg_off_s, arg_s, &route);
   }
   case OP66_NOR: {
     if (arg_s != 2) {
-      return er_into(er_tag_app, app);
+      return app_v;
     }
-    er_val row_v = op_eval_arg(vm, app, arg_off_s, ER_BC_EVAL_WHNF);
+    er_val row_v = op_eval_arg(vm, app_v, arg_off_s, ER_BC_EVAL_WHNF);
     if (!er_is_good(row_v)) {
       return row_v;
     }
@@ -1242,72 +1531,73 @@ static er_val op66_eval_arg_app(er_vm* vm, er_app* app) {
     if (app->arg_v[arg_off_s] != 0) {
       return row_v;
     }
-    return op_eval_arg(vm, app, arg_off_s + 1u, ER_BC_EVAL_WHNF);
+    return op_eval_arg(vm, row_v, arg_off_s + 1u, ER_BC_EVAL_WHNF);
   }
   case OP66_ROW: {
     er_bc_eval_req eval_v[] = {ER_BC_EVAL_WHNF, ER_BC_EVAL_WHNF,
                                ER_BC_EVAL_NONE};
     route = op_arg_route(OP_COUNT, 3, eval_v);
-    return op_eval_arg_route_app(vm, app, arg_off_s, arg_s, &route);
+    return op_eval_arg_route_app(vm, app_v, arg_off_s, arg_s, &route);
   }
   case OP66_SEQ: {
     er_bc_eval_req eval_v[] = {ER_BC_EVAL_WHNF, ER_BC_EVAL_NONE};
     route = op_arg_route(OP_COUNT, 2, eval_v);
-    return op_eval_arg_route_app(vm, app, arg_off_s, arg_s, &route);
+    return op_eval_arg_route_app(vm, app_v, arg_off_s, arg_s, &route);
   }
   case OP66_SEQ2: {
     er_bc_eval_req eval_v[] = {ER_BC_EVAL_WHNF, ER_BC_EVAL_WHNF,
                                ER_BC_EVAL_NONE};
     route = op_arg_route(OP_COUNT, 3, eval_v);
-    return op_eval_arg_route_app(vm, app, arg_off_s, arg_s, &route);
+    return op_eval_arg_route_app(vm, app_v, arg_off_s, arg_s, &route);
   }
   case OP66_SEQ3: {
     er_bc_eval_req eval_v[] = {ER_BC_EVAL_WHNF, ER_BC_EVAL_WHNF,
                                ER_BC_EVAL_WHNF, ER_BC_EVAL_NONE};
     route = op_arg_route(OP_COUNT, 4, eval_v);
-    return op_eval_arg_route_app(vm, app, arg_off_s, arg_s, &route);
+    return op_eval_arg_route_app(vm, app_v, arg_off_s, arg_s, &route);
   }
   case OP66_SAP: {
     er_bc_eval_req eval_v[] = {ER_BC_EVAL_NONE, ER_BC_EVAL_WHNF};
     route = op_arg_route(OP_COUNT, 2, eval_v);
-    return op_eval_arg_route_app(vm, app, arg_off_s, arg_s, &route);
+    return op_eval_arg_route_app(vm, app_v, arg_off_s, arg_s, &route);
   }
   case OP66_SAP2: {
     er_bc_eval_req eval_v[] = {ER_BC_EVAL_NONE, ER_BC_EVAL_WHNF,
                                ER_BC_EVAL_WHNF};
     route = op_arg_route(OP_COUNT, 3, eval_v);
-    return op_eval_arg_route_app(vm, app, arg_off_s, arg_s, &route);
+    return op_eval_arg_route_app(vm, app_v, arg_off_s, arg_s, &route);
   }
   case OP66_FORCE:
   case OP66_THROW: {
     er_bc_eval_req eval_v[] = {ER_BC_EVAL_NF};
     route = op_arg_route(OP_COUNT, 1, eval_v);
-    return op_eval_arg_route_app(vm, app, arg_off_s, arg_s, &route);
+    return op_eval_arg_route_app(vm, app_v, arg_off_s, arg_s, &route);
   }
   case OP66_DEEPSEQ: {
     er_bc_eval_req eval_v[] = {ER_BC_EVAL_NF, ER_BC_EVAL_NONE};
     route = op_arg_route(OP_COUNT, 2, eval_v);
-    return op_eval_arg_route_app(vm, app, arg_off_s, arg_s, &route);
+    return op_eval_arg_route_app(vm, app_v, arg_off_s, arg_s, &route);
   }
   case OP66_TRACE: {
     er_bc_eval_req eval_v[] = {ER_BC_EVAL_NONE, ER_BC_EVAL_NONE};
     route = op_arg_route(OP_COUNT, 2, eval_v);
-    return op_eval_arg_route_app(vm, app, arg_off_s, arg_s, &route);
+    return op_eval_arg_route_app(vm, app_v, arg_off_s, arg_s, &route);
   }
   case OP66_EQUAL: {
     er_bc_eval_req eval_v[] = {ER_BC_EVAL_WHNF, ER_BC_EVAL_WHNF};
     route = op_arg_route(OP_COUNT, 2, eval_v);
-    return op_eval_arg_route_app(vm, app, arg_off_s, arg_s, &route);
+    return op_eval_arg_route_app(vm, app_v, arg_off_s, arg_s, &route);
   }
   default:
     if (er_bc_prim66_route(op_i, &route)) {
-      return op_eval_arg_route_app(vm, app, arg_off_s, arg_s, &route);
+      return op_eval_arg_route_app(vm, app_v, arg_off_s, arg_s, &route);
     }
-    return er_into(er_tag_app, app);
+    return app_v;
   }
 }
 
-static er_val op0_eval_arg_app(er_vm* vm, er_app* app) {
+static er_val op0_eval_arg_app(er_vm* vm, er_val app_v) {
+  er_app* app = er_outt(er_tag_app, app_v);
   if (app == NULL) {
     return er_tank_make(vm->gc, 0, "expected primitive row");
   }
@@ -1324,9 +1614,9 @@ static er_val op0_eval_arg_app(er_vm* vm, er_app* app) {
   size_t op_s = 0;
   er_bc_prim_route route = {0};
   if (!eo_nat_to_size(tag_v, &op_s) || !er_bc_prim0_route(op_s, &route)) {
-    return er_into(er_tag_app, app);
+    return app_v;
   }
-  return op_eval_arg_route_app(vm, app, arg_off_s, arg_s, &route);
+  return op_eval_arg_route_app(vm, app_v, arg_off_s, arg_s, &route);
 }
 
 static bool op0_op_from_name(er_val tag_v, size_t* out_op_s) {
@@ -1370,7 +1660,331 @@ static bool op0_named_app_view(er_app* app, size_t* out_op_s,
   return true;
 }
 
-static bool op66_exec_named_op0_app(er_vm* vm, er_app* app, er_val* out_v) {
+static er_val op_thk_app_rooted(er_vm* vm, er_val* fn_v, size_t arg_s,
+                                er_val arg_v[]) {
+  if (arg_s == SIZE_MAX) {
+    return er_bad;
+  }
+  er_thk* thk = er_thk_alloc(vm->gc, arg_s + 1u);
+  if (thk == NULL) {
+    return er_bad;
+  }
+  er_val out_v = er_thk_init(thk, ER_XUNK_APP, arg_s + 1u, NULL);
+  if (out_v == 0) {
+    return er_bad;
+  }
+  thk->arg_v[0] = *fn_v;
+  if (arg_s > 0) {
+    memcpy(thk->arg_v + 1, arg_v, arg_s * sizeof(er_val));
+  }
+  return out_v;
+}
+
+static er_val op_exec_app_rooted(er_vm* vm, er_val app_v, bool op66_f) {
+  er_app* app = er_outt(er_tag_app, app_v);
+  if (app == NULL) {
+    return er_tank_make(vm->gc, app_v, "expected primitive row");
+  }
+
+  er_val* root_v = vm->dsp;
+  root_v[0] = app_v;
+  root_v[1] = app->fn_v;
+  if (app->arg_s > 0) {
+    memcpy(root_v + 2, app->arg_v, app->arg_s * sizeof(er_val));
+  }
+  vm->dsp = root_v + 2 + app->arg_s;
+
+  er_val tag_v = root_v[1];
+  er_val* arg_v = root_v + 2;
+  size_t arg_s = app->arg_s;
+  if (op66_f && tag_v == 0 && arg_s > 0) {
+    tag_v = root_v[2];
+    arg_v = root_v + 3;
+    arg_s--;
+  }
+
+  int op_i = 0;
+  if (op66_f && eo_op66_from_tag(tag_v, &op_i)) {
+    switch (op_i) {
+    case OP66_INIT: {
+      if (arg_s != 1) {
+        break;
+      }
+      er_app* row = er_outt(er_tag_app, arg_v[0]);
+      if (row == NULL || row->arg_s == 0) {
+        er_val out_v = 0;
+        vm->dsp = root_v;
+        return out_v;
+      }
+      if (row->arg_s == 1) {
+        er_val out_v = row->fn_v;
+        vm->dsp = root_v;
+        return out_v;
+      }
+      size_t out_arg_s = row->arg_s - 1u;
+      er_app* out = er_app_alloc(vm->gc, out_arg_s);
+      if (out == NULL) {
+        vm->dsp = root_v;
+        return er_bad;
+      }
+      row = er_outt(er_tag_app, arg_v[0]);
+      if (row == NULL || row->arg_s != out_arg_s + 1u) {
+        vm->dsp = root_v;
+        return er_bad;
+      }
+      er_val out_v = er_app_init(out, row->fn_v, out_arg_s, row->arg_v);
+      vm->dsp = root_v;
+      return out_v == 0 ? er_bad : out_v;
+    }
+    case OP66_REP: {
+      if (arg_s != 3) {
+        break;
+      }
+      size_t count_s = 0;
+      (void)eo_nat_to_size(arg_v[2], &count_s);
+      if (count_s == 0) {
+        er_val out_v = eo_nat(arg_v[0]);
+        vm->dsp = root_v;
+        return out_v;
+      }
+      er_app* out = er_app_alloc(vm->gc, count_s);
+      if (out == NULL) {
+        vm->dsp = root_v;
+        return er_bad;
+      }
+      er_val hd_v = eo_nat(arg_v[0]);
+      er_val out_v = er_app_init(out, hd_v, count_s, NULL);
+      if (out_v == 0) {
+        vm->dsp = root_v;
+        return er_bad;
+      }
+      for (size_t k = 0; k < count_s; k++) {
+        out->arg_v[k] = arg_v[1];
+      }
+      vm->dsp = root_v;
+      return out_v;
+    }
+    case OP66_ROW: {
+      if (arg_s != 3) {
+        break;
+      }
+      size_t count_s = 0;
+      (void)eo_nat_to_size(arg_v[1], &count_s);
+      if (count_s == 0) {
+        er_val out_v = eo_nat(arg_v[0]);
+        vm->dsp = root_v;
+        return out_v;
+      }
+      er_app* out = er_app_alloc(vm->gc, count_s);
+      if (out == NULL) {
+        vm->dsp = root_v;
+        return er_bad;
+      }
+      er_val hd_v = eo_nat(arg_v[0]);
+      er_val out_v = er_app_init(out, hd_v, count_s, NULL);
+      if (out_v == 0) {
+        vm->dsp = root_v;
+        return er_bad;
+      }
+      er_val cur_v = arg_v[2];
+      for (size_t k = 0; k < count_s; k++) {
+        out->arg_v[k] = eo_ix(0, cur_v);
+        cur_v = eo_ix(1, cur_v);
+      }
+      vm->dsp = root_v;
+      return out_v;
+    }
+    case OP66_SLICE: {
+      if (arg_s != 3) {
+        break;
+      }
+      size_t off_s = 0;
+      size_t count_s = 0;
+      (void)eo_nat_to_size(arg_v[0], &off_s);
+      if (!eo_nat_to_size(arg_v[1], &count_s)) {
+        count_s = SIZE_MAX;
+      }
+      er_app* row = er_outt(er_tag_app, arg_v[2]);
+      if (row == NULL || off_s > row->arg_s) {
+        vm->dsp = root_v;
+        return 0;
+      }
+      size_t keep_s = row->arg_s - off_s;
+      if (keep_s > count_s) {
+        keep_s = count_s;
+      }
+      if (keep_s == 0) {
+        vm->dsp = root_v;
+        return 0;
+      }
+      er_app* out = er_app_alloc(vm->gc, keep_s);
+      if (out == NULL) {
+        vm->dsp = root_v;
+        return er_bad;
+      }
+      row = er_outt(er_tag_app, arg_v[2]);
+      if (row == NULL || off_s > row->arg_s || keep_s > row->arg_s - off_s) {
+        vm->dsp = root_v;
+        return er_bad;
+      }
+      er_val out_v = er_app_init(out, 0, keep_s, row->arg_v + off_s);
+      vm->dsp = root_v;
+      return out_v == 0 ? er_bad : out_v;
+    }
+    case OP66_WELD: {
+      if (arg_s != 2) {
+        break;
+      }
+      er_app* x = er_outt(er_tag_app, arg_v[0]);
+      er_app* y = er_outt(er_tag_app, arg_v[1]);
+      size_t x_s = x == NULL ? 0 : x->arg_s;
+      size_t y_s = y == NULL ? 0 : y->arg_s;
+      size_t total_s = 0;
+      if (x_s > SIZE_MAX - y_s) {
+        vm->dsp = root_v;
+        return 0;
+      }
+      total_s = x_s + y_s;
+      er_app* out = er_app_alloc(vm->gc, total_s);
+      if (out == NULL) {
+        vm->dsp = root_v;
+        return er_bad;
+      }
+      x = er_outt(er_tag_app, arg_v[0]);
+      y = er_outt(er_tag_app, arg_v[1]);
+      er_val out_v = er_app_init(out, 0, total_s, NULL);
+      if (out_v == 0) {
+        vm->dsp = root_v;
+        return er_bad;
+      }
+      if (x_s > 0 && x != NULL) {
+        memcpy(out->arg_v, x->arg_v, x_s * sizeof(er_val));
+      }
+      if (y_s > 0 && y != NULL) {
+        memcpy(out->arg_v + x_s, y->arg_v, y_s * sizeof(er_val));
+      }
+      vm->dsp = root_v;
+      return out_v;
+    }
+    case OP66_UP:
+    case OP66_UP_UNIQ: {
+      if (arg_s != 3) {
+        er_val out_v =
+            er_tank_make(vm->gc, (er_val)arg_s, "bad primitive arity");
+        vm->dsp = root_v;
+        return out_v;
+      }
+      size_t idx_s = 0;
+      (void)eo_nat_to_size(arg_v[0], &idx_s);
+      er_app* row = er_outt(er_tag_app, arg_v[2]);
+      if (row == NULL || idx_s >= row->arg_s) {
+        er_val out_v = arg_v[2];
+        vm->dsp = root_v;
+        return out_v;
+      }
+      er_app* out = er_app_alloc(vm->gc, row->arg_s);
+      if (out == NULL) {
+        vm->dsp = root_v;
+        return er_bad;
+      }
+      row = er_outt(er_tag_app, arg_v[2]);
+      if (row == NULL || idx_s >= row->arg_s) {
+        vm->dsp = root_v;
+        return er_bad;
+      }
+      er_val out_v = er_app_init(out, row->fn_v, row->arg_s, row->arg_v);
+      if (out_v == 0) {
+        vm->dsp = root_v;
+        return er_bad;
+      }
+      out->arg_v[idx_s] = arg_v[1];
+      vm->dsp = root_v;
+      return out_v;
+    }
+    case OP66_COUP: {
+      if (arg_s != 2) {
+        break;
+      }
+      er_app* row = er_outt(er_tag_app, arg_v[1]);
+      if (row == NULL) {
+        er_val out_v = arg_v[0];
+        vm->dsp = root_v;
+        return out_v;
+      }
+      uint32_t arity_d = 0;
+      if (er_callable_arity(arg_v[0], &arity_d) && arity_d > row->arg_s) {
+        er_app* out = er_app_alloc(vm->gc, row->arg_s);
+        if (out == NULL) {
+          vm->dsp = root_v;
+          return er_bad;
+        }
+        row = er_outt(er_tag_app, arg_v[1]);
+        if (row == NULL) {
+          vm->dsp = root_v;
+          return er_bad;
+        }
+        er_val out_v = er_app_init(out, arg_v[0], row->arg_s, row->arg_v);
+        vm->dsp = root_v;
+        return out_v == 0 ? er_bad : out_v;
+      }
+      size_t row_arg_s = row->arg_s;
+      er_thk* thk = er_thk_alloc(vm->gc, row_arg_s + 1u);
+      if (thk == NULL) {
+        vm->dsp = root_v;
+        return er_bad;
+      }
+      row = er_outt(er_tag_app, arg_v[1]);
+      if (row == NULL || row->arg_s != row_arg_s) {
+        vm->dsp = root_v;
+        return er_bad;
+      }
+      er_val out_v = er_thk_init(thk, ER_XUNK_APP, row_arg_s + 1u, NULL);
+      if (out_v == 0) {
+        vm->dsp = root_v;
+        return er_bad;
+      }
+      thk->arg_v[0] = arg_v[0];
+      if (row_arg_s > 0) {
+        memcpy(thk->arg_v + 1, row->arg_v, row_arg_s * sizeof(er_val));
+      }
+      vm->dsp = root_v;
+      return out_v;
+    }
+    case OP66_SAP: {
+      if (arg_s != 2) {
+        break;
+      }
+      er_val out_v = op_thk_app_rooted(vm, &arg_v[0], 1, arg_v + 1);
+      vm->dsp = root_v;
+      return out_v;
+    }
+    case OP66_SAP2: {
+      if (arg_s != 3) {
+        break;
+      }
+      er_val app1_v = op_thk_app_rooted(vm, &arg_v[0], 1, arg_v + 1);
+      if (!er_is_good(app1_v)) {
+        vm->dsp = root_v;
+        return app1_v;
+      }
+      root_v[0] = app1_v;
+      er_val out_v = op_thk_app_rooted(vm, root_v, 1, arg_v + 2);
+      vm->dsp = root_v;
+      return out_v;
+    }
+    default:
+      break;
+    }
+  }
+
+  er_val out_v = op66_f ? eo_exec_op66_tag(vm->gc, tag_v, arg_s, arg_v)
+                        : eo_exec_op0_tag(vm->gc, tag_v, arg_s, arg_v);
+  vm->dsp = root_v;
+  return out_v;
+}
+
+static bool op66_exec_named_op0_app(er_vm* vm, er_val app_v, er_val* out_v) {
+  er_app* app = er_outt(er_tag_app, app_v);
   size_t op_s = 0;
   size_t arg_off_s = 0;
   size_t arg_s = 0;
@@ -1383,21 +1997,26 @@ static bool op66_exec_named_op0_app(er_vm* vm, er_app* app, er_val* out_v) {
     return true;
   }
 
-  er_val app_v = op_eval_arg_route_app(vm, app, arg_off_s, arg_s, &route);
-  if (!er_is_good(app_v)) {
-    *out_v = app_v;
+  er_val eval_app_v =
+      op_eval_arg_route_app(vm, app_v, arg_off_s, arg_s, &route);
+  if (!er_is_good(eval_app_v)) {
+    *out_v = eval_app_v;
     return true;
   }
-  app = er_outt(er_tag_app, app_v);
-  if (app == NULL) {
-    *out_v = er_tank_make(vm->gc, 0, "expected primitive row");
-    return true;
-  }
+  app = er_outt(er_tag_app, eval_app_v);
   if (!op0_named_app_view(app, &op_s, &arg_off_s, &arg_s)) {
     *out_v = er_tank_make(vm->gc, 0, "bad primitive tag");
     return true;
   }
-  *out_v = eo_exec_op0(vm->gc, (int)op_s, arg_s, app->arg_v + arg_off_s);
+
+  er_val* root_v = vm->dsp;
+  root_v[0] = eval_app_v;
+  for (size_t k = 0; k < arg_s; k++) {
+    root_v[k + 1] = app->arg_v[arg_off_s + k];
+  }
+  vm->dsp = root_v + 1 + arg_s;
+  *out_v = eo_exec_op0(vm->gc, (int)op_s, arg_s, root_v + 1);
+  vm->dsp = root_v;
   return true;
 }
 
@@ -1547,11 +2166,52 @@ static er_val op66_exec_try_app(er_vm* vm, const er_val arg_v[], size_t arg_s) {
   return out_v == 0 ? er_bad : out_v;
 }
 
-static bool op66_exec_special_app(er_vm* vm, er_app* app, er_val* out_v) {
-  if (op66_exec_named_op0_app(vm, app, out_v)) {
+static er_val op66_exec_save_app(er_vm* vm, const er_val arg_v[],
+                                 size_t arg_s) {
+  if (arg_s != 1) {
+    return er_tank_make(vm->gc, (er_val)arg_s, "bad primitive arity");
+  }
+  if (vm->store == NULL || vm->work_a == NULL) {
+    return er_tank_make(vm->gc, arg_v[0], "save without store");
+  }
+
+  size_t old_tmp_s = vm->gc_tmp_s;
+  if (old_tmp_s >= sizeof(vm->gc_tmp_v) / sizeof(vm->gc_tmp_v[0])) {
+    return er_tank_make(vm->gc, arg_v[0], "save root overflow");
+  }
+  er_val pin_v = arg_v[0];
+  vm->gc_tmp_v[old_tmp_s] = pin_v;
+  vm->gc_tmp_s = old_tmp_s + 1u;
+  pin_v = plan_eval_whnf_preserve(vm, pin_v);
+  vm->gc_tmp_v[old_tmp_s] = pin_v;
+  if (!er_is_good(pin_v)) {
+    vm->gc_tmp_s = old_tmp_s;
+    return pin_v;
+  }
+  if (er_outt(er_tag_pin, pin_v) == NULL) {
+    er_val tank_v = er_tank_make(vm->gc, pin_v, "save expects pin");
+    vm->gc_tmp_s = old_tmp_s;
+    return tank_v;
+  }
+
+  uint8_t hash_b[32];
+  enki_error err = er_pin_freeze(vm->store, vm->gc, vm->work_a, pin_v, hash_b);
+  if (err == ENKI_ERROR_OK) {
+    err = er_store_write_root_hash(vm->store, hash_b);
+  }
+  vm->gc_tmp_s = old_tmp_s;
+  if (err != ENKI_ERROR_OK) {
+    return er_tank_make(vm->gc, (er_val)err, "save failed");
+  }
+  return 0;
+}
+
+static bool op66_exec_special_app(er_vm* vm, er_val app_v, er_val* out_v) {
+  if (op66_exec_named_op0_app(vm, app_v, out_v)) {
     return true;
   }
 
+  er_app* app = er_outt(er_tag_app, app_v);
   int op_i = 0;
   const er_val* arg_v = NULL;
   size_t arg_s = 0;
@@ -1564,6 +2224,9 @@ static bool op66_exec_special_app(er_vm* vm, er_app* app, er_val* out_v) {
     return true;
   case OP66_TRY:
     *out_v = op66_exec_try_app(vm, arg_v, arg_s);
+    return true;
+  case OP66_SAVE:
+    *out_v = op66_exec_save_app(vm, arg_v, arg_s);
     return true;
   default:
     return false;
@@ -2002,9 +2665,8 @@ I_MK_APP: {
     FAIL_ALLOC();
   }
   er_val* app_base = dsp - app_s;
-  hd_v = app_base[0];
   GC_SYNC();
-  r = er_app_make_flat(vm->gc, hd_v, app_s - 1, &app_base[1]);
+  r = er_app_make_flat_stack_rooted(vm, app_base, app_s);
   CHECK_ALLOC(r);
   dsp = app_base;
   DPUSH(r);
@@ -2106,9 +2768,11 @@ I_APPLY_UNK: {
   er_val* call_base = dsp - call_s;
   hd_v = call_base[0];
   er_pin* pin = call_s == 2 ? er_outt(er_tag_pin, hd_v) : NULL;
+  bool prim_f = pin != NULL && er_is_cat(pin->val_v);
+  er_val prim_v = prim_f ? pin->val_v : 0;
   GC_SYNC();
-  if (pin != NULL && er_is_cat(pin->val_v)) {
-    r = er_thk_make_prim(vm->gc, pin->val_v, call_base[1]);
+  if (prim_f) {
+    r = er_thk_make_prim_rooted(vm, 0, prim_v, call_base[1], NULL);
   } else {
     r = er_thk_make_unk_app(vm->gc, call_s, call_base);
   }
@@ -2129,8 +2793,9 @@ I_CALLP: {
   if (pin == NULL || !er_is_cat(pin->val_v)) {
     FAIL_TANK("bad primitive call", hd_v);
   }
+  er_val prim_v = pin->val_v;
   GC_SYNC();
-  r = er_thk_make_prim(vm->gc, pin->val_v, call_base[1]);
+  r = er_thk_make_prim_rooted(vm, 0, prim_v, call_base[1], NULL);
   CHECK_ALLOC(r);
   dsp = call_base;
   DPUSH(r);
@@ -2207,12 +2872,15 @@ I_MAKE_SUSP: {
     FAIL_TANK("bad suspension frame", env[0]);
   }
   GC_SYNC();
-  er_val susp_env_v = er_thk_make_env_frame(vm->gc, frame_s, env);
+  er_val susp_env_v =
+      er_thk_make_env_frame_from_thk_rooted(vm, env_v, frame_s, &env_v);
   CHECK_ALLOC(susp_env_v);
-  vm->gc_tmp_v[0] = susp_env_v;
-  vm->gc_tmp_s = 1;
-  r = er_thk_make_susp(vm->gc, susp_label_d, susp_env_v, env[0]);
-  vm->gc_tmp_s = 0;
+  er_thk* moved_env = er_outt(er_tag_thk, env_v);
+  if (moved_env == NULL || moved_env->arg_s == 0) {
+    FAIL_TANK("bad suspension frame", env_v);
+  }
+  env = moved_env->arg_v;
+  r = er_thk_make_susp_rooted(vm, susp_label_d, susp_env_v, env[0]);
   CHECK_ALLOC(r);
   DPUSH(r);
   DISPATCH();
@@ -2258,13 +2926,15 @@ FORCE_UNK_APP: {
   hav_d = (uint32_t)hav_s;
 
   er_pin* pin = er_outt(er_tag_pin, f);
-  if (pin != NULL && er_is_cat(pin->val_v)) {
+  bool prim_f = pin != NULL && er_is_cat(pin->val_v);
+  er_val prim_v = prim_f ? pin->val_v : 0;
+  if (prim_f) {
     if (hav_s == 0) {
       CALLU_DISPATCH_MK_APP();
     }
     target = er_into(er_tag_thk, thk);
     GC_SYNC();
-    r = er_thk_make_prim(vm->gc, pin->val_v, thk->arg_v[1]);
+    r = er_thk_make_prim_rooted(vm, target, prim_v, thk->arg_v[1], &target);
     CHECK_ALLOC(r);
     KPUSH_UPDATE(target);
     thk = er_outt(er_tag_thk, target);
@@ -2281,7 +2951,7 @@ FORCE_UNK_APP: {
   if (er_is_tag(er_tag_app, f)) {
     target = er_into(er_tag_thk, thk);
     GC_SYNC();
-    r = er_thk_make_unk_app_flat(vm->gc, f, hav_s, &thk->arg_v[1]);
+    r = er_thk_make_unk_app_flat_from_thk_rooted(vm, target, hav_s, &target);
     CHECK_ALLOC(r);
     KPUSH_UPDATE(target);
     thk = er_outt(er_tag_thk, target);
@@ -2309,7 +2979,7 @@ FORCE_UNK_APP: {
     }
     er_val source_thk_v = er_into(er_tag_thk, thk);
     GC_SYNC();
-    r = er_thk_take_call(vm->gc, thk, frame_s);
+    r = er_thk_take_call_rooted(vm, source_thk_v, frame_s, &source_thk_v);
     CHECK_ALLOC(r);
     thk = er_outt(er_tag_thk, source_thk_v);
     if (thk == NULL) {
@@ -2328,7 +2998,8 @@ FORCE_UNK_APP: {
     }
     target = er_into(er_tag_thk, thk);
     GC_SYNC();
-    r = er_thk_make_call_frame(vm->gc, frame_s, (size_t)wan_d + 1, thk->arg_v);
+    r = er_thk_make_call_frame_from_thk_rooted(vm, target, frame_s,
+                                               (size_t)wan_d + 1, &target);
     CHECK_ALLOC(r);
     KPUSH_UPDATE(target);
     thk = er_outt(er_tag_thk, target);
@@ -2360,35 +3031,33 @@ FORCE_XPRIM: {
   prim_row = er_outt(er_tag_app, prim_arg);
   if (prim_set == 66) {
     GC_SYNC();
-    if (op66_exec_special_app(vm, prim_row, &r)) {
+    if (op66_exec_special_app(vm, prim_arg, &r)) {
       dsp = vm->dsp;
       ksp = vm->ksp;
       CHECK_PRIM(r);
       goto FORCE_ENTRY;
     }
     GC_SYNC();
-    prim_arg = op66_eval_arg_app(vm, prim_row);
+    (void)prim_row;
+    prim_arg = op66_eval_arg_app(vm, prim_arg);
     dsp = vm->dsp;
     ksp = vm->ksp;
     CHECK_PRIM(prim_arg);
     prim_row = er_outt(er_tag_app, prim_arg);
     GC_SYNC();
-    vm->gc_tmp_v[0] = prim_arg;
-    vm->gc_tmp_s = 1;
-    r = eo_exec_op66_er_app(vm->gc, prim_row);
-    vm->gc_tmp_s = 0;
+    (void)prim_row;
+    r = op_exec_app_rooted(vm, prim_arg, true);
   } else if (prim_set == 0) {
     GC_SYNC();
-    prim_arg = op0_eval_arg_app(vm, prim_row);
+    (void)prim_row;
+    prim_arg = op0_eval_arg_app(vm, prim_arg);
     dsp = vm->dsp;
     ksp = vm->ksp;
     CHECK_PRIM(prim_arg);
     prim_row = er_outt(er_tag_app, prim_arg);
     GC_SYNC();
-    vm->gc_tmp_v[0] = prim_arg;
-    vm->gc_tmp_s = 1;
-    r = eo_exec_op0_er_app(vm->gc, prim_row);
-    vm->gc_tmp_s = 0;
+    (void)prim_row;
+    r = op_exec_app_rooted(vm, prim_arg, false);
   } else {
     FAIL_TANK("bad primitive set", prim_arg);
   }
@@ -2404,6 +3073,11 @@ FORCE_ENTRY: {
   }
   if (er_is_whnf(r)) {
     RETURN(r);
+  }
+  head = er_outa(r);
+  if (head->raw.fwd_f) {
+    r = *(er_val*)((unsigned char*)head + sizeof(er_head));
+    goto FORCE_ENTRY;
   }
   thk = er_outt(er_tag_thk, r);
   if (thk == NULL) {
@@ -2470,14 +3144,26 @@ ENTER_CALL: {
   for (size_t i = 0; i < n_lets; i++) {
     size_t slot_s = (size_t)law->ari_d + 1 + i;
     GC_SYNC();
-    er_val susp_v = er_thk_make_susp(vm->gc, (uint32_t)i + 1, self_v, f);
+    er_val susp_v = er_thk_make_susp_rooted(vm, (uint32_t)i + 1, self_v, f);
     CHECK_ALLOC(susp_v);
+    self_v = r;
+    thk = er_outt(er_tag_thk, self_v);
+    if (thk == NULL) {
+      FAIL_TANK("bad call frame", self_v);
+    }
+    f = thk->arg_v[0];
     thk->arg_v[slot_s] = susp_v;
   }
   if (n_lets > 0) {
     GC_SYNC();
-    er_val env_frame_v = er_thk_make_env_frame(vm->gc, thk->arg_s, thk->arg_v);
+    er_val env_frame_v =
+        er_thk_make_env_frame_from_thk_rooted(vm, self_v, thk->arg_s, &self_v);
     CHECK_ALLOC(env_frame_v);
+    thk = er_outt(er_tag_thk, self_v);
+    if (thk == NULL) {
+      FAIL_TANK("bad call frame", self_v);
+    }
+    f = thk->arg_v[0];
     for (size_t i = 0; i < n_lets; i++) {
       size_t slot_s = (size_t)law->ari_d + 1 + i;
       er_thk* susp = er_outt(er_tag_thk, thk->arg_v[slot_s]);
@@ -2604,7 +3290,7 @@ K_OVERAPP:
     thk = er_outt(er_tag_thk, app);
     assert("bad overapp" && thk);
     GC_SYNC();
-    r = er_app_drop_coup(vm->gc, thk, r, split);
+    r = er_app_drop_coup_rooted(vm, app, r, split);
     CHECK_ALLOC(r);
     goto FORCE_ENTRY;
   }

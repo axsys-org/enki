@@ -1675,8 +1675,8 @@ static er_val eo_exec_op66_descriptor(enki_gc* gc, er_val tag_v, size_t arg_s,
   return er_bad;
 }
 
-static er_val eo_exec_op66_tag(enki_gc* gc, er_val tag_v, size_t arg_s,
-                               const er_val arg_v[]) {
+er_val eo_exec_op66_tag(enki_gc* gc, er_val tag_v, size_t arg_s,
+                        const er_val arg_v[]) {
   bool handled_f = false;
   er_val out_v = eo_exec_op66_descriptor(gc, tag_v, arg_s, arg_v, &handled_f);
   if (handled_f) {
@@ -1734,8 +1734,8 @@ er_val eo_exec_op0(enki_gc* gc, int op, size_t arg_s, const er_val arg_v[]) {
 #undef EO_ARITY
 }
 
-static er_val eo_exec_op0_tag(enki_gc* gc, er_val tag_v, size_t arg_s,
-                              const er_val arg_v[]) {
+er_val eo_exec_op0_tag(enki_gc* gc, er_val tag_v, size_t arg_s,
+                       const er_val arg_v[]) {
   if (tag_v == 0 && arg_s > 1) {
     size_t nested_s = 0;
     if (eo_nat_to_size(arg_v[0], &nested_s) && nested_s <= OP0_ELIM) {

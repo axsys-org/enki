@@ -283,8 +283,10 @@ static void enki_gc_trace_object(enki_gc* gc, er_val val_v) {
   case er_tag_pin: {
     er_pin* pin = er_outa(val_v);
     enki_gc_trace_ref(gc, &pin->val_v);
-    for (size_t k = 0; k < pin->sub_s; k++) {
-      enki_gc_trace_ref(gc, &pin->sub_v[k]);
+    if (pin->ice != NULL) {
+      for (size_t k = 0; k < pin->ice->sub_s; k++) {
+        enki_gc_trace_ref(gc, &pin->ice->sub_v[k]);
+      }
     }
     return;
   }

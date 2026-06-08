@@ -67,8 +67,12 @@ er_val eo_elim(enki_gc* gc, er_val pin_f_v, er_val law_f_v, er_val app_f_v,
 
 bool eo_op66_from_tag(er_val tag_v, int* out_op);
 er_val eo_exec_op66(enki_gc* gc, int op, size_t arg_s, const er_val arg_v[]);
+er_val eo_exec_op66_tag(enki_gc* gc, er_val tag_v, size_t arg_s,
+                        const er_val arg_v[]);
 er_val eo_exec_op66_er_app(enki_gc* gc, const er_app* app);
 er_val eo_exec_op66_app(enki_gc* gc, er_val row_v);
 er_val eo_exec_op0(enki_gc* gc, int op, size_t arg_s, const er_val arg_v[]);
+er_val eo_exec_op0_tag(enki_gc* gc, er_val tag_v, size_t arg_s,
+                       const er_val arg_v[]);
 er_val eo_exec_op0_er_app(enki_gc* gc, const er_app* app);
 er_val eo_exec_op0_app(enki_gc* gc, er_val row_v);
