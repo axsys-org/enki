@@ -50,6 +50,7 @@ void enki_gc_unlock(enki_gc* gc);
 void enki_gc_collect(enki_gc* gc);
 
 void enki_gc_set_trace_root(enki_gc* gc, void* root, enki_gc_trace_fn trace_fn);
+void enki_gc_trace_ref(enki_gc* gc, er_val* ref_v);
 void enki_gc_trace_vm(enki_gc* gc, void* root);
 const enki_allocator* enki_gc_as_allocator(enki_gc* gc);
 const enki_allocator* enki_gc_parent_allocator(enki_gc* gc);

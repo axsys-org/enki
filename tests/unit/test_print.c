@@ -1,4 +1,5 @@
 #include "enki/allocator.h"
+#include "enki/gc.h"
 #include "enki/arena.h"
 #include "enki/print.h"
 #include "enki/run.h"
@@ -9,15 +10,20 @@
 
 static enki_arena* fixture_arena;
 static const enki_allocator* fixture_allocator;
+static enki_gc* fixture_gc;
 
 static void setup(void) {
   fixture_arena = enki_arena_create(enki_allocator_system(), 1024 * 1024);
   cr_assert_not_null(fixture_arena);
   fixture_allocator = enki_arena_as_allocator(fixture_arena);
   cr_assert_not_null(fixture_allocator);
+  fixture_gc = enki_gc_create(enki_allocator_system(), 1024 * 1024, NULL);
+  cr_assert_not_null(fixture_gc);
 }
 
 static void teardown(void) {
+  enki_gc_destroy(fixture_gc);
+  fixture_gc = NULL;
   enki_arena_destroy(fixture_arena);
   fixture_arena = NULL;
   fixture_allocator = NULL;
@@ -36,7 +42,7 @@ static void assert_prints(er_val value_v, const char* expected_c) {
 }
 
 static er_val make_bat(size_t lim_s, const uint64_t* lim_q) {
-  er_bat* bat = er_bat_alloc(fixture_allocator, lim_s);
+  er_bat* bat = er_bat_alloc(fixture_gc, lim_s);
   cr_assert_not_null(bat);
   er_val bat_v = er_bat_init(bat, lim_s, lim_q);
   cr_assert_eq(er_get_tag(bat_v), er_tag_bat);
@@ -55,7 +61,7 @@ static er_val make_bat_bytes(const char* bytes_c, size_t bytes_s) {
 }
 
 static er_val make_app(er_val fn_v, size_t arg_s, const er_val* arg_v) {
-  er_app* app = er_app_alloc(fixture_allocator, arg_s);
+  er_app* app = er_app_alloc(fixture_gc, arg_s);
   cr_assert_not_null(app);
   er_val app_v = er_app_init(app, fn_v, arg_s, arg_v);
   cr_assert_eq(er_get_tag(app_v), er_tag_app);
@@ -63,7 +69,7 @@ static er_val make_app(er_val fn_v, size_t arg_s, const er_val* arg_v) {
 }
 
 static er_val make_pin(er_val value_v) {
-  er_pin* pin = er_pin_alloc(fixture_allocator, 0);
+  er_pin* pin = er_pin_alloc(fixture_gc, 0);
   cr_assert_not_null(pin);
   er_val pin_v = er_pin_init(pin, NULL, value_v, 0, NULL);
   cr_assert_eq(er_get_tag(pin_v), er_tag_pin);
@@ -74,7 +80,7 @@ static er_val make_law(uint32_t arity_d, er_val name_v, er_val body_v) {
   er_op op_v[] = {{.tag = OP_RET}};
   er_op* labels_v[] = {op_v};
   size_t label_len_v[] = {1};
-  er_law* law = er_law_alloc(fixture_allocator, 1, 1);
+  er_law* law = er_law_alloc(fixture_gc, 1, 1);
   cr_assert_not_null(law);
   er_val law_v =
       er_law_init(law, name_v, body_v, arity_d, 0, 1, labels_v, label_len_v);
@@ -83,7 +89,7 @@ static er_val make_law(uint32_t arity_d, er_val name_v, er_val body_v) {
 }
 
 static er_val make_thunk(er_execf fun) {
-  er_thk* thk = er_thk_alloc(fixture_allocator, 0);
+  er_thk* thk = er_thk_alloc(fixture_gc, 0);
   cr_assert_not_null(thk);
   er_val thk_v = er_thk_init(thk, fun, 0, NULL);
   cr_assert_eq(er_get_tag(thk_v), er_tag_thk);
@@ -146,7 +152,7 @@ Test(print, laws_print_name_arity_and_body) {
 
 Test(print, thunks_and_tanks_print_debug_placeholders) {
   assert_prints(make_thunk(ER_CALL), "<thk/2>");
-  assert_prints(er_tank_make(fixture_allocator, 42, "boom"), "<tank: boom>");
+  assert_prints(er_tank_make(fixture_gc, 42, "boom"), "<tank: boom>");
 }
 
 Test(print, bad_and_unknown_heap_tags_print_bad_placeholder) {

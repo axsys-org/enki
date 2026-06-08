@@ -443,15 +443,12 @@ static bool er_bc_compile_label(er_bc_compiler* c, size_t depth_s,
   return true;
 }
 
-er_val er_law_compile(const enki_allocator* loc_a, er_val nam_v, er_val bod_v,
-                      uint32_t ari_d) {
+er_val er_law_compile(enki_gc* gc, er_val nam_v, er_val bod_v, uint32_t ari_d) {
   ENKI_PROFILE_ZONE("er_law_compile");
-  if (loc_a == NULL || loc_a->alloc == NULL || loc_a->free == NULL) {
+  if (gc == NULL) {
     return 0;
   }
-  enki_gc* gc = enki_gc_from_allocator(loc_a);
-  const enki_allocator* work_a =
-      gc == NULL ? loc_a : enki_gc_parent_allocator(gc);
+  const enki_allocator* work_a = enki_gc_parent_allocator(gc);
   if (work_a == NULL || work_a->alloc == NULL || work_a->free == NULL) {
     return 0;
   }
@@ -521,7 +518,7 @@ er_val er_law_compile(const enki_allocator* loc_a, er_val nam_v, er_val bod_v,
     code_len_v[k] = c.label_v[k].code_s;
   }
 
-  law_v = er_law_make_code(loc_a, nam_v, bod_v, ari_d, (uint32_t)let_s, bc_s,
+  law_v = er_law_make_code(gc, nam_v, bod_v, ari_d, (uint32_t)let_s, bc_s,
                            code_v, code_len_v);
 
 cleanup:

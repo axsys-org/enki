@@ -152,39 +152,37 @@ static inline bool er_is_nf(er_val val_v) {
   return h->raw.nf_f != 0;
 }
 
-er_tank* er_tank_alloc(const enki_allocator* allocator);
+er_tank* er_tank_alloc(enki_gc* gc);
 er_val er_tank_init(er_tank* tank, er_val val_v, char* msg_c);
-er_val er_tank_make(const enki_allocator* loc_a, er_val val_v, char* msg_c);
+er_val er_tank_make(enki_gc* gc, er_val val_v, char* msg_c);
 
-er_bat* er_bat_alloc(const enki_allocator* allocator, size_t lim_s);
+er_bat* er_bat_alloc(enki_gc* gc, size_t lim_s);
 er_val er_bat_init(er_bat* bat, size_t lim_s, const uint64_t lim_q[]);
 
-er_pin* er_pin_alloc(const enki_allocator* allocator, size_t sub_s);
+er_pin* er_pin_alloc(enki_gc* gc, size_t sub_s);
 er_val er_pin_init(er_pin* pin, const uint8_t hash_b[32], er_val val_v,
                    size_t sub_s, const er_val sub_v[]);
-er_val er_pin_make(const enki_allocator* loc_a, er_val val_v);
+er_val er_pin_make(enki_gc* gc, er_val val_v);
 
-er_law* er_law_alloc(const enki_allocator* allocator, size_t bc_s, size_t op_s);
+er_law* er_law_alloc(enki_gc* gc, size_t bc_s, size_t op_s);
 er_val er_law_init(er_law* law, er_val name_v, er_val body_v, uint32_t ari_d,
                    uint32_t let_d, size_t bc_s, er_op* const bc_v[],
                    const size_t bc_len_v[]);
-er_val er_law_make_code(const enki_allocator* loc_a, er_val nam_v, er_val bod_v,
-                        uint32_t ari_d, uint32_t let_d, size_t bc_s,
-                        er_op* const bc_v[], const size_t bc_len_v[]);
-er_val er_law_make(const enki_allocator* loc_a, er_val nam_v, er_val bod_v,
-                   uint32_t ari_d);
+er_val er_law_make_code(enki_gc* gc, er_val nam_v, er_val bod_v, uint32_t ari_d,
+                        uint32_t let_d, size_t bc_s, er_op* const bc_v[],
+                        const size_t bc_len_v[]);
+er_val er_law_make(enki_gc* gc, er_val nam_v, er_val bod_v, uint32_t ari_d);
 
-er_app* er_app_alloc(const enki_allocator* allocator, size_t arg_s);
+er_app* er_app_alloc(enki_gc* gc, size_t arg_s);
 er_val er_app_init(er_app* app, er_val fn_v, size_t arg_s,
                    const er_val arg_v[]);
 
-er_thk* er_thk_alloc(const enki_allocator* allocator, size_t arg_s);
+er_thk* er_thk_alloc(enki_gc* gc, size_t arg_s);
 er_val er_thk_init(er_thk* thk, er_execf fun, size_t arg_s,
                    const er_val arg_v[]);
 
-er_val er_eval(const enki_allocator* loc_a, er_val val_v);
-er_thk* er_app_weld(const enki_allocator* allocator, er_val sin_v,
-                    er_val dex_v);
+er_val er_eval(enki_gc* gc, er_val val_v);
+er_thk* er_app_weld(enki_gc* gc, er_val sin_v, er_val dex_v);
 
 typedef enum {
   OP_PUSH_VAR,
@@ -333,7 +331,7 @@ typedef struct er_kon {
 
 typedef struct {
   er_bcpc pc;
-  const enki_allocator* loc_a;
+  enki_gc* gc;
 
   er_val* dstack;
   er_val* dsp;
@@ -346,6 +344,9 @@ typedef struct {
   er_val* gc_rp;
   er_val gc_tmp_v[8];
   size_t gc_tmp_s;
+
+  void* outer_trace_root;
+  void (*outer_trace_fn)(enki_gc* gc, void* root);
 } er_vm;
 
 typedef enum er_eval_mode {
@@ -355,7 +356,7 @@ typedef enum er_eval_mode {
 
 er_val plan_eval(er_vm* vm, er_val val_v, er_eval_mode mode);
 
-er_val er_eval_to(const enki_allocator* loc_a, er_val val_v, er_eval_mode mode);
+er_val er_eval_to(enki_gc* gc, er_val val_v, er_eval_mode mode);
 er_val er_eval_gc(enki_gc* gc, er_val val_v);
 
 #ifndef PLAN_CH

@@ -70,19 +70,18 @@ Test(store, read_reports_too_small_and_required_size) {
   cr_assert_eq(len_s, sizeof(bytes_b));
 }
 
-static er_val er_test_app2(const enki_allocator* a, er_val fn_v, er_val a_v,
-                           er_val b_v) {
+static er_val er_test_app2(enki_gc* gc, er_val fn_v, er_val a_v, er_val b_v) {
   er_val args_v[] = {a_v, b_v};
-  er_app* app = er_app_alloc(a, 2);
+  er_app* app = er_app_alloc(gc, 2);
   cr_assert_not_null(app);
   er_val app_v = er_app_init(app, fn_v, 2, args_v);
   cr_assert_eq(er_get_tag(app_v), er_tag_app);
   return app_v;
 }
 
-static er_val er_test_bat(const enki_allocator* a) {
+static er_val er_test_bat(enki_gc* gc) {
   uint64_t limbs_q[] = {0, 1};
-  er_bat* bat = er_bat_alloc(a, 2);
+  er_bat* bat = er_bat_alloc(gc, 2);
   cr_assert_not_null(bat);
   er_val bat_v = er_bat_init(bat, 2, limbs_q);
   cr_assert_eq(er_get_tag(bat_v), er_tag_bat);
@@ -90,23 +89,24 @@ static er_val er_test_bat(const enki_allocator* a) {
 }
 
 Test(store, er_pin_save_and_load_roundtrip_new_value_rep) {
-  const enki_allocator* a = enki_allocator_system();
-  er_val child_v = er_pin_make(a, 11);
+  enki_gc* gc = fixture_interp->gc;
+  const enki_allocator* work_a = enki_gc_parent_allocator(gc);
+  er_val child_v = er_pin_make(gc, 11);
   cr_assert_eq(er_get_tag(child_v), er_tag_pin);
 
-  er_val big_v = er_test_bat(a);
-  er_val inner_v = er_test_app2(a, 77, child_v, big_v);
-  er_val parent_v = er_pin_make(a, inner_v);
+  er_val big_v = er_test_bat(gc);
+  er_val inner_v = er_test_app2(gc, 77, child_v, big_v);
+  er_val parent_v = er_pin_make(gc, inner_v);
   cr_assert_eq(er_get_tag(parent_v), er_tag_pin);
 
   uint8_t hash_b[32];
   cr_assert_eq(
-      er_store_save_pin(&fixture_interp->store, a, a, parent_v, hash_b),
+      er_store_save_pin(&fixture_interp->store, gc, work_a, parent_v, hash_b),
       ENKI_ERROR_OK);
 
   er_val loaded_v = 0;
   cr_assert_eq(
-      er_store_load_pin(&fixture_interp->store, a, a, hash_b, &loaded_v),
+      er_store_load_pin(&fixture_interp->store, gc, work_a, hash_b, &loaded_v),
       ENKI_ERROR_OK);
 
   er_pin* loaded = er_outt(er_tag_pin, loaded_v);
@@ -135,14 +135,16 @@ Test(store, er_pin_save_and_load_roundtrip_new_value_rep) {
 }
 
 Test(store, er_root_save_and_load_roundtrip_new_value_rep) {
-  const enki_allocator* a = enki_allocator_system();
-  er_val pin_v = er_pin_make(a, 1234);
-  cr_assert_eq(er_store_save_root(&fixture_interp->store, a, a, pin_v),
+  enki_gc* gc = fixture_interp->gc;
+  const enki_allocator* work_a = enki_gc_parent_allocator(gc);
+  er_val pin_v = er_pin_make(gc, 1234);
+  cr_assert_eq(er_store_save_root(&fixture_interp->store, gc, work_a, pin_v),
                ENKI_ERROR_OK);
 
   er_val loaded_v = 0;
-  cr_assert_eq(er_store_load_root(&fixture_interp->store, a, a, &loaded_v),
-               ENKI_ERROR_OK);
+  cr_assert_eq(
+      er_store_load_root(&fixture_interp->store, gc, work_a, &loaded_v),
+      ENKI_ERROR_OK);
 
   er_pin* loaded = er_outt(er_tag_pin, loaded_v);
   cr_assert_not_null(loaded);

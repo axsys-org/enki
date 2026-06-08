@@ -9,6 +9,8 @@
 #include <string.h>
 #include <enki/profile.h>
 
+#define BOOT_ROOT_CAP 64
+
 typedef struct boot_module {
   er_val key_v;
   wisp_env_entry* env;
@@ -17,9 +19,14 @@ typedef struct boot_module {
 
 typedef struct boot_ctx {
   const enki_allocator* loc_a;
+  enki_gc* gc;
   wisp_rt* rt;
   const char* src_dir_c;
   boot_module* mod_v;
+  er_val gc_tmp_v[BOOT_ROOT_CAP];
+  size_t gc_tmp_s;
+  wisp_env_entry* gc_tmp_env_v[BOOT_ROOT_CAP];
+  size_t gc_tmp_env_s;
   bool emit_top_level_f;
 } boot_ctx;
 
@@ -98,7 +105,7 @@ static er_val boot_bytes_nat(boot_ctx* ctx, const char* bytes_c,
   memset(limb_q, 0, limb_s * sizeof(uint64_t));
   memcpy(limb_q, bytes_c, bytes_s);
 
-  er_bat* bat = er_bat_alloc(ctx->loc_a, limb_s);
+  er_bat* bat = er_bat_alloc(ctx->gc, limb_s);
   if (bat == NULL) {
     ctx->loc_a->free(ctx->loc_a->ctx, limb_q);
     return 0;
@@ -256,6 +263,48 @@ static bool boot_module_put(boot_ctx* ctx, er_val key_v, wisp_env_entry* env) {
   return true;
 }
 
+static bool boot_root_val_push(boot_ctx* ctx, er_val val_v) {
+  if (ctx->gc_tmp_s >= sizeof(ctx->gc_tmp_v) / sizeof(ctx->gc_tmp_v[0])) {
+    return false;
+  }
+  ctx->gc_tmp_v[ctx->gc_tmp_s++] = val_v;
+  return true;
+}
+
+static bool boot_root_env_push(boot_ctx* ctx, wisp_env_entry* env) {
+  if (ctx->gc_tmp_env_s >=
+      sizeof(ctx->gc_tmp_env_v) / sizeof(ctx->gc_tmp_env_v[0])) {
+    return false;
+  }
+  ctx->gc_tmp_env_v[ctx->gc_tmp_env_s++] = env;
+  return true;
+}
+
+static void boot_trace_env(enki_gc* gc, wisp_env_entry* env) {
+  for (wisp_env_entry* ent = env; ent != NULL; ent = ent->next) {
+    enki_gc_trace_ref(gc, &ent->key_v);
+    enki_gc_trace_ref(gc, &ent->val_v);
+  }
+}
+
+static void boot_trace_ctx(enki_gc* gc, void* root) {
+  boot_ctx* ctx = root;
+  if (gc == NULL || ctx == NULL) {
+    return;
+  }
+  wisp_rt_trace(gc, ctx->rt);
+  for (size_t i = 0; i < ctx->gc_tmp_s; i++) {
+    enki_gc_trace_ref(gc, &ctx->gc_tmp_v[i]);
+  }
+  for (size_t i = 0; i < ctx->gc_tmp_env_s; i++) {
+    boot_trace_env(gc, ctx->gc_tmp_env_v[i]);
+  }
+  for (boot_module* mod = ctx->mod_v; mod != NULL; mod = mod->next) {
+    enki_gc_trace_ref(gc, &mod->key_v);
+    boot_trace_env(gc, mod->env);
+  }
+}
+
 static bool boot_eat(char** str_c) {
   while (true) {
     if (**str_c == ';') {
@@ -407,18 +456,26 @@ static wisp_env_entry* boot_load_module(boot_ctx* ctx, const char* mod_c) {
   }
 
   er_val key_v = boot_string_nat(ctx, mod_c);
+  size_t key_root_s = ctx->gc_tmp_s;
+  if (!boot_root_val_push(ctx, key_v)) {
+    return NULL;
+  }
   boot_module* cached = boot_module_find(ctx, key_v);
   if (cached != NULL) {
-    return boot_env_clone(ctx, cached->env);
+    wisp_env_entry* out = boot_env_clone(ctx, cached->env);
+    ctx->gc_tmp_s = key_root_s;
+    return out;
   }
 
   char* path_c = boot_module_path(ctx, mod_c);
   if (path_c == NULL) {
+    ctx->gc_tmp_s = key_root_s;
     return NULL;
   }
   char* text_c = boot_read_file(ctx, path_c);
   ctx->loc_a->free(ctx->loc_a->ctx, path_c);
   if (text_c == NULL) {
+    ctx->gc_tmp_s = key_root_s;
     return NULL;
   }
 
@@ -428,6 +485,7 @@ static wisp_env_entry* boot_load_module(boot_ctx* ctx, const char* mod_c) {
     er_val form_v = wisp_parse(ctx->rt, &cur_c);
     if (!boot_process_form(ctx, form_v)) {
       ctx->loc_a->free(ctx->loc_a->ctx, text_c);
+      ctx->gc_tmp_s = key_root_s;
       return NULL;
     }
   }
@@ -435,35 +493,60 @@ static wisp_env_entry* boot_load_module(boot_ctx* ctx, const char* mod_c) {
 
   wisp_env_entry* module_env = boot_env_clone(ctx, ctx->rt->env);
   if (ctx->rt->env != NULL && module_env == NULL) {
+    ctx->gc_tmp_s = key_root_s;
     return NULL;
   }
   wisp_env_entry* cached_env = boot_env_clone(ctx, module_env);
   if (module_env != NULL && cached_env == NULL) {
+    ctx->gc_tmp_s = key_root_s;
     return NULL;
   }
   if (!boot_module_put(ctx, key_v, cached_env)) {
+    ctx->gc_tmp_s = key_root_s;
     return NULL;
   }
+  ctx->gc_tmp_s = key_root_s;
   return module_env;
 }
 
 static bool boot_process_file(boot_ctx* ctx, const char* mod_c) {
   er_val key_v = boot_string_nat(ctx, mod_c);
+  size_t val_root_s = ctx->gc_tmp_s;
+  size_t env_root_s = ctx->gc_tmp_env_s;
+  if (!boot_root_val_push(ctx, key_v)) {
+    return false;
+  }
   wisp_env_entry* old_env = boot_env_clone(ctx, ctx->rt->env);
   if (ctx->rt->env != NULL && old_env == NULL) {
+    ctx->gc_tmp_s = val_root_s;
+    return false;
+  }
+  if (!boot_root_env_push(ctx, old_env)) {
+    ctx->gc_tmp_s = val_root_s;
     return false;
   }
 
   wisp_env_entry* mod_env = boot_load_module(ctx, mod_c);
   if (mod_env == NULL && boot_module_find(ctx, key_v) == NULL) {
+    ctx->gc_tmp_env_s = env_root_s;
+    ctx->gc_tmp_s = val_root_s;
+    return false;
+  }
+  if (!boot_root_env_push(ctx, mod_env)) {
+    ctx->gc_tmp_env_s = env_root_s;
+    ctx->gc_tmp_s = val_root_s;
     return false;
   }
 
   wisp_env_entry* merged = boot_env_merge(ctx, old_env, mod_env);
   if ((old_env != NULL || mod_env != NULL) && merged == NULL) {
+    ctx->gc_tmp_env_s = env_root_s;
+    ctx->gc_tmp_s = val_root_s;
     return false;
   }
   ctx->rt->env = merged;
+  ctx->gc_tmp_env_s = env_root_s;
+  ctx->gc_tmp_s = val_root_s;
   return true;
 }
 
@@ -481,7 +564,7 @@ static er_val boot_make_row(boot_ctx* ctx, int argc, char** argv) {
     arg_v[i] = boot_string_nat(ctx, argv[i]);
   }
 
-  er_app* app = er_app_alloc(ctx->loc_a, (size_t)argc);
+  er_app* app = er_app_alloc(ctx->gc, (size_t)argc);
   if (app == NULL) {
     ctx->loc_a->free(ctx->loc_a->ctx, arg_v);
     return 0;
@@ -513,7 +596,7 @@ static bool boot_run_function(boot_ctx* ctx, er_val fun_v, int argc,
   }
 
   er_val call_arg_v[] = {boot_repl_fun(fun_v), arg_row_v};
-  er_thk* thk = er_thk_alloc(ctx->loc_a, 2);
+  er_thk* thk = er_thk_alloc(ctx->gc, 2);
   if (thk == NULL) {
     ctx->rt->env = old_env;
     return false;
@@ -523,7 +606,7 @@ static bool boot_run_function(boot_ctx* ctx, er_val fun_v, int argc,
     ctx->rt->env = old_env;
     return false;
   }
-  er_val out_v = er_eval(ctx->loc_a, call_v);
+  er_val out_v = er_eval(ctx->gc, call_v);
   ctx->rt->env = old_env;
   if (out_v == er_bad) {
     fprintf(stderr, "wisp: runtime error\n");
@@ -563,7 +646,12 @@ int main(int argc, char** argv) {
   wait_for_tracy(30.0);
 
   const enki_allocator* loc_a = enki_allocator_system();
-  wisp_rt* rt = wisp_rt_alloc(loc_a);
+  enki_gc* gc = enki_gc_create(loc_a, 256 * 1024 * 1024, NULL);
+  if (gc == NULL) {
+    fprintf(stderr, "wisp: oom\n");
+    return 1;
+  }
+  wisp_rt* rt = wisp_rt_alloc(gc);
   if (rt == NULL) {
     fprintf(stderr, "wisp: oom\n");
     return 1;
@@ -571,17 +659,22 @@ int main(int argc, char** argv) {
 
   boot_ctx ctx = {
       .loc_a = loc_a,
+      .gc = gc,
       .rt = rt,
       .src_dir_c = argv[1],
       .mod_v = NULL,
+      .gc_tmp_s = 0,
+      .gc_tmp_env_s = 0,
       .emit_top_level_f = true,
   };
+  enki_gc_set_trace_root(gc, &ctx, boot_trace_ctx);
 
   rt->err_f = true;
   if (setjmp(rt->errjmp) != 0) {
     fprintf(stderr, "wisp: %s\n",
             rt->msg_c == NULL ? "unknown error" : rt->msg_c);
-    wisp_rt_free(loc_a, rt);
+    wisp_rt_free(rt);
+    enki_gc_destroy(gc);
     return 1;
   }
 
@@ -589,6 +682,7 @@ int main(int argc, char** argv) {
   int run_argc = argc >= 5 ? argc - 4 : 0;
   char** run_argv = argc >= 5 ? argv + 4 : NULL;
   bool ok_f = boot_load_assembly(&ctx, argv[2], fn_c, run_argc, run_argv);
-  wisp_rt_free(loc_a, rt);
+  wisp_rt_free(rt);
+  enki_gc_destroy(gc);
   return ok_f ? 0 : 1;
 }

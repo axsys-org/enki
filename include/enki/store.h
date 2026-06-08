@@ -31,13 +31,13 @@ enki_error enki_store_write(enki_store* store, const uint8_t* key_b,
                             const uint8_t* bytes_b, size_t len_s);
 void enki_store_close(enki_store* store);
 
-enki_error er_store_save_pin(enki_store* store, const enki_allocator* heap_a,
+enki_error er_store_save_pin(enki_store* store, enki_gc* gc,
                              const enki_allocator* work_a, er_val pin_v,
                              uint8_t hash_b[32]);
-enki_error er_store_load_pin(enki_store* store, const enki_allocator* heap_a,
+enki_error er_store_load_pin(enki_store* store, enki_gc* gc,
                              const enki_allocator* work_a,
                              const uint8_t hash_b[32], er_val* out_v);
-enki_error er_store_save_root(enki_store* store, const enki_allocator* heap_a,
+enki_error er_store_save_root(enki_store* store, enki_gc* gc,
                               const enki_allocator* work_a, er_val pin_v);
-enki_error er_store_load_root(enki_store* store, const enki_allocator* heap_a,
+enki_error er_store_load_root(enki_store* store, enki_gc* gc,
                               const enki_allocator* work_a, er_val* out_v);

@@ -143,11 +143,11 @@ size_t er_bytecode_arena_op_count(void) {
   return er_bc_a.op_s;
 }
 
-static void* er_alloc_bytes(const enki_allocator* allocator, size_t size_s) {
-  if (allocator == NULL || allocator->alloc == NULL || size_s == 0) {
+static void* er_alloc_bytes(enki_gc* gc, size_t size_s, size_t align_s) {
+  if (gc == NULL || size_s == 0) {
     return NULL;
   }
-  return allocator->alloc(allocator->ctx, size_s);
+  return enki_gc_alloc(gc, size_s, align_s);
 }
 
 static void er_head_alloc_init(er_head* h, size_t size_s) {
@@ -167,9 +167,9 @@ static bool er_flex_fits(const er_head* h, size_t base_s, size_t count_s,
          need_s <= er_head_size(h);
 }
 
-er_tank* er_tank_alloc(const enki_allocator* allocator) {
+er_tank* er_tank_alloc(enki_gc* gc) {
   ENKI_PROFILE_ZONE("er_tank_alloc");
-  return (er_tank*)er_alloc_bytes(allocator, sizeof(er_tank));
+  return (er_tank*)er_alloc_bytes(gc, sizeof(er_tank), _Alignof(er_tank));
 }
 
 er_val er_tank_init(er_tank* tank, er_val val_v, char* msg_c) {
@@ -181,8 +181,8 @@ er_val er_tank_init(er_tank* tank, er_val val_v, char* msg_c) {
   return er_into(er_tag_tank, tank);
 }
 
-er_val er_tank_make(const enki_allocator* loc_a, er_val val_v, char* msg_c) {
-  er_tank* tank = er_tank_alloc(loc_a);
+er_val er_tank_make(enki_gc* gc, er_val val_v, char* msg_c) {
+  er_tank* tank = er_tank_alloc(gc);
   if (tank == NULL) {
     return er_bad;
   }
@@ -190,13 +190,13 @@ er_val er_tank_make(const enki_allocator* loc_a, er_val val_v, char* msg_c) {
   return out_v == 0 ? er_bad : out_v;
 }
 
-er_bat* er_bat_alloc(const enki_allocator* allocator, size_t lim_s) {
+er_bat* er_bat_alloc(enki_gc* gc, size_t lim_s) {
   ENKI_PROFILE_ZONE("er_bat_alloc");
   size_t size_s = 0;
   if (!er_alloc_size(sizeof(er_bat), lim_s, sizeof(uint64_t), &size_s)) {
     return NULL;
   }
-  er_bat* bat = (er_bat*)er_alloc_bytes(allocator, size_s);
+  er_bat* bat = (er_bat*)er_alloc_bytes(gc, size_s, _Alignof(er_bat));
   if (bat == NULL) {
     return NULL;
   }
@@ -224,24 +224,23 @@ er_val er_bat_init(er_bat* bat, size_t lim_s, const uint64_t lim_q[]) {
   return er_into(er_tag_bat, bat);
 }
 
-static er_val er_bat_qwords(const enki_allocator* loc_a, size_t lim_s,
-                            const uint64_t lim_q[]) {
-  er_bat* bat = er_bat_alloc(loc_a, lim_s);
+static er_val er_bat_qwords(enki_gc* gc, size_t lim_s, const uint64_t lim_q[]) {
+  er_bat* bat = er_bat_alloc(gc, lim_s);
   return er_bat_init(bat, lim_s, lim_q);
 }
 
-static er_val er_bat_qword(const enki_allocator* loc_a, const uint64_t lim_q) {
+static er_val er_bat_qword(enki_gc* gc, const uint64_t lim_q) {
   uint64_t lim_qq = lim_q;
-  return er_bat_qwords(loc_a, 1, &lim_qq);
+  return er_bat_qwords(gc, 1, &lim_qq);
 }
 
-er_pin* er_pin_alloc(const enki_allocator* allocator, size_t sub_s) {
+er_pin* er_pin_alloc(enki_gc* gc, size_t sub_s) {
   ENKI_PROFILE_ZONE("er_pin_alloc");
   size_t size_s = 0;
   if (!er_alloc_size(sizeof(er_pin), sub_s, sizeof(er_val), &size_s)) {
     return NULL;
   }
-  er_pin* pin = (er_pin*)er_alloc_bytes(allocator, size_s);
+  er_pin* pin = (er_pin*)er_alloc_bytes(gc, size_s, _Alignof(er_pin));
   if (pin == NULL) {
     return NULL;
   }
@@ -278,8 +277,8 @@ er_val er_pin_init(er_pin* pin, const uint8_t hash_b[32], er_val val_v,
   return er_into(er_tag_pin, pin);
 }
 
-er_val er_pin_make(const enki_allocator* loc_a, er_val val_v) {
-  er_pin* pin = er_pin_alloc(loc_a, 0);
+er_val er_pin_make(enki_gc* gc, er_val val_v) {
+  er_pin* pin = er_pin_alloc(gc, 0);
   return er_pin_init(pin, NULL, val_v, 0, NULL);
 }
 
@@ -303,14 +302,13 @@ static bool er_law_total_ops(size_t bc_s, const er_op* const bc_v[],
   return true;
 }
 
-er_law* er_law_alloc(const enki_allocator* allocator, size_t bc_s,
-                     size_t op_s) {
+er_law* er_law_alloc(enki_gc* gc, size_t bc_s, size_t op_s) {
   ENKI_PROFILE_ZONE("er_law_alloc");
   size_t size_s = 0;
   if (op_s > (size_t)ER_BCPC_NONE || !er_law_layout(bc_s, &size_s)) {
     return NULL;
   }
-  er_law* law = (er_law*)er_alloc_bytes(allocator, size_s);
+  er_law* law = (er_law*)er_alloc_bytes(gc, size_s, _Alignof(er_law));
   if (law == NULL) {
     return NULL;
   }
@@ -590,37 +588,33 @@ static bool er_prim_route_intern(er_optag tag, uint32_t arg_s,
   return true;
 }
 
-er_val er_law_make_code(const enki_allocator* loc_a, er_val nam_v, er_val bod_v,
-                        uint32_t ari_d, uint32_t let_d, size_t bc_s,
-                        er_op* const bc_v[], const size_t bc_len_v[]) {
+er_val er_law_make_code(enki_gc* gc, er_val nam_v, er_val bod_v, uint32_t ari_d,
+                        uint32_t let_d, size_t bc_s, er_op* const bc_v[],
+                        const size_t bc_len_v[]) {
   size_t op_s = 0;
   if (!er_law_total_ops(bc_s, (const er_op* const*)bc_v, bc_len_v, &op_s)) {
     return 0;
   }
-  er_law* law = er_law_alloc(loc_a, bc_s, op_s);
+  er_law* law = er_law_alloc(gc, bc_s, op_s);
   if (law == NULL) {
     return 0;
   }
   er_val law_v =
       er_law_init(law, nam_v, bod_v, ari_d, let_d, bc_s, bc_v, bc_len_v);
-  if (law_v == 0 && loc_a != NULL && loc_a->free != NULL) {
-    loc_a->free(loc_a->ctx, law);
-  }
   return law_v;
 }
 
-er_val er_law_make(const enki_allocator* loc_a, er_val nam_v, er_val bod_v,
-                   uint32_t ari_d) {
-  return er_law_compile(loc_a, nam_v, bod_v, ari_d);
+er_val er_law_make(enki_gc* gc, er_val nam_v, er_val bod_v, uint32_t ari_d) {
+  return er_law_compile(gc, nam_v, bod_v, ari_d);
 }
 
-er_app* er_app_alloc(const enki_allocator* allocator, size_t arg_s) {
+er_app* er_app_alloc(enki_gc* gc, size_t arg_s) {
   ENKI_PROFILE_ZONE("er_app_alloc");
   size_t size_s = 0;
   if (!er_alloc_size(sizeof(er_app), arg_s, sizeof(er_val), &size_s)) {
     return NULL;
   }
-  er_app* app = (er_app*)er_alloc_bytes(allocator, size_s);
+  er_app* app = (er_app*)er_alloc_bytes(gc, size_s, _Alignof(er_app));
   if (app == NULL) {
     return NULL;
   }
@@ -650,13 +644,13 @@ er_val er_app_init(er_app* app, er_val fn_v, size_t arg_s,
   return er_into(er_tag_app, app);
 }
 
-er_thk* er_thk_alloc(const enki_allocator* allocator, size_t arg_s) {
+er_thk* er_thk_alloc(enki_gc* gc, size_t arg_s) {
   ENKI_PROFILE_ZONE("er_thk_alloc");
   size_t siz_s = 0;
   if (!er_alloc_size(sizeof(er_thk), arg_s, sizeof(er_val), &siz_s)) {
     return NULL;
   }
-  er_thk* thk = (er_thk*)er_alloc_bytes(allocator, siz_s);
+  er_thk* thk = (er_thk*)er_alloc_bytes(gc, siz_s, _Alignof(er_app));
   if (thk == NULL) {
     return NULL;
   }
@@ -686,9 +680,9 @@ er_val er_thk_init(er_thk* thk, er_execf fun, size_t arg_s,
   return er_into(er_tag_thk, thk);
 }
 
-static er_val er_thk_make_call(const enki_allocator* loc_a, size_t arg_s,
+static er_val er_thk_make_call(enki_gc* gc, size_t arg_s,
                                const er_val arg_v[]) {
-  er_thk* thk = er_thk_alloc(loc_a, arg_s);
+  er_thk* thk = er_thk_alloc(gc, arg_s);
   if (thk == NULL) {
     return 0;
   }
@@ -697,23 +691,22 @@ static er_val er_thk_make_call(const enki_allocator* loc_a, size_t arg_s,
 
 static size_t er_call_frame_size(er_val fun_v, uint32_t arity_d);
 
-static er_val er_thk_make_prim(const enki_allocator* loc_a, er_val prim_set_v,
+static er_val er_thk_make_prim(enki_gc* gc, er_val prim_set_v,
                                er_val prim_arg_v) {
   er_val arg_v[] = {prim_set_v, prim_arg_v};
-  er_thk* thk = er_thk_alloc(loc_a, 2);
+  er_thk* thk = er_thk_alloc(gc, 2);
   if (thk == NULL) {
     return 0;
   }
   return er_thk_init(thk, ER_XPRIM, 2, arg_v);
 }
 
-static er_val er_thk_make_call_frame(const enki_allocator* loc_a,
-                                     size_t frame_s, size_t copy_s,
+static er_val er_thk_make_call_frame(enki_gc* gc, size_t frame_s, size_t copy_s,
                                      const er_val arg_v[]) {
   if (copy_s > frame_s) {
     return 0;
   }
-  er_thk* thk = er_thk_alloc(loc_a, frame_s);
+  er_thk* thk = er_thk_alloc(gc, frame_s);
   if (thk == NULL) {
     return 0;
   }
@@ -731,15 +724,15 @@ static bool er_app_spine_count(er_val fn_v, size_t extra_s, er_val* out_fn_v,
                                size_t* out_arg_s);
 static void er_app_spine_copy(er_val fn_v, er_val* out_v, size_t* out_s);
 
-static er_val er_thk_make_unk_app_flat(const enki_allocator* loc_a, er_val fn_v,
-                                       size_t arg_s, const er_val arg_v[]) {
+static er_val er_thk_make_unk_app_flat(enki_gc* gc, er_val fn_v, size_t arg_s,
+                                       const er_val arg_v[]) {
   er_val flat_fn_v = fn_v;
   size_t total_arg_s = 0;
   if (!er_app_spine_count(fn_v, arg_s, &flat_fn_v, &total_arg_s) ||
       total_arg_s > UINT32_MAX) {
     return 0;
   }
-  er_thk* thk = er_thk_alloc(loc_a, total_arg_s + 1u);
+  er_thk* thk = er_thk_alloc(gc, total_arg_s + 1u);
   if (thk == NULL) {
     return 0;
   }
@@ -756,41 +749,41 @@ static er_val er_thk_make_unk_app_flat(const enki_allocator* loc_a, er_val fn_v,
   return out_v;
 }
 
-static er_val er_thk_make_susp(const enki_allocator* loc_a, uint32_t pc,
-                               er_val frame_v, er_val law_v) {
+static er_val er_thk_make_susp(enki_gc* gc, uint32_t pc, er_val frame_v,
+                               er_val law_v) {
   er_val arg_v[] = {
       (er_val)pc,
       frame_v,
       law_v,
   };
-  er_thk* thk = er_thk_alloc(loc_a, 3);
+  er_thk* thk = er_thk_alloc(gc, 3);
   if (thk == NULL) {
     return 0;
   }
   return er_thk_init(thk, ER_SUSP, 3, arg_v);
 }
 
-static er_val er_thk_make_env_frame(const enki_allocator* loc_a, size_t frame_s,
+static er_val er_thk_make_env_frame(enki_gc* gc, size_t frame_s,
                                     const er_val frame_v[]) {
-  er_thk* thk = er_thk_alloc(loc_a, frame_s);
+  er_thk* thk = er_thk_alloc(gc, frame_s);
   if (thk == NULL) {
     return 0;
   }
   return er_thk_init(thk, ER_XDONE, frame_s, frame_v);
 }
 
-static er_val er_thk_make_unk_app(const enki_allocator* loc_a, size_t arg_s,
+static er_val er_thk_make_unk_app(enki_gc* gc, size_t arg_s,
                                   const er_val arg_v[]) {
-  er_thk* thk = er_thk_alloc(loc_a, arg_s);
+  er_thk* thk = er_thk_alloc(gc, arg_s);
   if (thk == NULL) {
     return 0;
   }
   return er_thk_init(thk, ER_XUNK_APP, arg_s, arg_v);
 }
 
-static er_val er_app_make(const enki_allocator* loc_a, er_val fn_v,
-                          size_t arg_s, const er_val arg_v[]) {
-  er_app* app = er_app_alloc(loc_a, arg_s);
+static er_val er_app_make(enki_gc* gc, er_val fn_v, size_t arg_s,
+                          const er_val arg_v[]) {
+  er_app* app = er_app_alloc(gc, arg_s);
   if (app == NULL) {
     return 0;
   }
@@ -827,17 +820,17 @@ static void er_app_spine_copy(er_val fn_v, er_val* out_v, size_t* out_s) {
   }
 }
 
-static er_val er_app_make_flat(const enki_allocator* loc_a, er_val fn_v,
-                               size_t arg_s, const er_val arg_v[]) {
+static er_val er_app_make_flat(enki_gc* gc, er_val fn_v, size_t arg_s,
+                               const er_val arg_v[]) {
   er_val flat_fn_v = fn_v;
   size_t total_s = arg_s;
   if (!er_app_spine_count(fn_v, arg_s, &flat_fn_v, &total_s)) {
     return 0;
   }
   if (flat_fn_v == fn_v && total_s == arg_s) {
-    return er_app_make(loc_a, fn_v, arg_s, arg_v);
+    return er_app_make(gc, fn_v, arg_s, arg_v);
   }
-  er_app* app = er_app_alloc(loc_a, total_s);
+  er_app* app = er_app_alloc(gc, total_s);
   if (app == NULL) {
     return 0;
   }
@@ -853,12 +846,11 @@ static er_val er_app_make_flat(const enki_allocator* loc_a, er_val fn_v,
   return out_v;
 }
 
-static er_val er_eval_with_heap(const enki_allocator* heap_a,
-                                const enki_allocator* work_a, enki_gc* gc,
-                                er_val val_v, er_eval_mode mode) {
+static er_val er_eval_with_heap(enki_gc* gc, er_val val_v, er_eval_mode mode) {
   ENKI_PROFILE_ZONE("er_eval");
-  if (heap_a == NULL || heap_a->alloc == NULL || heap_a->free == NULL ||
-      work_a == NULL || work_a->alloc == NULL || work_a->free == NULL) {
+  const enki_allocator* work_a = enki_gc_parent_allocator(gc);
+  if (gc == NULL || work_a == NULL || work_a->alloc == NULL ||
+      work_a->free == NULL) {
     return er_bad;
   }
 
@@ -883,7 +875,7 @@ static er_val er_eval_with_heap(const enki_allocator* heap_a,
 
   er_vm vm = {
       .pc = ER_BCPC_NONE,
-      .loc_a = heap_a,
+      .gc = gc,
       .dstack = dstack_v,
       .dsp = dstack_v,
       .kbase = kstack_v,
@@ -892,12 +884,16 @@ static er_val er_eval_with_heap(const enki_allocator* heap_a,
       .k_count = 0,
       .gc_rp = NULL,
       .gc_tmp_s = 0,
+      .outer_trace_root = NULL,
+      .outer_trace_fn = NULL,
   };
   void* old_root = NULL;
   enki_gc_trace_fn old_trace = NULL;
   if (gc != NULL) {
     old_root = gc->trace_root;
     old_trace = gc->trace_fn;
+    vm.outer_trace_root = old_root;
+    vm.outer_trace_fn = old_trace;
     enki_gc_set_trace_root(gc, &vm, enki_gc_trace_vm);
   }
   er_val out_v = plan_eval(&vm, val_v, mode);
@@ -911,47 +907,41 @@ static er_val er_eval_with_heap(const enki_allocator* heap_a,
   return out_v;
 }
 
-er_val er_eval(const enki_allocator* loc_a, er_val val_v) {
-  return er_eval_with_heap(loc_a, loc_a, NULL, val_v, ER_EVAL_WHNF);
+er_val er_eval(enki_gc* gc, er_val val_v) {
+  return er_eval_with_heap(gc, val_v, ER_EVAL_WHNF);
 }
 
-er_val er_eval_to(const enki_allocator* loc_a, er_val val_v,
-                  er_eval_mode mode) {
-  return er_eval_with_heap(loc_a, loc_a, NULL, val_v, mode);
+er_val er_eval_to(enki_gc* gc, er_val val_v, er_eval_mode mode) {
+  return er_eval_with_heap(gc, val_v, mode);
 }
 
 er_val er_eval_gc(enki_gc* gc, er_val val_v) {
   if (gc == NULL) {
     return er_bad;
   }
-  return er_eval_with_heap(enki_gc_as_allocator(gc),
-                           enki_gc_parent_allocator(gc), gc, val_v,
-                           ER_EVAL_WHNF);
+  return er_eval_with_heap(gc, val_v, ER_EVAL_WHNF);
 }
 
-static er_val er_app_take(const enki_allocator* loc_a, er_app* old,
-                          size_t arg_s) {
+static er_val er_app_take(enki_gc* gc, er_app* old, size_t arg_s) {
   if (old == NULL) {
     return 0;
   }
-  er_app* app = er_app_alloc(loc_a, arg_s);
+  er_app* app = er_app_alloc(gc, arg_s);
   if (app == NULL) {
     return 0;
   }
   return er_app_init(app, old->fn_v, arg_s, old->arg_v);
 }
 
-static er_val er_thk_take_call(const enki_allocator* loc_a, er_thk* old,
-                               size_t arg_s) {
+static er_val er_thk_take_call(enki_gc* gc, er_thk* old, size_t arg_s) {
   if (old == NULL) {
     return 0;
   }
   size_t copy_s = old->arg_s < arg_s ? old->arg_s : arg_s;
-  return er_thk_make_call_frame(loc_a, arg_s, copy_s, old->arg_v);
+  return er_thk_make_call_frame(gc, arg_s, copy_s, old->arg_v);
 }
 
-static er_val er_app_drop(const enki_allocator* loc_a, er_app* old,
-                          size_t dop_s) {
+static er_val er_app_drop(enki_gc* gc, er_app* old, size_t dop_s) {
   if (old == NULL) {
     return 0;
   }
@@ -959,15 +949,15 @@ static er_val er_app_drop(const enki_allocator* loc_a, er_app* old,
     return 0;
   }
   size_t siz_s = old->arg_s - dop_s;
-  er_app* app = er_app_alloc(loc_a, siz_s);
+  er_app* app = er_app_alloc(gc, siz_s);
   if (app == NULL) {
     return 0;
   }
   return er_app_init(app, old->fn_v, siz_s, &old->arg_v[dop_s]);
 }
 
-static er_val er_app_drop_coup(const enki_allocator* loc_a, er_thk* old,
-                               er_val fn_v, size_t dop_s) {
+static er_val er_app_drop_coup(enki_gc* gc, er_thk* old, er_val fn_v,
+                               size_t dop_s) {
   if (old == NULL) {
     return 0;
   }
@@ -975,7 +965,7 @@ static er_val er_app_drop_coup(const enki_allocator* loc_a, er_thk* old,
     return 0;
   }
   size_t siz_s = old->arg_s - dop_s - 1;
-  er_thk* thk = er_thk_alloc(loc_a, siz_s + 1);
+  er_thk* thk = er_thk_alloc(gc, siz_s + 1);
   if (thk == NULL) {
     return 0;
   }
@@ -1068,7 +1058,7 @@ static er_val plan_eval_whnf_preserve(er_vm* vm, er_val val_v);
 static er_val op_eval_arg(er_vm* vm, er_app* app, size_t arg_s,
                           er_bc_eval_req eval) {
   if (app == NULL || arg_s >= app->arg_s) {
-    return er_tank_make(vm->loc_a, 0, "bad primitive argument");
+    return er_tank_make(vm->gc, 0, "bad primitive argument");
   }
   if (eval == ER_BC_EVAL_NONE) {
     return er_into(er_tag_app, app);
@@ -1088,7 +1078,7 @@ static er_val op_eval_arg(er_vm* vm, er_app* app, size_t arg_s,
   app = er_outt(er_tag_app, root_v[0]);
   if (app == NULL || arg_s >= app->arg_s) {
     vm->dsp = root_v;
-    return er_tank_make(vm->loc_a, 0, "bad primitive argument");
+    return er_tank_make(vm->gc, 0, "bad primitive argument");
   }
   app->arg_v[arg_s] = out_v;
   er_val app_v = er_into(er_tag_app, app);
@@ -1100,7 +1090,7 @@ static er_val op_eval_arg_route_app(er_vm* vm, er_app* app, size_t arg_off_s,
                                     size_t arg_s,
                                     const er_bc_prim_route* route) {
   if (app == NULL) {
-    return er_tank_make(vm->loc_a, 0, "expected primitive row");
+    return er_tank_make(vm->gc, 0, "expected primitive row");
   }
   if (route == NULL || arg_s != route->arg_s || arg_s > ER_BC_MAX_PRIM_ARITY) {
     return er_into(er_tag_app, app);
@@ -1130,7 +1120,7 @@ static er_bc_prim_route op_arg_route(er_optag tag, size_t arg_s,
 
 static er_val op66_eval_arg_app(er_vm* vm, er_app* app) {
   if (app == NULL) {
-    return er_tank_make(vm->loc_a, 0, "expected primitive row");
+    return er_tank_make(vm->gc, 0, "expected primitive row");
   }
 
   er_val tag_v = app->fn_v;
@@ -1319,7 +1309,7 @@ static er_val op66_eval_arg_app(er_vm* vm, er_app* app) {
 
 static er_val op0_eval_arg_app(er_vm* vm, er_app* app) {
   if (app == NULL) {
-    return er_tank_make(vm->loc_a, 0, "expected primitive row");
+    return er_tank_make(vm->gc, 0, "expected primitive row");
   }
 
   er_val tag_v = app->fn_v;
@@ -1389,7 +1379,7 @@ static bool op66_exec_named_op0_app(er_vm* vm, er_app* app, er_val* out_v) {
     return false;
   }
   if (!er_bc_prim0_route(op_s, &route)) {
-    *out_v = er_tank_make(vm->loc_a, (er_val)op_s, "bad primitive route");
+    *out_v = er_tank_make(vm->gc, (er_val)op_s, "bad primitive route");
     return true;
   }
 
@@ -1400,14 +1390,14 @@ static bool op66_exec_named_op0_app(er_vm* vm, er_app* app, er_val* out_v) {
   }
   app = er_outt(er_tag_app, app_v);
   if (app == NULL) {
-    *out_v = er_tank_make(vm->loc_a, 0, "expected primitive row");
+    *out_v = er_tank_make(vm->gc, 0, "expected primitive row");
     return true;
   }
   if (!op0_named_app_view(app, &op_s, &arg_off_s, &arg_s)) {
-    *out_v = er_tank_make(vm->loc_a, 0, "bad primitive tag");
+    *out_v = er_tank_make(vm->gc, 0, "bad primitive tag");
     return true;
   }
-  *out_v = eo_exec_op0(vm->loc_a, (int)op_s, arg_s, app->arg_v + arg_off_s);
+  *out_v = eo_exec_op0(vm->gc, (int)op_s, arg_s, app->arg_v + arg_off_s);
   return true;
 }
 
@@ -1435,7 +1425,7 @@ static bool op66_app_view(er_app* app, int* out_op_i, const er_val** out_arg_v,
 
 static er_val op66_exec_row_app(er_vm* vm, const er_val arg_v[], size_t arg_s) {
   if (arg_s != 3) {
-    return er_tank_make(vm->loc_a, (er_val)arg_s, "bad primitive arity");
+    return er_tank_make(vm->gc, (er_val)arg_s, "bad primitive arity");
   }
 
   er_val* root_v = vm->dsp;
@@ -1466,7 +1456,7 @@ static er_val op66_exec_row_app(er_vm* vm, const er_val arg_v[], size_t arg_s) {
     return out_v;
   }
 
-  er_app* row_app = er_app_alloc(vm->loc_a, row_count_s);
+  er_app* row_app = er_app_alloc(vm->gc, row_count_s);
   if (row_app == NULL) {
     vm->dsp = root_v;
     return er_bad;
@@ -1503,7 +1493,7 @@ static er_val op66_exec_row_app(er_vm* vm, const er_val arg_v[], size_t arg_s) {
 
 static er_val op66_exec_try_app(er_vm* vm, const er_val arg_v[], size_t arg_s) {
   if (arg_s != 2) {
-    return er_tank_make(vm->loc_a, (er_val)arg_s, "bad primitive arity");
+    return er_tank_make(vm->gc, (er_val)arg_s, "bad primitive arity");
   }
 
   er_val* root_v = vm->dsp;
@@ -1511,7 +1501,7 @@ static er_val op66_exec_try_app(er_vm* vm, const er_val arg_v[], size_t arg_s) {
   root_v[1] = arg_v[1];
   vm->dsp = root_v + 2;
 
-  er_val call_v = er_thk_make_unk_app(vm->loc_a, 2, root_v);
+  er_val call_v = er_thk_make_unk_app(vm->gc, 2, root_v);
   if (call_v == 0) {
     vm->dsp = root_v;
     return er_bad;
@@ -1552,7 +1542,7 @@ static er_val op66_exec_try_app(er_vm* vm, const er_val arg_v[], size_t arg_s) {
 
   root_v[0] = try_val_v;
   vm->dsp = root_v + 1;
-  er_val out_v = er_app_make(vm->loc_a, tag_v, 1, root_v);
+  er_val out_v = er_app_make(vm->gc, tag_v, 1, root_v);
   vm->dsp = root_v;
   return out_v == 0 ? er_bad : out_v;
 }
@@ -1888,7 +1878,7 @@ __attribute__((noinline)) static er_val plan_eval_whnf(er_vm* vm, er_val val_v,
     GC_SYNC();                                                                 \
     vm->gc_tmp_v[0] = (_val);                                                  \
     vm->gc_tmp_s = 1;                                                          \
-    er_val tank_v = er_tank_make(vm->loc_a, vm->gc_tmp_v[0], (_msg));          \
+    er_val tank_v = er_tank_make(vm->gc, vm->gc_tmp_v[0], (_msg));             \
     vm->gc_tmp_s = 0;                                                          \
     return tank_v;                                                             \
   } while (0)
@@ -2014,7 +2004,7 @@ I_MK_APP: {
   er_val* app_base = dsp - app_s;
   hd_v = app_base[0];
   GC_SYNC();
-  r = er_app_make_flat(vm->loc_a, hd_v, app_s - 1, &app_base[1]);
+  r = er_app_make_flat(vm->gc, hd_v, app_s - 1, &app_base[1]);
   CHECK_ALLOC(r);
   dsp = app_base;
   DPUSH(r);
@@ -2038,7 +2028,7 @@ I_CALLF: {
     FAIL_TANK("bad fast call", hd_v);
   }
   GC_SYNC();
-  r = er_thk_make_call_frame(vm->loc_a, frame_s, call_s, call_base);
+  r = er_thk_make_call_frame(vm->gc, frame_s, call_s, call_base);
   CHECK_ALLOC(r);
   dsp = call_base;
   KPUSH_BYTECODE_RETURN(pc, env, env_v);
@@ -2062,7 +2052,7 @@ I_CALLS: {
     FAIL_TANK("bad standard call", hd_v);
   }
   GC_SYNC();
-  r = er_thk_make_call_frame(vm->loc_a, frame_s, call_s, call_base);
+  r = er_thk_make_call_frame(vm->gc, frame_s, call_s, call_base);
   CHECK_ALLOC(r);
   dsp = call_base;
   KPUSH_BYTECODE_RETURN(pc, env, env_v);
@@ -2086,7 +2076,7 @@ I_APPLY_FAST: {
     FAIL_TANK("bad fast application", hd_v);
   }
   GC_SYNC();
-  r = er_thk_make_call_frame(vm->loc_a, frame_s, call_s, call_base);
+  r = er_thk_make_call_frame(vm->gc, frame_s, call_s, call_base);
   CHECK_ALLOC(r);
   dsp = call_base;
   DPUSH(r);
@@ -2101,7 +2091,7 @@ I_CALLU: {
   }
   er_val* call_base = dsp - call_s;
   GC_SYNC();
-  r = er_thk_make_unk_app(vm->loc_a, call_s, call_base);
+  r = er_thk_make_unk_app(vm->gc, call_s, call_base);
   CHECK_ALLOC(r);
   dsp = call_base;
   DPUSH(r);
@@ -2118,9 +2108,9 @@ I_APPLY_UNK: {
   er_pin* pin = call_s == 2 ? er_outt(er_tag_pin, hd_v) : NULL;
   GC_SYNC();
   if (pin != NULL && er_is_cat(pin->val_v)) {
-    r = er_thk_make_prim(vm->loc_a, pin->val_v, call_base[1]);
+    r = er_thk_make_prim(vm->gc, pin->val_v, call_base[1]);
   } else {
-    r = er_thk_make_unk_app(vm->loc_a, call_s, call_base);
+    r = er_thk_make_unk_app(vm->gc, call_s, call_base);
   }
   CHECK_ALLOC(r);
   dsp = call_base;
@@ -2140,7 +2130,7 @@ I_CALLP: {
     FAIL_TANK("bad primitive call", hd_v);
   }
   GC_SYNC();
-  r = er_thk_make_prim(vm->loc_a, pin->val_v, call_base[1]);
+  r = er_thk_make_prim(vm->gc, pin->val_v, call_base[1]);
   CHECK_ALLOC(r);
   dsp = call_base;
   DPUSH(r);
@@ -2217,11 +2207,11 @@ I_MAKE_SUSP: {
     FAIL_TANK("bad suspension frame", env[0]);
   }
   GC_SYNC();
-  er_val susp_env_v = er_thk_make_env_frame(vm->loc_a, frame_s, env);
+  er_val susp_env_v = er_thk_make_env_frame(vm->gc, frame_s, env);
   CHECK_ALLOC(susp_env_v);
   vm->gc_tmp_v[0] = susp_env_v;
   vm->gc_tmp_s = 1;
-  r = er_thk_make_susp(vm->loc_a, susp_label_d, susp_env_v, env[0]);
+  r = er_thk_make_susp(vm->gc, susp_label_d, susp_env_v, env[0]);
   vm->gc_tmp_s = 0;
   CHECK_ALLOC(r);
   DPUSH(r);
@@ -2274,7 +2264,7 @@ FORCE_UNK_APP: {
     }
     target = er_into(er_tag_thk, thk);
     GC_SYNC();
-    r = er_thk_make_prim(vm->loc_a, pin->val_v, thk->arg_v[1]);
+    r = er_thk_make_prim(vm->gc, pin->val_v, thk->arg_v[1]);
     CHECK_ALLOC(r);
     KPUSH_UPDATE(target);
     thk = er_outt(er_tag_thk, target);
@@ -2291,7 +2281,7 @@ FORCE_UNK_APP: {
   if (er_is_tag(er_tag_app, f)) {
     target = er_into(er_tag_thk, thk);
     GC_SYNC();
-    r = er_thk_make_unk_app_flat(vm->loc_a, f, hav_s, &thk->arg_v[1]);
+    r = er_thk_make_unk_app_flat(vm->gc, f, hav_s, &thk->arg_v[1]);
     CHECK_ALLOC(r);
     KPUSH_UPDATE(target);
     thk = er_outt(er_tag_thk, target);
@@ -2319,7 +2309,7 @@ FORCE_UNK_APP: {
     }
     er_val source_thk_v = er_into(er_tag_thk, thk);
     GC_SYNC();
-    r = er_thk_take_call(vm->loc_a, thk, frame_s);
+    r = er_thk_take_call(vm->gc, thk, frame_s);
     CHECK_ALLOC(r);
     thk = er_outt(er_tag_thk, source_thk_v);
     if (thk == NULL) {
@@ -2338,8 +2328,7 @@ FORCE_UNK_APP: {
     }
     target = er_into(er_tag_thk, thk);
     GC_SYNC();
-    r = er_thk_make_call_frame(vm->loc_a, frame_s, (size_t)wan_d + 1,
-                               thk->arg_v);
+    r = er_thk_make_call_frame(vm->gc, frame_s, (size_t)wan_d + 1, thk->arg_v);
     CHECK_ALLOC(r);
     KPUSH_UPDATE(target);
     thk = er_outt(er_tag_thk, target);
@@ -2386,7 +2375,7 @@ FORCE_XPRIM: {
     GC_SYNC();
     vm->gc_tmp_v[0] = prim_arg;
     vm->gc_tmp_s = 1;
-    r = eo_exec_op66_er_app(vm->loc_a, prim_row);
+    r = eo_exec_op66_er_app(vm->gc, prim_row);
     vm->gc_tmp_s = 0;
   } else if (prim_set == 0) {
     GC_SYNC();
@@ -2398,7 +2387,7 @@ FORCE_XPRIM: {
     GC_SYNC();
     vm->gc_tmp_v[0] = prim_arg;
     vm->gc_tmp_s = 1;
-    r = eo_exec_op0_er_app(vm->loc_a, prim_row);
+    r = eo_exec_op0_er_app(vm->gc, prim_row);
     vm->gc_tmp_s = 0;
   } else {
     FAIL_TANK("bad primitive set", prim_arg);
@@ -2481,14 +2470,13 @@ ENTER_CALL: {
   for (size_t i = 0; i < n_lets; i++) {
     size_t slot_s = (size_t)law->ari_d + 1 + i;
     GC_SYNC();
-    er_val susp_v = er_thk_make_susp(vm->loc_a, (uint32_t)i + 1, self_v, f);
+    er_val susp_v = er_thk_make_susp(vm->gc, (uint32_t)i + 1, self_v, f);
     CHECK_ALLOC(susp_v);
     thk->arg_v[slot_s] = susp_v;
   }
   if (n_lets > 0) {
     GC_SYNC();
-    er_val env_frame_v =
-        er_thk_make_env_frame(vm->loc_a, thk->arg_s, thk->arg_v);
+    er_val env_frame_v = er_thk_make_env_frame(vm->gc, thk->arg_s, thk->arg_v);
     CHECK_ALLOC(env_frame_v);
     for (size_t i = 0; i < n_lets; i++) {
       size_t slot_s = (size_t)law->ari_d + 1 + i;
@@ -2616,7 +2604,7 @@ K_OVERAPP:
     thk = er_outt(er_tag_thk, app);
     assert("bad overapp" && thk);
     GC_SYNC();
-    r = er_app_drop_coup(vm->loc_a, thk, r, split);
+    r = er_app_drop_coup(vm->gc, thk, r, split);
     CHECK_ALLOC(r);
     goto FORCE_ENTRY;
   }

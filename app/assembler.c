@@ -30,7 +30,12 @@ static ssize_t repl(char** out_c) {
 
 int main() {
   const enki_allocator* loc_a = enki_allocator_system();
-  rt = wisp_rt_alloc(loc_a);
+  enki_gc* gc = enki_gc_create(loc_a, 64 * 1024 * 1024, NULL);
+  if (gc == NULL) {
+    fputs("failed to allocate GC\n", stderr);
+    return 1;
+  }
+  rt = wisp_rt_alloc(gc);
 
   char* inp_c = NULL;
   ssize_t inp_s;
@@ -51,5 +56,7 @@ int main() {
       loc_a->free(loc_a->ctx, out_c);
     }
   }
+  wisp_rt_free(rt);
+  enki_gc_destroy(gc);
   return 0;
 }

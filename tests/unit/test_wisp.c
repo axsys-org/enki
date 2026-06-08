@@ -6,14 +6,19 @@
 #include <stdlib.h>
 #include <string.h>
 
+static enki_gc* gc;
 static wisp_rt* rt;
 
 static void setup(void) {
-  rt = wisp_rt_alloc(&sys_a);
+  gc = enki_gc_create(&sys_a, 1024 * 1024, NULL);
+  cr_assert_not_null(gc);
+  rt = wisp_rt_alloc(gc);
 }
 
 static void teardown(void) {
-  wisp_rt_free(&sys_a, rt);
+  wisp_rt_free(rt);
+  enki_gc_destroy(gc);
+  gc = NULL;
 }
 
 TestSuite(wisp, .init = setup, .fini = teardown);

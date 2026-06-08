@@ -203,7 +203,8 @@ static bool planvm_arena_init(planvm_arena* arena, size_t cap_s) {
       .realloc = NULL,
       .free = planvm_arena_free,
   };
-  return true;
+  arena->gc = enki_gc_create(enki_allocator_system(), cap_s, NULL);
+  return arena->gc != NULL;
 }
 
 static void planvm_arena_reset(planvm_arena* arena) {
@@ -211,56 +212,57 @@ static void planvm_arena_reset(planvm_arena* arena) {
 }
 
 static void planvm_arena_destroy(planvm_arena* arena) {
+  enki_gc_destroy(arena->gc);
+  arena->gc = NULL;
   free(arena->data_b);
   arena->data_b = NULL;
   arena->off_s = 0;
   arena->cap_s = 0;
 }
 
-static er_val planvm_make_prim66(void) {
-  er_pin* pin = er_pin_alloc(enki_allocator_system(), 0);
+static er_val planvm_make_prim66(enki_gc* gc) {
+  er_pin* pin = er_pin_alloc(gc, 0);
   if (pin == NULL) {
     return 0;
   }
   return er_pin_init(pin, NULL, 66, 0, NULL);
 }
 
-static er_val planvm_make_law(uint32_t arity_d, er_op* entry_v,
+static er_val planvm_make_law(enki_gc* gc, uint32_t arity_d, er_op* entry_v,
                               size_t entry_len_s) {
   er_op* labels_v[] = {entry_v};
   size_t label_len_v[] = {entry_len_s};
-  er_law* law = er_law_alloc(enki_allocator_system(), 1, entry_len_s);
+  er_law* law = er_law_alloc(gc, 1, entry_len_s);
   if (law == NULL) {
     return 0;
   }
   return er_law_init(law, 0, 0, arity_d, 0, 1, labels_v, label_len_v);
 }
 
-static er_val planvm_make_call2(const enki_allocator* allocator, er_val fun_v,
-                                er_val a_v, er_val b_v) {
+static er_val planvm_make_call2(enki_gc* gc, er_val fun_v, er_val a_v,
+                                er_val b_v) {
   er_val args_v[] = {fun_v, a_v, b_v};
-  er_thk* thk = er_thk_alloc(allocator, 3);
+  er_thk* thk = er_thk_alloc(gc, 3);
   if (thk == NULL) {
     return 0;
   }
   return er_thk_init(thk, ER_CALL, 3, args_v);
 }
 
-static er_val planvm_make_call1(const enki_allocator* allocator, er_val fun_v,
-                                er_val a_v) {
+static er_val planvm_make_call1(enki_gc* gc, er_val fun_v, er_val a_v) {
   er_val args_v[] = {fun_v, a_v};
-  er_thk* thk = er_thk_alloc(allocator, 2);
+  er_thk* thk = er_thk_alloc(gc, 2);
   if (thk == NULL) {
     return 0;
   }
   return er_thk_init(thk, ER_CALL, 2, args_v);
 }
 
-static bool planvm_build_fac(planvm_fac_program* program) {
+static bool planvm_build_fac(planvm_fac_program* program, enki_gc* gc) {
   enum {
     BASE_PC = 24,
   };
-  er_val prim66_v = planvm_make_prim66();
+  er_val prim66_v = planvm_make_prim66(gc);
   if (prim66_v == 0) {
     return false;
   }
@@ -302,8 +304,9 @@ static bool planvm_build_fac(planvm_fac_program* program) {
           },
       .prim66_v = prim66_v,
   };
-  program->fact_v = planvm_make_law(
-      2, program->code_v, sizeof(program->code_v) / sizeof(program->code_v[0]));
+  program->fact_v =
+      planvm_make_law(gc, 2, program->code_v,
+                      sizeof(program->code_v) / sizeof(program->code_v[0]));
   if (program->fact_v == 0) {
     return false;
   }
@@ -315,13 +318,13 @@ static er_val planvm_run_fac(planvm_fac_program* program, planvm_arena* arena,
                              uint64_t* out_k_count) {
   er_val dstack_v[1024] = {0};
   er_kon kstack_v[4096] = {0};
-  er_val call_v = planvm_make_call2(&arena->allocator, program->fact_v, n_v, 1);
+  er_val call_v = planvm_make_call2(arena->gc, program->fact_v, n_v, 1);
   if (call_v == 0) {
     return er_bad;
   }
   er_vm vm = {
       .pc = ER_BCPC_NONE,
-      .loc_a = &arena->allocator,
+      .gc = arena->gc,
       .dstack = dstack_v,
       .dsp = dstack_v,
       .kbase = kstack_v,
@@ -335,7 +338,7 @@ static er_val planvm_run_fac(planvm_fac_program* program, planvm_arena* arena,
   return ret_v;
 }
 
-static bool planvm_build_fib(planvm_fib_program* program) {
+static bool planvm_build_fib(planvm_fib_program* program, enki_gc* gc) {
   enum {
     FIB_RECURSE_PC = 8,
   };
@@ -378,8 +381,9 @@ static bool planvm_build_fib(planvm_fib_program* program) {
               [22] = {.tag = OP_RET},
           },
   };
-  program->fib_v = planvm_make_law(
-      1, program->code_v, sizeof(program->code_v) / sizeof(program->code_v[0]));
+  program->fib_v =
+      planvm_make_law(gc, 1, program->code_v,
+                      sizeof(program->code_v) / sizeof(program->code_v[0]));
   if (program->fib_v == 0) {
     return false;
   }
@@ -391,13 +395,13 @@ static er_val planvm_run_fib(planvm_fib_program* program, planvm_arena* arena,
                              uint64_t* out_k_count) {
   er_val dstack_v[2048] = {0};
   er_kon kstack_v[16384] = {0};
-  er_val call_v = planvm_make_call1(&arena->allocator, program->fib_v, n_v);
+  er_val call_v = planvm_make_call1(arena->gc, program->fib_v, n_v);
   if (call_v == 0) {
     return er_bad;
   }
   er_vm vm = {
       .pc = ER_BCPC_NONE,
-      .loc_a = &arena->allocator,
+      .gc = arena->gc,
       .dstack = dstack_v,
       .dsp = dstack_v,
       .kbase = kstack_v,
@@ -468,7 +472,7 @@ static int run_bytecode_fac(size_t n, double seconds) {
 static int run_planvm_fac(size_t n, double seconds) {
   planvm_fac_program program;
   planvm_arena arena;
-  if (!planvm_build_fac(&program)) {
+  if (!planvm_build_fac(&program, arena.gc)) {
     fprintf(stderr, "failed to build planvm factorial program\n");
     return 1;
   }
@@ -508,7 +512,7 @@ static int run_planvm_fac(size_t n, double seconds) {
 static int run_planvm_fib(size_t n, double seconds) {
   planvm_fib_program program;
   planvm_arena arena;
-  if (!planvm_build_fib(&program)) {
+  if (!planvm_build_fib(&program, arena.gc)) {
     fprintf(stderr, "failed to build planvm fibonacci program\n");
     return 1;
   }
@@ -729,7 +733,12 @@ static int run_wisp_plan_fib(size_t n, double seconds) {
   FILE* devnull_f = freopen("/dev/null", "w", stderr);
   (void)devnull_f;
 
-  wisp_rt* rt = wisp_rt_alloc(&sys_a);
+  wisp_rt* enki_gc* gc = enki_gc_create(&sys_a, 64 * 1024 * 1024, NULL);
+  if (gc == NULL) {
+    fprintf(stderr, "failed to allocate wisp gc\n");
+    return 1;
+  }
+  wisp_rt* rt = wisp_rt_alloc(gc);
   wisp_install_fib_program(rt);
 
   char query_c[64];
@@ -751,7 +760,8 @@ static int run_wisp_plan_fib(size_t n, double seconds) {
          "iterations=%zu\n",
          n, out_c, iterations_s);
   sys_a.free(sys_a.ctx, out_c);
-  wisp_rt_free(&sys_a, rt);
+  wisp_rt_free(rt);
+  enki_gc_destroy(gc);
   return 0;
 }
 

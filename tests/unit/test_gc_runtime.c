@@ -15,27 +15,26 @@ static void trace_er_roots(enki_gc* gc, void* root_p) {
   }
 }
 
-static er_val gc_make_bat(const enki_allocator* loc_a, size_t lim_s,
-                          const uint64_t lim_q[]) {
-  er_bat* bat = er_bat_alloc(loc_a, lim_s);
+static er_val gc_make_bat(enki_gc* gc, size_t lim_s, const uint64_t lim_q[]) {
+  er_bat* bat = er_bat_alloc(gc, lim_s);
   cr_assert_not_null(bat);
   er_val bat_v = er_bat_init(bat, lim_s, lim_q);
   cr_assert_eq(er_get_tag(bat_v), er_tag_bat);
   return bat_v;
 }
 
-static er_val gc_make_app(const enki_allocator* loc_a, er_val fn_v,
-                          size_t arg_s, const er_val arg_v[]) {
-  er_app* app = er_app_alloc(loc_a, arg_s);
+static er_val gc_make_app(enki_gc* gc, er_val fn_v, size_t arg_s,
+                          const er_val arg_v[]) {
+  er_app* app = er_app_alloc(gc, arg_s);
   cr_assert_not_null(app);
   er_val app_v = er_app_init(app, fn_v, arg_s, arg_v);
   cr_assert_eq(er_get_tag(app_v), er_tag_app);
   return app_v;
 }
 
-static er_val gc_make_thunk(const enki_allocator* loc_a, er_execf fun,
-                            size_t arg_s, const er_val arg_v[]) {
-  er_thk* thk = er_thk_alloc(loc_a, arg_s);
+static er_val gc_make_thunk(enki_gc* gc, er_execf fun, size_t arg_s,
+                            const er_val arg_v[]) {
+  er_thk* thk = er_thk_alloc(gc, arg_s);
   cr_assert_not_null(thk);
   er_val thk_v = er_thk_init(thk, fun, arg_s, arg_v);
   cr_assert_eq(er_get_tag(thk_v), er_tag_thk);
@@ -45,33 +44,31 @@ static er_val gc_make_thunk(const enki_allocator* loc_a, er_execf fun,
 Test(gc_runtime, collect_moves_and_traces_er_runtime_tags) {
   enki_gc* gc = enki_gc_create(enki_allocator_system(), 8192, NULL);
   cr_assert_not_null(gc);
-  const enki_allocator* loc_a = enki_gc_as_allocator(gc);
 
   uint64_t limbs_q[] = {UINT64_C(0x0123456789abcdef),
                         UINT64_C(0xfedcba9876543210)};
-  er_val bat_v = gc_make_bat(loc_a, 2, limbs_q);
+  er_val bat_v = gc_make_bat(gc, 2, limbs_q);
   er_bat* old_bat = er_outt(er_tag_bat, bat_v);
 
   er_op ret_op[] = {{.tag = OP_RET}};
   er_op* label_v[] = {ret_op};
   size_t label_len_v[] = {1};
-  er_val law_v =
-      er_law_make_code(loc_a, 77, bat_v, 0, 0, 1, label_v, label_len_v);
+  er_val law_v = er_law_make_code(gc, 77, bat_v, 0, 0, 1, label_v, label_len_v);
   cr_assert_eq(er_get_tag(law_v), er_tag_law);
   er_law* old_law = er_outt(er_tag_law, law_v);
 
   er_val sub_v[] = {bat_v};
-  er_pin* pin = er_pin_alloc(loc_a, 1);
+  er_pin* pin = er_pin_alloc(gc, 1);
   cr_assert_not_null(pin);
   er_val pin_v = er_pin_init(pin, NULL, law_v, 1, sub_v);
   cr_assert_eq(er_get_tag(pin_v), er_tag_pin);
   er_pin* old_pin = er_outt(er_tag_pin, pin_v);
 
   er_val app_arg_v[] = {law_v, bat_v};
-  er_val app_v = gc_make_app(loc_a, pin_v, 2, app_arg_v);
+  er_val app_v = gc_make_app(gc, pin_v, 2, app_arg_v);
   er_app* old_app = er_outt(er_tag_app, app_v);
 
-  er_val thunk_v = gc_make_thunk(loc_a, ER_XDONE, 1, &app_v);
+  er_val thunk_v = gc_make_thunk(gc, ER_XDONE, 1, &app_v);
   er_thk* old_thk = er_outt(er_tag_thk, thunk_v);
 
   er_gc_roots roots = {.val_v = {thunk_v}, .val_s = 1};
@@ -119,11 +116,10 @@ Test(gc_runtime, collect_moves_and_traces_er_runtime_tags) {
 Test(gc_runtime, allocator_collection_preserves_registered_root) {
   enki_gc* gc = enki_gc_create(enki_allocator_system(), 1024, NULL);
   cr_assert_not_null(gc);
-  const enki_allocator* loc_a = enki_gc_as_allocator(gc);
 
   er_val root_arg_v[] = {11, 22, 33};
   er_gc_roots roots = {
-      .val_v = {gc_make_app(loc_a, 99, 3, root_arg_v)},
+      .val_v = {gc_make_app(gc, 99, 3, root_arg_v)},
       .val_s = 1,
   };
   enki_gc_set_trace_root(gc, &roots, trace_er_roots);
@@ -131,7 +127,7 @@ Test(gc_runtime, allocator_collection_preserves_registered_root) {
   er_app* old_root = er_outt(er_tag_app, roots.val_v[0]);
   for (size_t k = 0; k < 64; k++) {
     er_val arg_v[] = {(er_val)k, (er_val)(k + 1), roots.val_v[0]};
-    (void)gc_make_app(loc_a, 0, 3, arg_v);
+    (void)gc_make_app(gc, 0, 3, arg_v);
   }
 
   er_app* root = er_outt(er_tag_app, roots.val_v[0]);
@@ -149,10 +145,9 @@ Test(gc_runtime, allocator_collection_preserves_registered_root) {
 Test(gc_runtime, law_bytecode_literals_are_traced) {
   enki_gc* gc = enki_gc_create(enki_allocator_system(), 8192, NULL);
   cr_assert_not_null(gc);
-  const enki_allocator* loc_a = enki_gc_as_allocator(gc);
 
   uint64_t limbs_q[] = {UINT64_C(0x1234)};
-  er_val bat_v = gc_make_bat(loc_a, 1, limbs_q);
+  er_val bat_v = gc_make_bat(gc, 1, limbs_q);
   er_bat* old_bat = er_outt(er_tag_bat, bat_v);
   cr_assert_not_null(old_bat);
 
@@ -162,7 +157,7 @@ Test(gc_runtime, law_bytecode_literals_are_traced) {
   };
   er_op* label_v[] = {code};
   size_t label_len_v[] = {2};
-  er_val law_v = er_law_make_code(loc_a, 0, 0, 0, 0, 1, label_v, label_len_v);
+  er_val law_v = er_law_make_code(gc, 0, 0, 0, 0, 1, label_v, label_len_v);
   cr_assert_eq(er_get_tag(law_v), er_tag_law);
 
   er_gc_roots roots = {.val_v = {law_v}, .val_s = 1};
@@ -185,10 +180,9 @@ Test(gc_runtime, law_bytecode_literals_are_traced) {
 Test(gc_runtime, eval_gc_forces_collected_thunk) {
   enki_gc* gc = enki_gc_create(enki_allocator_system(), 4096, NULL);
   cr_assert_not_null(gc);
-  const enki_allocator* loc_a = enki_gc_as_allocator(gc);
 
   er_val answer_v = 1234;
-  er_val thunk_v = gc_make_thunk(loc_a, ER_XDONE, 1, &answer_v);
+  er_val thunk_v = gc_make_thunk(gc, ER_XDONE, 1, &answer_v);
   er_gc_roots roots = {.val_v = {thunk_v}, .val_s = 1};
   enki_gc_set_trace_root(gc, &roots, trace_er_roots);
   enki_gc_collect(gc);
@@ -200,13 +194,12 @@ Test(gc_runtime, eval_gc_forces_collected_thunk) {
 Test(gc_runtime, plan_eval_nf_keeps_parent_rooted_when_child_allocates) {
   enki_gc* gc = enki_gc_create(enki_allocator_system(), 512, NULL);
   cr_assert_not_null(gc);
-  const enki_allocator* loc_a = enki_gc_as_allocator(gc);
 
   er_val max_small_v = UINT64_C(0x7fffffffffffffff);
-  er_val row_v = gc_make_app(loc_a, PLAN_S3('I', 'n', 'c'), 1, &max_small_v);
+  er_val row_v = gc_make_app(gc, PLAN_S3('I', 'n', 'c'), 1, &max_small_v);
   er_val call_arg_v[] = {66, row_v};
-  er_val child_v = gc_make_thunk(loc_a, ER_XPRIM, 2, call_arg_v);
-  er_val root_v = gc_make_app(loc_a, 0, 1, &child_v);
+  er_val child_v = gc_make_thunk(gc, ER_XPRIM, 2, call_arg_v);
+  er_val root_v = gc_make_app(gc, 0, 1, &child_v);
   er_app* old_root = er_outt(er_tag_app, root_v);
   cr_assert_not_null(old_root);
 
@@ -227,7 +220,7 @@ Test(gc_runtime, plan_eval_nf_keeps_parent_rooted_when_child_allocates) {
   er_kon kstack_v[128] = {0};
   er_vm vm = {
       .pc = ER_BCPC_NONE,
-      .loc_a = loc_a,
+      .gc = gc,
       .dstack = dstack_v,
       .dsp = dstack_v,
       .kbase = kstack_v,
@@ -252,12 +245,11 @@ Test(gc_runtime, plan_eval_nf_keeps_parent_rooted_when_child_allocates) {
 Test(gc_runtime, bytecode_return_pc_survives_collection_during_eval) {
   enki_gc* gc = enki_gc_create(enki_allocator_system(), 2048, NULL);
   cr_assert_not_null(gc);
-  const enki_allocator* loc_a = enki_gc_as_allocator(gc);
 
   er_val max_small_v = UINT64_C(0x7fffffffffffffff);
-  er_val row_v = gc_make_app(loc_a, PLAN_S3('I', 'n', 'c'), 1, &max_small_v);
+  er_val row_v = gc_make_app(gc, PLAN_S3('I', 'n', 'c'), 1, &max_small_v);
   er_val child_arg_v[] = {66, row_v};
-  er_val child_v = gc_make_thunk(loc_a, ER_XPRIM, 2, child_arg_v);
+  er_val child_v = gc_make_thunk(gc, ER_XPRIM, 2, child_arg_v);
   er_op code[] = {
       [0] = {.tag = OP_PUSH_LIT, .as.lit_v = child_v},
       [1] = {.tag = OP_EVAL},
@@ -267,9 +259,9 @@ Test(gc_runtime, bytecode_return_pc_survives_collection_during_eval) {
   };
   er_op* label_v[] = {code};
   size_t label_len_v[] = {5};
-  er_val law_v = er_law_make_code(loc_a, 0, 0, 0, 0, 1, label_v, label_len_v);
+  er_val law_v = er_law_make_code(gc, 0, 0, 0, 0, 1, label_v, label_len_v);
   cr_assert_eq(er_get_tag(law_v), er_tag_law);
-  er_val call_v = gc_make_thunk(loc_a, ER_CALL, 1, &law_v);
+  er_val call_v = gc_make_thunk(gc, ER_CALL, 1, &law_v);
   er_gc_roots roots = {.val_v = {call_v}, .val_s = 1};
   enki_gc_set_trace_root(gc, &roots, trace_er_roots);
 
@@ -287,7 +279,7 @@ Test(gc_runtime, bytecode_return_pc_survives_collection_during_eval) {
   er_kon kstack_v[128] = {0};
   er_vm vm = {
       .pc = ER_BCPC_NONE,
-      .loc_a = loc_a,
+      .gc = gc,
       .dstack = dstack_v,
       .dsp = dstack_v,
       .kbase = kstack_v,
@@ -302,23 +294,21 @@ Test(gc_runtime, bytecode_return_pc_survives_collection_during_eval) {
 Test(gc_runtime, compiled_law_keeps_inline_bytecode_valid_after_collection) {
   enki_gc* gc = enki_gc_create(enki_allocator_system(), 16384, NULL);
   cr_assert_not_null(gc);
-  const enki_allocator* loc_a = enki_gc_as_allocator(gc);
 
-  er_val prim66_v = er_pin_make(loc_a, 66);
+  er_val prim66_v = er_pin_make(gc, 66);
   cr_assert_eq(er_get_tag(prim66_v), er_tag_pin);
   er_val add_row_arg_v[] = {10, 32};
-  er_val add_row_v =
-      gc_make_app(loc_a, PLAN_S3('A', 'd', 'd'), 2, add_row_arg_v);
+  er_val add_row_v = gc_make_app(gc, PLAN_S3('A', 'd', 'd'), 2, add_row_arg_v);
   er_val body_arg_v[] = {prim66_v, add_row_v};
-  er_val body_v = gc_make_app(loc_a, 0, 2, body_arg_v);
-  er_val law_v = er_law_make(loc_a, 0, body_v, 0);
+  er_val body_v = gc_make_app(gc, 0, 2, body_arg_v);
+  er_val law_v = er_law_make(gc, 0, body_v, 0);
   cr_assert_eq(er_get_tag(law_v), er_tag_law);
 
   er_gc_roots roots = {.val_v = {law_v}, .val_s = 1};
   enki_gc_set_trace_root(gc, &roots, trace_er_roots);
   enki_gc_collect(gc);
 
-  er_val call_v = gc_make_thunk(loc_a, ER_CALL, 1, &roots.val_v[0]);
+  er_val call_v = gc_make_thunk(gc, ER_CALL, 1, &roots.val_v[0]);
   cr_assert_eq(er_eval_gc(gc, call_v), 42);
   enki_gc_destroy(gc);
 }

@@ -1,4 +1,5 @@
 #include <enki/print.h>
+#include <enki/gc.h>
 #include <enki/string_builder.h>
 #include <enki/util.h>
 
@@ -217,9 +218,12 @@ char* enki_print_value(const enki_allocator* cat_a, er_val val_v,
 
   er_thk* thk = er_outt(er_tag_thk, val_v);
   if (thk != NULL) {
-    er_val res_v = er_eval_to(cat_a, val_v, ER_EVAL_NF);
-    if (er_is_good(res_v)) {
-      val_v = res_v;
+    enki_gc* gc = enki_gc_from_allocator(cat_a);
+    if (gc != NULL) {
+      er_val res_v = er_eval_to(gc, val_v, ER_EVAL_NF);
+      if (er_is_good(res_v)) {
+        val_v = res_v;
+      }
     }
   }
   enki_string_builder sb;

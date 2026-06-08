@@ -190,7 +190,7 @@ static bool er_store_u64_to_size(uint64_t val_q, size_t* out_s) {
   return (uint64_t)*out_s == val_q;
 }
 
-static er_val er_store_limbs_to_nat(const enki_allocator* heap_a, size_t limb_s,
+static er_val er_store_limbs_to_nat(enki_gc* gc, size_t limb_s,
                                     const uint64_t limb_q[]) {
   while (limb_s > 0 && limb_q[limb_s - 1u] == 0) {
     limb_s--;
@@ -202,7 +202,7 @@ static er_val er_store_limbs_to_nat(const enki_allocator* heap_a, size_t limb_s,
     return limb_q[0];
   }
 
-  er_bat* bat = er_bat_alloc(heap_a, limb_s);
+  er_bat* bat = er_bat_alloc(gc, limb_s);
   if (bat == NULL) {
     return er_bad;
   }
@@ -368,13 +368,13 @@ static enki_error er_store_collect_subpins(er_store_vals* pins, er_val val_v) {
   return ENKI_ERROR_BAD_TAG;
 }
 
-static enki_error er_store_deserialize_value(const enki_allocator* heap_a,
+static enki_error er_store_deserialize_value(enki_gc* gc,
                                              const enki_allocator* work_a,
                                              const uint8_t* data_b,
                                              size_t data_s, size_t* off_s,
                                              er_val* out_v);
 
-static enki_error er_store_deserialize_nat(const enki_allocator* heap_a,
+static enki_error er_store_deserialize_nat(enki_gc* gc,
                                            const enki_allocator* work_a,
                                            const uint8_t* data_b, size_t data_s,
                                            size_t* off_s, er_val* out_v) {
@@ -412,21 +412,21 @@ static enki_error er_store_deserialize_nat(const enki_allocator* heap_a,
     limb_q[k / 8u] |= ((uint64_t)data_b[*off_s + k]) << ((k % 8u) * 8u);
   }
   *off_s += byte_s;
-  *out_v = er_store_limbs_to_nat(heap_a, limb_s, limb_q);
+  *out_v = er_store_limbs_to_nat(gc, limb_s, limb_q);
   if (limb_q != &local_q) {
     work_a->free(work_a->ctx, limb_q);
   }
   return *out_v == er_bad ? ENKI_ERROR_OOM : ENKI_ERROR_OK;
 }
 
-static enki_error er_store_deserialize_pin_ref(const enki_allocator* heap_a,
+static enki_error er_store_deserialize_pin_ref(enki_gc* gc,
                                                const uint8_t* data_b,
                                                size_t data_s, size_t* off_s,
                                                er_val* out_v) {
   if (*off_s > data_s || data_s - *off_s < 32u) {
     return ENKI_ERROR_BOUNDS;
   }
-  er_pin* pin = er_pin_alloc(heap_a, 0);
+  er_pin* pin = er_pin_alloc(gc, 0);
   if (pin == NULL) {
     return ENKI_ERROR_OOM;
   }
@@ -435,7 +435,7 @@ static enki_error er_store_deserialize_pin_ref(const enki_allocator* heap_a,
   return *out_v == 0 ? ENKI_ERROR_OOM : ENKI_ERROR_OK;
 }
 
-static enki_error er_store_deserialize_law(const enki_allocator* heap_a,
+static enki_error er_store_deserialize_law(enki_gc* gc,
                                            const enki_allocator* work_a,
                                            const uint8_t* data_b, size_t data_s,
                                            size_t* off_s, er_val* out_v) {
@@ -449,28 +449,26 @@ static enki_error er_store_deserialize_law(const enki_allocator* heap_a,
   }
 
   er_val name_v = 0;
-  err = er_store_deserialize_value(heap_a, work_a, data_b, data_s, off_s,
-                                   &name_v);
+  err = er_store_deserialize_value(gc, work_a, data_b, data_s, off_s, &name_v);
   if (err != ENKI_ERROR_OK) {
     return err;
   }
   er_val body_v = 0;
-  err = er_store_deserialize_value(heap_a, work_a, data_b, data_s, off_s,
-                                   &body_v);
+  err = er_store_deserialize_value(gc, work_a, data_b, data_s, off_s, &body_v);
   if (err != ENKI_ERROR_OK) {
     return err;
   }
-  *out_v = er_law_make(heap_a, name_v, body_v, (uint32_t)ari_q);
+  *out_v = er_law_make(gc, name_v, body_v, (uint32_t)ari_q);
   return *out_v == 0 ? ENKI_ERROR_BAD_PIN : ENKI_ERROR_OK;
 }
 
-static enki_error er_store_deserialize_app(const enki_allocator* heap_a,
+static enki_error er_store_deserialize_app(enki_gc* gc,
                                            const enki_allocator* work_a,
                                            const uint8_t* data_b, size_t data_s,
                                            size_t* off_s, er_val* out_v) {
   er_val fn_v = 0;
   enki_error err =
-      er_store_deserialize_value(heap_a, work_a, data_b, data_s, off_s, &fn_v);
+      er_store_deserialize_value(gc, work_a, data_b, data_s, off_s, &fn_v);
   if (err != ENKI_ERROR_OK) {
     return err;
   }
@@ -495,7 +493,7 @@ static enki_error er_store_deserialize_app(const enki_allocator* heap_a,
       return ENKI_ERROR_OOM;
     }
     for (size_t k = 0; k < arg_s; k++) {
-      err = er_store_deserialize_value(heap_a, work_a, data_b, data_s, off_s,
+      err = er_store_deserialize_value(gc, work_a, data_b, data_s, off_s,
                                        &arg_v[k]);
       if (err != ENKI_ERROR_OK) {
         work_a->free(work_a->ctx, arg_v);
@@ -504,7 +502,7 @@ static enki_error er_store_deserialize_app(const enki_allocator* heap_a,
     }
   }
 
-  er_app* app = er_app_alloc(heap_a, arg_s);
+  er_app* app = er_app_alloc(gc, arg_s);
   if (app == NULL) {
     if (arg_v != NULL) {
       work_a->free(work_a->ctx, arg_v);
@@ -518,7 +516,7 @@ static enki_error er_store_deserialize_app(const enki_allocator* heap_a,
   return *out_v == 0 ? ENKI_ERROR_OOM : ENKI_ERROR_OK;
 }
 
-static enki_error er_store_deserialize_value(const enki_allocator* heap_a,
+static enki_error er_store_deserialize_value(enki_gc* gc,
                                              const enki_allocator* work_a,
                                              const uint8_t* data_b,
                                              size_t data_s, size_t* off_s,
@@ -529,16 +527,13 @@ static enki_error er_store_deserialize_value(const enki_allocator* heap_a,
   uint8_t tag_b = data_b[(*off_s)++];
   switch (tag_b) {
   case er_tag_bat:
-    return er_store_deserialize_nat(heap_a, work_a, data_b, data_s, off_s,
-                                    out_v);
+    return er_store_deserialize_nat(gc, work_a, data_b, data_s, off_s, out_v);
   case er_tag_pin:
-    return er_store_deserialize_pin_ref(heap_a, data_b, data_s, off_s, out_v);
+    return er_store_deserialize_pin_ref(gc, data_b, data_s, off_s, out_v);
   case er_tag_law:
-    return er_store_deserialize_law(heap_a, work_a, data_b, data_s, off_s,
-                                    out_v);
+    return er_store_deserialize_law(gc, work_a, data_b, data_s, off_s, out_v);
   case er_tag_app:
-    return er_store_deserialize_app(heap_a, work_a, data_b, data_s, off_s,
-                                    out_v);
+    return er_store_deserialize_app(gc, work_a, data_b, data_s, off_s, out_v);
   default:
     return ENKI_ERROR_BAD_TAG;
   }
@@ -684,10 +679,10 @@ void enki_store_close(enki_store* store) {
   store->dbi = 0;
 }
 
-enki_error er_store_save_pin(enki_store* store, const enki_allocator* heap_a,
+enki_error er_store_save_pin(enki_store* store, enki_gc* gc,
                              const enki_allocator* work_a, er_val pin_v,
                              uint8_t hash_b[32]) {
-  if (store == NULL || hash_b == NULL || !er_store_allocator_ok(heap_a) ||
+  if (store == NULL || hash_b == NULL || gc == NULL ||
       !er_store_allocator_ok(work_a)) {
     return ENKI_STORE_ERROR;
   }
@@ -710,8 +705,7 @@ enki_error er_store_save_pin(enki_store* store, const enki_allocator* heap_a,
   }
   for (size_t k = 0; err == ENKI_ERROR_OK && k < subpins.len_s; k++) {
     uint8_t sub_hash_b[32];
-    err =
-        er_store_save_pin(store, heap_a, work_a, subpins.val_v[k], sub_hash_b);
+    err = er_store_save_pin(store, gc, work_a, subpins.val_v[k], sub_hash_b);
     if (err == ENKI_ERROR_OK) {
       err = er_store_buf_push(&buf, sub_hash_b, sizeof(sub_hash_b));
     }
@@ -730,11 +724,11 @@ enki_error er_store_save_pin(enki_store* store, const enki_allocator* heap_a,
   return err;
 }
 
-enki_error er_store_load_pin(enki_store* store, const enki_allocator* heap_a,
+enki_error er_store_load_pin(enki_store* store, enki_gc* gc,
                              const enki_allocator* work_a,
                              const uint8_t hash_b[32], er_val* out_v) {
-  if (store == NULL || hash_b == NULL || out_v == NULL ||
-      !er_store_allocator_ok(heap_a) || !er_store_allocator_ok(work_a)) {
+  if (store == NULL || hash_b == NULL || out_v == NULL || gc == NULL ||
+      !er_store_allocator_ok(work_a)) {
     return ENKI_STORE_ERROR;
   }
   *out_v = 0;
@@ -795,19 +789,19 @@ enki_error er_store_load_pin(enki_store* store, const enki_allocator* heap_a,
     uint8_t sub_hash_b[32];
     memcpy(sub_hash_b, data_b + off_s, 32);
     off_s += 32u;
-    err = er_store_load_pin(store, heap_a, work_a, sub_hash_b, &subpin_v[k]);
+    err = er_store_load_pin(store, gc, work_a, sub_hash_b, &subpin_v[k]);
   }
 
   er_val inner_v = 0;
   if (err == ENKI_ERROR_OK) {
-    err = er_store_deserialize_value(heap_a, work_a, data_b, len_s, &off_s,
-                                     &inner_v);
+    err =
+        er_store_deserialize_value(gc, work_a, data_b, len_s, &off_s, &inner_v);
   }
   if (err == ENKI_ERROR_OK && off_s != len_s) {
     err = ENKI_ERROR_BAD_PIN;
   }
   if (err == ENKI_ERROR_OK) {
-    er_pin* pin = er_pin_alloc(heap_a, subpin_s);
+    er_pin* pin = er_pin_alloc(gc, subpin_s);
     if (pin == NULL) {
       err = ENKI_ERROR_OOM;
     } else {
@@ -825,17 +819,17 @@ enki_error er_store_load_pin(enki_store* store, const enki_allocator* heap_a,
   return err;
 }
 
-enki_error er_store_save_root(enki_store* store, const enki_allocator* heap_a,
+enki_error er_store_save_root(enki_store* store, enki_gc* gc,
                               const enki_allocator* work_a, er_val pin_v) {
   uint8_t hash_b[32];
-  enki_error err = er_store_save_pin(store, heap_a, work_a, pin_v, hash_b);
+  enki_error err = er_store_save_pin(store, gc, work_a, pin_v, hash_b);
   if (err != ENKI_ERROR_OK) {
     return err;
   }
   return enki_store_write(store, er_store_root_key_b, hash_b, sizeof(hash_b));
 }
 
-enki_error er_store_load_root(enki_store* store, const enki_allocator* heap_a,
+enki_error er_store_load_root(enki_store* store, enki_gc* gc,
                               const enki_allocator* work_a, er_val* out_v) {
   uint8_t hash_b[32];
   size_t len_s = 0;
@@ -847,5 +841,5 @@ enki_error er_store_load_root(enki_store* store, const enki_allocator* heap_a,
   if (len_s != sizeof(hash_b)) {
     return ENKI_ERROR_BAD_PIN;
   }
-  return er_store_load_pin(store, heap_a, work_a, hash_b, out_v);
+  return er_store_load_pin(store, gc, work_a, hash_b, out_v);
 }

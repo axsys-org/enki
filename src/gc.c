@@ -222,7 +222,7 @@ er_val enki_gc_copy(enki_gc* gc, er_val val_v) {
   return new_v;
 }
 
-static void enki_gc_trace_ref(enki_gc* gc, er_val* ref_v) {
+void enki_gc_trace_ref(enki_gc* gc, er_val* ref_v) {
   if (ref_v != NULL && !er_is_cat(*ref_v) && enki_gc_is_known_tag(*ref_v)) {
     *ref_v = enki_gc_copy(gc, *ref_v);
   }
@@ -269,6 +269,10 @@ void enki_gc_trace_vm(enki_gc* gc, void* root) {
   enki_gc_trace_ref(gc, vm->gc_rp);
   for (size_t k = 0; k < vm->gc_tmp_s; k++) {
     enki_gc_trace_ref(gc, &vm->gc_tmp_v[k]);
+  }
+
+  if (vm->outer_trace_fn != NULL) {
+    vm->outer_trace_fn(gc, vm->outer_trace_root);
   }
 }
 
