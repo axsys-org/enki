@@ -7,15 +7,20 @@ AR ?= ar
 
 VALID_BUILD_TYPES := debug release asan ubsan tsan coverage profile
 
-BASE_CPPFLAGS := -Iinclude -Itests/support -Itests/property/vendor/theft $(NIX_CFLAGS_COMPILE)
-BASE_CFLAGS := -std=c23 -MMD -MP
+# Per-package include paths enforce the layering (axsys < plan < enki):
+# compiling pkg/plan, the pkg/enki include directory is not on the path.
+AXSYS_INC := -Ipkg/axsys/include
+PLAN_INC := -Ipkg/plan/include $(AXSYS_INC)
+ENKI_INC := -Ipkg/enki/include $(PLAN_INC)
+
+BASE_CPPFLAGS := -Itests/support -Itests/property/vendor/theft $(NIX_CFLAGS_COMPILE)
+BASE_CFLAGS := -std=c23 -MMD -MP -D_GNU_SOURCE
 
 WARN_COMMON := -Wall -Wextra  \
 	-Wpedantic -Wshadow -Wconversion -Wstrict-prototypes \
 	-Wmissing-prototypes -Wold-style-definition -Wnull-dereference \
 	-Wdouble-promotion -Werror \
 	-Wno-sign-conversion -Wno-char-subscripts -Wno-unused-function -Wno-gnu-label-as-value
-
 
 WARN_CFLAGS = $(WARN_COMMON)
 
@@ -41,7 +46,12 @@ ifeq ($(filter $(BUILD_TYPE),$(VALID_BUILD_TYPES)),)
 $(error BUILD_TYPE must be one of $(VALID_BUILD_TYPES))
 endif
 
-APP_DIR := app
+# GC stress: every reserve collects (see pkg/plan/include/plan/heap.h)
+ifdef GC_STRESS
+BASE_CFLAGS += -DPL_GC_STRESS
+endif
+
+APP_DIR := pkg/enki/app
 APP_SRCS := $(wildcard $(APP_DIR)/*.c)
 APP_BINS := $(patsubst $(APP_DIR)/%.c,$(BUILD_DIR)/bin/%,$(APP_SRCS))
 
@@ -55,16 +65,20 @@ CFLAGS_ALL += -DTRACY_ENABLE
 LDFLAGS_ALL += -L/opt/homebrew/opt/tracy/lib -Wl,-rpath,/opt/homebrew/opt/tracy/lib -lTracyClient
 endif
 
-SRC_DIR := src
-INCLUDE_DIR := include
+AXSYS_SRCS := $(wildcard pkg/axsys/src/*.c)
+PLAN_SRCS := $(wildcard pkg/plan/src/*.c)
+ENKI_SRCS := $(wildcard pkg/enki/src/*.c)
+HEADERS := $(wildcard pkg/axsys/include/axsys/*.h) \
+	$(wildcard pkg/plan/include/plan/*.h) \
+	$(wildcard pkg/plan/src/*.h) \
+	$(wildcard pkg/enki/include/enki/*.h)
+
 UNIT_DIR := tests/unit
 PROPERTY_DIR := tests/property
 FUZZ_DIR := tests/fuzz
 PERF_DIR := tests/perf
 VENDOR_THEFT_DIR := tests/property/vendor/theft
 
-SRCS := $(wildcard $(SRC_DIR)/*.c)
-HEADERS := $(wildcard $(INCLUDE_DIR)/enki/*.h)
 TSAN_UNIT_SRCS := $(wildcard $(UNIT_DIR)/*_tsan.c)
 UNIT_SRCS := $(filter-out $(TSAN_UNIT_SRCS),$(wildcard $(UNIT_DIR)/*.c))
 PROPERTY_SRCS := $(wildcard $(PROPERTY_DIR)/*.c)
@@ -72,14 +86,22 @@ THEFT_SRCS := $(wildcard $(VENDOR_THEFT_DIR)/*.c)
 FUZZ_SRCS := $(wildcard $(FUZZ_DIR)/*.c)
 PERF_SRCS := $(wildcard $(PERF_DIR)/*.c)
 
-LIB_OBJS := $(patsubst %.c,$(BUILD_DIR)/%.o,$(SRCS))
+AXSYS_OBJS := $(patsubst %.c,$(BUILD_DIR)/%.o,$(AXSYS_SRCS))
+PLAN_OBJS := $(patsubst %.c,$(BUILD_DIR)/%.o,$(PLAN_SRCS))
+ENKI_OBJS := $(patsubst %.c,$(BUILD_DIR)/%.o,$(ENKI_SRCS))
+LIB_OBJS := $(AXSYS_OBJS) $(PLAN_OBJS) $(ENKI_OBJS)
+
 UNIT_BINS := $(patsubst %.c,$(BUILD_DIR)/%,$(UNIT_SRCS))
 TSAN_UNIT_BINS := $(patsubst %.c,$(BUILD_DIR)/%,$(TSAN_UNIT_SRCS))
 PROPERTY_BINS := $(patsubst %.c,$(BUILD_DIR)/%,$(PROPERTY_SRCS))
 THEFT_OBJS := $(patsubst %.c,$(BUILD_DIR)/%.o,$(THEFT_SRCS))
 FUZZ_BINS := $(patsubst %.c,$(BUILD_DIR)/%,$(FUZZ_SRCS))
 PERF_BINS := $(patsubst %.c,$(BUILD_DIR)/%,$(PERF_SRCS))
-LIB := $(BUILD_DIR)/lib/libenki.a
+
+LIB_AXSYS := $(BUILD_DIR)/lib/libaxsys.a
+LIB_PLAN := $(BUILD_DIR)/lib/libplan.a
+LIB_ENKI := $(BUILD_DIR)/lib/libenki.a
+LIBS := $(LIB_AXSYS) $(LIB_PLAN) $(LIB_ENKI)
 
 UNAME_S := $(shell uname -s 2>/dev/null)
 ifeq ($(BUILD_TYPE)-$(UNAME_S),tsan-Darwin)
@@ -88,11 +110,13 @@ else
 ACTIVE_UNIT_BINS := $(UNIT_BINS)
 endif
 
-TIDY_FILES := $(SRCS) $(UNIT_SRCS) $(PROPERTY_SRCS) $(FUZZ_SRCS) $(TSAN_UNIT_SRCS)
+TIDY_FILES := $(AXSYS_SRCS) $(PLAN_SRCS) $(ENKI_SRCS) $(UNIT_SRCS) $(PROPERTY_SRCS) $(FUZZ_SRCS) $(TSAN_UNIT_SRCS)
 TIDY_FILES_ABS := $(addprefix $(CURDIR)/,$(TIDY_FILES))
 
-FORMAT_FILES := $(HEADERS) $(SRCS) $(UNIT_SRCS) $(TSAN_UNIT_SRCS) $(PROPERTY_SRCS) $(FUZZ_SRCS) \
-	$(VENDOR_THEFT_DIR)/theft.h $(VENDOR_THEFT_DIR)/theft.c tests/support/fff.h
+FORMAT_FILES := $(HEADERS) $(AXSYS_SRCS) $(PLAN_SRCS) $(ENKI_SRCS) $(APP_SRCS) \
+	$(UNIT_SRCS) $(TSAN_UNIT_SRCS) $(PROPERTY_SRCS) $(FUZZ_SRCS) \
+	$(VENDOR_THEFT_DIR)/theft.h $(VENDOR_THEFT_DIR)/theft.c \
+	tests/support/fff.h tests/support/test_plan.h
 
 CRITERION_CFLAGS := $(shell pkg-config --cflags criterion 2>/dev/null)
 CRITERION_LIBS := $(shell pkg-config --libs criterion 2>/dev/null)
@@ -108,74 +132,114 @@ LCOV_FILTERED_INFO := $(BUILD_DIR)/coverage/enki.filtered.info
 COVERAGE_HTML_DIR := $(BUILD_DIR)/html
 LCOV_IGNORE_ERRORS ?= --ignore-errors inconsistent,inconsistent,mismatch,mismatch,gcov,gcov,unused,unused
 
-.PHONY: all lib install test test-binaries test-unit test-property fuzz fuzz-bin perf-binaries coverage tidy \
-	format format-check compile-commands compile-commands-fallback clean distclean
+.PHONY: all lib bin install test test-binaries test-unit test-property fuzz fuzz-bin perf-binaries coverage tidy \
+	check-layering format format-check compile-commands clean distclean
 
 all: lib bin
 
 bin: $(APP_BINS)
 
-$(BUILD_DIR)/bin/%: $(APP_DIR)/%.c $(LIB)
+$(BUILD_DIR)/bin/%: $(APP_DIR)/%.c $(LIBS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS_ALL) $(CFLAGS_ALL) $< $(LIB) $(LDFLAGS_ALL) -o $@
+	$(CC) $(CPPFLAGS_ALL) $(ENKI_INC) $(CFLAGS_ALL) $< $(LIB_ENKI) $(LIB_PLAN) $(LIB_AXSYS) $(LDFLAGS_ALL) -o $@
 
-lib: $(LIB)
+lib: $(LIBS)
 
-$(LIB): $(LIB_OBJS)
+$(LIB_AXSYS): $(AXSYS_OBJS)
 	@mkdir -p $(dir $@)
 	$(AR) rcs $@ $^
 
-$(BUILD_DIR)/%.o: %.c
+$(LIB_PLAN): $(PLAN_OBJS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS_ALL) $(CFLAGS_ALL) -c $< -o $@
+	$(AR) rcs $@ $^
 
-$(BUILD_DIR)/tests/unit/%_tsan: tests/unit/%_tsan.c $(LIB_OBJS)
+$(LIB_ENKI): $(ENKI_OBJS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS_ALL) $(CFLAGS_ALL) $< $(LIB_OBJS) $(LDFLAGS_ALL) -o $@
+	$(AR) rcs $@ $^
 
-$(BUILD_DIR)/tests/unit/%: tests/unit/%.c $(LIB_OBJS)
+# Layered compile rules (R1-R3): each package sees only its own include
+# path and the layers beneath it.
+$(BUILD_DIR)/pkg/axsys/%.o: pkg/axsys/%.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS_ALL) $(CRITERION_CFLAGS) $(CFLAGS_ALL) $< $(LIB_OBJS) \
+	$(CC) $(CPPFLAGS_ALL) $(AXSYS_INC) $(CFLAGS_ALL) -c $< -o $@
+
+$(BUILD_DIR)/pkg/plan/%.o: pkg/plan/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS_ALL) $(PLAN_INC) -Ipkg/plan/src $(CFLAGS_ALL) -c $< -o $@
+
+$(BUILD_DIR)/pkg/enki/%.o: pkg/enki/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS_ALL) $(ENKI_INC) $(CFLAGS_ALL) -c $< -o $@
+
+$(BUILD_DIR)/tests/%.o: tests/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS_ALL) $(ENKI_INC) $(CFLAGS_ALL) -c $< -o $@
+
+$(BUILD_DIR)/tests/unit/%_tsan: tests/unit/%_tsan.c $(LIBS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS_ALL) $(ENKI_INC) $(CFLAGS_ALL) $< $(LIB_ENKI) $(LIB_PLAN) $(LIB_AXSYS) $(LDFLAGS_ALL) -o $@
+
+$(BUILD_DIR)/tests/unit/%: tests/unit/%.c $(LIBS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS_ALL) $(ENKI_INC) $(CRITERION_CFLAGS) $(CFLAGS_ALL) $< $(LIB_ENKI) $(LIB_PLAN) $(LIB_AXSYS) \
 		$(LDFLAGS_ALL) $(CRITERION_LIBS) -o $@
 
-$(BUILD_DIR)/tests/property/%: tests/property/%.c $(LIB_OBJS) $(THEFT_OBJS)
+$(BUILD_DIR)/tests/property/%: tests/property/%.c $(LIBS) $(THEFT_OBJS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS_ALL) $(CFLAGS_ALL) $< $(LIB_OBJS) $(THEFT_OBJS) \
+	$(CC) $(CPPFLAGS_ALL) $(ENKI_INC) $(CFLAGS_ALL) $< $(LIB_ENKI) $(LIB_PLAN) $(LIB_AXSYS) $(THEFT_OBJS) \
 		$(LDFLAGS_ALL) -o $@
 
-$(BUILD_DIR)/tests/fuzz/%: tests/fuzz/%.c $(LIB_OBJS)
+$(BUILD_DIR)/tests/fuzz/%: tests/fuzz/%.c $(LIBS)
 	@if ! $(CC) --version 2>/dev/null | grep -qi clang; then \
 		echo "libFuzzer target requires Clang; use CC=clang"; \
 		exit 2; \
 	fi
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS_ALL) $(BASE_CFLAGS) $(WARN_CFLAGS) $(BUILD_CFLAGS_asan) \
-		$(FUZZ_CFLAGS) $< $(LIB_OBJS) $(LDFLAGS_ALL) -o $@
+	$(CC) $(CPPFLAGS_ALL) $(ENKI_INC) $(BASE_CFLAGS) $(WARN_CFLAGS) $(BUILD_CFLAGS_asan) \
+		$(FUZZ_CFLAGS) $< $(LIB_ENKI) $(LIB_PLAN) $(LIB_AXSYS) $(LDFLAGS_ALL) -o $@
 
-$(BUILD_DIR)/tests/perf/%: tests/perf/%.c $(LIB_OBJS)
+$(BUILD_DIR)/tests/perf/%: tests/perf/%.c $(LIBS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS_ALL) $(CFLAGS_ALL) $< $(LIB_OBJS) $(LDFLAGS_ALL) -o $@
+	$(CC) $(CPPFLAGS_ALL) $(ENKI_INC) $(CFLAGS_ALL) $< $(LIB_ENKI) $(LIB_PLAN) $(LIB_AXSYS) $(LDFLAGS_ALL) -o $@
 
-install: lib
-	install -d $(PREFIX)/lib $(PREFIX)/include/enki
-	install -m 0644 $(LIB) $(PREFIX)/lib/libenki.a
-	install -m 0644 $(HEADERS) $(PREFIX)/include/enki/
+install: lib bin
+	install -d $(PREFIX)/lib $(PREFIX)/include/axsys $(PREFIX)/include/plan $(PREFIX)/include/enki
+	install -m 0644 $(LIB_AXSYS) $(PREFIX)/lib/libaxsys.a
+	install -m 0644 $(LIB_PLAN) $(PREFIX)/lib/libplan.a
+	install -m 0644 $(LIB_ENKI) $(PREFIX)/lib/libenki.a
+	install -m 0644 pkg/axsys/include/axsys/*.h $(PREFIX)/include/axsys/
+	install -m 0644 pkg/plan/include/plan/*.h $(PREFIX)/include/plan/
+	install -m 0644 pkg/enki/include/enki/*.h $(PREFIX)/include/enki/
 
 test-binaries: $(ACTIVE_UNIT_BINS) $(PROPERTY_BINS)
 
-test: test-unit test-property
+test: check-layering test-unit test-property
 
-test-unit: $(ACTIVE_UNIT_BINS)
+test-unit: $(ACTIVE_UNIT_BINS) $(APP_BINS)
 	@set -eu; for test_bin in $(ACTIVE_UNIT_BINS); do \
 		if [ "$(BUILD_TYPE)-$(UNAME_S)" = "tsan-Darwin" ]; then \
-			"$$test_bin"; \
+			ENKI_WISP_BIN=$(CURDIR)/$(BUILD_DIR)/bin/wisp "$$test_bin"; \
 		else \
-			"$$test_bin" --jobs 1; \
+			ENKI_WISP_BIN=$(CURDIR)/$(BUILD_DIR)/bin/wisp "$$test_bin" --jobs 1; \
 		fi; \
 	done
 
 test-property: $(PROPERTY_BINS)
 	@set -eu; for test_bin in $(PROPERTY_BINS); do "$$test_bin"; done
+
+# Layering check (R1-R3): grep #include lines against the dependency
+# matrix.  axsys must not include plan/ or enki/; plan must not include
+# enki/.
+check-layering:
+	@status=0; \
+	if grep -rnE '#include\s+["<](plan|enki)/' pkg/axsys --include='*.c' --include='*.h' 2>/dev/null; then \
+		echo "layering violation: pkg/axsys includes plan/ or enki/ headers"; status=1; \
+	fi; \
+	if grep -rnE '#include\s+["<]enki/' pkg/plan --include='*.c' --include='*.h' 2>/dev/null; then \
+		echo "layering violation: pkg/plan includes enki/ headers"; status=1; \
+	fi; \
+	if [ $$status -eq 0 ]; then echo "check-layering: OK"; fi; \
+	exit $$status
 
 fuzz-bin: $(FUZZ_BINS)
 
@@ -204,8 +268,6 @@ format:
 format-check:
 	clang-format --dry-run --Werror $(FORMAT_FILES)
 	@if command -v treefmt >/dev/null 2>&1; then treefmt --fail-on-change; fi
-
-
 
 clean:
 	rm -rf $(BUILD_DIR)

@@ -1,4 +1,4 @@
-#include "enki/vector.h"
+#include "axsys/vector.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -14,29 +14,29 @@
   } while (0)
 
 static int run_vector_unit_checks(void) {
-  enki_vector* vector = enki_vector_create(enki_allocator_system());
+  ax_vector* vector = ax_vector_create(ax_allocator_system());
   EXPECT(vector != NULL);
-  EXPECT(enki_vector_len(vector) == 0);
-  EXPECT(enki_vector_capacity(vector) == 0);
+  EXPECT(ax_vector_len(vector) == 0);
+  EXPECT(ax_vector_capacity(vector) == 0);
 
-  EXPECT(enki_vector_push(vector, (void*)(uintptr_t)1u) == ENKI_OK);
-  EXPECT(enki_vector_push(vector, (void*)(uintptr_t)2u) == ENKI_OK);
-  EXPECT(enki_vector_len(vector) == 2);
-  EXPECT(enki_vector_get(vector, 0) == (void*)(uintptr_t)1u);
-  EXPECT(enki_vector_set(vector, 1, (void*)(uintptr_t)3u) == ENKI_OK);
-  EXPECT(enki_vector_get(vector, 1) == (void*)(uintptr_t)3u);
+  EXPECT(ax_vector_push(vector, (void*)(uintptr_t)1u) == AX_OK);
+  EXPECT(ax_vector_push(vector, (void*)(uintptr_t)2u) == AX_OK);
+  EXPECT(ax_vector_len(vector) == 2);
+  EXPECT(ax_vector_get(vector, 0) == (void*)(uintptr_t)1u);
+  EXPECT(ax_vector_set(vector, 1, (void*)(uintptr_t)3u) == AX_OK);
+  EXPECT(ax_vector_get(vector, 1) == (void*)(uintptr_t)3u);
 
-  size_t capacity_s = enki_vector_capacity(vector);
-  EXPECT(enki_vector_reserve(vector, 1) == ENKI_OK);
-  EXPECT(enki_vector_capacity(vector) == capacity_s);
-  EXPECT(enki_vector_shrink(vector) == ENKI_OK);
-  EXPECT(enki_vector_capacity(vector) == enki_vector_len(vector));
+  size_t capacity_s = ax_vector_capacity(vector);
+  EXPECT(ax_vector_reserve(vector, 1) == AX_OK);
+  EXPECT(ax_vector_capacity(vector) == capacity_s);
+  EXPECT(ax_vector_shrink(vector) == AX_OK);
+  EXPECT(ax_vector_capacity(vector) == ax_vector_len(vector));
 
-  EXPECT(enki_vector_pop(vector) == (void*)(uintptr_t)3u);
-  EXPECT(enki_vector_pop(vector) == (void*)(uintptr_t)1u);
-  EXPECT(enki_vector_pop(vector) == NULL);
+  EXPECT(ax_vector_pop(vector) == (void*)(uintptr_t)3u);
+  EXPECT(ax_vector_pop(vector) == (void*)(uintptr_t)1u);
+  EXPECT(ax_vector_pop(vector) == NULL);
 
-  enki_vector_destroy(vector);
+  ax_vector_destroy(vector);
   return EXIT_SUCCESS;
 }
 
