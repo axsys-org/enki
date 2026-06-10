@@ -55,8 +55,7 @@ static pl_val test_app1(pl_thread* t, pl_val h, pl_val a) {
   return test_app(t, h, 1, args);
 }
 
-static pl_val test_law(pl_thread* t, uint64_t arity, pl_val name,
-                       pl_val body) {
+static pl_val test_law(pl_thread* t, uint64_t arity, pl_val name, pl_val body) {
   size_t base = t->vsp;
   pl_vpush(t, name);
   pl_vpush(t, body);

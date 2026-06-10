@@ -3,11 +3,11 @@
 `enki` is a PLAN runtime structured as three packages with a mechanically
 enforced dependency direction:
 
-| package     | prefix | contents                                                                                                                                                                                                                  |
+| package | prefix | contents |
 | ----------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pkg/axsys` | `ax_`  | GC-oblivious systems substrate: arena, vector, string builder, allocator, sha256. Knows nothing about the heap or value representation.                                                                                     |
-| `pkg/plan`  | `pl_`  | The PLAN core: value representation, semispace Cheney heap with safepoint+reserve discipline, the explicit-frame reduction machine (whnf/nf), primops, pins, and the content-addressed store (LMDB or in-memory backend). |
-| `pkg/enki`  | `en_`  | Everything above the core: the wisp PLAN-assembly front end (parser, macro expander, module loader) and the `wisp` / `assembler` apps.                                                                                      |
+| `pkg/axsys` | `ax_` | GC-oblivious systems substrate: arena, vector, string builder, allocator, sha256. Knows nothing about the heap or value representation. |
+| `pkg/plan` | `pl_` | The PLAN core: value representation, semispace Cheney heap with safepoint+reserve discipline, the explicit-frame reduction machine (whnf/nf), primops, pins, and the content-addressed store (LMDB or in-memory backend). |
+| `pkg/enki` | `en_` | Everything above the core: the wisp PLAN-assembly front end (parser, macro expander, module loader) and the `wisp` / `assembler` apps. |
 
 Layering is enforced twice: per-package include paths (compiling `pkg/plan`,
 the `pkg/enki` include directory is not on the search path) and a
