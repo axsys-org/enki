@@ -228,25 +228,38 @@ static pl_val en_delay_apply(en_wisp* w, size_t mark, size_t n) {
   return out;
 }
 
+/* The setjmp-protected body lives in its own function so no locals or
+ * parameters cross the setjmp (gcc -Wclobbered). */
+static pl_val en_run_apply_body(en_wisp* w, size_t mark, size_t n, bool nf) {
+  size_t ri = en_root_mark(w);
+  en_root_push(w, w->tmp_v[mark]);
+  for (size_t i = 1; i < n; i++)
+    w->tmp_v[ri] = pl_apply(w->t, w->tmp_v[ri], w->tmp_v[mark + i]);
+  pl_val r = w->tmp_v[ri];
+  r = nf ? pl_nf(w->t, r) : pl_whnf(w->t, r);
+  en_root_pop(w, ri);
+  return r;
+}
+
 /* Evaluate the application of the rooted values tmp[mark..mark+n). */
 static pl_val en_run_apply_mode(en_wisp* w, size_t mark, size_t n, bool nf) {
   if (n == 0)
     return 0;
+  /* volatile copies: parameters must not live across setjmp
+   * (gcc -Wclobbered) */
+  en_wisp* volatile w_v = w;
+  volatile size_t mark_v = mark;
+  volatile size_t n_v = n;
+  volatile bool nf_v = nf;
   pl_catch c;
   pl_catch_init(w->t, &c);
   if (setjmp(c.jb) == 0) {
-    size_t ri = en_root_mark(w);
-    en_root_push(w, w->tmp_v[mark]);
-    for (size_t i = 1; i < n; i++)
-      w->tmp_v[ri] = pl_apply(w->t, w->tmp_v[ri], w->tmp_v[mark + i]);
-    pl_val r = w->tmp_v[ri];
-    r = nf ? pl_nf(w->t, r) : pl_whnf(w->t, r);
-    en_root_pop(w, ri);
-    pl_catch_pop(w->t, &c);
+    pl_val r = en_run_apply_body(w_v, mark_v, n_v, nf_v);
+    pl_catch_pop(w_v->t, &c);
     return r;
   }
-  pl_catch_unwind(w->t, &c);
-  en_fail_exn(w);
+  pl_catch_unwind(w_v->t, &c);
+  en_fail_exn(w_v);
 }
 
 static pl_val en_run_apply(en_wisp* w, size_t mark, size_t n) {

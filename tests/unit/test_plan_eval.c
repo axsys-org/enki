@@ -258,7 +258,9 @@ Test(ops, row_elements_stay_lazy) {
   cr_assert_eq(pl_app_n(p), 1);
   pl_vpush(t, r);
   /* forcing the element gives Ix0 of the stream = 5 */
-  pl_val e = pl_whnf(t, pl_app_args(pl_as(PL_TAG_APP, t->vstack[base + 2]))[0]);
+  pl_cell* rp = pl_as(PL_TAG_APP, t->vstack[base + 2]);
+  cr_assert_not_null(rp);
+  pl_val e = pl_whnf(t, pl_app_args(rp)[0]);
   cr_assert_eq(e, 5);
   test_rt_free(&rt);
 }

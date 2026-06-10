@@ -355,11 +355,10 @@ ret:
       }
       pl_cell* bp = pl_as(PL_TAG_APP, b);
       if (bp != NULL && pl_app_head(bp) == 1 && pl_app_n(bp) == 2) {
+        /* bp stays valid across the vpush: growing the value stack
+         * reallocs the stack array, never the heap */
         pl_vpush(t, pl_app_args(bp)[0]);
         m++;
-        /* re-read: vpush may have grown the stack, bp is still valid
-         * because growth reallocs the stack array, not the heap */
-        bp = pl_as(PL_TAG_APP, t->vstack[cursor]);
         t->vstack[cursor] = pl_app_args(bp)[1];
       } else {
         break;
