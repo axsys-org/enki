@@ -260,6 +260,9 @@ static void pl_thread_roots(pl_root_visit visit, void* gc_ctx, void* src_ctx) {
     visit(&t->fstack[i].b, gc_ctx);
   }
   visit(&t->exn, gc_ctx);
+  visit(&t->resume_val, gc_ctx);
+  visit(&t->blocked_on, gc_ctx);
+  visit(&t->result, gc_ctx);
 }
 
 pl_thread* pl_thread_new(pl_heap* h) {
@@ -271,6 +274,7 @@ pl_thread* pl_thread_new(pl_heap* h) {
   t->fcap = 4096;
   t->fstack = malloc(t->fcap * sizeof(pl_frame));
   ax_assume(t->vstack != NULL && t->fstack != NULL, "oom");
+  t->fuel = UINT64_MAX; /* fuel is inert outside pl_thread_run */
   pl_gc_add_root_source(h, pl_thread_roots, t);
   return t;
 }

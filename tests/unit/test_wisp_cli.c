@@ -149,19 +149,18 @@ Test(wisp_cli, read_file_honors_file_root) {
   (void)snprintf(path, sizeof(path), "%s/snap/root.plan", dir);
   f = fopen(path, "w");
   cr_assert_not_null(f);
-  fprintf(f,
-          "(#bind Output\n"
-          "  (#pin (#law \"Output\" (Output x) ((#pin \"R\") (\"Output\" "
-          "x)))))\n"
-          "(#bind ReadFile\n"
-          "  (#pin (#law \"ReadFile\" (ReadFile x) ((#pin \"R\") "
-          "(\"ReadFile\" x)))))\n"
-          "(#bind inside\n"
-          "  (#pin (#law \"inside\" (inside args) ((#pin \"R\") (\"Output\" "
-          "((#pin \"R\") (\"ReadFile\" \"allowed.txt\")))))))\n"
-          "(#bind escape\n"
-          "  (#pin (#law \"escape\" (escape args) ((#pin \"R\") (\"Output\" "
-          "((#pin \"R\") (\"ReadFile\" \"../secret.txt\")))))))\n");
+  fprintf(f, "(#bind Output\n"
+             "  (#pin (#law \"Output\" (Output x) ((#pin \"R\") (\"Output\" "
+             "x)))))\n"
+             "(#bind ReadFile\n"
+             "  (#pin (#law \"ReadFile\" (ReadFile x) ((#pin \"R\") "
+             "(\"ReadFile\" x)))))\n"
+             "(#bind inside\n"
+             "  (#pin (#law \"inside\" (inside args) ((#pin \"R\") (\"Output\" "
+             "((#pin \"R\") (\"ReadFile\" \"allowed.txt\")))))))\n"
+             "(#bind escape\n"
+             "  (#pin (#law \"escape\" (escape args) ((#pin \"R\") (\"Output\" "
+             "((#pin \"R\") (\"ReadFile\" \"../secret.txt\")))))))\n");
   fclose(f);
 
   char cmd[1024];

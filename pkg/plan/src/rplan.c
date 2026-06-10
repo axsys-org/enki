@@ -118,8 +118,7 @@ static bool rp_path_under_root(const char* root, const char* path) {
   if (strcmp(root, "/") == 0)
     return true;
   size_t rn = strlen(root);
-  return strncmp(path, root, rn) == 0 &&
-         (path[rn] == '\0' || path[rn] == '/');
+  return strncmp(path, root, rn) == 0 && (path[rn] == '\0' || path[rn] == '/');
 }
 
 static bool rp_resolve_read_path(pl_thread* t, const char* arg_path,

@@ -73,6 +73,23 @@ struct pl_thread {
   const char* exn_msg; /* non-NULL: runtime error, not catchable by Try */
   jmp_buf* handler;
 
+  /*
+   * Suspension state (spec §3–§4; driven by pl_thread_run in eval.c).
+   * A suspended thread is a complete continuation: value stack, frame
+   * stack, and these slots.  All pl_val fields here are root slots.
+   */
+  uint64_t fuel;         /* reductions remaining this quantum */
+  uint32_t centry_depth; /* >0: native frames below us — suspension deferred */
+  bool suspendable;      /* true only while pl_thread_run drives this thread */
+  bool pending_yield;    /* fuel hit 0 inside a C-entry region */
+  uint8_t resume_kind;   /* pl_resume_kind */
+  uint8_t status;        /* last pl_run_status */
+  size_t base_vsp;       /* entry watermarks (T4): EXN unwinds to these; */
+  size_t base_fsp;       /* the run is DONE when fsp returns to base_fsp */
+  pl_val resume_val;     /* root: value to EVAL or RETURN on re-entry */
+  pl_val blocked_on;     /* root: effect request while blocked */
+  pl_val result;         /* root: final value after PL_RUN_DONE */
+
   /* The reference vMode: op 82 (rplan I/O) is callable only in RPLAN
    * mode (REPL / snapshot execution), never while assembling modules. */
   bool rplan_f;

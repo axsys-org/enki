@@ -2,12 +2,13 @@
 
 **Status:** P0 deliverable per §11/§12 of the Suspension & Actor Runtime spec.
 **Sources examined:**
+
 - reaver (primary, semantic oracle): `reaver/src/hs/Plan.hs`, `Types.hs`, `Repl.hs`, `reaver/src/reaver/actor-demo.rvr`
 - `io-work` branch (secondary, naming precedent): `include/enki/run.h`, `src/op82.c`, `src/run.c`, `src/fd.c`, `src/store.c`, `tests/unit/test_op82_runtime.c` (tip `bd8e1bd`; key commit `92ac333` "Actor system and IO")
 
 Per spec priority, reaver wins on observable semantics; io-work supplies naming and C-side structure. Divergences are logged inline and summarized in §D.
 
----
+______________________________________________________________________
 
 ## 1. Step protocol
 
@@ -114,7 +115,7 @@ io-work error convention: failures return a *tank* (`er_tank_make(gc, val_v, msg
 
 No effect is treated asynchronously by either source — nothing to flag under §12 item 10's divergence clause.
 
----
+______________________________________________________________________
 
 ## D. Logged divergences
 

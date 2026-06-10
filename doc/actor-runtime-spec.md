@@ -5,14 +5,14 @@
 **Normative sources, in priority order:**
 
 1. The Haskell reference implementation in the `./reaver/` submodule — the semantic oracle for actor behavior, effect vocabulary, and PLAN evaluation. Where this spec and observable reaver behavior disagree, reaver wins and this spec gets amended.
-2. The `io-work` branch — the existing C-side actor/IO work. Treat it as design intent and naming precedent, **not** as code to preserve; this spec supersedes its mechanics where they conflict.
-3. This document — normative for the runtime *mechanics*: suspension, scheduling, heap topology, messaging, determinism, and testing.
+1. The `io-work` branch — the existing C-side actor/IO work. Treat it as design intent and naming precedent, **not** as code to preserve; this spec supersedes its mechanics where they conflict.
+1. This document — normative for the runtime *mechanics*: suspension, scheduling, heap topology, messaging, determinism, and testing.
 
 This spec deliberately does not define the actor-level *semantics* (the step-function type, the effect constructors, supervision rules); those live in the sources above. §12 is the extraction checklist: the questions the agent MUST answer from those sources before implementation, recorded as an addendum table committed alongside this spec.
 
 Normative keywords MUST / MUST NOT / SHOULD / MAY are RFC-2119.
 
----
+______________________________________________________________________
 
 ## 1. Design thesis
 
@@ -24,7 +24,7 @@ The actor model is then: one `Thread` per actor, one small private heap per acto
 
 This is **deliberately not an async IO runtime**. Unix-facing effects (file, socket, process syscalls) execute inline and block the OS thread (§6.2). Suspension exists for actor coordination — `receive` above all — not for IO multiplexing. Actors that make sustained blocking calls get their own OS thread later (§13), instead of this runtime growing a poller, completion queues, and the rest of an async stack.
 
----
+______________________________________________________________________
 
 ## 2. Substrate requirements (restated, self-contained)
 
@@ -51,7 +51,7 @@ This spec layers on a PLAN runtime with the following properties. If the codebas
 
 S8 is the load-bearing wall of the actor design: it is what makes the store safely shareable across actors with no synchronization for readers, and what guarantees actors never share mutable evaluation state (§7.4).
 
----
+______________________________________________________________________
 
 ## 3. Thread: the suspendable unit
 
@@ -89,7 +89,7 @@ Rules:
 - **T3.** A suspended Thread (`R_YIELDED` or `R_BLOCKED`) is a complete, collectable, *inspectable* continuation: its private heap may be collected at any time (its roots are exactly its registered sources), and it may be resumed any number of safepoints later with identical semantics (§10's transparency property).
 - **T4.** Entry watermarks are fields, not C locals: top-level execution always runs with frame base 0; re-entrant evaluator calls from C (§5.3) save/restore their own bases but are never suspension points.
 
----
+______________________________________________________________________
 
 ## 4. Suspension mechanics
 
@@ -125,7 +125,7 @@ static inline void gc_reserve(Thread *t, size_t cells) {
 ### 4.3 Suspension procedure (depth 0)
 
 1. Capture the resume point per §4.1 (one enum store + one rooted `Val` store, or one `pc` writeback).
-2. Return `R_YIELDED` (or `R_BLOCKED`, §6) from `thread_run` through normal C returns — the trampoline is the only live C frame, by §5.3.
+1. Return `R_YIELDED` (or `R_BLOCKED`, §6) from `thread_run` through normal C returns — the trampoline is the only live C frame, by §5.3.
 
 Total cost: a handful of stores. **There is no "context" to save** beyond what the machine already keeps in the Thread by S4/S6 — that is the entire point of the design.
 
@@ -133,7 +133,7 @@ Total cost: a handful of stores. **There is no "context" to save** beyond what t
 
 `thread_run` switches on `resume_kind`: `RES_EVAL` → EVAL `resume_val`; `RES_RETURN` → RETURN `resume_val`; `RES_RUN` → re-enter the dispatch loop of the law in the top `F_RUN` frame at `resume_pc`. For a Thread resumed after `R_BLOCKED`, the scheduler MUST first deposit the effect's response (§6.3) — which is precisely setting `resume_kind=RES_RETURN; resume_val=response`.
 
----
+______________________________________________________________________
 
 ## 5. What may and may not suspend
 
@@ -154,7 +154,7 @@ A *C-entry region* is any execution with native frames between the trampoline an
 - **C3.** Effects (§6) MUST NOT be initiated from inside a C-entry region. An effect reaching the machine from depth > 0 is a runtime abort in debug builds.
 - **C4.** New evaluator code MUST prefer frames over C recursion; C-entry is a tolerated exception for bounded work, not a pattern.
 
----
+______________________________________________________________________
 
 ## 6. Effects: coordination suspends, unix blocks
 
@@ -170,20 +170,21 @@ The cost of the direct class — one actor's slow `read(2)` stalls the executor 
 ### 6.2 Direct effects
 
 1. Recognized by the machine at a depth-0 safepoint (C3 applies to both classes: effect *initiation* never happens inside a C-entry region — this keeps the event-log order well-defined).
-2. The handler runs as its own C-entry region (`centry_depth++`): performs the syscall(s), allocates the response value in the actor's private heap under the normal reserve discipline, returns it; the machine RETURNs it. Results never cross actors here, so no pinning is involved.
-3. **Replay hook:** between recognition and execution the handler consults the executor mode. Live → perform the syscall and append `(actor, effect-id, args-hash, result-bytes)` to the event log, result serialized canonically. Replay → return the deserialized logged result and perform nothing. This hook is mandatory; a direct effect without it breaks R2.
-4. Errors (errno, EOF, partial reads) are data: surfaced inside the response value per the vocabulary, never as PLAN exceptions invented by the runtime. EINTR is retried in the handler.
+1. The handler runs as its own C-entry region (`centry_depth++`): performs the syscall(s), allocates the response value in the actor's private heap under the normal reserve discipline, returns it; the machine RETURNs it. Results never cross actors here, so no pinning is involved.
+1. **Replay hook:** between recognition and execution the handler consults the executor mode. Live → perform the syscall and append `(actor, effect-id, args-hash, result-bytes)` to the event log, result serialized canonically. Replay → return the deserialized logged result and perform nothing. This hook is mandatory; a direct effect without it breaks R2.
+1. Errors (errno, EOF, partial reads) are data: surfaced inside the response value per the vocabulary, never as PLAN exceptions invented by the runtime. EINTR is retried in the handler.
 
 ### 6.3 Coordination effects
 
 1. The request is materialized as a PLAN value; payloads that cross actors (message bodies, spawn arguments) MUST be pinned at initiation — see M2, §7.3.
-2. The request is parked in `t->blocked_on` (rooted) and the Thread suspends with `R_BLOCKED` at a RETURN-class point: the machine is left expecting the effect's *response* as the returned value.
-3. The scheduler resumes it by depositing the response — `resume_kind=RES_RETURN; resume_val=response; blocked_on=NIL` — and re-queueing. Responses carrying cross-actor data are store-resident (M1) and flow in without copying.
-4. A coordination effect the runtime can satisfy immediately (e.g., a `send`, or a `receive` against a non-empty mailbox) MAY be serviced inline without leaving the runnable set, provided observable semantics match reaver; the uniform `R_BLOCKED` path MUST also remain correct (it is the one YIELD_STRESS exercises).
+1. The request is parked in `t->blocked_on` (rooted) and the Thread suspends with `R_BLOCKED` at a RETURN-class point: the machine is left expecting the effect's *response* as the returned value.
+1. The scheduler resumes it by depositing the response — `resume_kind=RES_RETURN; resume_val=response; blocked_on=NIL` — and re-queueing. Responses carrying cross-actor data are store-resident (M1) and flow in without copying.
+1. A coordination effect the runtime can satisfy immediately (e.g., a `send`, or a `receive` against a non-empty mailbox) MAY be serviced inline without leaving the runnable set, provided observable semantics match reaver; the uniform `R_BLOCKED` path MUST also remain correct (it is the one YIELD_STRESS exercises).
+
 - **E1.** An `R_BLOCKED` Thread satisfies all the guarantees of an `R_YIELDED` one (T3): initiation only at depth-0 safepoints makes this so.
 - **E2.** Effect order within one actor is program semantics (transparency property); completion order across actors is scheduler-determined and captured by the log where external (§9).
 
----
+______________________________________________________________________
 
 ## 7. Actors, heaps, and the store
 
@@ -223,7 +224,7 @@ One actor = one Thread = one private heap. The actor's *state* is a PLAN value; 
 - **L2.** An uncaught PLAN exception at actor top level marks the actor `A_CRASHED`; the exception value is pinned and recorded in the event log. Supervision/restart/link semantics are reaver-normative (§12 items 6–7); the runtime contract is only: a crashed actor's Thread is never resumed, its heap is freed, its pinned crash report and last snapshot survive.
 - **L3.** Abandoned blackholes after a crash are unreachable by H3 (no other actor could hold them) and are freed with the heap. No repair pass needed.
 
----
+______________________________________________________________________
 
 ## 8. Scheduler
 
@@ -247,7 +248,7 @@ When the run queue empties: fire due timers; if timers are pending, a single blo
 - **D1.** `QUANTUM` is a fixed configuration constant per executor instance, recorded in the event log header.
 - **D2.** The executor's choices MUST be a pure function of: initial actor set, the logged external-event stream (§9), and `QUANTUM`. Tie-breaks (multiple timers at one deadline, multiple host injections in one batch) MUST use a deterministic total order (actor id), never arrival nondeterminism.
 
----
+______________________________________________________________________
 
 ## 9. Determinism, event log, replay
 
@@ -256,7 +257,7 @@ When the run queue empties: fire due timers; if timers are pending, a single blo
 - **R3.** *Snapshots*: an actor's state is a PLAN value; snapshotting = pinning it and logging the hash. Recovery = load pin by hash from the store backend, replay the log suffix. Snapshot cadence is policy (per §12 item 8 if the reference specifies one; otherwise configurable count-of-events).
 - **R4.** Fuel-schedule independence: changing `QUANTUM` may change interleavings and therefore the log, but any *single-actor* observable sequence (its events in, its effects out, its state hashes) MUST be unchanged. (Cross-actor message *arrival order* may legitimately differ; per-actor semantics may not.)
 
----
+______________________________________________________________________
 
 ## 10. Testing
 
@@ -271,11 +272,11 @@ Effect initiated at `centry_depth > 0` aborts (C3). Suspension attempted at dept
 ### 10.3 System-level
 
 1. **Differential vs reaver:** identical event scripts driven into both runtimes; compare per-actor state hashes and effect-request sequences. Required scenarios: message ordering per M3, crash + supervision per §12, timer ordering ties (D2), receive-while-empty, quiescence and host re-injection, spawn chains, direct-effect replay (logged syscall results substituted, byte-identical state hashes), an actor that loops forever (fairness: others still progress), an actor blocked in a slow direct effect (semantics correct despite the stall).
-2. **Replay:** record a randomized run (fuzzed event timings), replay per R2, assert bit-identical. Then re-run live with a different `QUANTUM` and assert R4.
-3. **Blackhole isolation:** property test that `<<loop>>` self-detection still fires under heavy cross-actor messaging (guards H3 against regression).
-4. **Soak:** thousands of actors, small heaps, sustained messaging; assert bounded RSS apart from store growth, and per-actor GC pause bounds.
+1. **Replay:** record a randomized run (fuzzed event timings), replay per R2, assert bit-identical. Then re-run live with a different `QUANTUM` and assert R4.
+1. **Blackhole isolation:** property test that `<<loop>>` self-detection still fires under heavy cross-actor messaging (guards H3 against regression).
+1. **Soak:** thousands of actors, small heaps, sustained messaging; assert bounded RSS apart from store growth, and per-actor GC pause bounds.
 
----
+______________________________________________________________________
 
 ## 11. Implementation plan
 
@@ -293,15 +294,15 @@ Each phase lands green across the sanitizer matrix and YIELD_STRESS before the n
 For each item: cite file/function in reaver (primary) and `io-work` (secondary), state the rule, note divergences between the two sources (reaver wins; log the divergence).
 
 1. **Step protocol** — the actor state function's type, saturation convention, and how (state′, effects) are decomposed from its result; what `R_DONE` means for an actor (§8 table).
-2. **Effect vocabulary** — every effect constructor: fields, field strictness, response type, error responses.
-3. **Effect initiation convention** — how the machine recognizes an effect (primop? distinguished pins? result shape?).
-4. **Mailbox semantics** — ordering guarantees, overflow policy, selective receive (if any).
-5. **Actor identity** — id scheme, relation to the namespace, addressability from PLAN values.
-6. **Spawn/link/monitor** — semantics and payloads.
-7. **Crash & supervision** — what a crash report contains; restart semantics; escalation.
-8. **Snapshot/event-log format** — if reaver fixes one, adopt it; else propose under R1–R3.
-9. **Timer semantics** — absolute vs relative, resolution, coalescing.
-10. **Coordination vs direct classification** — for every effect in the vocabulary: coordination (suspends, §6.3) or direct (inline, blocks the OS thread, §6.2). `receive` is coordination by definition; anything wrapping a unix syscall defaults to direct. Flag any effect the reference treats asynchronously — that is a divergence to record, not machinery to build.
+1. **Effect vocabulary** — every effect constructor: fields, field strictness, response type, error responses.
+1. **Effect initiation convention** — how the machine recognizes an effect (primop? distinguished pins? result shape?).
+1. **Mailbox semantics** — ordering guarantees, overflow policy, selective receive (if any).
+1. **Actor identity** — id scheme, relation to the namespace, addressability from PLAN values.
+1. **Spawn/link/monitor** — semantics and payloads.
+1. **Crash & supervision** — what a crash report contains; restart semantics; escalation.
+1. **Snapshot/event-log format** — if reaver fixes one, adopt it; else propose under R1–R3.
+1. **Timer semantics** — absolute vs relative, resolution, coalescing.
+1. **Coordination vs direct classification** — for every effect in the vocabulary: coordination (suspends, §6.3) or direct (inline, blocks the OS thread, §6.2). `receive` is coordination by definition; anything wrapping a unix syscall defaults to direct. Flag any effect the reference treats asynchronously — that is a divergence to record, not machinery to build.
 
 ## 13. Deferred (named seams)
 

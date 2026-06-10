@@ -21,6 +21,57 @@ pl_val pl_apply(pl_thread* t, pl_val f, pl_val x);
 /* Deep normalization (the reference rnf). */
 pl_val pl_nf(pl_thread* t, pl_val v);
 
+/* ── Suspension (spec §3–§4) ───────────────────────────────────────────── */
+
+/*
+ * A green thread is not a saved C stack: the complete continuation lives
+ * in the thread's value/frame stacks plus the resume slots.  Suspension
+ * is returning from pl_thread_run; resumption is calling it again.
+ *
+ * Fuel is the only yield trigger (Y2): one decrement per machine step at
+ * the EVAL position, deterministic for identical state and fuel.  Yields
+ * fire only at depth-0 safepoints; inside C-entry regions (re-entrant
+ * evaluator calls, op bodies, jets) the request is deferred and fires at
+ * the first depth-0 step (C1).
+ */
+
+typedef enum {
+  PL_RUN_DONE = 0, /* normal completion; value in t->result */
+  PL_RUN_EXN,      /* PLAN exception; t->exn / t->exn_msg, stacks unwound */
+  PL_RUN_YIELDED,  /* fuel exhausted; resume with pl_thread_run */
+  PL_RUN_BLOCKED,  /* awaiting an effect response (t->blocked_on);
+                      deposit one with pl_thread_deposit, then run */
+} pl_run_status;
+
+typedef enum {
+  PL_RES_EVAL = 0, /* re-enter the machine EVALing t->resume_val */
+  PL_RES_RETURN,   /* re-enter RETURNing t->resume_val to the top frame */
+  PL_RES_RUN,      /* reserved: compiled-law dispatch (spec §4.1 F_RUN) */
+} pl_resume_kind;
+
+/*
+ * Arm a thread to evaluate v (to WHNF) from the current stack position.
+ * Records the entry watermarks (T4): an uncaught exception unwinds to
+ * them, and the run completes when the frame stack returns to base.
+ */
+void pl_thread_start(pl_thread* t, pl_val v);
+/* As pl_thread_start, but drive a deep normalization of v. */
+void pl_thread_start_nf(pl_thread* t, pl_val v);
+
+/*
+ * Run until done, exception, or fuel exhaustion.  The only public
+ * execution entry for suspendable threads (T1).  Resumes per
+ * t->resume_kind; must not be re-entered from evaluator C code.
+ */
+pl_run_status pl_thread_run(pl_thread* t, uint64_t fuel);
+
+/* Deposit an effect response into a PL_RUN_BLOCKED thread (§4.4): the
+ * machine resumes by RETURNing the response to the pending frame. */
+void pl_thread_deposit(pl_thread* t, pl_val response);
+
+/* Result of the last PL_RUN_DONE. */
+pl_val pl_thread_result(pl_thread* t);
+
 /* ── Errors ────────────────────────────────────────────────────────────── */
 
 /* Raise PLAN_EXN carrying a PLAN value (catchable by Try). */
@@ -45,6 +96,7 @@ typedef struct pl_catch {
   jmp_buf jb;
   jmp_buf* prev;
   size_t vsp, fsp;
+  uint32_t centry; /* centry_depth watermark; restored on unwind */
 } pl_catch;
 
 void pl_catch_init(pl_thread* t, pl_catch* c);

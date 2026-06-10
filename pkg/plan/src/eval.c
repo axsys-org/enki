@@ -43,6 +43,7 @@ void pl_catch_init(pl_thread* t, pl_catch* c) {
   c->prev = t->handler;
   c->vsp = t->vsp;
   c->fsp = t->fsp;
+  c->centry = t->centry_depth;
   t->handler = &c->jb;
 }
 
@@ -54,6 +55,7 @@ void pl_catch_unwind(pl_thread* t, pl_catch* c) {
   t->handler = c->prev;
   t->vsp = c->vsp;
   t->fsp = c->fsp;
+  t->centry_depth = c->centry; /* longjmp skipped the region epilogues */
 }
 
 /* ── Enter hook seam ───────────────────────────────────────────────────── */
@@ -101,13 +103,53 @@ static pl_cell* pl_lawp(pl_val head) {
   return pl_ptr(pl_pin_body(pl_ptr(head)));
 }
 
+/* ── Suspension slow path (spec §4.2) ──────────────────────────────────── */
+
+/*
+ * Called when the per-step fuel decrement hits zero.  Returns true when
+ * the machine should capture a resume point and yield: only under
+ * pl_thread_run and only with no native frames between the trampoline
+ * and the current step (§5.2).  Otherwise the request is deferred: under
+ * an executor, fuel is pinned to 1 so every subsequent step funnels back
+ * here until depth 0 (the §4.2 grace path); outside an executor fuel is
+ * inert and simply rearmed.
+ */
+static bool pl_yield_now(pl_thread* t) {
+  if (t->suspendable && t->centry_depth == 0) {
+    t->pending_yield = false;
+    return true;
+  }
+  if (t->suspendable) {
+    t->pending_yield = true;
+    t->fuel = 1;
+  } else {
+    t->fuel = UINT64_MAX;
+  }
+  return false;
+}
+
 /* ── The machine ───────────────────────────────────────────────────────── */
 
-static pl_val pl_run(pl_thread* t, pl_val v, size_t base) {
+static pl_run_status pl_run(pl_thread* t, pl_val v, size_t base,
+                            bool at_return) {
   pl_val env, expr;
   pl_frame* fr;
 
+  if (at_return)
+    goto ret;
+
 eval:
+  /*
+   * The per-step safepoint: one decrement and one branch (Y1).  Fuel is
+   * the only yield trigger (Y2).  At this position the complete machine
+   * state is (v, value stack, frame stack) — nothing lives in C locals —
+   * so suspension is a two-field capture and a normal return.
+   */
+  if (ax_unlikely(--t->fuel == 0) && pl_yield_now(t)) {
+    t->resume_kind = PL_RES_EVAL;
+    t->resume_val = v;
+    return PL_RUN_YIELDED;
+  }
   if (pl_is_whnf(v))
     goto ret;
   {
@@ -209,8 +251,10 @@ eval_expr:
   goto ret;
 
 ret:
-  if (t->fsp == base)
-    return v;
+  if (t->fsp == base) {
+    t->result = v;
+    return PL_RUN_DONE;
+  }
   fr = &t->fstack[t->fsp - 1];
   switch (fr->kind) {
 
@@ -330,7 +374,10 @@ ret:
   judge: {
     if (pl_hook != NULL) {
       pl_val out;
-      if (pl_hook(t, hbase, argc, &out)) {
+      t->centry_depth++; /* jets are C-entry regions (C1/C2) */
+      bool handled = pl_hook(t, hbase, argc, &out);
+      t->centry_depth--;
+      if (handled) {
         t->vsp = hbase;
         v = out;
         goto eval;
@@ -349,8 +396,14 @@ ret:
     for (;;) {
       pl_val b = t->vstack[cursor];
       if (!pl_is_whnf(b)) {
-        /* dynamically-built law body: force the chain node */
-        b = pl_run(t, b, t->fsp);
+        /* dynamically-built law body: force the chain node.  This is a
+         * re-entrant evaluator call — a C-entry region (C1): JUDGE
+         * state (lp, cursor, m) lives in C locals, so no suspension. */
+        t->centry_depth++;
+        pl_run_status s = pl_run(t, b, t->fsp, false);
+        t->centry_depth--;
+        ax_assume(s == PL_RUN_DONE, "C-entry run cannot suspend");
+        b = t->result;
         t->vstack[cursor] = b;
       }
       pl_cell* bp = pl_as(PL_TAG_APP, b);
@@ -483,18 +536,173 @@ op_body:
   {
     const pl_opdesc* d = &pl_ops[fr->op];
     size_t argbase = fr->argbase;
-    t->fsp--; /* pop before the body so its frames take this slot */
+    t->fsp--;          /* pop before the body so its frames take this slot */
+    t->centry_depth++; /* op bodies are C-entry regions (C1) */
     pl_val r = d->body(t, argbase);
+    t->centry_depth--;
     t->vsp = argbase - 1; /* drop args and the name slot */
     v = r;
     goto eval;
   }
 }
 
-/* ── Entry points ──────────────────────────────────────────────────────── */
+/* ── Suspendable execution (spec §3) ───────────────────────────────────── */
+
+void pl_thread_start(pl_thread* t, pl_val v) {
+  ax_assume(!t->suspendable && t->centry_depth == 0,
+            "pl_thread_start: thread is running");
+  t->base_vsp = t->vsp;
+  t->base_fsp = t->fsp;
+  t->resume_kind = PL_RES_EVAL;
+  t->resume_val = v;
+  t->blocked_on = 0;
+  t->pending_yield = false;
+  t->status = PL_RUN_YIELDED;
+}
+
+void pl_thread_start_nf(pl_thread* t, pl_val v) {
+  pl_thread_start(t, v);
+  pl_frame* fr = pl_fpush(t); /* above base_fsp: pops exactly at DONE */
+  fr->kind = PL_F_NF;
+}
+
+void pl_thread_deposit(pl_thread* t, pl_val response) {
+  ax_assume(t->status == PL_RUN_BLOCKED,
+            "pl_thread_deposit: thread is not blocked");
+  t->resume_kind = PL_RES_RETURN;
+  t->resume_val = response;
+  t->blocked_on = 0;
+  t->status = PL_RUN_YIELDED;
+}
+
+pl_val pl_thread_result(pl_thread* t) {
+  ax_assume(t->status == PL_RUN_DONE, "pl_thread_result: thread not done");
+  return t->result;
+}
+
+pl_run_status pl_thread_run(pl_thread* t, uint64_t fuel) {
+  ax_assume(t->centry_depth == 0 && !t->suspendable,
+            "pl_thread_run: re-entered from evaluator code");
+  ax_assume(t->status == PL_RUN_YIELDED,
+            "pl_thread_run: thread is not runnable (status %d) — "
+            "start it or deposit a response first",
+            (int)t->status);
+  /* the per-step check pre-decrements, so fuel 1 would yield before the
+   * first step and the thread could never progress */
+  ax_assume(fuel >= 2, "pl_thread_run: fuel quantum must be >= 2");
+  t->fuel = fuel;
+  t->pending_yield = false;
+  t->suspendable = true;
+
+  pl_catch c;
+  pl_catch_init(t, &c);
+  if (setjmp(c.jb) != 0) {
+    /* uncaught at thread top level: unwind to the entry watermarks (T4);
+     * t->exn / t->exn_msg carry the payload */
+    t->handler = c.prev;
+    t->vsp = t->base_vsp;
+    t->fsp = t->base_fsp;
+    t->centry_depth = 0;
+    t->suspendable = false;
+    t->fuel = UINT64_MAX;
+    t->status = PL_RUN_EXN;
+    return PL_RUN_EXN;
+  }
+
+  pl_run_status s;
+  switch (t->resume_kind) {
+  case PL_RES_EVAL:
+    s = pl_run(t, t->resume_val, t->base_fsp, false);
+    break;
+  case PL_RES_RETURN:
+    s = pl_run(t, t->resume_val, t->base_fsp, true);
+    break;
+  default:
+    ax_abort("pl_thread_run: bad resume kind %d", (int)t->resume_kind);
+  }
+  pl_catch_pop(t, &c);
+  t->suspendable = false;
+  t->fuel = UINT64_MAX;
+  t->status = (uint8_t)s;
+  return s;
+}
+
+/* ── Entry points (host / C-entry) ─────────────────────────────────────── */
+
+/*
+ * Re-entrant evaluator call from host or op code: a C-entry region (C1).
+ * Runs with fuel inert (or in §4.2 grace under an executor) and can
+ * therefore never suspend.
+ */
+static pl_val pl_run_centry(pl_thread* t, pl_val v, size_t base) {
+  t->centry_depth++;
+  pl_run_status s = pl_run(t, v, base, false);
+  t->centry_depth--;
+  ax_assume(s == PL_RUN_DONE, "C-entry run cannot suspend");
+  return t->result;
+}
+
+#ifdef PL_YIELD_STRESS
+/*
+ * YIELD_STRESS (spec §10.1): at true depth 0, drive every host-API
+ * evaluation through pl_thread_run at one machine step per quantum, so
+ * the entire existing suite exercises suspension at every safepoint.
+ * Results, exceptions, and stack effects must be indistinguishable from
+ * the direct path.
+ */
+static pl_val pl_stress_drive(pl_thread* t, pl_val v, size_t base) {
+  /* save any armed-but-not-running suspension state; vals stay rooted */
+  size_t save_bvsp = t->base_vsp, save_bfsp = t->base_fsp;
+  uint8_t save_kind = t->resume_kind, save_status = t->status;
+  size_t mark = t->vsp;
+  pl_vpush(t, t->resume_val);
+  pl_vpush(t, t->blocked_on);
+  pl_vpush(t, t->result);
+
+  t->base_vsp = t->vsp;
+  t->base_fsp = base;
+  t->resume_kind = PL_RES_EVAL;
+  t->resume_val = v;
+  t->blocked_on = 0;
+  t->pending_yield = false;
+  t->status = PL_RUN_YIELDED;
+
+  pl_run_status s;
+  do
+    s = pl_thread_run(t, 2);
+  while (s == PL_RUN_YIELDED);
+  ax_assume(s != PL_RUN_BLOCKED, "stress drive cannot block");
+
+  pl_val r = (s == PL_RUN_DONE) ? t->result : 0;
+  t->result = t->vstack[mark + 2];
+  t->blocked_on = t->vstack[mark + 1];
+  t->resume_val = t->vstack[mark];
+  t->vsp = mark;
+  t->base_vsp = save_bvsp;
+  t->base_fsp = save_bfsp;
+  t->resume_kind = save_kind;
+  t->status = save_status;
+
+  if (s == PL_RUN_EXN) {
+    /* re-raise to the caller's handler, as the direct path would */
+    if (t->exn_msg != NULL)
+      pl_raise_msg(t, t->exn_msg);
+    pl_raise(t, t->exn);
+  }
+  return r;
+}
+#endif
+
+static pl_val pl_eval_public(pl_thread* t, pl_val v, size_t base) {
+#ifdef PL_YIELD_STRESS
+  if (!t->suspendable && t->centry_depth == 0)
+    return pl_stress_drive(t, v, base);
+#endif
+  return pl_run_centry(t, v, base);
+}
 
 pl_val pl_whnf(pl_thread* t, pl_val v) {
-  return pl_run(t, v, t->fsp);
+  return pl_eval_public(t, v, t->fsp);
 }
 
 pl_val pl_apply(pl_thread* t, pl_val f, pl_val x) {
@@ -502,12 +710,12 @@ pl_val pl_apply(pl_thread* t, pl_val f, pl_val x) {
   pl_frame* fr = pl_fpush(t);
   fr->kind = PL_F_APPLY;
   fr->b = x;
-  return pl_run(t, f, base);
+  return pl_eval_public(t, f, base);
 }
 
 pl_val pl_nf(pl_thread* t, pl_val v) {
   size_t base = t->fsp;
   pl_frame* fr = pl_fpush(t);
   fr->kind = PL_F_NF;
-  return pl_run(t, v, base);
+  return pl_eval_public(t, v, base);
 }

@@ -22,7 +22,7 @@
  * reference loadAssembly / runRepl drivers.
  */
 
-#define BOOT_HEAP_CELLS ((size_t)1 << 22) /* 32 MiB per semispace, grows */
+#define BOOT_HEAP_CELLS        ((size_t)1 << 22) /* 32 MiB per semispace, grows */
 #define BOOT_DEFAULT_FILE_ROOT "./reaver/src"
 
 typedef struct boot_module {
@@ -512,8 +512,7 @@ int main(int argc, char** argv) {
   const char* fn_c = argc - argi >= 3 ? argv[argi + 2] : NULL;
   int run_argc = argc - argi >= 4 ? argc - argi - 3 : 0;
   char** run_argv = argc - argi >= 4 ? argv + argi + 3 : NULL;
-  bool ok =
-      boot_load_assembly(&ctx, argv[argi + 1], fn_c, run_argc, run_argv);
+  bool ok = boot_load_assembly(&ctx, argv[argi + 1], fn_c, run_argc, run_argv);
 
   pl_gc_del_root_source(heap, boot_roots, &ctx);
   for (boot_module* mod = ctx.mod_v; mod != NULL;) {
