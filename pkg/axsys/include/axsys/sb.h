@@ -127,7 +127,7 @@ AX_SB_API char* ax_sb_build_with_allocator(const ax_sb* sb,
 #include <string.h>
 
 #ifndef SIZE_MAX
-#define SIZE_MAX ((size_t) - 1)
+#define SIZE_MAX ((size_t)-1)
 #endif
 
 static int ax_sb__allocator_ok(const ax_allocator* a) {

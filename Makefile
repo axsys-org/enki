@@ -70,6 +70,7 @@ PLAN_SRCS := $(wildcard pkg/plan/src/*.c)
 ENKI_SRCS := $(wildcard pkg/enki/src/*.c)
 HEADERS := $(wildcard pkg/axsys/include/axsys/*.h) \
 	$(wildcard pkg/plan/include/plan/*.h) \
+	$(wildcard pkg/plan/src/*.h) \
 	$(wildcard pkg/enki/include/enki/*.h)
 
 UNIT_DIR := tests/unit

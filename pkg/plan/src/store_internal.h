@@ -17,8 +17,8 @@ void pl_store_release(pl_store* s, size_t mark);
 pl_val pl_store_intern_get(pl_store* s, const uint8_t hash[32]);
 void pl_store_intern_put(pl_store* s, const uint8_t hash[32], pl_val pin);
 
-bool pl_store_backend_put(pl_store* s, const uint8_t hash[32],
-                          const uint8_t* b, size_t n);
+bool pl_store_backend_put(pl_store* s, const uint8_t hash[32], const uint8_t* b,
+                          size_t n);
 bool pl_store_backend_get(pl_store* s, const uint8_t hash[32], uint8_t** out_b,
                           size_t* out_s);
 

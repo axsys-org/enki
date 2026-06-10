@@ -696,9 +696,8 @@ static pl_val op_load(pl_thread* t, size_t ab) {
 
 /* ── The table ─────────────────────────────────────────────────────────── */
 
-#define M2(a, b) ax_s2(a, b)
-#define OP66(name, argc, mask, deep, body)                                     \
-  { 66, name, argc, mask, deep, body }
+#define M2(a, b)                           ax_s2(a, b)
+#define OP66(name, argc, mask, deep, body) {66, name, argc, mask, deep, body}
 
 const pl_opdesc pl_ops[] = {
     /* op 0: core PLAN */
