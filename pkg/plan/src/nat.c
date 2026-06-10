@@ -11,6 +11,16 @@ static_assert(sizeof(mp_limb_t) == sizeof(uint64_t),
               "mpn limbs must be 64-bit");
 
 /*
+ * The heap stores limbs as uint64_t cells.  On LP64 glibc that is the
+ * same type as mp_limb_t (unsigned long); on Darwin uint64_t is
+ * unsigned long long, a distinct pointer type of identical layout
+ * (asserted above), so mpn destinations need an explicit cast.
+ */
+static mp_limb_t* mpn_dst(uint64_t* p) {
+  return (mp_limb_t*)p;
+}
+
+/*
  * Limb view of a nat.  For a direct nat the limb is copied into *tmp;
  * for a boxed nat the pointer aliases the heap object, so the view is
  * valid only while nothing moves (use inside a no-collect window, or
@@ -28,7 +38,7 @@ static pl_limbs pl_limb_view(const pl_val* v, mp_limb_t* tmp) {
   }
   pl_cell* p = pl_ptr(*v);
   ax_assume(pl_hdr_kind(p[0]) == PL_K_NAT, "limb view of non-nat");
-  return (pl_limbs){pl_nat_limb_ptr(p), pl_nat_limbs(p)};
+  return (pl_limbs){(const mp_limb_t*)pl_nat_limb_ptr(p), pl_nat_limbs(p)};
 }
 
 size_t pl_nat_limb_len(pl_val v) {
@@ -118,7 +128,7 @@ pl_val pl_nat_inc(pl_thread* t, pl_val* a) {
   pl_val r = pl_mk_nat_limbs(t, la + 1, &out);
   mp_limb_t tmp;
   pl_limbs va = pl_limb_view(a, &tmp);
-  out[la] = mpn_add_1(out, va.p, la, 1);
+  out[la] = mpn_add_1(mpn_dst(out), va.p, la, 1);
   r = pl_nat_trim(r);
   PL_GC_ALLOW(t);
   return r;
@@ -134,7 +144,7 @@ pl_val pl_nat_dec(pl_thread* t, pl_val* a) {
   pl_val r = pl_mk_nat_limbs(t, la, &out);
   mp_limb_t tmp;
   pl_limbs va = pl_limb_view(a, &tmp);
-  mpn_sub_1(out, va.p, la, 1);
+  mpn_sub_1(mpn_dst(out), va.p, la, 1);
   r = pl_nat_trim(r);
   PL_GC_ALLOW(t);
   return r;
@@ -159,7 +169,7 @@ pl_val pl_nat_add(pl_thread* t, pl_val* a, pl_val* b) {
     va = vb;
     vb = sw;
   }
-  mp_limb_t carry = vb.n ? mpn_add(out, va.p, va.n, vb.p, vb.n)
+  mp_limb_t carry = vb.n ? mpn_add(mpn_dst(out), va.p, va.n, vb.p, vb.n)
                          : (memcpy(out, va.p, va.n * 8), 0);
   out[va.n] = carry;
   for (size_t i = va.n + 1; i < lr; i++)
@@ -181,7 +191,7 @@ pl_val pl_nat_sub(pl_thread* t, pl_val* a, pl_val* b) {
   pl_val r = pl_mk_nat_limbs(t, la, &out);
   mp_limb_t ta, tb;
   pl_limbs va = pl_limb_view(a, &ta), vb = pl_limb_view(b, &tb);
-  mpn_sub(out, va.p, va.n, vb.p, vb.n);
+  mpn_sub(mpn_dst(out), va.p, va.n, vb.p, vb.n);
   r = pl_nat_trim(r);
   PL_GC_ALLOW(t);
   return r;
@@ -204,9 +214,9 @@ pl_val pl_nat_mul(pl_thread* t, pl_val* a, pl_val* b) {
   mp_limb_t ta, tb;
   pl_limbs va = pl_limb_view(a, &ta), vb = pl_limb_view(b, &tb);
   if (va.n >= vb.n)
-    mpn_mul(out, va.p, va.n, vb.p, vb.n);
+    mpn_mul(mpn_dst(out), va.p, va.n, vb.p, vb.n);
   else
-    mpn_mul(out, vb.p, vb.n, va.p, va.n);
+    mpn_mul(mpn_dst(out), vb.p, vb.n, va.p, va.n);
   r = pl_nat_trim(r);
   PL_GC_ALLOW(t);
   return r;
@@ -235,7 +245,7 @@ static pl_val pl_nat_divmod(pl_thread* t, pl_val* a, pl_val* b, bool want_mod) {
   pl_val r = pl_mk_nat_limbs(t, lb, &rp);
   mp_limb_t ta, tb;
   pl_limbs va = pl_limb_view(a, &ta), vb = pl_limb_view(b, &tb);
-  mpn_tdiv_qr(qp, rp, 0, va.p, va.n, vb.p, vb.n);
+  mpn_tdiv_qr(mpn_dst(qp), mpn_dst(rp), 0, va.p, va.n, vb.p, vb.n);
   q = pl_nat_trim(q);
   r = pl_nat_trim(r);
   PL_GC_ALLOW(t);
@@ -270,7 +280,7 @@ pl_val pl_nat_lsh(pl_thread* t, pl_val* a, pl_val* sh) {
     out[limb_shift + va.n] = 0;
   } else {
     out[limb_shift + va.n] =
-        mpn_lshift(out + limb_shift, va.p, va.n, (unsigned)bit_shift);
+        mpn_lshift(mpn_dst(out + limb_shift), va.p, va.n, (unsigned)bit_shift);
   }
   r = pl_nat_trim(r);
   PL_GC_ALLOW(t);
@@ -295,7 +305,7 @@ pl_val pl_nat_rsh(pl_thread* t, pl_val* a, pl_val* sh) {
   if (bit_shift == 0)
     memcpy(out, va.p + limb_shift, lr * 8);
   else
-    mpn_rshift(out, va.p + limb_shift, lr, (unsigned)bit_shift);
+    mpn_rshift(mpn_dst(out), va.p + limb_shift, lr, (unsigned)bit_shift);
   r = pl_nat_trim(r);
   PL_GC_ALLOW(t);
   return r;
