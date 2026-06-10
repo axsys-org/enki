@@ -18,8 +18,10 @@
  * value that the machine continues to evaluate.
  */
 typedef struct pl_opdesc {
-  uint64_t opset; /* 0 or 66 */
-  uint64_t name;  /* op0: subop number; op66: name mote */
+  uint64_t opset;     /* 0, 66 or 82 */
+  uint64_t name;      /* op0: subop number; op66: name mote */
+  const char* name_c; /* non-NULL: match the name nat against this string
+                         (op-82 names can exceed the 7-byte mote width) */
   uint8_t argc;
   uint32_t strict_mask;
   bool deep;
@@ -31,6 +33,21 @@ extern const size_t pl_nops;
 
 /* Returns descriptor index, or -1 if there is no matching primop. */
 int pl_op_lookup(uint64_t opset, pl_val name, uint32_t argc);
+
+/* op 82 (rplan) bodies, in rplan.c; arg conventions as pl_opdesc. */
+pl_val pl_op82_input(pl_thread* t, size_t ab);
+pl_val pl_op82_output(pl_thread* t, size_t ab);
+pl_val pl_op82_warn(pl_thread* t, size_t ab);
+pl_val pl_op82_read_file(pl_thread* t, size_t ab);
+pl_val pl_op82_print(pl_thread* t, size_t ab);
+pl_val pl_op82_stamp(pl_thread* t, size_t ab);
+pl_val pl_op82_now(pl_thread* t, size_t ab);
+pl_val pl_op82_closefd(pl_thread* t, size_t ab);
+pl_val pl_op82_listen(pl_thread* t, size_t ab);
+pl_val pl_op82_accept(pl_thread* t, size_t ab);
+pl_val pl_op82_read(pl_thread* t, size_t ab);
+pl_val pl_op82_write(pl_thread* t, size_t ab);
+pl_val pl_op82_actor(pl_thread* t, size_t ab);
 
 /* Frame-push helpers usable from op bodies. */
 static inline void pl_push_apply(pl_thread* t, pl_val x) {

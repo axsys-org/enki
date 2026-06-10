@@ -72,6 +72,14 @@ struct pl_thread {
   pl_val exn;          /* pending PLAN_EXN value — root slot */
   const char* exn_msg; /* non-NULL: runtime error, not catchable by Try */
   jmp_buf* handler;
+
+  /* The reference vMode: op 82 (rplan I/O) is callable only in RPLAN
+   * mode (REPL / snapshot execution), never while assembling modules. */
+  bool rplan_f;
+
+  /* When non-NULL, ReadFile resolves its argument relative to this root and
+   * refuses paths whose canonical target escapes it. */
+  const char* rplan_file_root_c;
 };
 
 pl_heap* pl_heap_new(size_t cells, pl_store* store);
