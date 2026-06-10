@@ -15,8 +15,8 @@
 #define FFF_NARG(...)                          FFF_NARG_INNER(__VA_ARGS__, 3, 2, 1)
 
 #define FAKE_VALUE_FUNC(return_type, function_name, ...)                       \
-  FFF_CONCAT(FAKE_VALUE_FUNC_,                                                 \
-             FFF_NARG(__VA_ARGS__))(return_type, function_name, __VA_ARGS__)
+  FFF_CONCAT(FAKE_VALUE_FUNC_, FFF_NARG(__VA_ARGS__))                          \
+  (return_type, function_name, __VA_ARGS__)
 
 #define FAKE_VOID_FUNC(function_name, ...)                                     \
   FFF_CONCAT(FAKE_VOID_FUNC_, FFF_NARG(__VA_ARGS__))(function_name, __VA_ARGS__)

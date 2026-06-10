@@ -17,10 +17,15 @@ static const char* reaver_plan_dir(void) {
   return env_c != NULL && env_c[0] != '\0' ? env_c : ENKI_REAVER_PLAN_DIR;
 }
 
+static const char* wisp_bin(void) {
+  const char* env_c = getenv("ENKI_WISP_BIN");
+  return env_c != NULL && env_c[0] != '\0' ? env_c : ENKI_WISP_BIN;
+}
+
 Test(wisp_cli, reaver_module_exits_zero) {
   char command_c[4096];
   int command_s = snprintf(command_c, sizeof(command_c), "%s %s reaver",
-                           ENKI_WISP_BIN, reaver_plan_dir());
+                           wisp_bin(), reaver_plan_dir());
 
   cr_assert(command_s >= 0 && (size_t)command_s < sizeof(command_c),
             "failed to build wisp command");
