@@ -389,6 +389,7 @@ static bool boot_run_function(boot_ctx* ctx, pl_val fun, int argc,
   en_wisp* w = ctx->w;
   en_env_entry* old_env = w->env;
   w->env = NULL;
+  w->t->rplan_f = true; /* runRepl runs the program in RPLAN mode */
 
   size_t mark = en_root_mark(w);
   en_root_push(w, boot_repl_fun(fun));
@@ -416,6 +417,9 @@ static bool boot_load_assembly(boot_ctx* ctx, const char* mod_c,
                                const char* fn_c, int argc, char** argv) {
   en_wisp* w = ctx->w;
   w->env = NULL;
+  /* the reference loadAssembly: snapshots load in RPLAN mode, plan
+   * sources in BPLAN mode (op 82 is gated on this) */
+  w->t->rplan_f = strcmp(ctx->src_dir_c, "snap") == 0;
   if (!boot_process_file(ctx, mod_c))
     return false;
   if (fn_c == NULL)

@@ -399,6 +399,8 @@ ret:
     }
     uint32_t argc = (uint32_t)(t->vsp - listbase - 1);
     pl_val name = t->vstack[listbase];
+    if (opset == 82 && !t->rplan_f)
+      pl_raise_msg(t, "Not in RPLAN Mode");
     int idx = pl_op_lookup(opset, name, argc);
     if (idx < 0)
       pl_raise_msgf(t, "no primop %llu (argc %u)", (unsigned long long)opset,

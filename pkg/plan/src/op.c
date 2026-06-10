@@ -2,12 +2,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include "axsys/allocator.h"
 #include "axsys/assume.h"
+#include "axsys/base58.h"
 #include "axsys/util.h"
 #include "internal.h"
 #include "plan/build.h"
+#include "plan/canon.h"
 #include "plan/debug.h"
 #include "plan/nat.h"
 #include "plan/store.h"
@@ -16,8 +20,8 @@
  * Primops, normative semantics from the Haskell reference (Plan.hs).
  * op 0:  core PLAN ops (pin / law / case).
  * op 66: named extended ops.
- * op 82: rplan I/O — not supported by this runtime (parity with the
- *        previous C runtime); invoking one raises a runtime error.
+ * op 82: rplan I/O (rplan.c) — RPLAN-mode gated, fd/console/file ops;
+ *        actor ops raise until the io-work actor port lands.
  */
 
 #define ARG(i) (t->vstack[ab + (i)])
@@ -636,8 +640,8 @@ static pl_val op_try(pl_thread* t, size_t ab) {
 /* ── Misc ──────────────────────────────────────────────────────────────── */
 
 static pl_val op_trace(pl_thread* t, size_t ab) {
-  ARG(0) = pl_nf(t, ARG(0));
-  char* s = pl_show(ax_allocator_system(), ARG(0), NULL);
+  ARG(0) = pl_nf(t, ARG(0)); /* the reference shows the value deeply */
+  char* s = pl_show_val(ax_allocator_system(), ARG(0), NULL);
   fprintf(stderr, "%s\n", s);
   ax_free(ax_allocator_system(), s);
   return ARG(1);
@@ -685,25 +689,73 @@ static pl_val op_equal(pl_thread* t, size_t ab) {
   return pl_eq_deep(ARG(0), ARG(1)) ? 1 : 0;
 }
 
-static pl_val op_save(pl_thread* t, size_t ab) {
-  AX_UNUSED(ab);
-  pl_raise_msg(t, "Save is not supported by this runtime");
+/*
+ * savePinOnly: write snap/<base58>.plan for the pin and (depth-first)
+ * its sub-pins, skipping files that already exist; the file content is
+ * the canonical text whose SHA-256 is the pin hash, so any PLAN
+ * assembler can resume from the snapshot directory.
+ */
+static void save_pin_only(pl_thread* t, pl_val pin) {
+  pl_cell* p = pl_ptr(pin);
+  char b58[AX_BASE58_CAP(32)];
+  ax_base58(pl_pin_hash(pin), 32, b58);
+  char path[AX_BASE58_CAP(32) + 16];
+  (void)snprintf(path, sizeof(path), "snap/%s.plan", b58);
+  if (access(path, F_OK) == 0)
+    return;
+
+  uint32_t np = pl_pin_npins(p);
+  for (uint32_t i = 0; i < np; i++)
+    save_pin_only(t, pl_pin_subpins(p)[i]);
+
+  size_t n;
+  char* text = pl_canonize(ax_allocator_system(), pin, &n);
+  FILE* f = fopen(path, "wb");
+  if (f == NULL) {
+    ax_free(ax_allocator_system(), text);
+    pl_raise_msg(t, "Save: cannot write snapshot file");
+  }
+  size_t wrote = fwrite(text, 1, n, f);
+  ax_free(ax_allocator_system(), text);
+  if (fclose(f) != 0 || wrote != n)
+    pl_raise_msg(t, "Save: short write");
 }
+
+static pl_val op_save(pl_thread* t, size_t ab) {
+  pl_cell* pp = pl_as(PL_TAG_PIN, ARG(0));
+  if (pp == NULL)
+    pl_raise_msg(t, "Save: expected a pin");
+  (void)mkdir("./snap", 0777); /* EEXIST is fine */
+  save_pin_only(t, ARG(0));
+
+  char b58[AX_BASE58_CAP(32)];
+  ax_base58(pl_pin_hash(ARG(0)), 32, b58);
+  FILE* f = fopen("snap/root.plan", "a");
+  if (f == NULL)
+    pl_raise_msg(t, "Save: cannot append snap/root.plan");
+  fprintf(f, "@%s\n", b58);
+  if (fclose(f) != 0)
+    pl_raise_msg(t, "Save: short write");
+  return 0;
+}
+
 static pl_val op_load(pl_thread* t, size_t ab) {
   AX_UNUSED(ab);
-  pl_raise_msg(t, "Load is not supported by this runtime");
+  pl_raise_msg(t, "load ./snap/root.plan"); /* loadSnapshot, verbatim */
 }
 
 /* ── The table ─────────────────────────────────────────────────────────── */
 
-#define M2(a, b)                           ax_s2(a, b)
-#define OP66(name, argc, mask, deep, body) {66, name, argc, mask, deep, body}
+#define M2(a, b) ax_s2(a, b)
+#define OP66(name, argc, mask, deep, body)                                     \
+  {66, name, NULL, argc, mask, deep, body}
+#define OP82(name, argc, mask, body) {82, 0, name, argc, mask, false, body}
 
 const pl_opdesc pl_ops[] = {
     /* op 0: core PLAN */
-    {0, 0, 1, 0b1, true, op_pin},
-    {0, 1, 3, 0b111, false, op_law},
-    {0, 2, 6, 0b100000, false, op_elim},
+    {0, 0, NULL, 1, 0b1, true, op_pin},
+    {0, 1, NULL, 3, 0b111, false, op_law},
+    {0, 2, NULL, 6, 0b100000, false, op_elim},
 
     OP66(ax_s3('P', 'i', 'n'), 1, 0b1, true, op_pin),
     OP66(ax_s3('L', 'a', 'w'), 3, 0b111, false, op_law),
@@ -788,8 +840,8 @@ const pl_opdesc pl_ops[] = {
     OP66(ax_s3('I', 'x', '5'), 1, 0b1, false, op_ix5),
     OP66(ax_s3('I', 'x', '6'), 1, 0b1, false, op_ix6),
     OP66(ax_s3('I', 'x', '7'), 1, 0b1, false, op_ix7),
-    OP66(ax_s4('S', 'a', 'v', 'e'), 1, 0, false, op_save),
-    OP66(ax_s4('L', 'o', 'a', 'd'), 1, 0, false, op_load),
+    OP66(ax_s4('S', 'a', 'v', 'e'), 1, 0b1, false, op_save),
+    OP66(ax_s4('L', 'o', 'a', 'd'), 1, 0b1, false, op_load),
     OP66(ax_s5('T', 'r', 'a', 'c', 'e'), 2, 0, false, op_trace),
     OP66(ax_s3('N', 'i', 'l'), 1, 0b1, false, op_nil),
     OP66(ax_s5('T', 'r', 'u', 't', 'h'), 1, 0b1, false, op_truth),
@@ -809,16 +861,49 @@ const pl_opdesc pl_ops[] = {
     OP66(ax_s4('L', 'a', 's', 't'), 1, 0b1, false, op_last),
     OP66(ax_s4('I', 'n', 'i', 't'), 1, 0b1, false, op_init),
     OP66(ax_s5('E', 'q', 'u', 'a', 'l'), 2, 0b11, true, op_equal),
+
+    /* op 82: rplan I/O (mode-gated in eval.c) */
+    OP82("Input", 1, 0b1, pl_op82_input),
+    OP82("Output", 1, 0b1, pl_op82_output),
+    OP82("Warn", 1, 0b1, pl_op82_warn),
+    OP82("ReadFile", 1, 0b1, pl_op82_read_file),
+    OP82("Print", 1, 0b1, pl_op82_print),
+    OP82("Stamp", 1, 0b1, pl_op82_stamp),
+    OP82("Now", 1, 0, pl_op82_now),
+    OP82("CloseFd", 1, 0b1, pl_op82_closefd),
+    OP82("Listen", 1, 0b1, pl_op82_listen),
+    OP82("Accept", 1, 0b1, pl_op82_accept),
+    OP82("Read", 2, 0b11, pl_op82_read),
+    OP82("Write", 2, 0b11, pl_op82_write),
+    OP82("Spawn", 1, 0, pl_op82_actor),
+    OP82("Send", 2, 0b1, pl_op82_actor),
+    OP82("SendCaps", 3, 0b1, pl_op82_actor),
+    OP82("Recv", 1, 0b1, pl_op82_actor),
+    OP82("CloseHandle", 1, 0b1, pl_op82_actor),
 };
 
 const size_t pl_nops = sizeof(pl_ops) / sizeof(pl_ops[0]);
 
+static bool nat_name_eq(pl_val v, const char* s) {
+  if (!pl_is_nat(v))
+    return false;
+  size_t n = strlen(s);
+  if (pl_nat_byte_len(v) != n)
+    return false;
+  for (size_t i = 0; i < n; i++) {
+    if (pl_nat_byte_at(v, i) != (uint8_t)s[i])
+      return false;
+  }
+  return true;
+}
+
 int pl_op_lookup(uint64_t opset, pl_val name, uint32_t argc) {
-  if (!pl_is_nat63(name))
-    return -1; /* boxed names match nothing in the table */
   for (size_t i = 0; i < pl_nops; i++) {
     const pl_opdesc* d = &pl_ops[i];
-    if (d->opset == opset && d->name == name && d->argc == argc)
+    if (d->opset != opset || d->argc != argc)
+      continue;
+    if (d->name_c != NULL ? nat_name_eq(name, d->name_c)
+                          : (pl_is_nat63(name) && d->name == name))
       return (int)i;
   }
   return -1;
