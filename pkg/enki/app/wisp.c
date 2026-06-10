@@ -15,7 +15,7 @@
 #include "plan/store.h"
 
 /*
- * wisp DIR MODULE [FUNCTION ARGS...]
+ * wisp [--file-root DIR] DIR MODULE [FUNCTION ARGS...]
  *
  * Loads MODULE (and its @includes) from DIR, then optionally applies the
  * binding FUNCTION to a row of the remaining arguments.  Mirrors the
@@ -23,6 +23,7 @@
  */
 
 #define BOOT_HEAP_CELLS ((size_t)1 << 22) /* 32 MiB per semispace, grows */
+#define BOOT_DEFAULT_FILE_ROOT "./reaver/src"
 
 typedef struct boot_module {
   pl_val key_v;
@@ -437,11 +438,48 @@ static bool boot_load_assembly(boot_ctx* ctx, const char* mod_c,
 }
 
 static void boot_usage(const char* argv0_c) {
-  fprintf(stderr, "usage: %s DIR MODULE [FUNCTION ARGS...]\n", argv0_c);
+  fprintf(stderr, "usage: %s [--file-root DIR] DIR MODULE [FUNCTION ARGS...]\n",
+          argv0_c);
+}
+
+static const char* boot_env_file_root(void) {
+  const char* env_c = getenv("ENKI_WISP_FILE_ROOT");
+  return env_c != NULL && env_c[0] != '\0' ? env_c : BOOT_DEFAULT_FILE_ROOT;
 }
 
 int main(int argc, char** argv) {
-  if (argc != 3 && argc < 4) {
+  const char* file_root_c = boot_env_file_root();
+  int argi = 1;
+  while (argi < argc && strncmp(argv[argi], "--", 2) == 0) {
+    if (strcmp(argv[argi], "--") == 0) {
+      argi++;
+      break;
+    }
+    if (strcmp(argv[argi], "--file-root") == 0) {
+      if (argi + 1 >= argc) {
+        boot_usage(argv[0]);
+        return 2;
+      }
+      file_root_c = argv[argi + 1];
+      argi += 2;
+      continue;
+    }
+    const char prefix_c[] = "--file-root=";
+    size_t prefix_s = sizeof(prefix_c) - 1;
+    if (strncmp(argv[argi], prefix_c, prefix_s) == 0) {
+      file_root_c = argv[argi] + prefix_s;
+      argi++;
+      continue;
+    }
+    boot_usage(argv[0]);
+    return 2;
+  }
+
+  if (argc - argi < 2) {
+    boot_usage(argv[0]);
+    return 2;
+  }
+  if (file_root_c[0] == '\0') {
     boot_usage(argv[0]);
     return 2;
   }
@@ -453,11 +491,12 @@ int main(int argc, char** argv) {
     fprintf(stderr, "wisp: oom\n");
     return 1;
   }
+  w->t->rplan_file_root_c = file_root_c;
 
   boot_ctx ctx = {
       .loc_a = ax_allocator_system(),
       .w = w,
-      .src_dir_c = argv[1],
+      .src_dir_c = argv[argi],
       .mod_v = NULL,
       .emit_top_level_f = true,
   };
@@ -470,10 +509,11 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  const char* fn_c = argc >= 4 ? argv[3] : NULL;
-  int run_argc = argc >= 5 ? argc - 4 : 0;
-  char** run_argv = argc >= 5 ? argv + 4 : NULL;
-  bool ok = boot_load_assembly(&ctx, argv[2], fn_c, run_argc, run_argv);
+  const char* fn_c = argc - argi >= 3 ? argv[argi + 2] : NULL;
+  int run_argc = argc - argi >= 4 ? argc - argi - 3 : 0;
+  char** run_argv = argc - argi >= 4 ? argv + argi + 3 : NULL;
+  bool ok =
+      boot_load_assembly(&ctx, argv[argi + 1], fn_c, run_argc, run_argv);
 
   pl_gc_del_root_source(heap, boot_roots, &ctx);
   for (boot_module* mod = ctx.mod_v; mod != NULL;) {

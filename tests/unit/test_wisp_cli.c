@@ -123,3 +123,61 @@ Test(wisp_cli, rplan_op_rejected_in_bplan) {
   cr_assert(WIFEXITED(st) && WEXITSTATUS(st) != 0,
             "RPLAN op should be rejected outside RPLAN mode");
 }
+
+Test(wisp_cli, read_file_honors_file_root) {
+  char dir[] = "/tmp/enki-fileroot-XXXXXX";
+  cr_assert_not_null(mkdtemp(dir));
+
+  char path[512];
+  (void)snprintf(path, sizeof(path), "%s/snap", dir);
+  cr_assert_eq(mkdir(path, 0700), 0);
+  (void)snprintf(path, sizeof(path), "%s/files", dir);
+  cr_assert_eq(mkdir(path, 0700), 0);
+
+  (void)snprintf(path, sizeof(path), "%s/files/allowed.txt", dir);
+  FILE* f = fopen(path, "w");
+  cr_assert_not_null(f);
+  fputs("inside-ok", f);
+  fclose(f);
+
+  (void)snprintf(path, sizeof(path), "%s/secret.txt", dir);
+  f = fopen(path, "w");
+  cr_assert_not_null(f);
+  fputs("outside-secret", f);
+  fclose(f);
+
+  (void)snprintf(path, sizeof(path), "%s/snap/root.plan", dir);
+  f = fopen(path, "w");
+  cr_assert_not_null(f);
+  fprintf(f,
+          "(#bind Output\n"
+          "  (#pin (#law \"Output\" (Output x) ((#pin \"R\") (\"Output\" "
+          "x)))))\n"
+          "(#bind ReadFile\n"
+          "  (#pin (#law \"ReadFile\" (ReadFile x) ((#pin \"R\") "
+          "(\"ReadFile\" x)))))\n"
+          "(#bind inside\n"
+          "  (#pin (#law \"inside\" (inside args) ((#pin \"R\") (\"Output\" "
+          "((#pin \"R\") (\"ReadFile\" \"allowed.txt\")))))))\n"
+          "(#bind escape\n"
+          "  (#pin (#law \"escape\" (escape args) ((#pin \"R\") (\"Output\" "
+          "((#pin \"R\") (\"ReadFile\" \"../secret.txt\")))))))\n");
+  fclose(f);
+
+  char cmd[1024];
+  char out[256];
+
+  (void)snprintf(cmd, sizeof(cmd),
+                 "cd %s && %s --file-root files snap root inside 2>/dev/null",
+                 dir, wisp_bin());
+  int st = run_cmd(cmd, out, sizeof(out));
+  cr_assert(WIFEXITED(st) && WEXITSTATUS(st) == 0, "inside run failed");
+  cr_assert_not_null(strstr(out, "inside-ok"), "got `%s`", out);
+
+  (void)snprintf(cmd, sizeof(cmd),
+                 "cd %s && %s --file-root files snap root escape 2>/dev/null",
+                 dir, wisp_bin());
+  st = run_cmd(cmd, out, sizeof(out));
+  cr_assert(WIFEXITED(st) && WEXITSTATUS(st) == 0, "escape run failed");
+  cr_assert_null(strstr(out, "outside-secret"), "escaped file root: `%s`", out);
+}

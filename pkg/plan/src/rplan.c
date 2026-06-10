@@ -92,6 +92,61 @@ static char* rp_nat_path(pl_val v) {
   return p;
 }
 
+static char* rp_strdup(const char* s) {
+  size_t n = strlen(s);
+  char* out = malloc(n + 1);
+  ax_assume(out != NULL, "oom");
+  memcpy(out, s, n + 1);
+  return out;
+}
+
+static char* rp_join_path(const char* root, const char* path) {
+  size_t rn = strlen(root);
+  size_t pn = strlen(path);
+  bool slash = rn > 0 && root[rn - 1] == '/';
+  char* out = malloc(rn + (slash ? 0 : 1) + pn + 1);
+  ax_assume(out != NULL, "oom");
+  memcpy(out, root, rn);
+  size_t off = rn;
+  if (!slash)
+    out[off++] = '/';
+  memcpy(out + off, path, pn + 1);
+  return out;
+}
+
+static bool rp_path_under_root(const char* root, const char* path) {
+  if (strcmp(root, "/") == 0)
+    return true;
+  size_t rn = strlen(root);
+  return strncmp(path, root, rn) == 0 &&
+         (path[rn] == '\0' || path[rn] == '/');
+}
+
+static bool rp_resolve_read_path(pl_thread* t, const char* arg_path,
+                                 char** out_path) {
+  if (t->rplan_file_root_c == NULL || t->rplan_file_root_c[0] == '\0') {
+    *out_path = rp_strdup(arg_path);
+    return true;
+  }
+
+  char* root = realpath(t->rplan_file_root_c, NULL);
+  if (root == NULL)
+    return false;
+
+  char* joined = rp_join_path(root, arg_path);
+  char* resolved = realpath(joined, NULL);
+  free(joined);
+  if (resolved == NULL || !rp_path_under_root(root, resolved)) {
+    free(root);
+    free(resolved);
+    return false;
+  }
+
+  free(root);
+  *out_path = resolved;
+  return true;
+}
+
 /* bytesBar: the data bytes followed by a 0x01 terminator. */
 static pl_val rp_bar(pl_thread* t, const uint8_t* b, size_t n) {
   uint8_t* bar = malloc(n + 1);
@@ -163,7 +218,13 @@ pl_val pl_op82_print(pl_thread* t, size_t ab) {
 /* ── Files ─────────────────────────────────────────────────────────────── */
 
 pl_val pl_op82_read_file(pl_thread* t, size_t ab) {
-  char* path = rp_nat_path(rp_want_nat(t, ARG(0)));
+  char* arg_path = rp_nat_path(rp_want_nat(t, ARG(0)));
+  char* path = NULL;
+  if (!rp_resolve_read_path(t, arg_path, &path)) {
+    free(arg_path);
+    return 0;
+  }
+  free(arg_path);
   int fd = open(path, O_RDONLY);
   free(path);
   if (fd < 0)
