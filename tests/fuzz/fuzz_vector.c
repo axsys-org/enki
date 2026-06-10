@@ -1,4 +1,4 @@
-#include "enki/vector.h"
+#include "axsys/vector.h"
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -14,7 +14,7 @@ static size_t bounded_index(uint8_t value, size_t len) {
 }
 
 int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
-  enki_vector* vector = enki_vector_create(enki_allocator_system());
+  ax_vector* vector = ax_vector_create(ax_allocator_system());
   if (vector == NULL) {
     abort();
   }
@@ -25,33 +25,31 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
 
     switch (op) {
     case 0:
-      (void)enki_vector_push(vector, (void*)(uintptr_t)value);
+      (void)ax_vector_push(vector, (void*)(uintptr_t)value);
       break;
     case 1:
-      (void)enki_vector_pop(vector);
+      (void)ax_vector_pop(vector);
       break;
     case 2:
-      (void)enki_vector_get(vector,
-                            bounded_index(value, enki_vector_len(vector)));
+      (void)ax_vector_get(vector, bounded_index(value, ax_vector_len(vector)));
       break;
     case 3:
-      if (enki_vector_len(vector) > 0) {
-        (void)enki_vector_set(vector,
-                              bounded_index(value, enki_vector_len(vector)),
-                              (void*)(uintptr_t)(value + 1u));
+      if (ax_vector_len(vector) > 0) {
+        (void)ax_vector_set(vector, bounded_index(value, ax_vector_len(vector)),
+                            (void*)(uintptr_t)(value + 1u));
       }
       break;
     case 4:
-      (void)enki_vector_reserve(vector, (size_t)value);
+      (void)ax_vector_reserve(vector, (size_t)value);
       break;
     case 5:
-      (void)enki_vector_shrink(vector);
+      (void)ax_vector_shrink(vector);
       break;
     default:
       break;
     }
   }
 
-  enki_vector_destroy(vector);
+  ax_vector_destroy(vector);
   return 0;
 }

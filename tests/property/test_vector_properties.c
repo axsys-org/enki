@@ -1,4 +1,4 @@
-#include "enki/vector.h"
+#include "axsys/vector.h"
 #include "theft.h"
 
 #include <inttypes.h>
@@ -80,9 +80,9 @@ static void accounting_free(void* ctx, void* ptr) {
 }
 
 static void make_accounting_allocator(accounting_allocator* account,
-                                      enki_allocator* allocator_a) {
+                                      ax_allocator* allocator_a) {
   *account = (accounting_allocator){0};
-  *allocator_a = (enki_allocator){
+  *allocator_a = (ax_allocator){
       .ctx = account,
       .alloc = accounting_alloc,
       .realloc = accounting_realloc,
@@ -144,27 +144,27 @@ static bool property_push_increases_len(const void* generated, void* ctx,
   (void)ctx;
   const sequence_case* sequence = generated;
   accounting_allocator account;
-  enki_allocator allocator_a;
+  ax_allocator allocator_a;
   make_accounting_allocator(&account, &allocator_a);
-  enki_vector* vector = enki_vector_create(&allocator_a);
+  ax_vector* vector = ax_vector_create(&allocator_a);
   if (vector == NULL) {
     message(out, out_len, "vector creation failed");
     return false;
   }
 
   for (size_t i = 0; i < sequence->len_s; i += 1) {
-    if (enki_vector_push(vector, (void*)sequence->values[i]) != ENKI_OK) {
-      enki_vector_destroy(vector);
+    if (ax_vector_push(vector, (void*)sequence->values[i]) != AX_OK) {
+      ax_vector_destroy(vector);
       message(out, out_len, "initial push failed");
       return false;
     }
   }
 
-  size_t before = enki_vector_len(vector);
-  bool ok = enki_vector_push(vector, (void*)sequence->values[0]) == ENKI_OK &&
-            enki_vector_len(vector) == before + 1u;
+  size_t before = ax_vector_len(vector);
+  bool ok = ax_vector_push(vector, (void*)sequence->values[0]) == AX_OK &&
+            ax_vector_len(vector) == before + 1u;
 
-  enki_vector_destroy(vector);
+  ax_vector_destroy(vector);
   if (!ok || account.live_allocations != 0 || account.live_bytes != 0) {
     message(out, out_len,
             "push did not increase length by exactly one or leaked");
@@ -179,28 +179,28 @@ static bool property_get_pushed_item(const void* generated, void* ctx,
   (void)ctx;
   const sequence_case* sequence = generated;
   accounting_allocator account;
-  enki_allocator allocator_a;
+  ax_allocator allocator_a;
   make_accounting_allocator(&account, &allocator_a);
-  enki_vector* vector = enki_vector_create(&allocator_a);
+  ax_vector* vector = ax_vector_create(&allocator_a);
   if (vector == NULL) {
     message(out, out_len, "vector creation failed");
     return false;
   }
 
   for (size_t i = 0; i < sequence->len_s; i += 1) {
-    if (enki_vector_push(vector, (void*)sequence->values[i]) != ENKI_OK) {
-      enki_vector_destroy(vector);
+    if (ax_vector_push(vector, (void*)sequence->values[i]) != AX_OK) {
+      ax_vector_destroy(vector);
       message(out, out_len, "initial push failed");
       return false;
     }
   }
 
-  size_t index_i = enki_vector_len(vector);
+  size_t index_i = ax_vector_len(vector);
   void* value_v = (void*)sequence->values[0];
-  bool ok = enki_vector_push(vector, value_v) == ENKI_OK &&
-            enki_vector_get(vector, index_i) == value_v;
+  bool ok = ax_vector_push(vector, value_v) == AX_OK &&
+            ax_vector_get(vector, index_i) == value_v;
 
-  enki_vector_destroy(vector);
+  ax_vector_destroy(vector);
   if (!ok || account.live_allocations != 0 || account.live_bytes != 0) {
     message(out, out_len,
             "pushed item_v was not retrievable at old_o length or leaked");
@@ -215,33 +215,33 @@ static bool property_pushes_then_pops_empty(const void* generated, void* ctx,
   (void)ctx;
   const sequence_case* sequence = generated;
   accounting_allocator account;
-  enki_allocator allocator_a;
+  ax_allocator allocator_a;
   make_accounting_allocator(&account, &allocator_a);
-  enki_vector* vector = enki_vector_create(&allocator_a);
+  ax_vector* vector = ax_vector_create(&allocator_a);
   if (vector == NULL) {
     message(out, out_len, "vector creation failed");
     return false;
   }
 
   for (size_t i = 0; i < sequence->len_s; i += 1) {
-    if (enki_vector_push(vector, (void*)sequence->values[i]) != ENKI_OK) {
-      enki_vector_destroy(vector);
+    if (ax_vector_push(vector, (void*)sequence->values[i]) != AX_OK) {
+      ax_vector_destroy(vector);
       message(out, out_len, "push failed");
       return false;
     }
   }
 
   for (size_t i = sequence->len_s; i > 0; i -= 1) {
-    void* popped = enki_vector_pop(vector);
+    void* popped = ax_vector_pop(vector);
     if (popped != (void*)sequence->values[i - 1u]) {
-      enki_vector_destroy(vector);
+      ax_vector_destroy(vector);
       message(out, out_len, "pop order changed");
       return false;
     }
   }
 
-  bool ok = enki_vector_len(vector) == 0;
-  enki_vector_destroy(vector);
+  bool ok = ax_vector_len(vector) == 0;
+  ax_vector_destroy(vector);
   if (!ok || account.live_allocations != 0 || account.live_bytes != 0) {
     message(out, out_len, "pop sequence did not return to empty or leaked");
     return false;
@@ -256,29 +256,29 @@ static bool property_reserve_keeps_len_and_capacity(const void* generated,
   (void)ctx;
   const sequence_case* sequence = generated;
   accounting_allocator account;
-  enki_allocator allocator_a;
+  ax_allocator allocator_a;
   make_accounting_allocator(&account, &allocator_a);
-  enki_vector* vector = enki_vector_create(&allocator_a);
+  ax_vector* vector = ax_vector_create(&allocator_a);
   if (vector == NULL) {
     message(out, out_len, "vector creation failed");
     return false;
   }
 
   for (size_t i = 0; i < sequence->len_s; i += 1) {
-    if (enki_vector_push(vector, (void*)sequence->values[i]) != ENKI_OK) {
-      enki_vector_destroy(vector);
+    if (ax_vector_push(vector, (void*)sequence->values[i]) != AX_OK) {
+      ax_vector_destroy(vector);
       message(out, out_len, "push failed");
       return false;
     }
   }
 
-  size_t before_len = enki_vector_len(vector);
-  size_t before_capacity = enki_vector_capacity(vector);
-  bool ok = enki_vector_reserve(vector, sequence->reserve) == ENKI_OK &&
-            enki_vector_len(vector) == before_len &&
-            enki_vector_capacity(vector) >= before_capacity;
+  size_t before_len = ax_vector_len(vector);
+  size_t before_capacity = ax_vector_capacity(vector);
+  bool ok = ax_vector_reserve(vector, sequence->reserve) == AX_OK &&
+            ax_vector_len(vector) == before_len &&
+            ax_vector_capacity(vector) >= before_capacity;
 
-  enki_vector_destroy(vector);
+  ax_vector_destroy(vector);
   if (!ok || account.live_allocations != 0 || account.live_bytes != 0) {
     message(out, out_len,
             "reserve changed length, decreased capacity_s, or leaked");
