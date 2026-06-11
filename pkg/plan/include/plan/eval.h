@@ -81,6 +81,26 @@ pl_val pl_thread_result(pl_thread* t);
 /* The parked effect request of a PL_RUN_BLOCKED thread (§6.3). */
 pl_val pl_thread_request(pl_thread* t);
 
+/* ── Direct-effect interception (the §6.2.3 record/replay seam) ────────── */
+
+/*
+ * When set, the machine consults the hook instead of the handler for
+ * every direct (non-coordination) op-82 effect.  Return true with *out
+ * filled to substitute a result (replay: no syscall happens); return
+ * false to run the real handler.  A live-logging hook performs the
+ * effect itself via pl_io_run and records the result.  The hook runs
+ * inside the op's C-entry region; out must be WHNF.
+ */
+typedef bool (*pl_io_hook)(pl_thread* t, uint32_t op, size_t argbase,
+                           pl_val* out);
+void pl_set_io_hook(pl_io_hook hook);
+
+/* Run the real handler of direct op `op` (hooks only). */
+pl_val pl_io_run(pl_thread* t, uint32_t op, size_t argbase);
+/* Stable identity for the log: the op's name and arg count. */
+const char* pl_io_name(uint32_t op);
+uint32_t pl_io_argc(uint32_t op);
+
 /* ── Errors ────────────────────────────────────────────────────────────── */
 
 /* Raise PLAN_EXN carrying a PLAN value (catchable by Try). */

@@ -97,6 +97,11 @@ struct pl_thread {
   /* When non-NULL, ReadFile resolves its argument relative to this root and
    * refuses paths whose canonical target escapes it. */
   const char* rplan_file_root_c;
+
+  /* Opaque embedder slot (the actor runtime stores its er_actor here so
+   * the pl_io_hook can attribute effects); never touched by the plan
+   * layer. */
+  void* host;
 };
 
 pl_heap* pl_heap_new(size_t cells, pl_store* store);

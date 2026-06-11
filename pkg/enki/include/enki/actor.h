@@ -94,4 +94,47 @@ er_actor* er_scheduler_actor_by_id(er_scheduler* sys, uint64_t id);
  * keep the heap until er_scheduler_free so embedders/tests can read). */
 pl_val er_actor_result(er_actor* a);
 
+/*
+ * ── Event log & replay (spec §9, R1–R2) ────────────────────────────────
+ *
+ * The log records exactly the external inputs: every direct (unix)
+ * effect's result as (actor, op name, args hash, result-nat bytes), and
+ * every host injection, in occurrence order.  Internal events — actor
+ * messages, yields, scheduling — are reproducible and never logged.
+ *
+ * Recording: attach with er_scheduler_record before running; direct
+ * effects execute live and their results are appended.
+ *
+ * Replay: attach with er_scheduler_replay (same QUANTUM, same program,
+ * same store contents, same embedder script per D2); direct effects
+ * perform no syscalls — the logged result is substituted after the
+ * (actor, op, args-hash) of the site is verified against the log, and
+ * er_scheduler_inject verifies injections likewise.  Any mismatch is a
+ * divergence and aborts.  Replay reproduces state, not side effects:
+ * Output/Print/Warn write nothing.
+ *
+ * Limitation: a direct effect that raises a host error (bad handle,
+ * failed socket) crashes its actor before a record is appended, so a
+ * recorded run replays only up to such a crash.
+ */
+
+typedef struct er_log er_log;
+
+er_log* er_log_new(void);
+void er_log_free(er_log* log);
+size_t er_log_events(const er_log* log);
+
+/* Binary round trip (format: header { magic, version, quantum } then
+ * length-prefixed records).  NULL / false on IO or format errors. */
+bool er_log_write_file(const er_log* log, const char* path);
+er_log* er_log_read_file(const char* path);
+
+/* Record into `log` (its quantum header is taken from this system). */
+void er_scheduler_record(er_scheduler* sys, er_log* log);
+/* Substitute results from `log`; asserts the quantum matches (D1). */
+void er_scheduler_replay(er_scheduler* sys, const er_log* log);
+/* Replay cursor (events consumed so far); equals er_log_events when a
+ * replayed run consumed the whole recording. */
+size_t er_scheduler_log_cursor(const er_scheduler* sys);
+
 #endif

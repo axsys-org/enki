@@ -1,10 +1,13 @@
 #include "enki/actor.h"
 
 #include <setjmp.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "axsys/assume.h"
+#include "axsys/ds.h"
+#include "axsys/sha256.h"
 #include "plan/build.h"
 #include "plan/nat.h"
 
@@ -53,6 +56,26 @@ struct er_actor {
   er_actor* all_next;
 };
 
+/* ── Event log (spec §9 R1–R2) ─────────────────────────────────────────── */
+
+typedef enum { ER_EV_IO = 1, ER_EV_INJECT = 2 } er_ev_kind;
+
+typedef struct er_event {
+  uint8_t kind;
+  uint64_t actor;        /* er_actor id */
+  uint64_t op;           /* IO: effect-name mote; INJECT: 0 */
+  uint8_t args_hash[32]; /* IO: SHA-256 of the forced args */
+  uint8_t* data;         /* IO: result nat bytes; INJECT: payload encoding */
+  uint64_t data_n;
+} er_event;
+
+struct er_log {
+  uint64_t quantum; /* header: replay must use the same quantum (D1) */
+  er_event* ev;     /* stb_ds array */
+};
+
+typedef enum { ER_MODE_LIVE = 0, ER_MODE_RECORD, ER_MODE_REPLAY } er_mode;
+
 struct er_scheduler {
   pl_store* store;
   er_config cfg;
@@ -61,6 +84,10 @@ struct er_scheduler {
   er_actor* all_head; /* every actor, creation order */
   er_actor* all_tail;
   uint64_t next_id;
+  er_mode mode;
+  er_log* rec;        /* RECORD sink */
+  const er_log* play; /* REPLAY source */
+  size_t cursor;      /* next replay event */
 };
 
 /* ── Construction ──────────────────────────────────────────────────────── */
@@ -87,6 +114,7 @@ static er_actor* er_register(er_scheduler* sys, pl_heap* heap, pl_thread* t,
   a->id = sys->next_id++;
   a->heap = heap;
   a->t = t;
+  a->t->host = a; /* effect attribution for the pl_io_hook */
   a->adopted = adopted;
   a->handle_cap = 8;
   a->handle_v = calloc(a->handle_cap, sizeof(er_actor*));
@@ -126,6 +154,7 @@ void er_scheduler_free(er_scheduler* sys) {
       m = mn;
     }
     free(a->handle_v);
+    a->t->host = NULL; /* the backpointer dies with the actor */
     if (!a->adopted) { /* adopted threads/heaps stay with the embedder */
       pl_thread_free(a->t);
       pl_heap_free(a->heap);
@@ -566,10 +595,242 @@ er_drive_status er_scheduler_drive(er_scheduler* sys, er_actor* root) {
   }
 }
 
+/* ── Event log & replay ────────────────────────────────────────────────── */
+
+er_log* er_log_new(void) {
+  er_log* log = calloc(1, sizeof(*log));
+  ax_assume(log != NULL, "oom");
+  return log;
+}
+
+void er_log_free(er_log* log) {
+  if (log == NULL)
+    return;
+  for (ptrdiff_t i = 0; i < ax_arrlen(log->ev); i++)
+    free(log->ev[i].data);
+  ax_arrfree(log->ev);
+  free(log);
+}
+
+size_t er_log_events(const er_log* log) {
+  return (size_t)ax_arrlen(log->ev);
+}
+
+/* Effect names are <= 8 bytes; pack them as a mote like ax_s*. */
+static uint64_t er_mote(const char* s) {
+  uint64_t v = 0;
+  for (int i = 0; s[i] != '\0'; i++) {
+    ax_assume(i < 8, "er_log: effect name too long");
+    v |= (uint64_t)(uint8_t)s[i] << (8 * i);
+  }
+  return v;
+}
+
+/* SHA-256 over the forced args of a direct effect, as length-prefixed
+ * nat bytes (non-nat args — e.g. Now's ignored slot — are a marker). */
+static void er_args_hash(pl_thread* t, uint32_t op, size_t ab,
+                         uint8_t out[32]) {
+  uint8_t* buf = NULL;
+  uint32_t argc = pl_io_argc(op);
+  for (uint32_t i = 0; i < argc; i++) {
+    pl_val v = t->vstack[ab + i];
+    if (pl_is_nat(v)) {
+      ax_arrpush(buf, 'n');
+      uint64_t n = pl_nat_byte_len(v);
+      for (int b = 0; b < 8; b++)
+        ax_arrpush(buf, (uint8_t)(n >> (8 * b)));
+      for (uint64_t j = 0; j < n; j++)
+        ax_arrpush(buf, pl_nat_byte_at(v, j));
+    } else {
+      ax_arrpush(buf, 'x');
+    }
+  }
+  ax_sha256(buf, (size_t)ax_arrlen(buf), out);
+  ax_arrfree(buf);
+}
+
+static uint8_t* er_nat_bytes(pl_val v, uint64_t* out_n) {
+  uint64_t n = pl_nat_byte_len(v);
+  uint8_t* b = malloc(n ? (size_t)n : 1);
+  ax_assume(b != NULL, "oom");
+  for (uint64_t i = 0; i < n; i++)
+    b[i] = pl_nat_byte_at(v, i);
+  *out_n = n;
+  return b;
+}
+
+static const er_event* er_replay_next(er_scheduler* sys) {
+  ax_assume(sys->cursor < er_log_events(sys->play),
+            "er_log: replay ran past the end of the recording");
+  return &sys->play->ev[sys->cursor++];
+}
+
+/*
+ * The pl_io_hook (§6.2.3): every direct op-82 effect of every actor on
+ * a recording or replaying system funnels through here.  Record mode
+ * performs the effect and appends (actor, op, args-hash, result);
+ * replay mode verifies the site against the next record and substitutes
+ * the logged result without any syscall.
+ */
+static bool er_io_hook(pl_thread* t, uint32_t op, size_t ab, pl_val* out) {
+  er_actor* a = t->host;
+  if (a == NULL || a->sys->mode == ER_MODE_LIVE)
+    return false;
+  er_scheduler* sys = a->sys;
+  uint8_t hash[32];
+  er_args_hash(t, op, ab, hash);
+  uint64_t name = er_mote(pl_io_name(op));
+
+  if (sys->mode == ER_MODE_RECORD) {
+    pl_val r = pl_io_run(t, op, ab);
+    ax_assume(pl_is_nat(r), "er_log: direct-effect results are nats");
+    er_event e = {.kind = ER_EV_IO, .actor = a->id, .op = name};
+    memcpy(e.args_hash, hash, 32);
+    e.data = er_nat_bytes(r, &e.data_n);
+    ax_arrpush(sys->rec->ev, e);
+    *out = r;
+    return true;
+  }
+
+  const er_event* e = er_replay_next(sys);
+  ax_assume(e->kind == ER_EV_IO && e->actor == a->id && e->op == name &&
+                memcmp(e->args_hash, hash, 32) == 0,
+            "er_log: replay divergence at a direct effect");
+  *out = e->data_n == 0 ? 0 : pl_nat_from_bytes(t, e->data, (size_t)e->data_n);
+  return true;
+}
+
+void er_scheduler_record(er_scheduler* sys, er_log* log) {
+  ax_assume(sys->mode == ER_MODE_LIVE, "er_scheduler_record: mode already set");
+  ax_assume(er_log_events(log) == 0, "er_scheduler_record: log not empty");
+  log->quantum = sys->cfg.quantum;
+  sys->mode = ER_MODE_RECORD;
+  sys->rec = log;
+  pl_set_io_hook(er_io_hook);
+}
+
+void er_scheduler_replay(er_scheduler* sys, const er_log* log) {
+  ax_assume(sys->mode == ER_MODE_LIVE, "er_scheduler_replay: mode already set");
+  ax_assume(log->quantum == sys->cfg.quantum,
+            "er_scheduler_replay: quantum differs from the recording (D1)");
+  sys->mode = ER_MODE_REPLAY;
+  sys->play = log;
+  sys->cursor = 0;
+  pl_set_io_hook(er_io_hook);
+}
+
+size_t er_scheduler_log_cursor(const er_scheduler* sys) {
+  return sys->cursor;
+}
+
+/* Injection payload encoding: a nat63 by value, a pin by hash. */
+static uint64_t er_inject_encode(pl_val payload, uint8_t buf[33]) {
+  if (pl_is_nat63(payload)) {
+    buf[0] = 0;
+    for (int i = 0; i < 8; i++)
+      buf[1 + i] = (uint8_t)(payload >> (8 * i));
+    return 9;
+  }
+  ax_assume(pl_tag(payload) == PL_TAG_PIN,
+            "er_log: logged injection payloads must be nat63s or pins");
+  buf[0] = 1;
+  memcpy(buf + 1, pl_pin_hash(payload), 32);
+  return 33;
+}
+
 void er_scheduler_inject(er_scheduler* sys, er_actor* to, pl_val payload) {
   ax_assume(pl_is_nat63(payload) || pl_store_owns(sys->store, payload),
             "er_scheduler_inject: payload must be a nat63 or store-resident");
   if (to->status == ER_ACTOR_HALTED || to->status == ER_ACTOR_CRASHED)
     return; /* a Chan nobody reads (reaver: send succeeds silently) */
+  if (sys->mode == ER_MODE_RECORD) {
+    uint8_t buf[33];
+    er_event e = {.kind = ER_EV_INJECT, .actor = to->id};
+    e.data_n = er_inject_encode(payload, buf);
+    e.data = malloc((size_t)e.data_n);
+    ax_assume(e.data != NULL, "oom");
+    memcpy(e.data, buf, (size_t)e.data_n);
+    ax_arrpush(sys->rec->ev, e);
+  } else if (sys->mode == ER_MODE_REPLAY) {
+    uint8_t buf[33];
+    uint64_t n = er_inject_encode(payload, buf);
+    const er_event* e = er_replay_next(sys);
+    ax_assume(e->kind == ER_EV_INJECT && e->actor == to->id && e->data_n == n &&
+                  memcmp(e->data, buf, (size_t)n) == 0,
+              "er_log: replay divergence at a host injection");
+  }
   er_deliver(to, payload, 0, NULL);
+}
+
+/* ── Log file round trip ───────────────────────────────────────────────── */
+
+static const uint8_t ER_LOG_MAGIC[8] = {'e', 'n', 'k', 'i',
+                                        'l', 'o', 'g', '\1'};
+
+static bool er_wr_u64(FILE* f, uint64_t v) {
+  uint8_t b[8];
+  for (int i = 0; i < 8; i++)
+    b[i] = (uint8_t)(v >> (8 * i));
+  return fwrite(b, 1, 8, f) == 8;
+}
+
+static bool er_rd_u64(FILE* f, uint64_t* v) {
+  uint8_t b[8];
+  if (fread(b, 1, 8, f) != 8)
+    return false;
+  *v = 0;
+  for (int i = 0; i < 8; i++)
+    *v |= (uint64_t)b[i] << (8 * i);
+  return true;
+}
+
+bool er_log_write_file(const er_log* log, const char* path) {
+  FILE* f = fopen(path, "wb");
+  if (f == NULL)
+    return false;
+  bool ok = fwrite(ER_LOG_MAGIC, 1, 8, f) == 8 && er_wr_u64(f, log->quantum) &&
+            er_wr_u64(f, er_log_events(log));
+  for (ptrdiff_t i = 0; ok && i < ax_arrlen(log->ev); i++) {
+    const er_event* e = &log->ev[i];
+    ok = fputc(e->kind, f) != EOF && er_wr_u64(f, e->actor) &&
+         er_wr_u64(f, e->op) && fwrite(e->args_hash, 1, 32, f) == 32 &&
+         er_wr_u64(f, e->data_n) &&
+         (e->data_n == 0 ||
+          fwrite(e->data, 1, (size_t)e->data_n, f) == (size_t)e->data_n);
+  }
+  return fclose(f) == 0 && ok;
+}
+
+er_log* er_log_read_file(const char* path) {
+  FILE* f = fopen(path, "rb");
+  if (f == NULL)
+    return NULL;
+  er_log* log = er_log_new();
+  uint8_t magic[8];
+  uint64_t count = 0;
+  bool ok = fread(magic, 1, 8, f) == 8 && memcmp(magic, ER_LOG_MAGIC, 8) == 0 &&
+            er_rd_u64(f, &log->quantum) && er_rd_u64(f, &count);
+  for (uint64_t i = 0; ok && i < count; i++) {
+    er_event e = {0};
+    int kind = fgetc(f);
+    ok = kind != EOF && er_rd_u64(f, &e.actor) && er_rd_u64(f, &e.op) &&
+         fread(e.args_hash, 1, 32, f) == 32 && er_rd_u64(f, &e.data_n);
+    if (ok && e.data_n > 0) {
+      e.data = malloc((size_t)e.data_n);
+      ax_assume(e.data != NULL, "oom");
+      ok = fread(e.data, 1, (size_t)e.data_n, f) == (size_t)e.data_n;
+    }
+    if (!ok) {
+      free(e.data);
+      break;
+    }
+    e.kind = (uint8_t)kind;
+    ax_arrpush(log->ev, e);
+  }
+  fclose(f);
+  if (!ok) {
+    er_log_free(log);
+    return NULL;
+  }
+  return log;
 }

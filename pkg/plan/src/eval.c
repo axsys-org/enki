@@ -66,6 +66,26 @@ void pl_set_enter_hook(pl_enter_hook hook) {
   pl_hook = hook;
 }
 
+/* ── Direct-effect interception seam (§6.2.3) ──────────────────────────── */
+
+static pl_io_hook pl_io = NULL;
+
+void pl_set_io_hook(pl_io_hook hook) {
+  pl_io = hook;
+}
+
+pl_val pl_io_run(pl_thread* t, uint32_t op, size_t argbase) {
+  return pl_ops[op].body(t, argbase);
+}
+
+const char* pl_io_name(uint32_t op) {
+  return pl_ops[op].name_c;
+}
+
+uint32_t pl_io_argc(uint32_t op) {
+  return pl_ops[op].argc;
+}
+
 /* ── KAL: non-forcing law-body operand interpretation ──────────────────── */
 
 /*
@@ -535,10 +555,15 @@ op_body:
   fr = &t->fstack[t->fsp - 1];
   {
     const pl_opdesc* d = &pl_ops[fr->op];
+    uint32_t opi = fr->op;
     size_t argbase = fr->argbase;
     t->fsp--;          /* pop before the body so its frames take this slot */
     t->centry_depth++; /* op bodies are C-entry regions (C1) */
-    pl_val r = d->body(t, argbase);
+    pl_val r;
+    /* direct op-82 effects route through the record/replay seam */
+    if (!(d->opset == 82 && !d->coord && pl_io != NULL &&
+          pl_io(t, opi, argbase, &r)))
+      r = d->body(t, argbase);
     t->centry_depth--;
     t->vsp = argbase - 1; /* drop args and the name slot */
     if (ax_unlikely(d->coord)) {
