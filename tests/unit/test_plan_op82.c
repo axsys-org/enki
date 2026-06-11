@@ -1,0 +1,246 @@
+#include <criterion/criterion.h>
+
+#include "test_plan.h"
+
+/*
+ * op 82 coordination effects (actor spec §6.3): Spawn/Send/SendCaps/
+ * Recv/CloseHandle validate their forced args, park the request spine
+ * [OpName, args…] in t->blocked_on, and suspend with PL_RUN_BLOCKED.
+ * The host services the request and resumes with pl_thread_deposit; the
+ * response arrives as the op's value.  Direct ops (Input/Output/…) are
+ * unaffected and keep running inline as op bodies.
+ *
+ * Redexes are driven through lazy thunks with KAL body code, as in
+ * test_plan_thread.c: in a 1-slot-env body, (0 f x) is application and
+ * (0 v) is a literal.
+ */
+
+/* A lazy thunk whose body expr runs under an empty (1-slot) env. */
+static pl_val test_thunk(pl_thread* t, pl_val expr) {
+  size_t base = t->vsp;
+  pl_vpush(t, expr);
+  pl_gc_reserve(t, PL_ENV_CELLS(1) + PL_THUNK_CELLS);
+  pl_val env = pl_mk_env(t, 1);
+  pl_val out = pl_mk_thunk(t, env, t->vstack[base]);
+  t->vsp = base;
+  return out;
+}
+
+/* The pin of nat 82, the rplan I/O op set. */
+static pl_val test_p82(pl_thread* t) {
+  size_t base = t->vsp;
+  pl_vpush(t, 82);
+  pl_val pin = pl_pin(t, t->vstack[base]);
+  t->vsp = base;
+  return pin;
+}
+
+/* A thunk forcing (P82 % (name args…)): body (0 (0 P82) (0 row)). */
+static pl_val test_op82_thunk(pl_thread* t, pl_val name, size_t n,
+                              const pl_val* args) {
+  size_t base = t->vsp;
+  pl_vpush(t, test_app(t, name, n, args));
+  pl_vpush(t, test_app1(t, 0, t->vstack[base])); /* (0 row) */
+  pl_vpush(t, test_app1(t, 0, test_p82(t)));     /* (0 P82) */
+  pl_val expr = test_app2(t, 0, t->vstack[base + 2], t->vstack[base + 1]);
+  t->vsp = base;
+  return test_thunk(t, expr);
+}
+
+/* Run until the thread leaves the runnable set, one machine step per
+ * quantum, so every test also exercises yield/resume interleaving. */
+static pl_run_status test_run(pl_thread* t) {
+  pl_run_status s;
+  int quanta = 0;
+  do {
+    s = pl_thread_run(t, 2);
+    cr_assert_lt(++quanta, 1 << 20, "runaway resume loop");
+  } while (s == PL_RUN_YIELDED);
+  return s;
+}
+
+Test(op82, recv_blocks_then_deposit_resumes) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  t->rplan_f = true;
+  size_t vsp0 = t->vsp, fsp0 = t->fsp;
+  pl_val args[1] = {0};
+  pl_thread_start(t, test_op82_thunk(t, ax_s4('R', 'e', 'c', 'v'), 1, args));
+  cr_assert_eq(test_run(t), PL_RUN_BLOCKED);
+
+  pl_cell* p = pl_as(PL_TAG_APP, pl_thread_request(t));
+  cr_assert_not_null(p);
+  cr_assert_eq(pl_app_head(p), ax_s4('R', 'e', 'c', 'v'));
+  cr_assert_eq(pl_app_n(p), 1);
+  cr_assert_eq(pl_app_args(p)[0], 0);
+
+  pl_thread_deposit(t, 42);
+  cr_assert_eq(t->blocked_on, 0);
+  cr_assert_eq(test_run(t), PL_RUN_DONE);
+  cr_assert_eq(pl_thread_result(t), 42);
+  cr_assert_eq(t->vsp, vsp0);
+  cr_assert_eq(t->fsp, fsp0);
+  test_rt_free(&rt);
+}
+
+Test(op82, response_feeds_pending_frames) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  t->rplan_f = true;
+  /* (P66 % (Add 5 <thunk -> (P82 % (Recv 0))>)): the Recv blocks while
+   * forcing Add's strict arg; the deposit RETURNs through the recv
+   * thunk's F_UPDATE into the F_OPARG driver. */
+  size_t base = t->vsp;
+  pl_val rargs[1] = {0};
+  pl_vpush(t, test_op82_thunk(t, ax_s4('R', 'e', 'c', 'v'), 1, rargs));
+  pl_val aargs[2] = {5, t->vstack[base]};
+  pl_vpush(t, test_app(t, ax_s3('A', 'd', 'd'), 2, aargs));
+  pl_vpush(t, test_app1(t, 0, t->vstack[base + 1])); /* (0 addrow) */
+  pl_vpush(t, test_app1(t, 0, test_p66(t)));         /* (0 P66)    */
+  pl_val expr = test_app2(t, 0, t->vstack[base + 3], t->vstack[base + 2]);
+  t->vsp = base;
+  pl_thread_start(t, test_thunk(t, expr));
+
+  cr_assert_eq(test_run(t), PL_RUN_BLOCKED);
+  pl_thread_deposit(t, 4);
+  cr_assert_eq(test_run(t), PL_RUN_DONE);
+  cr_assert_eq(pl_thread_result(t), 9);
+  test_rt_free(&rt);
+}
+
+Test(op82, send_forces_handle_keeps_msg_lazy) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  t->rplan_f = true;
+  size_t base = t->vsp;
+  pl_vpush(t, test_thunk(t, 7)); /* msg: unforced (0-free body literal) */
+  pl_val args[2] = {3, t->vstack[base]};
+  pl_thread_start(t, test_op82_thunk(t, ax_s4('S', 'e', 'n', 'd'), 2, args));
+  cr_assert_eq(test_run(t), PL_RUN_BLOCKED);
+
+  pl_cell* p = pl_as(PL_TAG_APP, pl_thread_request(t));
+  cr_assert_not_null(p);
+  cr_assert_eq(pl_app_head(p), ax_s4('S', 'e', 'n', 'd'));
+  cr_assert_eq(pl_app_n(p), 2);
+  cr_assert_eq(pl_app_args(p)[0], 3);
+  /* the message payload must not have been forced at initiation */
+  cr_assert_eq(pl_tag(pl_app_args(p)[1]), PL_TAG_DEFER);
+
+  pl_thread_deposit(t, 0);
+  cr_assert_eq(test_run(t), PL_RUN_DONE);
+  cr_assert_eq(pl_thread_result(t), 0);
+  cr_assert_eq(pl_tag(t->vstack[base]), PL_TAG_DEFER); /* still lazy */
+  t->vsp = base;
+  test_rt_free(&rt);
+}
+
+Test(op82, spawn_takes_fn_unevaluated) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  t->rplan_f = true;
+  size_t base = t->vsp;
+  pl_vpush(t, test_thunk(t, 7));
+  pl_val args[1] = {t->vstack[base]};
+  pl_thread_start(t,
+                  test_op82_thunk(t, ax_s5('S', 'p', 'a', 'w', 'n'), 1, args));
+  cr_assert_eq(test_run(t), PL_RUN_BLOCKED);
+
+  pl_cell* p = pl_as(PL_TAG_APP, pl_thread_request(t));
+  cr_assert_not_null(p);
+  cr_assert_eq(pl_app_head(p), ax_s5('S', 'p', 'a', 'w', 'n'));
+  cr_assert_eq(pl_app_n(p), 1);
+  cr_assert_eq(pl_tag(pl_app_args(p)[0]), PL_TAG_DEFER);
+
+  pl_thread_deposit(t, 1); /* fresh child handle */
+  cr_assert_eq(test_run(t), PL_RUN_DONE);
+  cr_assert_eq(pl_thread_result(t), 1);
+  t->vsp = base;
+  test_rt_free(&rt);
+}
+
+Test(op82, blocked_request_survives_gc) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  t->rplan_f = true;
+  size_t base = t->vsp;
+  pl_vpush(t, test_thunk(t, 7));
+  pl_val args[2] = {3, t->vstack[base]};
+  pl_thread_start(t, test_op82_thunk(t, ax_s4('S', 'e', 'n', 'd'), 2, args));
+  cr_assert_eq(test_run(t), PL_RUN_BLOCKED);
+
+  pl_gc_collect_now(t); /* moves the request and the parked continuation */
+  pl_cell* p = pl_as(PL_TAG_APP, pl_thread_request(t));
+  cr_assert_not_null(p);
+  cr_assert_eq(pl_app_head(p), ax_s4('S', 'e', 'n', 'd'));
+  cr_assert_eq(pl_app_args(p)[0], 3);
+
+  pl_thread_deposit(t, 0);
+  cr_assert_eq(test_run(t), PL_RUN_DONE);
+  cr_assert_eq(pl_thread_result(t), 0);
+  t->vsp = base;
+  test_rt_free(&rt);
+}
+
+Test(op82, recv_rejects_nonzero_arg) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  t->rplan_f = true;
+  pl_val args[1] = {1};
+  pl_thread_start(t, test_op82_thunk(t, ax_s4('R', 'e', 'c', 'v'), 1, args));
+  cr_assert_eq(test_run(t), PL_RUN_EXN); /* crash path, not catchable */
+  cr_assert_not_null(t->exn_msg);
+  test_rt_free(&rt);
+}
+
+Test(op82, unknown_op_is_runtime_error) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  t->rplan_f = true;
+  pl_val args[1] = {0};
+  pl_thread_start(t, test_op82_thunk(t, ax_s4('F', 'r', 'o', 'b'), 1, args));
+  cr_assert_eq(test_run(t), PL_RUN_EXN);
+  cr_assert_not_null(t->exn_msg);
+  test_rt_free(&rt);
+}
+
+Test(op82, requires_rplan_mode) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t; /* rplan_f defaults to false */
+  pl_val args[1] = {0};
+  pl_thread_start(t, test_op82_thunk(t, ax_s4('R', 'e', 'c', 'v'), 1, args));
+  cr_assert_eq(test_run(t), PL_RUN_EXN);
+  cr_assert_not_null(t->exn_msg);
+  test_rt_free(&rt);
+}
+
+Test(op82, host_entry_has_no_executor) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  t->rplan_f = true;
+  /* pl_whnf cannot service a coordination op: runtime error on both the
+   * direct path (initiation at centry_depth > 0) and the YIELD_STRESS
+   * stress drive (PL_RUN_BLOCKED converted to the same raise). */
+  pl_val args[1] = {0};
+  pl_val v = test_op82_thunk(t, ax_s4('R', 'e', 'c', 'v'), 1, args);
+  pl_catch c;
+  pl_catch_init(t, &c);
+  if (setjmp(c.jb) == 0) {
+    (void)pl_whnf(t, v);
+    cr_assert_fail("expected a runtime error");
+  }
+  pl_catch_unwind(t, &c);
+  cr_assert_not_null(t->exn_msg);
+  test_rt_free(&rt);
+}
+
+Test(op82, direct_ops_still_run_inline) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  t->rplan_f = true;
+  /* Now is a direct effect: no suspension, result inline. */
+  pl_val args[1] = {0};
+  pl_thread_start(t, test_op82_thunk(t, ax_s3('N', 'o', 'w'), 1, args));
+  cr_assert_eq(test_run(t), PL_RUN_DONE);
+  cr_assert_gt(pl_thread_result(t), 0);
+  test_rt_free(&rt);
+}

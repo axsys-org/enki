@@ -541,6 +541,24 @@ op_body:
     pl_val r = d->body(t, argbase);
     t->centry_depth--;
     t->vsp = argbase - 1; /* drop args and the name slot */
+    if (ax_unlikely(d->coord)) {
+      /*
+       * Coordination effect (§6.3): r is the validated request, not a
+       * result.  Initiation is legal only at depth 0 (C3) — directly
+       * under pl_thread_run — where the machine parks the request and
+       * suspends at a RETURN point: the deposited response arrives as
+       * the op's value.  At depth > 0 under an executor this is a C3
+       * violation; from a plain host entry there is nobody to service
+       * the request, so it is a (non-Try-catchable) runtime error.
+       */
+      if (t->centry_depth > 0) {
+        ax_assume(!t->suspendable,
+                  "C3: coordination effect initiated in a C-entry region");
+        pl_raise_msg(t, "actor op with no executor");
+      }
+      t->blocked_on = r;
+      return PL_RUN_BLOCKED;
+    }
     v = r;
     goto eval;
   }
@@ -566,9 +584,19 @@ void pl_thread_start_nf(pl_thread* t, pl_val v) {
   fr->kind = PL_F_NF;
 }
 
+void pl_thread_start_call_nf(pl_thread* t, pl_val f, pl_val x) {
+  pl_thread_start_nf(t, f);
+  pl_frame* fr = pl_fpush(t); /* applied first, then the NF descent */
+  fr->kind = PL_F_APPLY;
+  fr->b = x;
+}
+
 void pl_thread_deposit(pl_thread* t, pl_val response) {
   ax_assume(t->status == PL_RUN_BLOCKED,
             "pl_thread_deposit: thread is not blocked");
+  /* the machine resumes by RETURNing the response to the pending frame,
+   * which expects a WHNF (executors build rows/nats, never thunks) */
+  ax_assume(pl_is_whnf(response), "pl_thread_deposit: response must be WHNF");
   t->resume_kind = PL_RES_RETURN;
   t->resume_val = response;
   t->blocked_on = 0;
@@ -578,6 +606,12 @@ void pl_thread_deposit(pl_thread* t, pl_val response) {
 pl_val pl_thread_result(pl_thread* t) {
   ax_assume(t->status == PL_RUN_DONE, "pl_thread_result: thread not done");
   return t->result;
+}
+
+pl_val pl_thread_request(pl_thread* t) {
+  ax_assume(t->status == PL_RUN_BLOCKED,
+            "pl_thread_request: thread is not blocked");
+  return t->blocked_on;
 }
 
 pl_run_status pl_thread_run(pl_thread* t, uint64_t fuel) {
@@ -671,7 +705,6 @@ static pl_val pl_stress_drive(pl_thread* t, pl_val v, size_t base) {
   do
     s = pl_thread_run(t, 2);
   while (s == PL_RUN_YIELDED);
-  ax_assume(s != PL_RUN_BLOCKED, "stress drive cannot block");
 
   pl_val r = (s == PL_RUN_DONE) ? t->result : 0;
   t->result = t->vstack[mark + 2];
@@ -688,6 +721,11 @@ static pl_val pl_stress_drive(pl_thread* t, pl_val v, size_t base) {
     if (t->exn_msg != NULL)
       pl_raise_msg(t, t->exn_msg);
     pl_raise(t, t->exn);
+  }
+  if (s == PL_RUN_BLOCKED) {
+    /* a coordination op reached depth 0 under the stress executor; the
+     * direct path raises at initiation (centry_depth > 0) — match it */
+    pl_raise_msg(t, "actor op with no executor");
   }
   return r;
 }

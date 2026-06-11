@@ -46,7 +46,7 @@ static pl_val mk_app1_rooted(pl_thread* t, pl_val head, pl_val* slot) {
 /* ── op 0 / shared bodies ──────────────────────────────────────────────── */
 
 static pl_val op_pin(pl_thread* t, size_t ab) {
-  return pl_pin(t, &ARG(0));
+  return pl_pin(t, ARG(0));
 }
 
 static pl_val op_law(pl_thread* t, size_t ab) {
@@ -640,7 +640,10 @@ static pl_val op_try(pl_thread* t, size_t ab) {
 /* ── Misc ──────────────────────────────────────────────────────────────── */
 
 static pl_val op_trace(pl_thread* t, size_t ab) {
-  ARG(0) = pl_nf(t, ARG(0)); /* the reference shows the value deeply */
+  /* assign via a local: evaluation may realloc the vstack, so computing
+   * the slot address unsequenced with the call would be stale */
+  pl_val shown = pl_nf(t, ARG(0)); /* the reference shows the value deeply */
+  ARG(0) = shown;
   char* s = pl_show_val(ax_allocator_system(), ARG(0), NULL);
   fprintf(stderr, "%s\n", s);
   ax_free(ax_allocator_system(), s);
@@ -685,7 +688,8 @@ static bool pl_eq_deep(pl_val a, pl_val b) {
 }
 
 static pl_val op_equal(pl_thread* t, size_t ab) {
-  ARG(1) = pl_nf(t, ARG(1)); /* arg 0 deep via flag */
+  pl_val rhs = pl_nf(t, ARG(1)); /* arg 0 deep via flag */
+  ARG(1) = rhs;
   return pl_eq_deep(ARG(0), ARG(1)) ? 1 : 0;
 }
 
@@ -748,14 +752,18 @@ static pl_val op_load(pl_thread* t, size_t ab) {
 
 #define M2(a, b) ax_s2(a, b)
 #define OP66(name, argc, mask, deep, body)                                     \
-  {66, name, NULL, argc, mask, deep, body}
-#define OP82(name, argc, mask, body) {82, 0, name, argc, mask, false, body}
+  {66, name, NULL, argc, mask, deep, false, body}
+#define OP82(name, argc, mask, body)                                           \
+  {82, 0, name, argc, mask, false, false, body}
+/* coordination effects (§6.3): the machine blocks instead of executing */
+#define OP82C(name, argc, mask, body)                                          \
+  {82, 0, name, argc, mask, false, true, body}
 
 const pl_opdesc pl_ops[] = {
     /* op 0: core PLAN */
-    {0, 0, NULL, 1, 0b1, true, op_pin},
-    {0, 1, NULL, 3, 0b111, false, op_law},
-    {0, 2, NULL, 6, 0b100000, false, op_elim},
+    {0, 0, NULL, 1, 0b1, true, false, op_pin},
+    {0, 1, NULL, 3, 0b111, false, false, op_law},
+    {0, 2, NULL, 6, 0b100000, false, false, op_elim},
 
     OP66(ax_s3('P', 'i', 'n'), 1, 0b1, true, op_pin),
     OP66(ax_s3('L', 'a', 'w'), 3, 0b111, false, op_law),
@@ -875,11 +883,11 @@ const pl_opdesc pl_ops[] = {
     OP82("Accept", 1, 0b1, pl_op82_accept),
     OP82("Read", 2, 0b11, pl_op82_read),
     OP82("Write", 2, 0b11, pl_op82_write),
-    OP82("Spawn", 1, 0, pl_op82_actor),
-    OP82("Send", 2, 0b1, pl_op82_actor),
-    OP82("SendCaps", 3, 0b1, pl_op82_actor),
-    OP82("Recv", 1, 0b1, pl_op82_actor),
-    OP82("CloseHandle", 1, 0b1, pl_op82_actor),
+    OP82C("Spawn", 1, 0, pl_op82_spawn),
+    OP82C("Send", 2, 0b1, pl_op82_send),
+    OP82C("SendCaps", 3, 0b1, pl_op82_send_caps),
+    OP82C("Recv", 1, 0b1, pl_op82_recv),
+    OP82C("CloseHandle", 1, 0b1, pl_op82_close_handle),
 };
 
 const size_t pl_nops = sizeof(pl_ops) / sizeof(pl_ops[0]);

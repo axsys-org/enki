@@ -7,6 +7,7 @@
 
 #include "axsys/allocator.h"
 #include "axsys/util.h"
+#include "enki/actor.h"
 #include "enki/wisp.h"
 #include "plan/build.h"
 #include "plan/eval.h"
@@ -397,20 +398,19 @@ static bool boot_run_function(boot_ctx* ctx, pl_val fun, int argc,
   en_root_push(w, 0);
   w->tmp_v[mark + 1] = boot_make_row(ctx, argc, argv);
 
-  pl_catch c;
-  pl_catch_init(w->t, &c);
-  if (setjmp(c.jb) != 0) {
-    pl_catch_unwind(w->t, &c);
-    w->env = old_env;
-    fprintf(stderr, "wisp: runtime error: %s\n",
-            w->t->exn_msg != NULL ? w->t->exn_msg : "PLAN exception");
-    return false;
-  }
-  pl_val r = pl_apply(w->t, w->tmp_v[mark], w->tmp_v[mark + 1]);
-  (void)pl_nf(w->t, r);
-  pl_catch_pop(w->t, &c);
+  /* the reference runRepl: force (fun % args), in the root actor so
+   * the program may spawn, send, and block on Recv (§6.3) */
+  pl_thread_start_call_nf(w->t, w->tmp_v[mark], w->tmp_v[mark + 1]);
+  er_drive_status ds = er_scheduler_drive(w->sched, w->self);
   en_root_pop(w, mark);
   w->env = old_env;
+  if (ds != ER_DRIVE_DONE) {
+    fprintf(stderr, "wisp: runtime error: %s\n",
+            ds == ER_DRIVE_DEADLOCK ? "deadlock: every actor is blocked on Recv"
+            : w->t->exn_msg != NULL ? w->t->exn_msg
+                                    : "PLAN exception");
+    return false;
+  }
   return true;
 }
 
@@ -493,6 +493,13 @@ int main(int argc, char** argv) {
   }
   w->t->rplan_file_root_c = file_root_c;
 
+  /* the boot thread is the root actor (the reference withNewRts);
+   * spawned actors inherit the ReadFile jail */
+  er_scheduler* sched =
+      er_scheduler_new(store, (er_config){.file_root_c = file_root_c});
+  w->sched = sched;
+  w->self = er_scheduler_adopt(sched, w->t);
+
   boot_ctx ctx = {
       .loc_a = ax_allocator_system(),
       .w = w,
@@ -521,6 +528,7 @@ int main(int argc, char** argv) {
     ax_free(ctx.loc_a, mod);
     mod = next;
   }
+  er_scheduler_free(sched); /* leftover actors die with the program */
   en_wisp_free(w);
   pl_heap_free(heap);
   pl_store_free(store);

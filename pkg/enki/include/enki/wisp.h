@@ -16,6 +16,9 @@
 #include "plan/heap.h"
 #include "plan/value.h"
 
+typedef struct er_scheduler er_scheduler; /* enki/actor.h */
+typedef struct er_actor er_actor;
+
 typedef struct en_env_entry {
   pl_val key_v;
   pl_val val_v;
@@ -34,6 +37,15 @@ typedef struct en_wisp {
   /* rooted scratch stack (registered as a GC root source) */
   pl_val* tmp_v;
   size_t tmp_s, tmp_cap;
+  /*
+   * Optional actor executor (the reference withNewRts): when set, the
+   * guarded evaluations below arm `t` (which must be `self`'s adopted
+   * thread) and drive the scheduler, so op-82 coordination effects in
+   * top-level code are serviced instead of raising.  NULL keeps the
+   * plain host evaluation path.
+   */
+  er_scheduler* sched;
+  er_actor* self;
 } en_wisp;
 
 en_wisp* en_wisp_new(pl_heap* heap);

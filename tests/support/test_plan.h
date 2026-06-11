@@ -69,7 +69,7 @@ static pl_val test_law(pl_thread* t, uint64_t arity, pl_val name, pl_val body) {
 static pl_val test_p66(pl_thread* t) {
   size_t base = t->vsp;
   pl_vpush(t, 66);
-  pl_val pin = pl_pin(t, &t->vstack[base]);
+  pl_val pin = pl_pin(t, t->vstack[base]);
   t->vsp = base;
   return pin;
 }

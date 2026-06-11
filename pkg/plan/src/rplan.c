@@ -25,10 +25,12 @@
  *   - Output / Warn / Write take bars and strip the top byte (natBytes).
  *   - Print takes a plain string nat and writes every byte (natStr).
  *
- * Actor ops (Spawn/Send/SendCaps/Recv/CloseHandle) are not yet ported:
- * io-work implements them with a resumable bytecode VM and a cooperative
- * scheduler, which this explicit-frame machine cannot interrupt; they
- * need either the P4 compiled runtime or one OS thread per actor.
+ * Actor ops (Spawn/Send/SendCaps/Recv/CloseHandle) are coordination
+ * effects (actor spec §6.3): their bodies below only validate the forced
+ * args and rebuild the request spine [OpName, args…]; the machine parks
+ * it in t->blocked_on and suspends with PL_RUN_BLOCKED (eval.c op_body).
+ * Servicing — mailboxes, handle tables, spawning — belongs to the
+ * executor (P3), which deposits the response with pl_thread_deposit.
  */
 
 #define ARG(i) (t->vstack[ab + (i)])
@@ -361,9 +363,40 @@ pl_val pl_op82_write(pl_thread* t, size_t ab) {
   return 0;
 }
 
-/* ── Actors (not yet ported, see header comment) ───────────────────────── */
+/* ── Actors: coordination effects (see header comment) ─────────────────── */
 
-pl_val pl_op82_actor(pl_thread* t, size_t ab) {
-  AX_UNUSED(ab);
-  pl_raise_msg(t, "actor ops are not yet supported by this runtime");
+/* Rebuild the request spine [OpName, args…] from the unapp'd op row on
+ * the value stack (name at ab-1, argc args from ab).  Strict args are
+ * already forced; the rest stay lazy until the executor services them. */
+static pl_val rp_request(pl_thread* t, size_t ab, uint32_t argc) {
+  pl_gc_reserve(t, PL_APP_CELLS(argc));
+  PL_GC_FORBID(t);
+  pl_val r = pl_mk_app_from(t, t->vstack[ab - 1], argc, &t->vstack[ab]);
+  PL_GC_ALLOW(t);
+  return r;
+}
+
+pl_val pl_op82_spawn(pl_thread* t, size_t ab) {
+  return rp_request(t, ab, 1); /* fn is taken unevaluated */
+}
+
+pl_val pl_op82_send(pl_thread* t, size_t ab) {
+  rp_want_nat(t, ARG(0)); /* handle; the message stays lazy */
+  return rp_request(t, ab, 2);
+}
+
+pl_val pl_op82_send_caps(pl_thread* t, size_t ab) {
+  rp_want_nat(t, ARG(0));
+  return rp_request(t, ab, 3);
+}
+
+pl_val pl_op82_recv(pl_thread* t, size_t ab) {
+  if (ARG(0) != 0) /* the reference accepts only the literal nat 0 */
+    pl_raise_msg(t, "unknown actor/net op");
+  return rp_request(t, ab, 1);
+}
+
+pl_val pl_op82_close_handle(pl_thread* t, size_t ab) {
+  rp_want_nat(t, ARG(0));
+  return rp_request(t, ab, 1);
 }

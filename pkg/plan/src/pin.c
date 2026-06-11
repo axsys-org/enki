@@ -4,7 +4,7 @@
 #include "axsys/allocator.h"
 #include "axsys/assume.h"
 #include "axsys/sha256.h"
-#include "axsys/stb_ds.h"
+#include "axsys/ds.h"
 #include "internal.h"
 #include "plan/build.h"
 #include "plan/canon.h"
@@ -49,17 +49,17 @@ typedef struct canon_ctx {
 } canon_ctx;
 
 static void cput8(canon_ctx* c, uint8_t b) {
-  arrpush(c->buf, b);
+  ax_arrpush(c->buf, b);
 }
 
 static void cput32(canon_ctx* c, uint32_t v) {
   for (int i = 0; i < 4; i++)
-    arrpush(c->buf, (uint8_t)(v >> (8 * i)));
+    ax_arrpush(c->buf, (uint8_t)(v >> (8 * i)));
 }
 
 static void cput64(canon_ctx* c, uint64_t v) {
   for (int i = 0; i < 8; i++)
-    arrpush(c->buf, (uint8_t)(v >> (8 * i)));
+    ax_arrpush(c->buf, (uint8_t)(v >> (8 * i)));
 }
 
 /* Collect sub-pins, shallow, first-occurrence, left-to-right. */
@@ -69,9 +69,9 @@ static void collect_subpins(canon_ctx* c, pl_val v) {
   pl_cell* p = pl_ptr(v);
   switch (pl_tag(v)) {
   case PL_TAG_PIN:
-    if (hmgeti(c->idx, v) < 0) {
-      hmput(c->idx, v, (uint32_t)arrlen(c->subpins));
-      arrpush(c->subpins, v);
+    if (ax_hmgeti(c->idx, v) < 0) {
+      ax_hmput(c->idx, v, (uint32_t)ax_arrlen(c->subpins));
+      ax_arrpush(c->subpins, v);
     }
     return;
   case PL_TAG_LAW:
@@ -103,7 +103,7 @@ static void serialize(canon_ctx* c, pl_val v) {
   pl_cell* p = pl_ptr(v);
   switch (pl_tag(v)) {
   case PL_TAG_PIN: {
-    ptrdiff_t i = hmgeti(c->idx, v);
+    ptrdiff_t i = ax_hmgeti(c->idx, v);
     ax_assume(i >= 0, "serialize: pin not collected");
     cput8(c, 'p');
     cput32(c, c->idx[i].value);
@@ -141,7 +141,7 @@ static pl_val store_copy(pl_store* s, copy_entry** map, pl_val v) {
     return v;
   if (pl_store_owns(s, v))
     return v; /* sub-pins and prior pinned data */
-  ptrdiff_t hit = hmgeti(*map, v);
+  ptrdiff_t hit = ax_hmgeti(*map, v);
   if (hit >= 0)
     return (*map)[hit].value;
   pl_cell* p = pl_ptr(v);
@@ -160,7 +160,7 @@ static pl_val store_copy(pl_store* s, copy_entry** map, pl_val v) {
     np[0] = pl_hdr_make(PL_K_LAW, PL_F_NORMAL, 0, PL_LAW_CELLS);
     np[1] = pl_law_arity(p);
     nv = pl_make(PL_TAG_LAW, np);
-    hmput(*map, v, nv);
+    ax_hmput(*map, v, nv);
     np[2] = store_copy(s, map, pl_law_name(p));
     np[3] = store_copy(s, map, pl_law_body(p));
     return nv;
@@ -170,7 +170,7 @@ static pl_val store_copy(pl_store* s, copy_entry** map, pl_val v) {
     pl_cell* np = pl_store_alloc(s, PL_APP_CELLS(n));
     np[0] = pl_hdr_make(PL_K_APP, PL_F_NORMAL, pl_app_need(p), PL_APP_CELLS(n));
     nv = pl_make(PL_TAG_APP, np);
-    hmput(*map, v, nv);
+    ax_hmput(*map, v, nv);
     np[1] = store_copy(s, map, pl_app_head(p));
     for (uint32_t i = 0; i < n; i++)
       np[2 + i] = store_copy(s, map, pl_app_args(pl_ptr(v))[i]);
@@ -180,26 +180,26 @@ static pl_val store_copy(pl_store* s, copy_entry** map, pl_val v) {
     ax_abort("store_copy: non-normal value (tag 0x%llx)",
              (unsigned long long)pl_tag(v));
   }
-  hmput(*map, v, nv);
+  ax_hmput(*map, v, nv);
   return nv;
 }
 
 /* ── Pinning ───────────────────────────────────────────────────────────── */
 
 static pl_val pin_from_canon(pl_store* s, canon_ctx* c, pl_val body) {
-  size_t nsub = (size_t)arrlen(c->subpins);
+  size_t nsub = (size_t)ax_arrlen(c->subpins);
   /* assemble the full canonical buffer: header + body bytes */
   uint8_t* full = NULL;
-  arrpush(full, PL_CANON_VERSION);
+  ax_arrpush(full, PL_CANON_VERSION);
   for (int i = 0; i < 8; i++)
-    arrpush(full, (uint8_t)((uint64_t)nsub >> (8 * i)));
+    ax_arrpush(full, (uint8_t)((uint64_t)nsub >> (8 * i)));
   for (size_t j = 0; j < nsub; j++) {
     const uint8_t* h = pl_pin_hash(c->subpins[j]);
     for (int i = 0; i < 32; i++)
-      arrpush(full, h[i]);
+      ax_arrpush(full, h[i]);
   }
-  for (ptrdiff_t i = 0; i < arrlen(c->buf); i++)
-    arrpush(full, c->buf[i]);
+  for (ptrdiff_t i = 0; i < ax_arrlen(c->buf); i++)
+    ax_arrpush(full, c->buf[i]);
 
   /* the content hash is SHA-256 of the canonical TEXT (mkPin) */
   uint8_t hash[32];
@@ -214,28 +214,33 @@ static pl_val pin_from_canon(pl_store* s, canon_ctx* c, pl_val body) {
   if (pin == 0) {
     copy_entry* map = NULL;
     pl_val body_copy = store_copy(s, &map, body);
-    hmfree(map);
+    ax_hmfree(map);
     pin = pl_store_mk_pin(s, hash, body_copy, (uint32_t)nsub, c->subpins);
     pl_store_intern_put(s, hash, pin);
-    ax_assume(pl_store_backend_put(s, hash, full, (size_t)arrlen(full)),
+    ax_assume(pl_store_backend_put(s, hash, full, (size_t)ax_arrlen(full)),
               "store backend put failed");
   }
-  arrfree(full);
+  ax_arrfree(full);
   return pin;
 }
 
-pl_val pl_pin(pl_thread* t, pl_val* slot) {
+pl_val pl_pin(pl_thread* t, pl_val v) {
   pl_store* s = pl_heap_store(t->heap);
   ax_assume(s != NULL, "pinning requires a store");
-  *slot = pl_nf(t, *slot);
+  /* v is rooted by the machine while it normalizes; afterwards nothing
+   * below can collect (serialization buffers are malloc'd and the pin
+   * itself is built in the non-moving store region), so the bare val is
+   * safe.  Taking a slot pointer here would be wrong: evaluation may
+   * grow (realloc) the very stacks most callers' slots live in. */
+  v = pl_nf(t, v);
 
   canon_ctx c = {0};
-  collect_subpins(&c, *slot);
-  serialize(&c, *slot);
-  pl_val pin = pin_from_canon(s, &c, *slot);
-  arrfree(c.buf);
-  arrfree(c.subpins);
-  hmfree(c.idx);
+  collect_subpins(&c, v);
+  serialize(&c, v);
+  pl_val pin = pin_from_canon(s, &c, v);
+  ax_arrfree(c.buf);
+  ax_arrfree(c.subpins);
+  ax_hmfree(c.idx);
   return pin;
 }
 
@@ -244,9 +249,9 @@ pl_val pl_store_pin_of_nat(pl_store* s, uint64_t n) {
   canon_ctx c = {0};
   serialize(&c, n);
   pl_val pin = pin_from_canon(s, &c, n);
-  arrfree(c.buf);
-  arrfree(c.subpins);
-  hmfree(c.idx);
+  ax_arrfree(c.buf);
+  ax_arrfree(c.subpins);
+  ax_hmfree(c.idx);
   return pin;
 }
 
@@ -351,13 +356,13 @@ pl_val pl_store_load(pl_thread* t, const uint8_t hash[32]) {
     ax_assume(d.off + 32 <= d.n, "pin bytes truncated");
     memcpy(sub, d.b + d.off, 32);
     d.off += 32;
-    arrpush(subs, pl_store_load(t, sub));
+    ax_arrpush(subs, pl_store_load(t, sub));
   }
   d.subpins = subs;
   pl_val body = deser(s, &d);
   pl_val pin = pl_store_mk_pin(s, hash, body, (uint32_t)d.nsub, subs);
   pl_store_intern_put(s, hash, pin);
-  arrfree(subs);
+  ax_arrfree(subs);
   free(bytes);
   return pin;
 }

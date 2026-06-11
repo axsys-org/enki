@@ -5,8 +5,9 @@
 #include <string.h>
 
 #include "axsys/allocator.h"
-#include "axsys/stb_ds.h"
+#include "axsys/ds.h"
 #include "axsys/util.h"
+#include "enki/actor.h"
 #include "plan/build.h"
 #include "plan/debug.h"
 #include "plan/nat.h"
@@ -128,7 +129,29 @@ void en_root_push(en_wisp* w, pl_val v) {
   en_fail_with_val(w, "PLAN exception", w->t->exn);
 }
 
+/* Scheduler-driven evaluation (the reference withNewRts): arm the
+ * adopted root thread and drive the executor, so top-level code can
+ * initiate coordination effects (Spawn/Send/Recv/…) that the scheduler
+ * services while spawned actors run alongside. */
+static pl_val en_run_drive(en_wisp* w, pl_val v, bool nf) {
+  if (nf)
+    pl_thread_start_nf(w->t, v);
+  else
+    pl_thread_start(w->t, v);
+  switch (er_scheduler_drive(w->sched, w->self)) {
+  case ER_DRIVE_DONE:
+    return pl_thread_result(w->t);
+  case ER_DRIVE_EXN:
+    en_fail_exn(w);
+  case ER_DRIVE_DEADLOCK:
+  default:
+    en_fail(w, "deadlock: every actor is blocked on Recv");
+  }
+}
+
 pl_val en_run_whnf(en_wisp* w, pl_val v) {
+  if (w->sched != NULL)
+    return en_run_drive(w, v, false);
   pl_catch c;
   pl_catch_init(w->t, &c);
   if (setjmp(c.jb) == 0) {
@@ -141,6 +164,8 @@ pl_val en_run_whnf(en_wisp* w, pl_val v) {
 }
 
 pl_val en_run_nf(en_wisp* w, pl_val v) {
+  if (w->sched != NULL)
+    return en_run_drive(w, v, true);
   pl_catch c;
   pl_catch_init(w->t, &c);
   if (setjmp(c.jb) == 0) {
@@ -598,11 +623,11 @@ static void en_env_tmp_free(en_wisp* w, en_env_tmp* root) {
 static pl_val en_env_value(en_wisp* w) {
   en_env_entry** ents = NULL;
   for (en_env_entry* e = w->env; e != NULL; e = e->next)
-    arrpush(ents, e);
+    ax_arrpush(ents, e);
   en_env_tmp* root = NULL;
-  for (size_t i = (size_t)arrlen(ents); i > 0; i--)
+  for (size_t i = (size_t)ax_arrlen(ents); i > 0; i--)
     root = en_env_tmp_put(w, root, ents[i - 1]);
-  arrfree(ents);
+  ax_arrfree(ents);
   pl_val out = en_env_tmp_value(w, root);
   en_env_tmp_free(w, root);
   return out;
@@ -802,7 +827,7 @@ static pl_val en_pin(en_wisp* w, pl_val val) {
     pl_catch_unwind(w->t, &c);
     en_fail_exn(w);
   }
-  pl_val pin = pl_pin(w->t, &w->tmp_v[mark]);
+  pl_val pin = pl_pin(w->t, w->tmp_v[mark]);
   pl_catch_pop(w->t, &c);
   en_root_pop(w, mark);
   return en_quote(w, pin);
@@ -842,14 +867,14 @@ static pl_val en_export(en_wisp* w, size_t sym_s, const pl_val* sym_v) {
     en_env_entry* ent = en_wisp_getenv(w, sym_v[i]);
     if (ent == NULL)
       en_fail_with_val(w, "unbound export", sym_v[i]);
-    arrpush(keep, ent);
+    ax_arrpush(keep, ent);
   }
   /* keep entries alive: they are spliced into a fresh list */
   en_env_entry* old = w->env;
   w->env = NULL;
   for (size_t i = 0; i < sym_s; i++)
     en_wisp_putenv(w, keep[i]->key_v, (bool)keep[i]->mac_f, keep[i]->val_v);
-  arrfree(keep);
+  ax_arrfree(keep);
   en_env_entry* e = old;
   while (e != NULL) {
     en_env_entry* next = e->next;

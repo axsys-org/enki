@@ -9,7 +9,7 @@
 #include "axsys/assume.h"
 #include "axsys/base58.h"
 #include "axsys/sb.h"
-#include "axsys/stb_ds.h"
+#include "axsys/ds.h"
 #include "plan/nat.h"
 #include "plan/store.h"
 
@@ -264,7 +264,7 @@ static cn_expr* cn_extract_expr(cn* c, cn_law* law, uint64_t maxref, pl_val v) {
   pl_val* xs = NULL; /* stb_ds; outermost arg first */
   pl_cell* p;
   while ((p = cn_as_app2(v, 0)) != NULL) {
-    arrpush(xs, pl_app_args(p)[1]);
+    ax_arrpush(xs, pl_app_args(p)[1]);
     v = pl_app_args(p)[0];
   }
 
@@ -288,13 +288,13 @@ static cn_expr* cn_extract_expr(cn* c, cn_law* law, uint64_t maxref, pl_val v) {
   }
 
   /* foldl EApp over the collected args (innermost-first application) */
-  for (size_t i = arrlenu(xs); i > 0; i--) {
+  for (size_t i = ax_arrlenu(xs); i > 0; i--) {
     cn_expr* app = cn_expr_new(c, CN_EAPP);
     app->f = e;
     app->x = cn_extract_expr(c, law, maxref, xs[i - 1]);
     e = app;
   }
-  arrfree(xs);
+  ax_arrfree(xs);
   return e;
 }
 
@@ -306,10 +306,10 @@ static cn_law* cn_extract_law(cn* c, uint64_t arity, pl_val tag, pl_val body) {
   pl_val* letvals = NULL;
   pl_cell* p;
   while ((p = cn_as_app2(body, 1)) != NULL) {
-    arrpush(letvals, pl_app_args(p)[0]);
+    ax_arrpush(letvals, pl_app_args(p)[0]);
     body = pl_app_args(p)[1];
   }
-  size_t nlets = arrlenu(letvals);
+  size_t nlets = ax_arrlenu(letvals);
   uint64_t maxref = arity + nlets;
 
   law->tag = cn_extract(c, tag);
@@ -335,7 +335,7 @@ static cn_law* cn_extract_law(cn* c, uint64_t arity, pl_val tag, pl_val body) {
     law->rhss[j] = cn_extract_expr(c, law, maxref, letvals[j]);
   }
   law->body = cn_extract_expr(c, law, maxref, body);
-  arrfree(letvals);
+  ax_arrfree(letvals);
   return law;
 }
 
@@ -385,7 +385,7 @@ static cn_doc* cn_extract(cn* c, pl_val v) {
 /* ── Pass 2: collect globals + self names (orderedGlobals order) ───────── */
 
 static bool cn_name_used(cn* c, const char* name) {
-  for (size_t i = 0; i < arrlenu(c->used); i++) {
+  for (size_t i = 0; i < ax_arrlenu(c->used); i++) {
     if (strcmp(c->used[i], name) == 0)
       return true;
   }
@@ -402,11 +402,11 @@ static void cn_collect_doc(cn* c, cn_doc* d) {
   case CN_DPIN:
     return; /* orderedGlobals skips DPin contents */
   case CN_DREF:
-    if (d->ref->rk == CN_RPIN && hmgeti(c->pinidx, d->ref->pin) < 0) {
-      hmput(c->pinidx, d->ref->pin, arrlenu(c->globals));
+    if (d->ref->rk == CN_RPIN && ax_hmgeti(c->pinidx, d->ref->pin) < 0) {
+      ax_hmput(c->pinidx, d->ref->pin, ax_arrlenu(c->globals));
       cn_global g = {.pin = d->ref->pin, .hint = d->ref->hint, .name = NULL};
       ax_base58(pl_pin_hash(d->ref->pin), 32, g.b58);
-      arrpush(c->globals, g);
+      ax_arrpush(c->globals, g);
     }
     return;
   case CN_DAPP:
@@ -417,7 +417,7 @@ static void cn_collect_doc(cn* c, cn_doc* d) {
   case CN_DLAW: {
     /* the law always reserves its self name (nameSelf's allRefs) */
     if (!cn_name_used(c, d->law->self->name))
-      arrpush(c->used, d->law->self->name);
+      ax_arrpush(c->used, d->law->self->name);
     cn_collect_doc(c, d->law->tag);
     for (size_t j = 0; j < d->law->nlets; j++)
       cn_collect_expr(c, d->law->rhss[j]);
@@ -446,7 +446,7 @@ static void cn_collect_expr(cn* c, cn_expr* e) {
 
 static const char* cn_fresh_name(cn* c, const char* base) {
   if (!cn_name_used(c, base)) {
-    arrpush(c->used, base);
+    ax_arrpush(c->used, base);
     return base;
   }
   for (int i = 2;; i++) {
@@ -454,7 +454,7 @@ static const char* cn_fresh_name(cn* c, const char* base) {
     snprintf(buf, sizeof(buf), "%s_%d", base, i);
     if (!cn_name_used(c, buf)) {
       const char* name = cn_strdup_n(c, buf, strlen(buf));
-      arrpush(c->used, name);
+      ax_arrpush(c->used, name);
       return name;
     }
   }
@@ -478,26 +478,26 @@ static int cn_hash_order(const void* pa, const void* pb) {
 static void cn_assign_global_names(cn* c) {
   cn_global** named = NULL;
   cn_global** unnamed = NULL;
-  for (size_t i = 0; i < arrlenu(c->globals); i++) {
+  for (size_t i = 0; i < ax_arrlenu(c->globals); i++) {
     if (c->globals[i].hint != NULL)
-      arrpush(named, &c->globals[i]);
+      ax_arrpush(named, &c->globals[i]);
     else
-      arrpush(unnamed, &c->globals[i]);
+      ax_arrpush(unnamed, &c->globals[i]);
   }
-  if (arrlenu(named) > 0)
-    qsort(named, arrlenu(named), sizeof(cn_global*), cn_global_order);
-  if (arrlenu(unnamed) > 0)
-    qsort(unnamed, arrlenu(unnamed), sizeof(cn_global*), cn_hash_order);
+  if (ax_arrlenu(named) > 0)
+    qsort(named, ax_arrlenu(named), sizeof(cn_global*), cn_global_order);
+  if (ax_arrlenu(unnamed) > 0)
+    qsort(unnamed, ax_arrlenu(unnamed), sizeof(cn_global*), cn_hash_order);
 
-  for (size_t i = 0; i < arrlenu(named); i++)
+  for (size_t i = 0; i < ax_arrlenu(named); i++)
     named[i]->name = cn_fresh_name(c, named[i]->hint);
-  for (size_t i = 0; i < arrlenu(unnamed); i++) {
+  for (size_t i = 0; i < ax_arrlenu(unnamed); i++) {
     char base[16];
     snprintf(base, sizeof(base), "<%.8s>", unnamed[i]->b58);
     unnamed[i]->name = cn_fresh_name(c, cn_strdup_n(c, base, strlen(base)));
   }
-  arrfree(named);
-  arrfree(unnamed);
+  ax_arrfree(named);
+  ax_arrfree(unnamed);
 }
 
 /* Second walk: resolve every pin ref to its assigned global name (this
@@ -514,7 +514,7 @@ static void cn_resolve_doc(cn* c, cn_doc* d) {
     return;
   case CN_DREF:
     if (d->ref->rk == CN_RPIN) {
-      ptrdiff_t i = hmgeti(c->pinidx, d->ref->pin);
+      ptrdiff_t i = ax_hmgeti(c->pinidx, d->ref->pin);
       ax_assume(i >= 0, "canon: unresolved pin ref");
       d->ref->name = c->globals[c->pinidx[i].value].name;
     }
@@ -584,7 +584,7 @@ static void cn_namevars_expr(cn* c, cn_local* tbl, cn_expr* e) {
   switch (e->k) {
   case CN_EVAR:
     if (e->ref->rk == CN_RVAR) {
-      ptrdiff_t i = hmgeti(tbl, e->ref->var);
+      ptrdiff_t i = ax_hmgeti(tbl, e->ref->var);
       ax_assume(i >= 0, "canon: unbound law variable");
       e->ref->name = tbl[i].value;
     }
@@ -618,19 +618,19 @@ static void cn_namevars_doc(cn* c, cn_doc* d) {
     cn_law* law = d->law;
     cn_namevars_doc(c, law->tag);
     cn_local* tbl = NULL;
-    hmput(tbl, (uint64_t)0, law->self->name);
+    ax_hmput(tbl, (uint64_t)0, law->self->name);
     for (size_t i = 0; i < law->nargs; i++) {
       law->args[i]->name = cn_next_fresh(c);
-      hmput(tbl, law->args[i]->var, law->args[i]->name);
+      ax_hmput(tbl, law->args[i]->var, law->args[i]->name);
     }
     for (size_t j = 0; j < law->nlets; j++) {
       law->lets[j]->name = cn_next_fresh(c);
-      hmput(tbl, law->lets[j]->var, law->lets[j]->name);
+      ax_hmput(tbl, law->lets[j]->var, law->lets[j]->name);
     }
     for (size_t j = 0; j < law->nlets; j++)
       cn_namevars_expr(c, tbl, law->rhss[j]);
     cn_namevars_expr(c, tbl, law->body);
-    hmfree(tbl);
+    ax_hmfree(tbl);
     return;
   }
   }
@@ -715,11 +715,11 @@ static const char* cn_pp_flat(cn* c, cn_doc* d) {
 static cn_expr* cn_expr_spine(cn_expr* e, cn_expr*** out_args, size_t* out_n) {
   cn_expr** acc = NULL;
   while (e->k == CN_EAPP) {
-    arrpush(acc, e->x);
+    ax_arrpush(acc, e->x);
     e = e->f;
   }
   /* acc is innermost-last; reverse to application order */
-  size_t n = arrlenu(acc);
+  size_t n = ax_arrlenu(acc);
   for (size_t i = 0; i < n / 2; i++) {
     cn_expr* t = acc[i];
     acc[i] = acc[n - 1 - i];
@@ -765,7 +765,7 @@ static const char* cn_flat_expr(cn* c, cn_expr* e) {
   size_t n;
   cn_expr* hd = cn_expr_spine(e, &args, &n);
   if (n == 0) {
-    arrfree(args);
+    ax_arrfree(args);
     return cn_flat_head(c, hd);
   }
   ax_sb sb;
@@ -777,7 +777,7 @@ static const char* cn_flat_expr(cn* c, cn_expr* e) {
     ax_sb_append_cstr(&sb, cn_flat_expr(c, args[i]));
   }
   ax_sb_append_lit(&sb, ")");
-  arrfree(args);
+  ax_arrfree(args);
   return ax_sb_build(&sb, NULL);
 }
 
@@ -800,7 +800,7 @@ static size_t cn_take_fitting(cn* c, long budget, cn_doc** xs, size_t n,
     long len = (long)strlen(flat);
     if (len > budget)
       break;
-    arrpush(flats, flat);
+    ax_arrpush(flats, flat);
     budget -= len + 1;
     taken++;
   }
@@ -827,7 +827,7 @@ static const char* cn_pack_lines(cn* c, int col, cn_doc** xs, size_t n) {
       }
       i += taken;
     }
-    arrfree(flats);
+    ax_arrfree(flats);
   }
   return ax_sb_build(&sb, NULL);
 }
@@ -858,7 +858,7 @@ static const char* cn_wide_app(cn* c, int col, cn_doc* d) {
     ax_sb_append_cstr(
         &sb, cn_pack_lines(c, col2, d->args + taken, d->nargs - taken));
   }
-  arrfree(flats);
+  ax_arrfree(flats);
   ax_sb_append_lit(&sb, ")");
   return ax_sb_build(&sb, NULL);
 }
@@ -906,7 +906,7 @@ static size_t cn_take_exprs(cn* c, long budget, cn_expr** xs, size_t n,
     long len = (long)strlen(flat);
     if (len > budget)
       break;
-    arrpush(flats, flat);
+    ax_arrpush(flats, flat);
     budget -= len + 1;
     taken++;
   }
@@ -933,7 +933,7 @@ static const char* cn_pack_exprs(cn* c, int col, cn_expr** xs, size_t n) {
       }
       i += taken;
     }
-    arrfree(flats);
+    ax_arrfree(flats);
   }
   return ax_sb_build(&sb, NULL);
 }
@@ -943,7 +943,7 @@ static const char* cn_wide_expr(cn* c, int ec, cn_expr* e) {
   size_t n;
   cn_expr* hd = cn_expr_spine(e, &args, &n);
   if (n == 0) {
-    arrfree(args);
+    ax_arrfree(args);
     return cn_wide_head(c, ec, hd);
   }
 
@@ -960,7 +960,7 @@ static const char* cn_wide_expr(cn* c, int ec, cn_expr* e) {
     ax_sb_append_lit(&sb, ")");
     const char* flat = ax_sb_build(&sb, NULL);
     if (strlen(flat) <= (size_t)c->maxw) {
-      arrfree(args);
+      ax_arrfree(args);
       return flat;
     }
   }
@@ -989,8 +989,8 @@ static const char* cn_wide_expr(cn* c, int ec, cn_expr* e) {
     }
     ax_sb_append_cstr(&sb, cn_pack_exprs(c, col2, args + taken, n - taken));
   }
-  arrfree(flats);
-  arrfree(args);
+  ax_arrfree(flats);
+  ax_arrfree(args);
   ax_sb_append_lit(&sb, ")");
   return ax_sb_build(&sb, NULL);
 }
@@ -1104,9 +1104,9 @@ static char* cn_finish(const ax_allocator* a, const char* s, size_t* out_s) {
 }
 
 static void cn_free(cn* c) {
-  arrfree(c->globals);
-  hmfree(c->pinidx);
-  arrfree(c->used);
+  ax_arrfree(c->globals);
+  ax_hmfree(c->pinidx);
+  ax_arrfree(c->used);
   ax_arena_destroy(c->ar);
 }
 
@@ -1139,12 +1139,12 @@ char* pl_canonize(const ax_allocator* a, pl_val v, size_t* out_s) {
   ax_sb_init(&sb, ax_arena_as_allocator(c.ar));
 
   size_t maxlen = 0;
-  for (size_t i = 0; i < arrlenu(c.globals); i++) {
+  for (size_t i = 0; i < ax_arrlenu(c.globals); i++) {
     size_t l = strlen(c.globals[i].b58);
     if (l > maxlen)
       maxlen = l;
   }
-  for (size_t i = 0; i < arrlenu(c.globals); i++) {
+  for (size_t i = 0; i < ax_arrlenu(c.globals); i++) {
     cn_global* g = &c.globals[i];
     ax_sb_append_lit(&sb, "@");
     ax_sb_append_cstr(&sb, g->b58);

@@ -57,6 +57,9 @@ typedef enum {
 void pl_thread_start(pl_thread* t, pl_val v);
 /* As pl_thread_start, but drive a deep normalization of v. */
 void pl_thread_start_nf(pl_thread* t, pl_val v);
+/* Arm a deep normalization of (f x) — the actor boot shape, the
+ * reference `force (fn % N 0)`. */
+void pl_thread_start_call_nf(pl_thread* t, pl_val f, pl_val x);
 
 /*
  * Run until done, exception, or fuel exhaustion.  The only public
@@ -66,11 +69,17 @@ void pl_thread_start_nf(pl_thread* t, pl_val v);
 pl_run_status pl_thread_run(pl_thread* t, uint64_t fuel);
 
 /* Deposit an effect response into a PL_RUN_BLOCKED thread (§4.4): the
- * machine resumes by RETURNing the response to the pending frame. */
+ * machine resumes by RETURNing the response (a WHNF) to the pending
+ * frame.  Coordination ops (op 82 Spawn/Send/SendCaps/Recv/CloseHandle)
+ * are the PL_RUN_BLOCKED producers; the parked request is the spine
+ * [OpName, args…] with strict args already forced. */
 void pl_thread_deposit(pl_thread* t, pl_val response);
 
 /* Result of the last PL_RUN_DONE. */
 pl_val pl_thread_result(pl_thread* t);
+
+/* The parked effect request of a PL_RUN_BLOCKED thread (§6.3). */
+pl_val pl_thread_request(pl_thread* t);
 
 /* ── Errors ────────────────────────────────────────────────────────────── */
 
