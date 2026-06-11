@@ -8,7 +8,7 @@
 #include "test_plan.h"
 
 /*
- * Event log & replay (spec §9 R1–R2): direct-effect results and host
+ * Event log & replay: direct-effect results and host
  * injections are recorded; a replay run substitutes the recorded
  * results without performing syscalls, verifying (actor, op, args)
  * at every site.  Coordination effects are internal and never logged.

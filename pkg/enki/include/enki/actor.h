@@ -2,14 +2,14 @@
 #define ER_ACTOR_H
 
 /*
- * Actor runtime (actor spec §7–§8): one er_actor = one pl_thread with a
+ * Actor runtime: one er_actor = one pl_thread with a
  * private heap; an actor's whole life is one deep normalization of
  * (fn 0).  The single-OS-thread deterministic executor drives actors in
  * FIFO run-queue order with a fixed fuel quantum and services the
  * coordination effects (op 82 Spawn/Send/SendCaps/Recv/CloseHandle)
  * that pl_thread_run parks as PL_RUN_BLOCKED requests.
  *
- * Messaging (M1–M4): payloads cross actors only as store-resident
+ * Messaging: payloads cross actors only as store-resident
  * values — the sender pins at send, the mailbox holds store addresses,
  * the receiver's heap points into the shared immutable store.  PLAN
  * code addresses actors through per-actor handle tables; handle 0 is
@@ -28,7 +28,7 @@ typedef enum {
   ER_ACTOR_RUNNABLE = 0, /* in the run queue (or not yet started) */
   ER_ACTOR_BLOCKED,      /* parked on Recv against an empty mailbox */
   ER_ACTOR_HALTED,       /* (fn 0) reached normal form */
-  ER_ACTOR_CRASHED,      /* uncaught exception or invalid effect (L2) */
+  ER_ACTOR_CRASHED, /* uncaught exception or invalid effect; never resumed */
 } er_actor_status;
 
 typedef struct er_config {
@@ -72,7 +72,7 @@ er_drive_status er_scheduler_drive(er_scheduler* sys, er_actor* root);
 
 typedef enum {
   ER_RUN_IDLE,      /* no live actors: every actor halted or crashed */
-  ER_RUN_QUIESCENT, /* live actors remain, all receive-blocked (§8) */
+  ER_RUN_QUIESCENT, /* live actors remain, all receive-blocked */
 } er_run_reason;
 
 /* Drive the system until nothing is runnable. */
@@ -95,7 +95,7 @@ er_actor* er_scheduler_actor_by_id(er_scheduler* sys, uint64_t id);
 pl_val er_actor_result(er_actor* a);
 
 /*
- * ── Event log & replay (spec §9, R1–R2) ────────────────────────────────
+ * ── Event log & replay ─────────────────────────────────────────────────────
  *
  * The log records exactly the external inputs: every direct (unix)
  * effect's result as (actor, op name, args hash, result-nat bytes), and
@@ -106,7 +106,7 @@ pl_val er_actor_result(er_actor* a);
  * effects execute live and their results are appended.
  *
  * Replay: attach with er_scheduler_replay (same QUANTUM, same program,
- * same store contents, same embedder script per D2); direct effects
+ * same store contents, same embedder script); direct effects
  * perform no syscalls — the logged result is substituted after the
  * (actor, op, args-hash) of the site is verified against the log, and
  * er_scheduler_inject verifies injections likewise.  Any mismatch is a
@@ -131,7 +131,7 @@ er_log* er_log_read_file(const char* path);
 
 /* Record into `log` (its quantum header is taken from this system). */
 void er_scheduler_record(er_scheduler* sys, er_log* log);
-/* Substitute results from `log`; asserts the quantum matches (D1). */
+/* Substitute results from `log`; asserts the quantum matches. */
 void er_scheduler_replay(er_scheduler* sys, const er_log* log);
 /* Replay cursor (events consumed so far); equals er_log_events when a
  * replayed run consumed the whole recording. */

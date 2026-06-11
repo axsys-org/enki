@@ -77,7 +77,7 @@ struct pl_thread {
   jmp_buf* handler;
 
   /*
-   * Suspension state (spec §3–§4; driven by pl_thread_run in eval.c).
+   * Suspension state (driven by pl_thread_run in eval.c).
    * A suspended thread is a complete continuation: value stack, frame
    * stack, and these slots.  All pl_val fields here are root slots.
    */
@@ -87,7 +87,7 @@ struct pl_thread {
   bool pending_yield;    /* fuel hit 0 inside a C-entry region */
   uint8_t resume_kind;   /* pl_resume_kind */
   uint8_t status;        /* last pl_run_status */
-  size_t base_vsp;       /* entry watermarks (T4): EXN unwinds to these; */
+  size_t base_vsp;       /* entry watermarks: EXN unwinds to these; */
   size_t base_fsp;       /* the run is DONE when fsp returns to base_fsp */
   pl_val resume_val;     /* root: value to EVAL or RETURN on re-entry */
   pl_val blocked_on;     /* root: effect request while blocked */

@@ -3,7 +3,7 @@
 #include "test_plan.h"
 
 /*
- * op 82 coordination effects (actor spec §6.3): Spawn/Send/SendCaps/
+ * op 82 coordination effects: Spawn/Send/SendCaps/
  * Recv/CloseHandle validate their forced args, park the request spine
  * [OpName, args…] in t->blocked_on, and suspend with PL_RUN_BLOCKED.
  * The host services the request and resumes with pl_thread_deposit; the
@@ -123,7 +123,7 @@ Test(op82, send_normalizes_payload_at_initiation) {
   cr_assert_eq(pl_app_head(p), ax_s4('S', 'e', 'n', 'd'));
   cr_assert_eq(pl_app_n(p), 2);
   cr_assert_eq(pl_app_args(p)[0], 3);
-  /* M2: the payload was deep-normalized before the request parked */
+  /* the payload was deep-normalized before the request parked */
   cr_assert_eq(pl_app_args(p)[1], 7);
 
   pl_thread_deposit(t, 0);
@@ -148,7 +148,7 @@ Test(op82, spawn_normalizes_fn_at_initiation) {
   cr_assert_not_null(p);
   cr_assert_eq(pl_app_head(p), ax_s5('S', 'p', 'a', 'w', 'n'));
   cr_assert_eq(pl_app_n(p), 1);
-  cr_assert_eq(pl_app_args(p)[0], 7); /* M2/L1: forced at initiation */
+  cr_assert_eq(pl_app_args(p)[0], 7); /* forced at initiation */
 
   pl_thread_deposit(t, 1); /* fresh child handle */
   cr_assert_eq(test_run(t), PL_RUN_DONE);
@@ -257,7 +257,7 @@ Test(op82, recv_blocks_under_try) {
   t->rplan_f = true;
   /* (P66 % (Try f 0)) where (f 0) performs a Recv: the Try barrier is
    * a machine frame, so the thread suspends beneath it and the resumed
-   * result comes back wrapped as (0 v) — D12 resolved. */
+   * result comes back wrapped as (0 v). */
   size_t base = t->vsp;
   pl_val rargs[1] = {0};
   pl_vpush(t, test_app(t, ax_s4('R', 'e', 'c', 'v'), 1, rargs));

@@ -9,22 +9,21 @@
 #include "plan/value.h"
 
 /*
- * Primop descriptor (§9).  Strictness is data: strict_mask bit i forces
+ * Primop descriptor.  Strictness is data: strict_mask bit i forces
  * arg i to WHNF (low to high) before the body runs; deep_mask bit i
  * additionally deep-normalizes arg i — through the machine at depth 0,
  * so effects inside the normalization suspend and block correctly
- * (coordination ops use this to force payloads at initiation, M2).
- * Bodies address their args as value-stack slots
+ * (coordination ops use this to force payloads before the request
+ * parks).  Bodies address their args as value-stack slots
  * t->vstack[ab + i]: slots survive reserves (the collector rewrites them
  * in place) and remain valid across nested machine runs, which may grow
  * the stack.  Bodies may push F_APPLY/F_SEQ/F_NF frames and return a
  * value that the machine continues to evaluate.
  *
- * coord marks a coordination effect (actor spec §6.3): the body only
- * validates the forced args and returns the request spine [name, args…];
- * the machine parks it in t->blocked_on and suspends with PL_RUN_BLOCKED
- * instead of evaluating the body's result.  The name slot sits at
- * vstack[ab - 1].
+ * coord marks a coordination effect: the body only validates the forced
+ * args and returns the request spine [name, args…]; the machine parks
+ * it in t->blocked_on and suspends with PL_RUN_BLOCKED instead of
+ * evaluating the body's result.  The name slot sits at vstack[ab - 1].
  */
 typedef struct pl_opdesc {
   uint64_t opset;     /* 0, 66 or 82 */

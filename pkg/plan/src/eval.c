@@ -66,7 +66,7 @@ void pl_set_enter_hook(pl_enter_hook hook) {
   pl_hook = hook;
 }
 
-/* ── Direct-effect interception seam (§6.2.3) ──────────────────────────── */
+/* ── Direct-effect interception seam ───────────────────────────────────── */
 
 static pl_io_hook pl_io = NULL;
 
@@ -123,16 +123,16 @@ static pl_cell* pl_lawp(pl_val head) {
   return pl_ptr(pl_pin_body(pl_ptr(head)));
 }
 
-/* ── Suspension slow path (spec §4.2) ──────────────────────────────────── */
+/* ── Suspension slow path ──────────────────────────────────────────────── */
 
 /*
  * Called when the per-step fuel decrement hits zero.  Returns true when
  * the machine should capture a resume point and yield: only under
- * pl_thread_run and only with no native frames between the trampoline
- * and the current step (§5.2).  Otherwise the request is deferred: under
- * an executor, fuel is pinned to 1 so every subsequent step funnels back
- * here until depth 0 (the §4.2 grace path); outside an executor fuel is
- * inert and simply rearmed.
+ * pl_thread_run, and only with no native frames between the trampoline
+ * and the current step — returning would abandon live C state.
+ * Otherwise the request is deferred: under an executor, fuel is pinned
+ * to 1 so every subsequent step funnels back here until depth 0 (the
+ * grace path); outside an executor fuel is inert and simply rearmed.
  */
 static bool pl_yield_now(pl_thread* t) {
   if (t->suspendable && t->centry_depth == 0) {
@@ -167,8 +167,8 @@ static pl_run_status pl_run(pl_thread* t, pl_val v, size_t base,
 
 eval:
   /*
-   * The per-step safepoint: one decrement and one branch (Y1).  Fuel is
-   * the only yield trigger (Y2).  At this position the complete machine
+   * The per-step safepoint: one decrement and one branch.  Fuel is the
+   * only yield trigger.  At this position the complete machine
    * state is (v, value stack, frame stack) — nothing lives in C locals —
    * so suspension is a two-field capture and a normal return.
    */
@@ -401,7 +401,7 @@ ret:
   judge: {
     if (pl_hook != NULL) {
       pl_val out;
-      t->centry_depth++; /* jets are C-entry regions (C1/C2) */
+      t->centry_depth++; /* jets are C-entry regions */
       bool handled = pl_hook(t, hbase, argc, &out);
       t->centry_depth--;
       if (handled) {
@@ -623,7 +623,7 @@ op_body:
     uint32_t opi = fr->op;
     size_t argbase = fr->argbase;
     t->fsp--;          /* pop before the body so its frames take this slot */
-    t->centry_depth++; /* op bodies are C-entry regions (C1) */
+    t->centry_depth++; /* op bodies are C-entry regions */
     pl_val r;
     /* direct op-82 effects route through the record/replay seam */
     if (!(d->opset == 82 && !d->coord && pl_io != NULL &&
@@ -633,17 +633,20 @@ op_body:
     t->vsp = argbase - 1; /* drop args and the name slot */
     if (ax_unlikely(d->coord)) {
       /*
-       * Coordination effect (§6.3): r is the validated request, not a
-       * result.  Initiation is legal only at depth 0 (C3) — directly
+       * Coordination effect: r is the validated request, not a
+       * result.  Initiation is legal only at depth 0 — directly
        * under pl_thread_run — where the machine parks the request and
        * suspends at a RETURN point: the deposited response arrives as
-       * the op's value.  At depth > 0 under an executor this is a C3
-       * violation; from a plain host entry there is nobody to service
-       * the request, so it is a (non-Try-catchable) runtime error.
+       * the op's value.  At depth > 0 under an executor, blocking is
+       * impossible (live native frames sit between the trampoline and
+       * this step), so reaching here is a contract violation — only a
+       * jet or a host re-entry could do it.  From a plain host entry
+       * there is nobody to service the request, so it is a
+       * (non-Try-catchable) runtime error.
        */
       if (t->centry_depth > 0) {
         ax_assume(!t->suspendable,
-                  "C3: coordination effect initiated in a C-entry region");
+                  "coordination effect initiated in a C-entry region");
         pl_raise_msg(t, "actor op with no executor");
       }
       t->blocked_on = r;
@@ -712,7 +715,7 @@ static pl_run_status pl_run_caught(pl_thread* t, pl_val v0, size_t base,
   }
 }
 
-/* ── Suspendable execution (spec §3) ───────────────────────────────────── */
+/* ── Suspendable execution ─────────────────────────────────────────────── */
 
 void pl_thread_start(pl_thread* t, pl_val v) {
   ax_assume(!t->suspendable && t->centry_depth == 0,
@@ -779,7 +782,7 @@ pl_run_status pl_thread_run(pl_thread* t, uint64_t fuel) {
   pl_catch c;
   pl_catch_init(t, &c);
   if (setjmp(c.jb) != 0) {
-    /* uncaught at thread top level: unwind to the entry watermarks (T4);
+    /* uncaught at thread top level: unwind to the entry watermarks;
      * t->exn / t->exn_msg carry the payload */
     t->handler = c.prev;
     t->vsp = t->base_vsp;
@@ -812,9 +815,9 @@ pl_run_status pl_thread_run(pl_thread* t, uint64_t fuel) {
 /* ── Entry points (host / C-entry) ─────────────────────────────────────── */
 
 /*
- * Re-entrant evaluator call from host or op code: a C-entry region (C1).
- * Runs with fuel inert (or in §4.2 grace under an executor) and can
- * therefore never suspend.
+ * Re-entrant evaluator call from host or op code: a C-entry region.
+ * Runs with fuel inert (or pinned to the grace path under an executor)
+ * and can therefore never suspend.
  */
 static pl_val pl_run_centry(pl_thread* t, pl_val v, size_t base) {
   t->centry_depth++;
@@ -826,8 +829,8 @@ static pl_val pl_run_centry(pl_thread* t, pl_val v, size_t base) {
 
 #ifdef PL_YIELD_STRESS
 /*
- * YIELD_STRESS (spec §10.1): at true depth 0, drive every host-API
- * evaluation through pl_thread_run at one machine step per quantum, so
+ * YIELD_STRESS: at true depth 0, drive every host-API evaluation
+ * through pl_thread_run at one machine step per quantum, so
  * the entire existing suite exercises suspension at every safepoint.
  * Results, exceptions, and stack effects must be indistinguishable from
  * the direct path.

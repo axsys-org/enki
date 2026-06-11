@@ -3,7 +3,7 @@
 #include "test_plan.h"
 
 /*
- * Suspension core (spec §3–§4): pl_thread_start / pl_thread_run /
+ * Suspension core: pl_thread_start / pl_thread_run /
  * pl_thread_deposit.  A suspended thread is a complete continuation in
  * the thread's stacks plus the resume slots; these tests exercise the
  * yield/resume protocol, exception unwinding to the entry watermarks,

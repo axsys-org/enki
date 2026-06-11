@@ -12,15 +12,16 @@
 #include "plan/nat.h"
 
 /*
- * Deterministic single-OS-thread executor (actor spec §8).  Everything
+ * Deterministic single-OS-thread executor.  Everything
  * is FIFO and fuel-driven: scheduling decisions are a pure function of
- * the initial actor set, injections, and the quantum (D2).  Service
+ * the initial actor set, injections, and the quantum.  Service
  * order on a coordination effect is fixed: a woken receiver is enqueued
  * before the serviced sender resumes.
  *
- * Semantics follow the P0 extraction (reaver as oracle):
- *   - Spawn fn arrives unevaluated PLAN-side but is pinned here (M2/L1,
- *     divergence D4): forcing happens at initiation, in the parent.
+ * Semantics follow the reaver reference (the semantic oracle):
+ *   - Payloads (message bodies, spawn fns) are forced and pinned at
+ *     initiation, in the sender/parent; reaver shares its heap and
+ *     forces lazily at the receiver — an accepted divergence.
  *   - Send/SendCaps to an invalid handle, or a PLAN exception while
  *     pinning a payload, crashes the *sender* (reaver: host `error`).
  *   - CloseHandle of an unknown handle is a silent no-op (IntMap.delete).
@@ -30,24 +31,24 @@
  */
 
 #define ER_DEFAULT_QUANTUM    4096
-#define ER_DEFAULT_HEAP_CELLS 8192 /* 64 KiB per semispace (H1) */
+#define ER_DEFAULT_HEAP_CELLS 8192 /* 64 KiB per semispace */
 
 typedef struct er_msg {
   pl_val payload; /* nat63 or store-resident — terminal for every GC */
   struct er_msg* next;
   uint32_t ncaps;
-  er_actor* caps[]; /* actor refs, translated at send (M2) */
+  er_actor* caps[]; /* actor refs, translated at send */
 } er_msg;
 
 struct er_actor {
   er_scheduler* sys;
-  uint64_t id; /* creation order; D2 tie-break key */
+  uint64_t id; /* creation order; deterministic tie-break key */
   pl_heap* heap;
   pl_thread* t;
   er_actor_status status;
   bool started;
   bool adopted;      /* embedder-owned thread/heap; never HALTED, never freed */
-  er_msg* mbox_head; /* arrival-order FIFO (M3, per extraction §4) */
+  er_msg* mbox_head; /* arrival-order FIFO (matches reaver's Chan) */
   er_msg* mbox_tail;
   er_actor** handle_v; /* dense handle table; NULL = closed; [0] = self */
   size_t handle_n;     /* next handle to mint (never reused) */
@@ -56,7 +57,7 @@ struct er_actor {
   er_actor* all_next;
 };
 
-/* ── Event log (spec §9 R1–R2) ─────────────────────────────────────────── */
+/* ── Event log ─────────────────────────────────────────────────────────── */
 
 typedef enum { ER_EV_IO = 1, ER_EV_INJECT = 2 } er_ev_kind;
 
@@ -70,7 +71,7 @@ typedef struct er_event {
 } er_event;
 
 struct er_log {
-  uint64_t quantum; /* header: replay must use the same quantum (D1) */
+  uint64_t quantum; /* header: replay must use the same quantum */
   er_event* ev;     /* stb_ds array */
 };
 
@@ -245,7 +246,7 @@ static bool er_name_is(pl_val name, const char* s) {
   return true;
 }
 
-/* ── Messaging (M1–M4) ─────────────────────────────────────────────────── */
+/* ── Messaging ─────────────────────────────────────────────────────────── */
 
 void er_actor_start(er_actor* a, pl_val fn) {
   ax_assume(!a->started && a->status == ER_ACTOR_RUNNABLE,
@@ -256,11 +257,11 @@ void er_actor_start(er_actor* a, pl_val fn) {
 }
 
 /*
- * Snapshot a payload out of the sender's moving heap (M2): nat63s and
+ * Snapshot a payload out of the sender's moving heap: nat63s and
  * pins are already shareable; anything else is pinned via a [v] row so
  * the store copy is unambiguous even when v is itself a pin.  Payloads
  * arrive deeply normalized — the coordination ops carry deep masks, so
- * forcing (and any effects or exceptions inside it, divergences D4/D5)
+ * forcing (and any effects or exceptions inside it)
  * happened at initiation as the sender's own execution — which makes
  * the pin here a pure store copy.  false means the sender crashed.
  */
@@ -317,7 +318,7 @@ static void er_deliver(er_actor* to, pl_val payload, uint32_t ncaps,
 /*
  * Deliver the mailbox head to a Recv: response is valRow [msg, capsRow]
  * built in the receiver's heap, caps re-minted as fresh receiver-local
- * handles (extraction §5).  The receiver becomes runnable.
+ * handles.  The receiver becomes runnable.
  */
 static void er_recv_ready(er_actor* a) {
   er_msg* m = a->mbox_head;
@@ -354,10 +355,10 @@ static void er_recv_ready(er_actor* a) {
   er_enqueue(a);
 }
 
-/* ── Coordination-effect service (§6.3) ────────────────────────────────── */
+/* ── Coordination-effect service ───────────────────────────────────────── */
 
 static void er_crash(er_actor* a) {
-  a->status = ER_ACTOR_CRASHED; /* L2: never resumed */
+  a->status = ER_ACTOR_CRASHED; /* never resumed */
 }
 
 /* Service-detected crash (no PLAN raise happened): leave a message in
@@ -520,7 +521,7 @@ static void er_service(er_scheduler* sys, er_actor* a) {
   ax_abort("er_service: unknown coordination op");
 }
 
-/* ── The executor loop (§8) ────────────────────────────────────────────── */
+/* ── The executor loop ─────────────────────────────────────────────────── */
 
 /* One scheduling step of a spawned (scheduler-owned) actor. */
 static void er_step(er_scheduler* sys, er_actor* a, pl_run_status s) {
@@ -668,7 +669,7 @@ static const er_event* er_replay_next(er_scheduler* sys) {
 }
 
 /*
- * The pl_io_hook (§6.2.3): every direct op-82 effect of every actor on
+ * The pl_io_hook: every direct op-82 effect of every actor on
  * a recording or replaying system funnels through here.  Record mode
  * performs the effect and appends (actor, op, args-hash, result);
  * replay mode verifies the site against the next record and substitutes
@@ -714,7 +715,7 @@ void er_scheduler_record(er_scheduler* sys, er_log* log) {
 void er_scheduler_replay(er_scheduler* sys, const er_log* log) {
   ax_assume(sys->mode == ER_MODE_LIVE, "er_scheduler_replay: mode already set");
   ax_assume(log->quantum == sys->cfg.quantum,
-            "er_scheduler_replay: quantum differs from the recording (D1)");
+            "er_scheduler_replay: quantum differs from the recording");
   sys->mode = ER_MODE_REPLAY;
   sys->play = log;
   sys->cursor = 0;

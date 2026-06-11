@@ -399,7 +399,7 @@ static bool boot_run_function(boot_ctx* ctx, pl_val fun, int argc,
   w->tmp_v[mark + 1] = boot_make_row(ctx, argc, argv);
 
   /* the reference runRepl: force (fun % args), in the root actor so
-   * the program may spawn, send, and block on Recv (§6.3) */
+   * the program may spawn, send, and block on Recv */
   pl_thread_start_call_nf(w->t, w->tmp_v[mark], w->tmp_v[mark + 1]);
   er_drive_status ds = er_scheduler_drive(w->sched, w->self);
   en_root_pop(w, mark);

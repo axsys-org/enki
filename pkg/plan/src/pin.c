@@ -13,7 +13,7 @@
 #include "store_internal.h"
 
 /*
- * Pinning (§10).  The value is normalized, rendered to the canonical
+ * Pinning.  The value is normalized, rendered to the canonical
  * snapshot text (plan/canon.h), hashed with SHA-256 — exactly the
  * reference mkPin — then interned, and on an intern miss deep-copied
  * into the non-moving store region.  Nothing here allocates on the

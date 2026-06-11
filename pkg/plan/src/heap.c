@@ -110,7 +110,7 @@ static pl_val pl_forward(pl_gc_ctx* gc, pl_val v) {
     if (pl_is_nat63(v))
       return v;
     if (gc->h->store != NULL && pl_store_owns(gc->h->store, v))
-      return v; /* store region is non-moving and closed (§10.3) */
+      return v; /* store region is non-moving and closed */
     pl_cell* p = pl_ptr(v);
     pl_cell hdr = p[0];
     pl_kind kind = pl_hdr_kind(hdr);

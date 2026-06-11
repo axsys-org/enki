@@ -15,9 +15,9 @@
 
 /*
  * op 82: rplan I/O, gated on RPLAN mode (checked in eval.c before
- * dispatch).  Structure follows the io-work branch (global fd handle
- * table, unixy errors); the byte conventions follow the Haskell
- * reference, which the reaver sources rely on:
+ * dispatch).  Sockets live in a process-global fd handle table; the
+ * byte conventions follow the Haskell reference, which the reaver
+ * sources rely on:
  *
  *   - Input / ReadFile / Read return "bars": the data bytes followed by
  *     a 0x01 terminator byte (bytesBar), so the consumer can recover
@@ -26,11 +26,11 @@
  *   - Print takes a plain string nat and writes every byte (natStr).
  *
  * Actor ops (Spawn/Send/SendCaps/Recv/CloseHandle) are coordination
- * effects (actor spec §6.3): their bodies below only validate the forced
- * args and rebuild the request spine [OpName, args…]; the machine parks
- * it in t->blocked_on and suspends with PL_RUN_BLOCKED (eval.c op_body).
+ * effects: their bodies below only validate the forced args and rebuild
+ * the request spine [OpName, args…]; the machine parks it in
+ * t->blocked_on and suspends with PL_RUN_BLOCKED (eval.c op_body).
  * Servicing — mailboxes, handle tables, spawning — belongs to the
- * executor (P3), which deposits the response with pl_thread_deposit.
+ * executor, which deposits the response with pl_thread_deposit.
  */
 
 #define ARG(i) (t->vstack[ab + (i)])

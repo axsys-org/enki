@@ -4,7 +4,7 @@
 #include "test_plan.h"
 
 /*
- * Actor runtime (spec §7–§8): er_scheduler drives er_actors — each one
+ * Actor runtime: er_scheduler drives er_actors — each one
  * deep normalization of (fn 0) — servicing the op-82 coordination
  * effects parked by PL_RUN_BLOCKED.
  *
@@ -147,7 +147,8 @@ Test(actor, send_to_self_then_recv) {
 }
 
 Test(actor, results_independent_of_quantum) {
-  /* R4 smoke: one machine step per quantum and a huge quantum agree */
+  /* results must not depend on the quantum: one step per quantum and a huge
+   * quantum agree */
   test_rt rt = test_rt_new();
   run_self_ping(rt.store, 2);
   run_self_ping(rt.store, 1 << 20);
@@ -283,7 +284,7 @@ Test(actor, send_to_closed_handle_crashes_sender) {
 
 Test(actor, cross_actor_payload_is_store_resident) {
   /* Send a structured payload (a law) to a recv-blocked child: it must
-   * arrive intact through the store, forced at send (M1/M2, D4). */
+   * arrive intact through the store, forced at send. */
   test_rt rt = test_rt_new();
   er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
   er_actor* parent = er_scheduler_actor(sys);

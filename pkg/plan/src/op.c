@@ -20,8 +20,9 @@
  * Primops, normative semantics from the Haskell reference (Plan.hs).
  * op 0:  core PLAN ops (pin / law / case).
  * op 66: named extended ops.
- * op 82: rplan I/O (rplan.c) — RPLAN-mode gated, fd/console/file ops;
- *        actor ops raise until the io-work actor port lands.
+ * op 82: rplan I/O (rplan.c) — RPLAN-mode gated.  Console/file/socket
+ *        ops run inline; the actor ops are coordination effects that
+ *        suspend the thread for an executor to service.
  */
 
 #define ARG(i) (t->vstack[ab + (i)])
@@ -264,7 +265,7 @@ static pl_val op_and(pl_thread* t, size_t ab) {
 static pl_val op_nor(pl_thread* t, size_t ab) {
   if (ARG(0) != 0)
     return 0;
-  /* conditional strictness through a frame (C4): the machine forces y
+  /* conditional strictness through a frame: the machine forces y
    * at depth 0 and the F_NIL frame maps it to planNil y */
   pl_frame* fr = pl_fpush(t);
   fr->kind = PL_F_NIL;
@@ -610,7 +611,7 @@ static pl_val op_throw(pl_thread* t, size_t ab) {
 }
 
 /*
- * Frame-based Try (C4: frames over C recursion): push the F_TRY
+ * Frame-based Try: push the F_TRY
  * barrier, then drive force (f % x) through the machine itself.  The
  * success/exception wrapping lives in the trampoline (F_TRY return
  * case, pl_run_caught), so suspension, fuel yields, and blocking
@@ -738,8 +739,8 @@ static pl_val op_load(pl_thread* t, size_t ab) {
 #define OP66(name, argc, mask, deep, body)                                     \
   {66, name, NULL, argc, mask, deep, false, body}
 #define OP82(name, argc, mask, body) {82, 0, name, argc, mask, 0, false, body}
-/* coordination effects (§6.3): the machine blocks instead of executing;
- * deep is the initiation-time payload normalization (M2) */
+/* coordination effects: the machine blocks instead of executing;
+ * deep is the initiation-time payload normalization */
 #define OP82C(name, argc, mask, deep, body)                                    \
   {82, 0, name, argc, mask, deep, true, body}
 
@@ -867,7 +868,7 @@ const pl_opdesc pl_ops[] = {
     OP82("Accept", 1, 0b1, pl_op82_accept),
     OP82("Read", 2, 0b11, pl_op82_read),
     OP82("Write", 2, 0b11, pl_op82_write),
-    /* payloads deep-normalize at initiation (M2/D4): forcing — and any
+    /* payloads deep-normalize at initiation: forcing — and any
      * effects within it — runs as the sender's own execution, before
      * the request parks; the service pins already-normal values */
     OP82C("Spawn", 1, 0, 0b1, pl_op82_spawn),

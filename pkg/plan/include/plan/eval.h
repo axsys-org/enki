@@ -21,18 +21,18 @@ pl_val pl_apply(pl_thread* t, pl_val f, pl_val x);
 /* Deep normalization (the reference rnf). */
 pl_val pl_nf(pl_thread* t, pl_val v);
 
-/* ── Suspension (spec §3–§4) ───────────────────────────────────────────── */
+/* ── Suspension ────────────────────────────────────────────────────────── */
 
 /*
  * A green thread is not a saved C stack: the complete continuation lives
  * in the thread's value/frame stacks plus the resume slots.  Suspension
  * is returning from pl_thread_run; resumption is calling it again.
  *
- * Fuel is the only yield trigger (Y2): one decrement per machine step at
+ * Fuel is the only yield trigger: one decrement per machine step at
  * the EVAL position, deterministic for identical state and fuel.  Yields
  * fire only at depth-0 safepoints; inside C-entry regions (re-entrant
  * evaluator calls, op bodies, jets) the request is deferred and fires at
- * the first depth-0 step (C1).
+ * the first depth-0 step.
  */
 
 typedef enum {
@@ -46,12 +46,12 @@ typedef enum {
 typedef enum {
   PL_RES_EVAL = 0, /* re-enter the machine EVALing t->resume_val */
   PL_RES_RETURN,   /* re-enter RETURNing t->resume_val to the top frame */
-  PL_RES_RUN,      /* reserved: compiled-law dispatch (spec §4.1 F_RUN) */
+  PL_RES_RUN,      /* reserved: compiled-law re-entry at a saved offset */
 } pl_resume_kind;
 
 /*
  * Arm a thread to evaluate v (to WHNF) from the current stack position.
- * Records the entry watermarks (T4): an uncaught exception unwinds to
+ * Records the entry watermarks: an uncaught exception unwinds to
  * them, and the run completes when the frame stack returns to base.
  */
 void pl_thread_start(pl_thread* t, pl_val v);
@@ -63,12 +63,12 @@ void pl_thread_start_call_nf(pl_thread* t, pl_val f, pl_val x);
 
 /*
  * Run until done, exception, or fuel exhaustion.  The only public
- * execution entry for suspendable threads (T1).  Resumes per
+ * execution entry for suspendable threads.  Resumes per
  * t->resume_kind; must not be re-entered from evaluator C code.
  */
 pl_run_status pl_thread_run(pl_thread* t, uint64_t fuel);
 
-/* Deposit an effect response into a PL_RUN_BLOCKED thread (§4.4): the
+/* Deposit an effect response into a PL_RUN_BLOCKED thread: the
  * machine resumes by RETURNing the response (a WHNF) to the pending
  * frame.  Coordination ops (op 82 Spawn/Send/SendCaps/Recv/CloseHandle)
  * are the PL_RUN_BLOCKED producers; the parked request is the spine
@@ -78,10 +78,10 @@ void pl_thread_deposit(pl_thread* t, pl_val response);
 /* Result of the last PL_RUN_DONE. */
 pl_val pl_thread_result(pl_thread* t);
 
-/* The parked effect request of a PL_RUN_BLOCKED thread (§6.3). */
+/* The parked effect request of a PL_RUN_BLOCKED thread. */
 pl_val pl_thread_request(pl_thread* t);
 
-/* ── Direct-effect interception (the §6.2.3 record/replay seam) ────────── */
+/* ── Direct-effect interception (the record/replay seam) ───────────────── */
 
 /*
  * When set, the machine consults the hook instead of the handler for
@@ -132,7 +132,7 @@ void pl_catch_init(pl_thread* t, pl_catch* c);
 void pl_catch_pop(pl_thread* t, pl_catch* c);
 void pl_catch_unwind(pl_thread* t, pl_catch* c);
 
-/* ── enki hook seam (§11.1): jets / compiled code ──────────────────────── */
+/* ── enki hook seam: jets / compiled code ──────────────────────────────── */
 
 /*
  * Consulted by ENTER before the naive JUDGE/KAL path runs a law.  The

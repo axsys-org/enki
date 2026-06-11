@@ -1,4 +1,4 @@
-;;;; Actor differential scenarios (P4): run the same module through the
+;;;; Actor differential scenarios: run the same module through the
 ;;;; enki wisp and the reaver plan-assembler and compare stdout.
 ;;;;
 ;;;;   wisp tests/plan actors ping    -> hello-via-echo
@@ -6,7 +6,7 @@
 ;;;;
 ;;;; All prints happen in the root actor, so the output is deterministic
 ;;;; under both the fuel scheduler and reaver's preemptive GHC threads
-;;;; (R4: per-actor observables are schedule-independent).
+;;;; (per-actor observables are schedule-independent).
 
 (#bind R (#pin "R"))
 (#bind B (#pin "B"))
@@ -47,7 +47,7 @@
     (cstep counter n (R ("Recv" 0))))))
 
 ;;; tryrecv: a Recv beneath Try — the barrier is a machine frame, so
-;;; blocking under it suspends and resumes (divergence D12, resolved).
+;;; blocking under it suspends and resumes.
 
 (#bind getmsg
   (#pin (#law "getmsg" (getmsg z)
