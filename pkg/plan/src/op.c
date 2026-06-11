@@ -264,8 +264,11 @@ static pl_val op_and(pl_thread* t, size_t ab) {
 static pl_val op_nor(pl_thread* t, size_t ab) {
   if (ARG(0) != 0)
     return 0;
-  pl_val y = pl_whnf(t, ARG(1)); /* conditional strictness (planNil y) */
-  return y == 0 ? 1 : 0;
+  /* conditional strictness through a frame (C4): the machine forces y
+   * at depth 0 and the F_NIL frame maps it to planNil y */
+  pl_frame* fr = pl_fpush(t);
+  fr->kind = PL_F_NIL;
+  return ARG(1);
 }
 static pl_val op_if(pl_thread* t, size_t ab) {
   AX_UNUSED(t);

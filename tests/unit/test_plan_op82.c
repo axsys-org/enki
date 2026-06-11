@@ -190,6 +190,67 @@ Test(op82, payload_effects_block_before_the_request) {
   test_rt_free(&rt);
 }
 
+Test(op82, recv_inside_nor_conditional) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  t->rplan_f = true;
+  /* (P66 % (Nor 0 <recv>)): Nor's conditional strictness is an F_NIL
+   * frame, so the forced arm may block — no C-entry remains. */
+  size_t base = t->vsp;
+  pl_val rargs[1] = {0};
+  pl_vpush(t, test_op82_thunk(t, ax_s4('R', 'e', 'c', 'v'), 1, rargs));
+  pl_val nargs[2] = {0, t->vstack[base]};
+  pl_vpush(t, test_app(t, ax_s3('N', 'o', 'r'), 2, nargs));
+  pl_vpush(t, test_app1(t, 0, t->vstack[base + 1])); /* (0 norrow) */
+  pl_vpush(t, test_app1(t, 0, test_p66(t)));         /* (0 P66)    */
+  pl_val expr = test_app2(t, 0, t->vstack[base + 3], t->vstack[base + 2]);
+  t->vsp = base;
+  pl_thread_start(t, test_thunk(t, expr));
+
+  cr_assert_eq(test_run(t), PL_RUN_BLOCKED);
+  pl_cell* p = pl_as(PL_TAG_APP, pl_thread_request(t));
+  cr_assert_not_null(p);
+  cr_assert_eq(pl_app_head(p), ax_s4('R', 'e', 'c', 'v'));
+
+  pl_thread_deposit(t, 0); /* planNil 0 = 1 */
+  cr_assert_eq(test_run(t), PL_RUN_DONE);
+  cr_assert_eq(pl_thread_result(t), 1);
+  test_rt_free(&rt);
+}
+
+Test(op82, recv_inside_dynamic_law_body) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  t->rplan_f = true;
+  /* A law whose body field is a thunk that performs a Recv: JUDGE's
+   * chain scan suspends under the F_JUDGE frame and resumes with the
+   * deposited value as the body.  The response (1 5 7) is a let chain,
+   * so the scan also continues correctly after the resume. */
+  size_t base = t->vsp;
+  pl_val rargs[1] = {0};
+  pl_vpush(t, test_op82_thunk(t, ax_s4('R', 'e', 'c', 'v'), 1, rargs));
+  pl_vpush(t, test_law(t, 1, 0, t->vstack[base]));   /* body = recv thunk */
+  pl_vpush(t, test_app1(t, 0, t->vstack[base + 1])); /* (0 L) */
+  pl_vpush(t, test_app1(t, 0, 0));                   /* (0 0) */
+  pl_val expr = test_app2(t, 0, t->vstack[base + 2], t->vstack[base + 3]);
+  t->vsp = base;
+  pl_thread_start(t, test_thunk(t, expr));
+
+  cr_assert_eq(test_run(t), PL_RUN_BLOCKED);
+  pl_cell* p = pl_as(PL_TAG_APP, pl_thread_request(t));
+  cr_assert_not_null(p);
+  cr_assert_eq(pl_app_head(p), ax_s4('R', 'e', 'c', 'v'));
+
+  size_t rb = t->vsp;
+  pl_vpush(t, test_app2(t, 1, 5, 7)); /* body: (1 5 7) — let, then 7 */
+  pl_val resp = t->vstack[rb];
+  t->vsp = rb;
+  pl_thread_deposit(t, resp);
+  cr_assert_eq(test_run(t), PL_RUN_DONE);
+  cr_assert_eq(pl_thread_result(t), 7);
+  test_rt_free(&rt);
+}
+
 Test(op82, recv_blocks_under_try) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;

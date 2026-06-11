@@ -157,6 +157,10 @@ static pl_run_status pl_run(pl_thread* t, pl_val v, size_t base,
                             bool at_return) {
   pl_val env, expr;
   pl_frame* fr;
+  /* JUDGE scan coordinates; restored from the F_JUDGE frame on resume
+   * (offsets only — the chain itself lives on the value stack) */
+  size_t jbase = 0;
+  uint32_t jargc = 0;
 
   if (at_return)
     goto ret;
@@ -413,47 +417,10 @@ ret:
      */
     pl_cell* lp = pl_lawp(t->vstack[hbase]);
     ax_assume(pl_law_arity(lp) == argc, "JUDGE: arity mismatch");
-    size_t cursor = t->vsp;
-    pl_vpush(t, pl_law_body(lp));
-    uint32_t m = 0;
-    for (;;) {
-      pl_val b = t->vstack[cursor];
-      if (!pl_is_whnf(b)) {
-        /* dynamically-built law body: force the chain node.  This is a
-         * re-entrant evaluator call — a C-entry region (C1): JUDGE
-         * state (lp, cursor, m) lives in C locals, so no suspension. */
-        t->centry_depth++;
-        pl_run_status s = pl_run_caught(t, b, t->fsp, false);
-        t->centry_depth--;
-        ax_assume(s == PL_RUN_DONE, "C-entry run cannot suspend");
-        b = t->result;
-        t->vstack[cursor] = b;
-      }
-      pl_cell* bp = pl_as(PL_TAG_APP, b);
-      if (bp != NULL && pl_app_head(bp) == 1 && pl_app_n(bp) == 2) {
-        /* bp stays valid across the vpush: growing the value stack
-         * reallocs the stack array, never the heap */
-        pl_vpush(t, pl_app_args(bp)[0]);
-        m++;
-        t->vstack[cursor] = pl_app_args(bp)[1];
-      } else {
-        break;
-      }
-    }
-    uint32_t nslots = 1 + argc + m;
-    pl_gc_reserve(t, PL_ENV_CELLS(nslots) + (size_t)(m + 1) * PL_THUNK_CELLS);
-    PL_GC_FORBID(t);
-    pl_val envv = pl_mk_env(t, nslots);
-    pl_val* slots = pl_env_slots(pl_ptr(envv));
-    slots[0] = t->vstack[hbase];
-    for (uint32_t i = 0; i < argc; i++)
-      slots[1 + i] = t->vstack[hbase + 1 + i];
-    for (uint32_t j = 0; j < m; j++)
-      slots[1 + argc + j] = pl_mk_thunk(t, envv, t->vstack[cursor + 1 + j]);
-    v = pl_kal1(t, envv, t->vstack[cursor]);
-    PL_GC_ALLOW(t);
-    t->vsp = hbase;
-    goto eval;
+    pl_vpush(t, pl_law_body(lp)); /* the chain cursor slot */
+    jbase = hbase;
+    jargc = argc;
+    goto judge_scan;
   }
   }
 
@@ -544,6 +511,21 @@ ret:
     goto ret;
   }
 
+  case PL_F_JUDGE: {
+    /* v is the forced chain node: write it back and resume the scan */
+    jbase = fr->argbase;
+    jargc = fr->argc;
+    t->fsp--;
+    t->vstack[jbase + 1 + jargc] = v;
+    goto judge_scan;
+  }
+
+  case PL_F_NIL:
+    /* planNil of the conditionally-forced value (op 66 Nor) */
+    v = v == 0 ? 1 : 0;
+    t->fsp--;
+    goto ret;
+
   default:
     ax_abort("RETURN: bad frame kind %d", (int)fr->kind);
   }
@@ -566,6 +548,54 @@ oparg_next:
     }
   }
   goto op_body;
+
+judge_scan:
+  /*
+   * The recursive-let scan, re-enterable: its complete state is the
+   * value stack plus (jbase, jargc) — the chain cursor sits at
+   * jbase + 1 + jargc and the collected bind exprs above it.  A
+   * non-WHNF chain node (dynamically-built law body) is forced through
+   * the machine under an F_JUDGE frame, so the thread can suspend or
+   * block mid-scan and resume with identical state.
+   */
+  {
+    size_t cursor = jbase + 1 + jargc;
+    for (;;) {
+      pl_val b = t->vstack[cursor];
+      if (!pl_is_whnf(b)) {
+        fr = pl_fpush(t);
+        fr->kind = PL_F_JUDGE;
+        fr->argbase = jbase;
+        fr->argc = jargc;
+        v = b;
+        goto eval;
+      }
+      pl_cell* bp = pl_as(PL_TAG_APP, b);
+      if (bp != NULL && pl_app_head(bp) == 1 && pl_app_n(bp) == 2) {
+        /* bp stays valid across the vpush: growing the value stack
+         * reallocs the stack array, never the heap */
+        pl_vpush(t, pl_app_args(bp)[0]);
+        t->vstack[cursor] = pl_app_args(bp)[1];
+      } else {
+        break;
+      }
+    }
+    uint32_t m = (uint32_t)(t->vsp - cursor - 1);
+    uint32_t nslots = 1 + jargc + m;
+    pl_gc_reserve(t, PL_ENV_CELLS(nslots) + (size_t)(m + 1) * PL_THUNK_CELLS);
+    PL_GC_FORBID(t);
+    pl_val envv = pl_mk_env(t, nslots);
+    pl_val* slots = pl_env_slots(pl_ptr(envv));
+    slots[0] = t->vstack[jbase];
+    for (uint32_t i = 0; i < jargc; i++)
+      slots[1 + i] = t->vstack[jbase + 1 + i];
+    for (uint32_t j = 0; j < m; j++)
+      slots[1 + jargc + j] = pl_mk_thunk(t, envv, t->vstack[cursor + 1 + j]);
+    v = pl_kal1(t, envv, t->vstack[cursor]);
+    PL_GC_ALLOW(t);
+    t->vsp = jbase;
+    goto eval;
+  }
 
 opdeep_next:
   /* fr is the F_OPDEEP frame on top of the stack.  Deep (nf) phase

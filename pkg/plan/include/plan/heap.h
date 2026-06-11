@@ -46,6 +46,8 @@ typedef enum {
   PL_F_NF,         /* normalize the incoming value                      */
   PL_F_NFOBJ,      /* a: object being normalized, k: field index        */
   PL_F_TRY,        /* exception barrier (op 66 Try); argbase: vsp mark  */
+  PL_F_JUDGE,      /* forcing a law-body chain node; argbase: hbase     */
+  PL_F_NIL,        /* RETURN planNil(v): 1 if the value is 0, else 0    */
 } pl_frame_kind;
 
 typedef struct pl_frame {
