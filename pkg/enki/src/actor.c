@@ -258,9 +258,11 @@ void er_actor_start(er_actor* a, pl_val fn) {
 /*
  * Snapshot a payload out of the sender's moving heap (M2): nat63s and
  * pins are already shareable; anything else is pinned via a [v] row so
- * the store copy is unambiguous even when v is itself a pin.  Pinning
- * deep-normalizes, so payload divergence and exceptions surface here,
- * at send (divergences D4/D5) — false means the sender crashed.
+ * the store copy is unambiguous even when v is itself a pin.  Payloads
+ * arrive deeply normalized — the coordination ops carry deep masks, so
+ * forcing (and any effects or exceptions inside it, divergences D4/D5)
+ * happened at initiation as the sender's own execution — which makes
+ * the pin here a pure store copy.  false means the sender crashed.
  */
 static bool er_pin_payload(er_actor* a, pl_val v, pl_val* out) {
   if (pl_is_nat63(v)) {

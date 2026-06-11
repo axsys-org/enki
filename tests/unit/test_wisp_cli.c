@@ -160,6 +160,13 @@ Test(wisp_cli, actor_deadlock_is_reported) {
             "an unanswerable Recv must fail the run");
 }
 
+Test(wisp_cli, actor_recv_under_try) {
+  char out[256];
+  int st = run_scenario(wisp_bin(), "tryrecv", out, sizeof(out));
+  cr_assert(WIFEXITED(st) && WEXITSTATUS(st) == 0, "tryrecv run failed");
+  cr_assert_str_eq(out, "tm");
+}
+
 /* Differential vs the reaver oracle (a local Haskell reference build);
  * skipped where the binary is absent (e.g. the nix sandbox). */
 Test(wisp_cli, actor_differential_vs_reaver) {
@@ -171,7 +178,7 @@ Test(wisp_cli, actor_differential_vs_reaver) {
   if (access(oracle, X_OK) != 0)
     cr_skip_test("reaver oracle binary not available");
 
-  static const char* const fns[] = {"ping", "count"};
+  static const char* const fns[] = {"ping", "count", "tryrecv"};
   for (size_t i = 0; i < sizeof(fns) / sizeof(fns[0]); i++) {
     char ours[256], theirs[256];
     int st1 = run_scenario(wisp_bin(), fns[i], ours, sizeof(ours));

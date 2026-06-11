@@ -46,6 +46,18 @@
   (#pin (#law "counter" (counter n)
     (cstep counter n (R ("Recv" 0))))))
 
+;;; tryrecv: a Recv beneath Try — the barrier is a machine frame, so
+;;; blocking under it suspends and resumes (divergence D12, resolved).
+
+(#bind getmsg
+  (#pin (#law "getmsg" (getmsg z)
+    (B ("Ix0" (R ("Recv" 0)))))))
+
+(#bind tryrecv
+  (#pin (#law "tryrecv" (tryrecv args)
+    (B ("Seq" (R ("Send" 0 "tm"))
+              (R ("Print" (B ("Ix0" (B ("Try" getmsg 0)))))))))))
+
 ;;; stuck: a Recv that nobody will ever answer — the executor reports a
 ;;; deadlock (reaver: BlockedIndefinitelyOnMVar).
 

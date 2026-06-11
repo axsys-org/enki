@@ -10,8 +10,11 @@
 
 /*
  * Primop descriptor (§9).  Strictness is data: strict_mask bit i forces
- * arg i to WHNF (low to high) before the body runs; deep additionally
- * normalizes arg 0.  Bodies address their args as value-stack slots
+ * arg i to WHNF (low to high) before the body runs; deep_mask bit i
+ * additionally deep-normalizes arg i — through the machine at depth 0,
+ * so effects inside the normalization suspend and block correctly
+ * (coordination ops use this to force payloads at initiation, M2).
+ * Bodies address their args as value-stack slots
  * t->vstack[ab + i]: slots survive reserves (the collector rewrites them
  * in place) and remain valid across nested machine runs, which may grow
  * the stack.  Bodies may push F_APPLY/F_SEQ/F_NF frames and return a
@@ -30,7 +33,7 @@ typedef struct pl_opdesc {
                          (op-82 names can exceed the 7-byte mote width) */
   uint8_t argc;
   uint32_t strict_mask;
-  bool deep;
+  uint32_t deep_mask;
   bool coord;
   pl_val (*body)(pl_thread* t, size_t ab);
 } pl_opdesc;

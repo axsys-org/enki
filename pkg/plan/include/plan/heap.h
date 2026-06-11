@@ -42,9 +42,10 @@ typedef enum {
                    /* interpret them (the reference unapp forces)       */
   PL_F_OPENT,      /* op entry: forcing the op's single argument        */
   PL_F_OPARG,      /* primop strict-arg driver                          */
-  PL_F_OPDEEP,     /* primop deep (nf) phase over arg 0                 */
+  PL_F_OPDEEP,     /* primop deep (nf) phase over the deep_mask args    */
   PL_F_NF,         /* normalize the incoming value                      */
   PL_F_NFOBJ,      /* a: object being normalized, k: field index        */
+  PL_F_TRY,        /* exception barrier (op 66 Try); argbase: vsp mark  */
 } pl_frame_kind;
 
 typedef struct pl_frame {

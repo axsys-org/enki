@@ -108,12 +108,12 @@ Test(op82, response_feeds_pending_frames) {
   test_rt_free(&rt);
 }
 
-Test(op82, send_forces_handle_keeps_msg_lazy) {
+Test(op82, send_normalizes_payload_at_initiation) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
   t->rplan_f = true;
   size_t base = t->vsp;
-  pl_vpush(t, test_thunk(t, 7)); /* msg: unforced (0-free body literal) */
+  pl_vpush(t, test_thunk(t, 7)); /* msg: a thunk forced by the deep mask */
   pl_val args[2] = {3, t->vstack[base]};
   pl_thread_start(t, test_op82_thunk(t, ax_s4('S', 'e', 'n', 'd'), 2, args));
   cr_assert_eq(test_run(t), PL_RUN_BLOCKED);
@@ -123,18 +123,17 @@ Test(op82, send_forces_handle_keeps_msg_lazy) {
   cr_assert_eq(pl_app_head(p), ax_s4('S', 'e', 'n', 'd'));
   cr_assert_eq(pl_app_n(p), 2);
   cr_assert_eq(pl_app_args(p)[0], 3);
-  /* the message payload must not have been forced at initiation */
-  cr_assert_eq(pl_tag(pl_app_args(p)[1]), PL_TAG_DEFER);
+  /* M2: the payload was deep-normalized before the request parked */
+  cr_assert_eq(pl_app_args(p)[1], 7);
 
   pl_thread_deposit(t, 0);
   cr_assert_eq(test_run(t), PL_RUN_DONE);
   cr_assert_eq(pl_thread_result(t), 0);
-  cr_assert_eq(pl_tag(t->vstack[base]), PL_TAG_DEFER); /* still lazy */
   t->vsp = base;
   test_rt_free(&rt);
 }
 
-Test(op82, spawn_takes_fn_unevaluated) {
+Test(op82, spawn_normalizes_fn_at_initiation) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
   t->rplan_f = true;
@@ -149,12 +148,81 @@ Test(op82, spawn_takes_fn_unevaluated) {
   cr_assert_not_null(p);
   cr_assert_eq(pl_app_head(p), ax_s5('S', 'p', 'a', 'w', 'n'));
   cr_assert_eq(pl_app_n(p), 1);
-  cr_assert_eq(pl_tag(pl_app_args(p)[0]), PL_TAG_DEFER);
+  cr_assert_eq(pl_app_args(p)[0], 7); /* M2/L1: forced at initiation */
 
   pl_thread_deposit(t, 1); /* fresh child handle */
   cr_assert_eq(test_run(t), PL_RUN_DONE);
   cr_assert_eq(pl_thread_result(t), 1);
   t->vsp = base;
+  test_rt_free(&rt);
+}
+
+Test(op82, payload_effects_block_before_the_request) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  t->rplan_f = true;
+  /* Send a payload whose normalization performs a Recv: the inner
+   * effect blocks FIRST, as the sender's own execution, and only then
+   * does the Send request park with the settled payload. */
+  size_t base = t->vsp;
+  pl_val rargs[1] = {0};
+  pl_vpush(t, test_op82_thunk(t, ax_s4('R', 'e', 'c', 'v'), 1, rargs));
+  pl_val sargs[2] = {3, t->vstack[base]};
+  pl_thread_start(t, test_op82_thunk(t, ax_s4('S', 'e', 'n', 'd'), 2, sargs));
+
+  cr_assert_eq(test_run(t), PL_RUN_BLOCKED);
+  pl_cell* p = pl_as(PL_TAG_APP, pl_thread_request(t));
+  cr_assert_not_null(p);
+  cr_assert_eq(pl_app_head(p), ax_s4('R', 'e', 'c', 'v')); /* inner first */
+
+  pl_thread_deposit(t, 5);
+  cr_assert_eq(test_run(t), PL_RUN_BLOCKED);
+  p = pl_as(PL_TAG_APP, pl_thread_request(t));
+  cr_assert_not_null(p);
+  cr_assert_eq(pl_app_head(p), ax_s4('S', 'e', 'n', 'd'));
+  cr_assert_eq(pl_app_args(p)[0], 3);
+  cr_assert_eq(pl_app_args(p)[1], 5); /* the deposited response */
+
+  pl_thread_deposit(t, 0);
+  cr_assert_eq(test_run(t), PL_RUN_DONE);
+  cr_assert_eq(pl_thread_result(t), 0);
+  t->vsp = base;
+  test_rt_free(&rt);
+}
+
+Test(op82, recv_blocks_under_try) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  t->rplan_f = true;
+  /* (P66 % (Try f 0)) where (f 0) performs a Recv: the Try barrier is
+   * a machine frame, so the thread suspends beneath it and the resumed
+   * result comes back wrapped as (0 v) — D12 resolved. */
+  size_t base = t->vsp;
+  pl_val rargs[1] = {0};
+  pl_vpush(t, test_app(t, ax_s4('R', 'e', 'c', 'v'), 1, rargs));
+  pl_vpush(t, test_app1(t, 0, t->vstack[base])); /* (0 recvrow) */
+  pl_vpush(t, test_app1(t, 0, test_p82(t)));     /* (0 P82)     */
+  pl_vpush(t, test_app2(t, 0, t->vstack[base + 2], t->vstack[base + 1]));
+  pl_vpush(t, test_law(t, 1, 0, t->vstack[base + 3])); /* f z = recv */
+  pl_val targs[2] = {t->vstack[base + 4], 0};
+  pl_vpush(t, test_app(t, ax_s3('T', 'r', 'y'), 2, targs));
+  pl_vpush(t, test_app1(t, 0, t->vstack[base + 5])); /* (0 tryrow) */
+  pl_vpush(t, test_app1(t, 0, test_p66(t)));         /* (0 P66)    */
+  pl_val expr = test_app2(t, 0, t->vstack[base + 7], t->vstack[base + 6]);
+  t->vsp = base;
+  pl_thread_start(t, test_thunk(t, expr));
+
+  cr_assert_eq(test_run(t), PL_RUN_BLOCKED);
+  pl_cell* p = pl_as(PL_TAG_APP, pl_thread_request(t));
+  cr_assert_not_null(p);
+  cr_assert_eq(pl_app_head(p), ax_s4('R', 'e', 'c', 'v'));
+
+  pl_thread_deposit(t, 9);
+  cr_assert_eq(test_run(t), PL_RUN_DONE);
+  pl_cell* r = pl_as(PL_TAG_APP, pl_thread_result(t));
+  cr_assert_not_null(r);
+  cr_assert_eq(pl_app_head(r), 0); /* planTry's Right */
+  cr_assert_eq(pl_app_args(r)[0], 9);
   test_rt_free(&rt);
 }
 

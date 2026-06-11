@@ -150,6 +150,9 @@ static bool pl_yield_now(pl_thread* t) {
 
 /* ── The machine ───────────────────────────────────────────────────────── */
 
+static pl_run_status pl_run_caught(pl_thread* t, pl_val v0, size_t base,
+                                   bool at_return0);
+
 static pl_run_status pl_run(pl_thread* t, pl_val v, size_t base,
                             bool at_return) {
   pl_val env, expr;
@@ -420,7 +423,7 @@ ret:
          * re-entrant evaluator call — a C-entry region (C1): JUDGE
          * state (lp, cursor, m) lives in C locals, so no suspension. */
         t->centry_depth++;
-        pl_run_status s = pl_run(t, b, t->fsp, false);
+        pl_run_status s = pl_run_caught(t, b, t->fsp, false);
         t->centry_depth--;
         ax_assume(s == PL_RUN_DONE, "C-entry run cannot suspend");
         b = t->result;
@@ -495,8 +498,9 @@ ret:
   }
 
   case PL_F_OPDEEP: {
-    t->vstack[fr->argbase] = v; /* deeply normalized arg 0 */
-    goto op_body;
+    t->vstack[fr->argbase + fr->k] = v; /* deeply normalized arg k */
+    fr->k++;
+    goto opdeep_next;
   }
 
   case PL_F_NF: {
@@ -527,6 +531,19 @@ ret:
     goto ret;
   }
 
+  case PL_F_TRY: {
+    /* force (f x) succeeded under the barrier: the reference planTry's
+     * Right, wrapped as (0 v).  The Left path lives in pl_run_caught. */
+    t->fsp--;
+    pl_vpush(t, v);
+    pl_gc_reserve(t, PL_APP_CELLS(1));
+    PL_GC_FORBID(t);
+    v = pl_mk_app_from(t, 0, 1, &t->vstack[t->vsp - 1]);
+    PL_GC_ALLOW(t);
+    t->vsp--;
+    goto ret;
+  }
+
   default:
     ax_abort("RETURN: bad frame kind %d", (int)fr->kind);
   }
@@ -542,10 +559,28 @@ oparg_next:
       v = t->vstack[fr->argbase + fr->k];
       goto eval;
     }
-    if (d->deep) {
+    if (d->deep_mask != 0) {
       fr->kind = PL_F_OPDEEP;
+      fr->k = 0;
+      goto opdeep_next;
+    }
+  }
+  goto op_body;
+
+opdeep_next:
+  /* fr is the F_OPDEEP frame on top of the stack.  Deep (nf) phase
+   * over the deep_mask args: payload normalization runs through the
+   * machine at depth 0, so effects inside it block correctly. */
+  fr = &t->fstack[t->fsp - 1];
+  {
+    const pl_opdesc* d = &pl_ops[fr->op];
+    while (fr->k < fr->argc && ((d->deep_mask >> fr->k) & 1u) == 0)
+      fr->k++;
+    if (fr->k < fr->argc) {
+      /* read through the frame before push_nf may move the array */
+      size_t slot = fr->argbase + fr->k;
       pl_push_nf(t);
-      v = t->vstack[fr->argbase];
+      v = t->vstack[slot];
       goto eval;
     }
   }
@@ -586,6 +621,64 @@ op_body:
     }
     v = r;
     goto eval;
+  }
+}
+
+/* ── Exception delivery (frame-based Try) ──────────────────────────────── */
+
+/*
+ * Every machine entry runs under this wrapper, which owns PLAN
+ * exception delivery.  A raise longjmps here; if an F_TRY barrier
+ * exists within THIS entry's frame range (and the exception is a
+ * catchable PLAN_EXN, not a runtime error), the stacks unwind to the
+ * barrier and the machine resumes by RETURNing (1 exn) — the reference
+ * planTry's Left.  Otherwise the entry unwinds and the exception
+ * re-raises to the next-outer handler (an enclosing entry's wrapper, a
+ * host pl_catch, or pl_thread_run's top-level trap).
+ *
+ * Because Try is a frame, everything beneath it runs in the same
+ * trampoline invocation: fuel yields, blocking coordination effects,
+ * and resumption all work under Try, and a suspended continuation
+ * carries its barriers across quanta.
+ */
+static pl_run_status pl_run_caught(pl_thread* t, pl_val v0, size_t base,
+                                   bool at_return0) {
+  /* modified across setjmp/longjmp iterations */
+  volatile pl_val v = v0;
+  volatile bool at_return = at_return0;
+  for (;;) {
+    pl_catch c;
+    pl_catch_init(t, &c);
+    if (setjmp(c.jb) == 0) {
+      pl_run_status s = pl_run(t, v, base, at_return);
+      pl_catch_pop(t, &c);
+      return s;
+    }
+    t->handler = c.prev;
+    t->centry_depth = c.centry;
+    if (t->exn_msg == NULL) { /* runtime errors are not catchable */
+      size_t i = t->fsp;
+      while (i > base && t->fstack[i - 1].kind != PL_F_TRY)
+        i--;
+      if (i > base) {
+        /* unwind to the barrier and deliver (1 exn) */
+        t->fsp = i - 1;
+        t->vsp = t->fstack[i - 1].argbase;
+        pl_gc_reserve(t, PL_APP_CELLS(1));
+        PL_GC_FORBID(t);
+        v = pl_mk_app_from(t, 1, 1, &t->exn);
+        PL_GC_ALLOW(t);
+        t->exn = 0;
+        at_return = true;
+        continue;
+      }
+    }
+    /* uncaught within this entry: unwind it and propagate */
+    t->vsp = c.vsp;
+    t->fsp = c.fsp;
+    if (t->exn_msg != NULL)
+      pl_raise_msg(t, t->exn_msg);
+    pl_raise(t, t->exn);
   }
 }
 
@@ -671,10 +764,10 @@ pl_run_status pl_thread_run(pl_thread* t, uint64_t fuel) {
   pl_run_status s;
   switch (t->resume_kind) {
   case PL_RES_EVAL:
-    s = pl_run(t, t->resume_val, t->base_fsp, false);
+    s = pl_run_caught(t, t->resume_val, t->base_fsp, false);
     break;
   case PL_RES_RETURN:
-    s = pl_run(t, t->resume_val, t->base_fsp, true);
+    s = pl_run_caught(t, t->resume_val, t->base_fsp, true);
     break;
   default:
     ax_abort("pl_thread_run: bad resume kind %d", (int)t->resume_kind);
@@ -695,7 +788,7 @@ pl_run_status pl_thread_run(pl_thread* t, uint64_t fuel) {
  */
 static pl_val pl_run_centry(pl_thread* t, pl_val v, size_t base) {
   t->centry_depth++;
-  pl_run_status s = pl_run(t, v, base, false);
+  pl_run_status s = pl_run_caught(t, v, base, false);
   t->centry_depth--;
   ax_assume(s == PL_RUN_DONE, "C-entry run cannot suspend");
   return t->result;

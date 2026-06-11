@@ -821,6 +821,10 @@ static pl_val en_law(en_wisp* w, pl_val tag, pl_val sig, pl_val bod,
 static pl_val en_pin(en_wisp* w, pl_val val) {
   size_t mark = en_root_mark(w);
   en_root_push(w, en_wisp_eval(w, val));
+  /* normalize through the guarded path first: under a scheduler this
+   * drives the executor, so effects inside the pinned value run as the
+   * root actor instead of raising at host level */
+  w->tmp_v[mark] = en_run_nf(w, w->tmp_v[mark]);
   pl_catch c;
   pl_catch_init(w->t, &c);
   if (setjmp(c.jb) != 0) {

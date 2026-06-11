@@ -33,16 +33,6 @@ static pl_val pl_resolve(pl_val v) {
   return v;
 }
 
-/* ── Small helpers ─────────────────────────────────────────────────────── */
-
-static pl_val mk_app1_rooted(pl_thread* t, pl_val head, pl_val* slot) {
-  pl_gc_reserve(t, PL_APP_CELLS(1));
-  PL_GC_FORBID(t);
-  pl_val r = pl_mk_app_from(t, head, 1, slot);
-  PL_GC_ALLOW(t);
-  return r;
-}
-
 /* ── op 0 / shared bodies ──────────────────────────────────────────────── */
 
 static pl_val op_pin(pl_thread* t, size_t ab) {
@@ -616,34 +606,26 @@ static pl_val op_throw(pl_thread* t, size_t ab) {
   pl_raise(t, ARG(0)); /* arg 0 already deeply forced (deep flag) */
 }
 
+/*
+ * Frame-based Try (C4: frames over C recursion): push the F_TRY
+ * barrier, then drive force (f % x) through the machine itself.  The
+ * success/exception wrapping lives in the trampoline (F_TRY return
+ * case, pl_run_caught), so suspension, fuel yields, and blocking
+ * coordination effects all work beneath a Try.
+ */
 static pl_val op_try(pl_thread* t, size_t ab) {
-  pl_catch c;
-  pl_catch_init(t, &c);
-  if (setjmp(c.jb) == 0) {
-    pl_val r = pl_apply(t, ARG(0), ARG(1));
-    r = pl_nf(t, r);
-    pl_catch_pop(t, &c);
-    size_t ri = t->vsp;
-    pl_vpush(t, r);
-    pl_val out = mk_app1_rooted(t, 0, &t->vstack[ri]);
-    t->vsp = ri;
-    return out;
-  }
-  pl_catch_unwind(t, &c);
-  if (t->exn_msg != NULL)
-    pl_raise_msg(t, t->exn_msg); /* only PLAN_EXN is catchable */
-  pl_val out = mk_app1_rooted(t, 1, &t->exn);
-  t->exn = 0;
-  return out;
+  pl_frame* fr = pl_fpush(t);
+  fr->kind = PL_F_TRY;
+  fr->argbase = ab - 1; /* vsp to restore when delivering the exn */
+  pl_push_nf(t);
+  pl_push_apply(t, ARG(1));
+  return ARG(0);
 }
 
 /* ── Misc ──────────────────────────────────────────────────────────────── */
 
 static pl_val op_trace(pl_thread* t, size_t ab) {
-  /* assign via a local: evaluation may realloc the vstack, so computing
-   * the slot address unsequenced with the call would be stale */
-  pl_val shown = pl_nf(t, ARG(0)); /* the reference shows the value deeply */
-  ARG(0) = shown;
+  /* arg 0 deep via mask: the reference shows the value deeply */
   char* s = pl_show_val(ax_allocator_system(), ARG(0), NULL);
   fprintf(stderr, "%s\n", s);
   ax_free(ax_allocator_system(), s);
@@ -688,8 +670,7 @@ static bool pl_eq_deep(pl_val a, pl_val b) {
 }
 
 static pl_val op_equal(pl_thread* t, size_t ab) {
-  pl_val rhs = pl_nf(t, ARG(1)); /* arg 0 deep via flag */
-  ARG(1) = rhs;
+  /* both args deep via mask */
   return pl_eq_deep(ARG(0), ARG(1)) ? 1 : 0;
 }
 
@@ -753,122 +734,122 @@ static pl_val op_load(pl_thread* t, size_t ab) {
 #define M2(a, b) ax_s2(a, b)
 #define OP66(name, argc, mask, deep, body)                                     \
   {66, name, NULL, argc, mask, deep, false, body}
-#define OP82(name, argc, mask, body)                                           \
-  {82, 0, name, argc, mask, false, false, body}
-/* coordination effects (§6.3): the machine blocks instead of executing */
-#define OP82C(name, argc, mask, body)                                          \
-  {82, 0, name, argc, mask, false, true, body}
+#define OP82(name, argc, mask, body) {82, 0, name, argc, mask, 0, false, body}
+/* coordination effects (§6.3): the machine blocks instead of executing;
+ * deep is the initiation-time payload normalization (M2) */
+#define OP82C(name, argc, mask, deep, body)                                    \
+  {82, 0, name, argc, mask, deep, true, body}
 
 const pl_opdesc pl_ops[] = {
     /* op 0: core PLAN */
-    {0, 0, NULL, 1, 0b1, true, false, op_pin},
-    {0, 1, NULL, 3, 0b111, false, false, op_law},
-    {0, 2, NULL, 6, 0b100000, false, false, op_elim},
+    {0, 0, NULL, 1, 0b1, 0b1, false, op_pin},
+    {0, 1, NULL, 3, 0b111, 0, false, op_law},
+    {0, 2, NULL, 6, 0b100000, 0, false, op_elim},
 
-    OP66(ax_s3('P', 'i', 'n'), 1, 0b1, true, op_pin),
-    OP66(ax_s3('L', 'a', 'w'), 3, 0b111, false, op_law),
-    OP66(ax_s4('E', 'l', 'i', 'm'), 6, 0b100000, false, op_elim),
+    OP66(ax_s3('P', 'i', 'n'), 1, 0b1, 0b1, op_pin),
+    OP66(ax_s3('L', 'a', 'w'), 3, 0b111, 0, op_law),
+    OP66(ax_s4('E', 'l', 'i', 'm'), 6, 0b100000, 0, op_elim),
 
-    OP66(ax_s3('I', 'n', 'c'), 1, 0b1, false, op_inc),
-    OP66(ax_s3('D', 'e', 'c'), 1, 0b1, false, op_dec),
-    OP66(ax_s3('A', 'd', 'd'), 2, 0b11, false, op_add),
-    OP66(ax_s3('S', 'u', 'b'), 2, 0b11, false, op_sub),
-    OP66(ax_s3('M', 'u', 'l'), 2, 0b11, false, op_mul),
-    OP66(ax_s3('D', 'i', 'v'), 2, 0b11, false, op_div),
-    OP66(ax_s3('M', 'o', 'd'), 2, 0b11, false, op_mod),
-    OP66(ax_s3('R', 's', 'h'), 2, 0b11, false, op_rsh),
-    OP66(ax_s3('L', 's', 'h'), 2, 0b11, false, op_lsh),
+    OP66(ax_s3('I', 'n', 'c'), 1, 0b1, 0, op_inc),
+    OP66(ax_s3('D', 'e', 'c'), 1, 0b1, 0, op_dec),
+    OP66(ax_s3('A', 'd', 'd'), 2, 0b11, 0, op_add),
+    OP66(ax_s3('S', 'u', 'b'), 2, 0b11, 0, op_sub),
+    OP66(ax_s3('M', 'u', 'l'), 2, 0b11, 0, op_mul),
+    OP66(ax_s3('D', 'i', 'v'), 2, 0b11, 0, op_div),
+    OP66(ax_s3('M', 'o', 'd'), 2, 0b11, 0, op_mod),
+    OP66(ax_s3('R', 's', 'h'), 2, 0b11, 0, op_rsh),
+    OP66(ax_s3('L', 's', 'h'), 2, 0b11, 0, op_lsh),
 
-    OP66(ax_s5('C', 'a', 's', 'e', '2'), 3, 0b1, false, op_case2),
-    OP66(ax_s5('C', 'a', 's', 'e', '3'), 4, 0b1, false, op_case3),
-    OP66(ax_s5('C', 'a', 's', 'e', '4'), 5, 0b1, false, op_case4),
-    OP66(ax_s5('C', 'a', 's', 'e', '5'), 6, 0b1, false, op_case5),
-    OP66(ax_s5('C', 'a', 's', 'e', '6'), 7, 0b1, false, op_case6),
-    OP66(ax_s5('C', 'a', 's', 'e', '7'), 8, 0b1, false, op_case7),
-    OP66(ax_s5('C', 'a', 's', 'e', '8'), 9, 0b1, false, op_case8),
-    OP66(ax_s5('C', 'a', 's', 'e', '9'), 10, 0b1, false, op_case9),
-    OP66(ax_s6('C', 'a', 's', 'e', '1', '0'), 11, 0b1, false, op_case10),
-    OP66(ax_s6('C', 'a', 's', 'e', '1', '1'), 12, 0b1, false, op_case11),
-    OP66(ax_s6('C', 'a', 's', 'e', '1', '2'), 13, 0b1, false, op_case12),
-    OP66(ax_s6('C', 'a', 's', 'e', '1', '3'), 14, 0b1, false, op_case13),
-    OP66(ax_s6('C', 'a', 's', 'e', '1', '4'), 15, 0b1, false, op_case14),
-    OP66(ax_s6('C', 'a', 's', 'e', '1', '5'), 16, 0b1, false, op_case15),
-    OP66(ax_s6('C', 'a', 's', 'e', '1', '6'), 17, 0b1, false, op_case16),
-    OP66(ax_s4('C', 'a', 's', 'e'), 3, 0b11, false, op_case),
+    OP66(ax_s5('C', 'a', 's', 'e', '2'), 3, 0b1, 0, op_case2),
+    OP66(ax_s5('C', 'a', 's', 'e', '3'), 4, 0b1, 0, op_case3),
+    OP66(ax_s5('C', 'a', 's', 'e', '4'), 5, 0b1, 0, op_case4),
+    OP66(ax_s5('C', 'a', 's', 'e', '5'), 6, 0b1, 0, op_case5),
+    OP66(ax_s5('C', 'a', 's', 'e', '6'), 7, 0b1, 0, op_case6),
+    OP66(ax_s5('C', 'a', 's', 'e', '7'), 8, 0b1, 0, op_case7),
+    OP66(ax_s5('C', 'a', 's', 'e', '8'), 9, 0b1, 0, op_case8),
+    OP66(ax_s5('C', 'a', 's', 'e', '9'), 10, 0b1, 0, op_case9),
+    OP66(ax_s6('C', 'a', 's', 'e', '1', '0'), 11, 0b1, 0, op_case10),
+    OP66(ax_s6('C', 'a', 's', 'e', '1', '1'), 12, 0b1, 0, op_case11),
+    OP66(ax_s6('C', 'a', 's', 'e', '1', '2'), 13, 0b1, 0, op_case12),
+    OP66(ax_s6('C', 'a', 's', 'e', '1', '3'), 14, 0b1, 0, op_case13),
+    OP66(ax_s6('C', 'a', 's', 'e', '1', '4'), 15, 0b1, 0, op_case14),
+    OP66(ax_s6('C', 'a', 's', 'e', '1', '5'), 16, 0b1, 0, op_case15),
+    OP66(ax_s6('C', 'a', 's', 'e', '1', '6'), 17, 0b1, 0, op_case16),
+    OP66(ax_s4('C', 'a', 's', 'e'), 3, 0b11, 0, op_case),
 
-    OP66(ax_s4('T', 'e', 's', 't'), 2, 0b11, false, op_test),
-    OP66(ax_s3('N', 'i', 'b'), 2, 0b11, false, op_nib),
-    OP66(ax_s5('L', 'o', 'a', 'd', '8'), 2, 0b11, false, op_load8),
-    OP66(ax_s6('S', 't', 'o', 'r', 'e', '8'), 3, 0b111, false, op_store8),
-    OP66(ax_s3('S', 'e', 't'), 2, 0b11, false, op_set),
-    OP66(ax_s5('C', 'l', 'e', 'a', 'r'), 2, 0b11, false, op_clear),
-    OP66(ax_s3('B', 'e', 'x'), 1, 0b1, false, op_bex),
-    OP66(ax_s6('T', 'r', 'u', 'n', 'c', '8'), 1, 0b1, false, op_trunc8),
-    OP66(ax_s7('T', 'r', 'u', 'n', 'c', '1', '6'), 1, 0b1, false, op_trunc16),
-    OP66(ax_s7('T', 'r', 'u', 'n', 'c', '3', '2'), 1, 0b1, false, op_trunc32),
-    OP66(ax_s7('T', 'r', 'u', 'n', 'c', '6', '4'), 1, 0b1, false, op_trunc64),
-    OP66(ax_s5('T', 'r', 'u', 'n', 'c'), 2, 0b11, false, op_trunc),
-    OP66(ax_s4('B', 'i', 't', 's'), 1, 0b1, false, op_bits),
-    OP66(ax_s5('B', 'y', 't', 'e', 's'), 1, 0b1, false, op_bytes),
+    OP66(ax_s4('T', 'e', 's', 't'), 2, 0b11, 0, op_test),
+    OP66(ax_s3('N', 'i', 'b'), 2, 0b11, 0, op_nib),
+    OP66(ax_s5('L', 'o', 'a', 'd', '8'), 2, 0b11, 0, op_load8),
+    OP66(ax_s6('S', 't', 'o', 'r', 'e', '8'), 3, 0b111, 0, op_store8),
+    OP66(ax_s3('S', 'e', 't'), 2, 0b11, 0, op_set),
+    OP66(ax_s5('C', 'l', 'e', 'a', 'r'), 2, 0b11, 0, op_clear),
+    OP66(ax_s3('B', 'e', 'x'), 1, 0b1, 0, op_bex),
+    OP66(ax_s6('T', 'r', 'u', 'n', 'c', '8'), 1, 0b1, 0, op_trunc8),
+    OP66(ax_s7('T', 'r', 'u', 'n', 'c', '1', '6'), 1, 0b1, 0, op_trunc16),
+    OP66(ax_s7('T', 'r', 'u', 'n', 'c', '3', '2'), 1, 0b1, 0, op_trunc32),
+    OP66(ax_s7('T', 'r', 'u', 'n', 'c', '6', '4'), 1, 0b1, 0, op_trunc64),
+    OP66(ax_s5('T', 'r', 'u', 'n', 'c'), 2, 0b11, 0, op_trunc),
+    OP66(ax_s4('B', 'i', 't', 's'), 1, 0b1, 0, op_bits),
+    OP66(ax_s5('B', 'y', 't', 'e', 's'), 1, 0b1, 0, op_bytes),
 
-    OP66(ax_s5('U', 'n', 'p', 'i', 'n'), 1, 0b1, false, op_unpin),
-    OP66(ax_s3('S', 'e', 'q'), 2, 0b01, false, op_seq),
-    OP66(ax_s4('S', 'e', 'q', '2'), 3, 0b011, false, op_seq2),
-    OP66(ax_s4('S', 'e', 'q', '3'), 4, 0b0111, false, op_seq3),
-    OP66(ax_s3('S', 'a', 'p'), 2, 0b10, false, op_sap),
-    OP66(ax_s4('S', 'a', 'p', '2'), 3, 0b110, false, op_sap2),
-    OP66(ax_s4('T', 'y', 'p', 'e'), 1, 0b1, false, op_type),
-    OP66(ax_s5('I', 's', 'P', 'i', 'n'), 1, 0b1, false, op_is_pin),
-    OP66(ax_s5('I', 's', 'L', 'a', 'w'), 1, 0b1, false, op_is_law),
-    OP66(ax_s5('I', 's', 'A', 'p', 'p'), 1, 0b1, false, op_is_app),
-    OP66(ax_s5('I', 's', 'N', 'a', 't'), 1, 0b1, false, op_is_nat),
-    OP66(ax_s3('N', 'a', 't'), 1, 0b1, false, op_nat),
-    OP66(ax_s5('A', 'r', 'i', 't', 'y'), 1, 0b1, false, op_arity),
-    OP66(ax_s4('N', 'a', 'm', 'e'), 1, 0b1, false, op_name),
-    OP66(ax_s4('B', 'o', 'd', 'y'), 1, 0b1, false, op_body),
+    OP66(ax_s5('U', 'n', 'p', 'i', 'n'), 1, 0b1, 0, op_unpin),
+    OP66(ax_s3('S', 'e', 'q'), 2, 0b01, 0, op_seq),
+    OP66(ax_s4('S', 'e', 'q', '2'), 3, 0b011, 0, op_seq2),
+    OP66(ax_s4('S', 'e', 'q', '3'), 4, 0b0111, 0, op_seq3),
+    OP66(ax_s3('S', 'a', 'p'), 2, 0b10, 0, op_sap),
+    OP66(ax_s4('S', 'a', 'p', '2'), 3, 0b110, 0, op_sap2),
+    OP66(ax_s4('T', 'y', 'p', 'e'), 1, 0b1, 0, op_type),
+    OP66(ax_s5('I', 's', 'P', 'i', 'n'), 1, 0b1, 0, op_is_pin),
+    OP66(ax_s5('I', 's', 'L', 'a', 'w'), 1, 0b1, 0, op_is_law),
+    OP66(ax_s5('I', 's', 'A', 'p', 'p'), 1, 0b1, 0, op_is_app),
+    OP66(ax_s5('I', 's', 'N', 'a', 't'), 1, 0b1, 0, op_is_nat),
+    OP66(ax_s3('N', 'a', 't'), 1, 0b1, 0, op_nat),
+    OP66(ax_s5('A', 'r', 'i', 't', 'y'), 1, 0b1, 0, op_arity),
+    OP66(ax_s4('N', 'a', 'm', 'e'), 1, 0b1, 0, op_name),
+    OP66(ax_s4('B', 'o', 'd', 'y'), 1, 0b1, 0, op_body),
 
-    OP66(ax_s3('R', 'o', 'w'), 3, 0b011, false, op_row),
-    OP66(ax_s3('R', 'e', 'p'), 3, 0b101, false, op_rep),
-    OP66(ax_s5('S', 'l', 'i', 'c', 'e'), 3, 0b111, false, op_slice),
-    OP66(ax_s4('W', 'e', 'l', 'd'), 2, 0b11, false, op_weld),
-    OP66(ax_s5('F', 'o', 'r', 'c', 'e'), 1, 0, false, op_force),
-    OP66(ax_s7('D', 'e', 'e', 'p', 'S', 'e', 'q'), 2, 0, false, op_deepseq),
-    OP66(ax_s2('U', 'p'), 3, 0b101, false, op_up),
-    OP66(ax_s6('U', 'p', 'U', 'n', 'i', 'q'), 3, 0b101, false, op_up),
-    OP66(ax_s4('C', 'o', 'u', 'p'), 2, 0b11, false, op_coup),
-    OP66(ax_s3('T', 'r', 'y'), 2, 0, false, op_try),
-    OP66(ax_s5('T', 'h', 'r', 'o', 'w'), 1, 0b1, true, op_throw),
-    OP66(ax_s2('H', 'd'), 1, 0b1, false, op_hd),
-    OP66(ax_s2('I', 'x'), 2, 0b11, false, op_ix),
-    OP66(ax_s3('I', 'x', '0'), 1, 0b1, false, op_ix0),
-    OP66(ax_s3('I', 'x', '1'), 1, 0b1, false, op_ix1),
-    OP66(ax_s3('I', 'x', '2'), 1, 0b1, false, op_ix2),
-    OP66(ax_s3('I', 'x', '3'), 1, 0b1, false, op_ix3),
-    OP66(ax_s3('I', 'x', '4'), 1, 0b1, false, op_ix4),
-    OP66(ax_s3('I', 'x', '5'), 1, 0b1, false, op_ix5),
-    OP66(ax_s3('I', 'x', '6'), 1, 0b1, false, op_ix6),
-    OP66(ax_s3('I', 'x', '7'), 1, 0b1, false, op_ix7),
-    OP66(ax_s4('S', 'a', 'v', 'e'), 1, 0b1, false, op_save),
-    OP66(ax_s4('L', 'o', 'a', 'd'), 1, 0b1, false, op_load),
-    OP66(ax_s5('T', 'r', 'a', 'c', 'e'), 2, 0, false, op_trace),
-    OP66(ax_s3('N', 'i', 'l'), 1, 0b1, false, op_nil),
-    OP66(ax_s5('T', 'r', 'u', 't', 'h'), 1, 0b1, false, op_truth),
-    OP66(ax_s2('O', 'r'), 2, 0b01, false, op_or),
-    OP66(ax_s3('N', 'o', 'r'), 2, 0b01, false, op_nor),
-    OP66(ax_s3('A', 'n', 'd'), 2, 0b01, false, op_and),
-    OP66(ax_s2('I', 'f'), 3, 0b001, false, op_if),
-    OP66(ax_s3('I', 'f', 'z'), 3, 0b001, false, op_ifz),
-    OP66(ax_s2('E', 'q'), 2, 0b11, false, op_eq),
-    OP66(ax_s2('N', 'e'), 2, 0b11, false, op_ne),
-    OP66(ax_s2('L', 't'), 2, 0b11, false, op_lt),
-    OP66(ax_s2('L', 'e'), 2, 0b11, false, op_le),
-    OP66(ax_s2('G', 't'), 2, 0b11, false, op_gt),
-    OP66(ax_s2('G', 'e'), 2, 0b11, false, op_ge),
-    OP66(ax_s3('C', 'm', 'p'), 2, 0b11, false, op_cmp),
-    OP66(ax_s2('S', 'z'), 1, 0b1, false, op_sz),
-    OP66(ax_s4('L', 'a', 's', 't'), 1, 0b1, false, op_last),
-    OP66(ax_s4('I', 'n', 'i', 't'), 1, 0b1, false, op_init),
-    OP66(ax_s5('E', 'q', 'u', 'a', 'l'), 2, 0b11, true, op_equal),
+    OP66(ax_s3('R', 'o', 'w'), 3, 0b011, 0, op_row),
+    OP66(ax_s3('R', 'e', 'p'), 3, 0b101, 0, op_rep),
+    OP66(ax_s5('S', 'l', 'i', 'c', 'e'), 3, 0b111, 0, op_slice),
+    OP66(ax_s4('W', 'e', 'l', 'd'), 2, 0b11, 0, op_weld),
+    OP66(ax_s5('F', 'o', 'r', 'c', 'e'), 1, 0, 0, op_force),
+    OP66(ax_s7('D', 'e', 'e', 'p', 'S', 'e', 'q'), 2, 0, 0, op_deepseq),
+    OP66(ax_s2('U', 'p'), 3, 0b101, 0, op_up),
+    OP66(ax_s6('U', 'p', 'U', 'n', 'i', 'q'), 3, 0b101, 0, op_up),
+    OP66(ax_s4('C', 'o', 'u', 'p'), 2, 0b11, 0, op_coup),
+    OP66(ax_s3('T', 'r', 'y'), 2, 0, 0, op_try),
+    OP66(ax_s5('T', 'h', 'r', 'o', 'w'), 1, 0b1, 0b1, op_throw),
+    OP66(ax_s2('H', 'd'), 1, 0b1, 0, op_hd),
+    OP66(ax_s2('I', 'x'), 2, 0b11, 0, op_ix),
+    OP66(ax_s3('I', 'x', '0'), 1, 0b1, 0, op_ix0),
+    OP66(ax_s3('I', 'x', '1'), 1, 0b1, 0, op_ix1),
+    OP66(ax_s3('I', 'x', '2'), 1, 0b1, 0, op_ix2),
+    OP66(ax_s3('I', 'x', '3'), 1, 0b1, 0, op_ix3),
+    OP66(ax_s3('I', 'x', '4'), 1, 0b1, 0, op_ix4),
+    OP66(ax_s3('I', 'x', '5'), 1, 0b1, 0, op_ix5),
+    OP66(ax_s3('I', 'x', '6'), 1, 0b1, 0, op_ix6),
+    OP66(ax_s3('I', 'x', '7'), 1, 0b1, 0, op_ix7),
+    OP66(ax_s4('S', 'a', 'v', 'e'), 1, 0b1, 0, op_save),
+    OP66(ax_s4('L', 'o', 'a', 'd'), 1, 0b1, 0, op_load),
+    OP66(ax_s5('T', 'r', 'a', 'c', 'e'), 2, 0, 0b1, op_trace),
+    OP66(ax_s3('N', 'i', 'l'), 1, 0b1, 0, op_nil),
+    OP66(ax_s5('T', 'r', 'u', 't', 'h'), 1, 0b1, 0, op_truth),
+    OP66(ax_s2('O', 'r'), 2, 0b01, 0, op_or),
+    OP66(ax_s3('N', 'o', 'r'), 2, 0b01, 0, op_nor),
+    OP66(ax_s3('A', 'n', 'd'), 2, 0b01, 0, op_and),
+    OP66(ax_s2('I', 'f'), 3, 0b001, 0, op_if),
+    OP66(ax_s3('I', 'f', 'z'), 3, 0b001, 0, op_ifz),
+    OP66(ax_s2('E', 'q'), 2, 0b11, 0, op_eq),
+    OP66(ax_s2('N', 'e'), 2, 0b11, 0, op_ne),
+    OP66(ax_s2('L', 't'), 2, 0b11, 0, op_lt),
+    OP66(ax_s2('L', 'e'), 2, 0b11, 0, op_le),
+    OP66(ax_s2('G', 't'), 2, 0b11, 0, op_gt),
+    OP66(ax_s2('G', 'e'), 2, 0b11, 0, op_ge),
+    OP66(ax_s3('C', 'm', 'p'), 2, 0b11, 0, op_cmp),
+    OP66(ax_s2('S', 'z'), 1, 0b1, 0, op_sz),
+    OP66(ax_s4('L', 'a', 's', 't'), 1, 0b1, 0, op_last),
+    OP66(ax_s4('I', 'n', 'i', 't'), 1, 0b1, 0, op_init),
+    OP66(ax_s5('E', 'q', 'u', 'a', 'l'), 2, 0b11, 0b11, op_equal),
 
     /* op 82: rplan I/O (mode-gated in eval.c) */
     OP82("Input", 1, 0b1, pl_op82_input),
@@ -883,11 +864,14 @@ const pl_opdesc pl_ops[] = {
     OP82("Accept", 1, 0b1, pl_op82_accept),
     OP82("Read", 2, 0b11, pl_op82_read),
     OP82("Write", 2, 0b11, pl_op82_write),
-    OP82C("Spawn", 1, 0, pl_op82_spawn),
-    OP82C("Send", 2, 0b1, pl_op82_send),
-    OP82C("SendCaps", 3, 0b1, pl_op82_send_caps),
-    OP82C("Recv", 1, 0b1, pl_op82_recv),
-    OP82C("CloseHandle", 1, 0b1, pl_op82_close_handle),
+    /* payloads deep-normalize at initiation (M2/D4): forcing — and any
+     * effects within it — runs as the sender's own execution, before
+     * the request parks; the service pins already-normal values */
+    OP82C("Spawn", 1, 0, 0b1, pl_op82_spawn),
+    OP82C("Send", 2, 0b1, 0b10, pl_op82_send),
+    OP82C("SendCaps", 3, 0b1, 0b110, pl_op82_send_caps),
+    OP82C("Recv", 1, 0b1, 0, pl_op82_recv),
+    OP82C("CloseHandle", 1, 0b1, 0, pl_op82_close_handle),
 };
 
 const size_t pl_nops = sizeof(pl_ops) / sizeof(pl_ops[0]);
