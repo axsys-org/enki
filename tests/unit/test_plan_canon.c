@@ -81,7 +81,7 @@ Test(canon, pin_of_nat) {
   pl_thread* t = rt.t;
   size_t base = t->vsp;
   pl_vpush(t, 42);
-  pl_val pin = pl_pin(t, &t->vstack[base]);
+  pl_val pin = pl_pin(t, t->vstack[base]);
   char* s = pl_show_val(ax_allocator_system(), pin, NULL);
   cr_assert_str_eq(s, "(#pin 42)");
   ax_free(ax_allocator_system(), s);
@@ -94,7 +94,7 @@ Test(canon, canonize_module_text) {
   size_t base = t->vsp;
   /* pin a law with no sub-pins: the snapshot has no imports. */
   pl_vpush(t, test_law(t, 1, (pl_val)'h', test_app2(t, 0, 1, 1)));
-  pl_val pin = pl_pin(t, &t->vstack[base]);
+  pl_val pin = pl_pin(t, t->vstack[base]);
   char* s = pl_canonize(ax_allocator_system(), pin, NULL);
   cr_assert_str_eq(s,
                    "(#bind _ (#pin (#law \"h\" (h a) (a a))))\n(#export _)\n");
@@ -110,8 +110,8 @@ Test(canon, pin_hash_is_canonical_text) {
   size_t base = t->vsp;
   pl_vpush(t, test_law(t, 1, (pl_val)'h', test_app2(t, 0, 1, 1)));
   pl_vpush(t, test_law(t, 1, (pl_val)'h', test_app2(t, 0, 1, 1)));
-  pl_val p1 = pl_pin(t, &t->vstack[base]);
-  pl_val p2 = pl_pin(t, &t->vstack[base + 1]);
+  pl_val p1 = pl_pin(t, t->vstack[base]);
+  pl_val p2 = pl_pin(t, t->vstack[base + 1]);
   cr_assert_eq(p1, p2);
   test_rt_free(&rt);
 }

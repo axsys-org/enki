@@ -176,7 +176,7 @@ Test(gc, store_values_are_terminal) {
 
   size_t base = t->vsp;
   pl_vpush(t, test_app2(t, 0, 1, 2));
-  pl_val pin = pl_pin(t, &t->vstack[base]);
+  pl_val pin = pl_pin(t, t->vstack[base]);
   pl_vpush(t, pin);
   cr_assert(pl_store_owns(rt.store, pin));
 

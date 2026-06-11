@@ -110,7 +110,7 @@ static pl_val pl_forward(pl_gc_ctx* gc, pl_val v) {
     if (pl_is_nat63(v))
       return v;
     if (gc->h->store != NULL && pl_store_owns(gc->h->store, v))
-      return v; /* store region is non-moving and closed (§10.3) */
+      return v; /* store region is non-moving and closed */
     pl_cell* p = pl_ptr(v);
     pl_cell hdr = p[0];
     pl_kind kind = pl_hdr_kind(hdr);
@@ -260,6 +260,9 @@ static void pl_thread_roots(pl_root_visit visit, void* gc_ctx, void* src_ctx) {
     visit(&t->fstack[i].b, gc_ctx);
   }
   visit(&t->exn, gc_ctx);
+  visit(&t->resume_val, gc_ctx);
+  visit(&t->blocked_on, gc_ctx);
+  visit(&t->result, gc_ctx);
 }
 
 pl_thread* pl_thread_new(pl_heap* h) {
@@ -271,6 +274,7 @@ pl_thread* pl_thread_new(pl_heap* h) {
   t->fcap = 4096;
   t->fstack = malloc(t->fcap * sizeof(pl_frame));
   ax_assume(t->vstack != NULL && t->fstack != NULL, "oom");
+  t->fuel = UINT64_MAX; /* fuel is inert outside pl_thread_run */
   pl_gc_add_root_source(h, pl_thread_roots, t);
   return t;
 }

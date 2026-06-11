@@ -237,8 +237,8 @@ Test(ops, equal_deep_and_pin_identity) {
                            t->vstack[base + 1]),
                1);
   /* pins dedup to pointer identity */
-  pl_val p1 = pl_pin(t, &t->vstack[base]);
-  pl_val p2 = pl_pin(t, &t->vstack[base + 1]);
+  pl_val p1 = pl_pin(t, t->vstack[base]);
+  pl_val p2 = pl_pin(t, t->vstack[base + 1]);
   cr_assert_eq(p1, p2);
   test_rt_free(&rt);
 }
@@ -271,7 +271,7 @@ Test(ops, law_op_adds_one_to_arity) {
   /* op0: (P0 % (1 a m b)) makes L (a+1) m b */
   size_t base = t->vsp;
   pl_vpush(t, 0);
-  pl_val p0 = pl_pin(t, &t->vstack[base]);
+  pl_val p0 = pl_pin(t, t->vstack[base]);
   pl_vpush(t, p0);
   pl_val row_args[3] = {1, 0, 1};
   pl_vpush(t, test_app(t, 1, 3, row_args)); /* (1 1 0 1) */

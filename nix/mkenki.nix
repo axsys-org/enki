@@ -15,6 +15,7 @@
   pname,
   buildType,
   makeTarget ? "all",
+  makeArgs ? "",
   installPackage ? true,
 }:
 stdenv.mkDerivation {
@@ -42,7 +43,7 @@ stdenv.mkDerivation {
 
   buildPhase = ''
     runHook preBuild
-    make ${makeTarget} BUILD_TYPE=${buildType} CC=${compiler}/bin/${cc}
+    make ${makeTarget} BUILD_TYPE=${buildType} CC=${compiler}/bin/${cc} ${makeArgs}
     runHook postBuild
   '';
 
