@@ -184,6 +184,14 @@ static pl_val op_load8(pl_thread* t, size_t ab) {
   COERCE(1);
   return pl_nat_byte_at(ARG(1), pl_nat_u64_clamp(ARG(0)));
 }
+
+static pl_val op_loadvar(pl_thread* t, size_t ab) {
+  COERCE(0);
+  COERCE(1);
+  COERCE(2);
+  return pl_nat_load_var(t, &ARG(0), &ARG(1), &ARG(2));
+}
+
 static pl_val op_store8(pl_thread* t, size_t ab) {
   COERCE(0);
   COERCE(1);
@@ -791,6 +799,7 @@ const pl_opdesc pl_ops[] = {
     OP66(ax_s4('T', 'e', 's', 't'), 2, 0b11, false, op_test),
     OP66(ax_s3('N', 'i', 'b'), 2, 0b11, false, op_nib),
     OP66(ax_s5('L', 'o', 'a', 'd', '8'), 2, 0b11, false, op_load8),
+    OP66(ax_s7('L', 'o', 'a', 'd', 'V', 'a', 'r'), 3, 0b111, false, op_loadvar),
     OP66(ax_s6('S', 't', 'o', 'r', 'e', '8'), 3, 0b111, false, op_store8),
     OP66(ax_s3('S', 'e', 't'), 2, 0b11, false, op_set),
     OP66(ax_s5('C', 'l', 'e', 'a', 'r'), 2, 0b11, false, op_clear),

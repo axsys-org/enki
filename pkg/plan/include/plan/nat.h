@@ -44,6 +44,7 @@ pl_val pl_nat_set_bit(pl_thread* t, pl_val* bit, pl_val* a);
 pl_val pl_nat_clear_bit(pl_thread* t, pl_val* bit, pl_val* a);
 bool pl_nat_test_bit(pl_val bit, pl_val a);
 pl_val pl_nat_trunc(pl_thread* t, pl_val* width, pl_val* a);
+pl_val pl_nat_load_var(pl_thread* t, pl_val* off, pl_val* width, pl_val* a);
 pl_val pl_nat_store_byte(pl_thread* t, pl_val* idx, pl_val* byte, pl_val* a);
 
 /* Construction from raw bytes / decimal text (no rooted inputs needed). */
