@@ -28,7 +28,7 @@ HARDEN_CFLAGS := -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3 -fstack-protector-strong
 
 BUILD_CFLAGS_debug := -O0 -g3 -DDEBUG
 BUILD_CFLAGS_release := -O3 -DNDEBUG $(HARDEN_CFLAGS)
-BUILD_CFLAGS_profile := $(BUILD_CFLAGS_release) -g3 -fno-omit-frame-pointer -fdebug-info-for-profiling -fno-inline
+BUILD_CFLAGS_profile := $(BUILD_CFLAGS_release) -g3 -fno-omit-frame-pointer -fdebug-info-for-profiling
 BUILD_CFLAGS_asan := -O1 -g3 -fsanitize=address -fno-omit-frame-pointer $(HARDEN_CFLAGS)
 BUILD_CFLAGS_ubsan := -O1 -g3 -fsanitize=undefined -fno-omit-frame-pointer $(HARDEN_CFLAGS)
 BUILD_CFLAGS_tsan := -O1 -g3 -fsanitize=thread -fno-omit-frame-pointer $(HARDEN_CFLAGS)

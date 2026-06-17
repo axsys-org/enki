@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "axsys/allocator.h"
 #include "axsys/arena.h"
 #include "axsys/assume.h"
 #include "axsys/base58.h"
@@ -95,6 +96,7 @@ typedef struct cn {
   cn_global* globals; /* stb_ds array */
   cn_pin_idx* pinidx; /* stb_ds hashmap pin val -> index */
   const char** used;  /* stb_ds array: reserved/assigned names */
+  char** temps;       /* system-allocated render strings */
   int nc;             /* nameVars fresh counter, threads whole doc */
 } cn;
 
@@ -104,6 +106,62 @@ static void* cn_alloc(cn* c, size_t n) {
   void* p = ax_arena_alloc(c->ar, n);
   ax_assume(p != NULL, "canon: arena exhausted");
   return p;
+}
+
+static size_t cn_arena_mark(cn* c) { return c->ar->off_o; }
+
+static void cn_arena_rewind(cn* c, size_t mark) {
+  ax_assume(mark >= sizeof(ax_arena) && mark <= c->ar->off_o,
+            "canon: bad arena mark");
+  c->ar->off_o = mark;
+}
+
+static const char* cn_cstr(const char* where, const char* s) {
+  ax_assume(s != NULL, "canon: null string from %s", where);
+  return s;
+}
+
+static size_t cn_strlen(const char* where, const char* s) {
+  ax_assume(s != NULL, "canon: null string length from %s", where);
+  return strlen(s);
+}
+
+static void cn_sb_append_cstr(ax_sb* sb, const char* where, const char* s) {
+  ax_assume(s != NULL, "canon: null string append from %s", where);
+  ax_assume(ax_sb_append_cstr(sb, s), "canon: string builder failed at %s",
+            where);
+}
+
+static void cn_sb_init(ax_sb* sb) { ax_sb_init(sb, ax_allocator_system()); }
+
+static const char* cn_sb_build(cn* c, ax_sb* sb, const char* where) {
+  char* s = ax_sb_build_with_allocator(sb, ax_allocator_system(), NULL);
+  cn_cstr(where, s);
+  ax_sb_free(sb);
+  arrpush(c->temps, s);
+  return s;
+}
+
+static const char* cn_overwide(cn* c) {
+  static char s[4096];
+  if (s[0] == '\0') {
+    s[0] = '(';
+    memset(s + 1, 'x', sizeof(s) - 2);
+    s[sizeof(s) - 1] = '\0';
+  }
+  ax_assume((size_t)c->maxw < sizeof(s) - 1, "canon: max width too large");
+  return s;
+}
+
+static const char* cn_sb_build_flat(cn* c, ax_sb* sb, const char* where) {
+  size_t len = 0;
+  ax_assume(ax_sb_measure(sb, &len), "canon: string builder failed at %s",
+            where);
+  if (len > (size_t)c->maxw) {
+    ax_sb_free(sb);
+    return cn_overwide(c);
+  }
+  return cn_sb_build(c, sb, where);
 }
 
 static char* cn_strdup_n(cn* c, const char* s, size_t n) {
@@ -116,11 +174,13 @@ static char* cn_strdup_n(cn* c, const char* s, size_t n) {
 static const char* cn_cat_v(cn* c, const char* const* parts) {
   size_t n = 0;
   for (size_t i = 0; parts[i] != NULL; i++)
-    n += strlen(parts[i]);
-  char* out = cn_alloc(c, n + 1);
+    n += cn_strlen("CN_CAT", parts[i]);
+  char* out = ax_calloc(ax_allocator_system(), char, n + 1);
+  ax_assume(out != NULL, "canon: oom");
+  arrpush(c->temps, out);
   char* p = out;
   for (size_t i = 0; parts[i] != NULL; i++) {
-    size_t l = strlen(parts[i]);
+    size_t l = cn_strlen("CN_CAT", parts[i]);
     memcpy(p, parts[i], l);
     p += l;
   }
@@ -132,7 +192,9 @@ static const char* cn_cat_v(cn* c, const char* const* parts) {
 
 /* "\n" followed by col spaces */
 static const char* cn_nl(cn* c, int col) {
-  char* s = cn_alloc(c, (size_t)col + 2);
+  char* s = ax_calloc(ax_allocator_system(), char, (size_t)col + 2);
+  ax_assume(s != NULL, "canon: oom");
+  arrpush(c->temps, s);
   s[0] = '\n';
   memset(s + 1, ' ', (size_t)col);
   s[col + 1] = '\0';
@@ -658,25 +720,26 @@ static const char* cn_wrap(cn* c, const char* s) {
 
 static const char* cn_flat_law(cn* c, cn_law* law) {
   ax_sb sb;
-  ax_sb_init(&sb, ax_arena_as_allocator(c->ar));
+  cn_sb_init(&sb);
   ax_sb_append_lit(&sb, "(#law ");
-  ax_sb_append_cstr(&sb, cn_pp_flat(c, law->tag));
+  cn_sb_append_cstr(&sb, "cn_flat_law tag", cn_pp_flat(c, law->tag));
   ax_sb_append_lit(&sb, " (");
-  ax_sb_append_cstr(&sb, law->self->name);
+  cn_sb_append_cstr(&sb, "cn_flat_law self", law->self->name);
   for (size_t i = 0; i < law->nargs; i++) {
     ax_sb_append_lit(&sb, " ");
-    ax_sb_append_cstr(&sb, law->args[i]->name);
+    cn_sb_append_cstr(&sb, "cn_flat_law arg", law->args[i]->name);
   }
   ax_sb_append_lit(&sb, ")");
   for (size_t j = 0; j < law->nlets; j++) {
     ax_sb_append_lit(&sb, " ");
-    ax_sb_append_cstr(&sb, law->lets[j]->name);
-    ax_sb_append_cstr(&sb, cn_wrap(c, cn_flat_expr(c, law->rhss[j])));
+    cn_sb_append_cstr(&sb, "cn_flat_law let", law->lets[j]->name);
+    cn_sb_append_cstr(&sb, "cn_flat_law rhs",
+                      cn_wrap(c, cn_flat_expr(c, law->rhss[j])));
   }
   ax_sb_append_lit(&sb, " ");
-  ax_sb_append_cstr(&sb, cn_flat_expr(c, law->body));
+  cn_sb_append_cstr(&sb, "cn_flat_law body", cn_flat_expr(c, law->body));
   ax_sb_append_lit(&sb, ")");
-  return ax_sb_build(&sb, NULL);
+  return cn_sb_build_flat(c, &sb, "cn_flat_law build");
 }
 
 static const char* cn_pp_flat(cn* c, cn_doc* d) {
@@ -686,7 +749,7 @@ static const char* cn_pp_flat(cn* c, cn_doc* d) {
   case CN_DSTR:
     return cn_str_show(c, d->nat);
   case CN_DREF:
-    return d->ref->name;
+    return cn_cstr("cn_pp_flat DREF", d->ref->name);
   case CN_DPIN:
     return CN_CAT(c, "(#pin ", cn_pp_flat(c, d->inner), ")");
   case CN_DLAW:
@@ -695,17 +758,19 @@ static const char* cn_pp_flat(cn* c, cn_doc* d) {
     /* "(" f " " unwords(args) ")" — the space after the head is emitted
      * even for zero args, matching the reference layout exactly */
     ax_sb sb;
-    ax_sb_init(&sb, ax_arena_as_allocator(c->ar));
+    cn_sb_init(&sb);
     ax_sb_append_lit(&sb, "(");
-    ax_sb_append_cstr(&sb, cn_pp_flat(c, d->head));
+    cn_sb_append_cstr(&sb, "cn_pp_flat app head",
+                      cn_pp_flat(c, d->head));
     ax_sb_append_lit(&sb, " ");
     for (size_t i = 0; i < d->nargs; i++) {
       if (i > 0)
         ax_sb_append_lit(&sb, " ");
-      ax_sb_append_cstr(&sb, cn_pp_flat(c, d->args[i]));
+      cn_sb_append_cstr(&sb, "cn_pp_flat app arg",
+                        cn_pp_flat(c, d->args[i]));
     }
     ax_sb_append_lit(&sb, ")");
-    return ax_sb_build(&sb, NULL);
+    return cn_sb_build_flat(c, &sb, "cn_pp_flat app build");
   }
   }
   ax_abort("canon: bad doc kind");
@@ -733,19 +798,21 @@ static cn_expr* cn_expr_spine(cn_expr* e, cn_expr*** out_args, size_t* out_n) {
 static const char* cn_flat_head(cn* c, cn_expr* hd) {
   switch (hd->k) {
   case CN_EVAR:
-    return hd->ref->name;
+    return cn_cstr("cn_flat_head EVAR", hd->ref->name);
   case CN_ECONST:
     if (hd->doc->k == CN_DAPP) {
       ax_sb sb;
-      ax_sb_init(&sb, ax_arena_as_allocator(c->ar));
+      cn_sb_init(&sb);
       ax_sb_append_lit(&sb, "(#app ");
-      ax_sb_append_cstr(&sb, cn_pp_flat(c, hd->doc->head));
+      cn_sb_append_cstr(&sb, "cn_flat_head app head",
+                        cn_pp_flat(c, hd->doc->head));
       for (size_t i = 0; i < hd->doc->nargs; i++) {
         ax_sb_append_lit(&sb, " ");
-        ax_sb_append_cstr(&sb, cn_pp_flat(c, hd->doc->args[i]));
+        cn_sb_append_cstr(&sb, "cn_flat_head app arg",
+                          cn_pp_flat(c, hd->doc->args[i]));
       }
       ax_sb_append_lit(&sb, ")");
-      return ax_sb_build(&sb, NULL);
+      return cn_sb_build_flat(c, &sb, "cn_flat_head build");
     }
     return cn_pp_flat(c, hd->doc);
   case CN_EESC: {
@@ -769,24 +836,26 @@ static const char* cn_flat_expr(cn* c, cn_expr* e) {
     return cn_flat_head(c, hd);
   }
   ax_sb sb;
-  ax_sb_init(&sb, ax_arena_as_allocator(c->ar));
+  cn_sb_init(&sb);
   ax_sb_append_lit(&sb, "(");
-  ax_sb_append_cstr(&sb, cn_flat_head(c, hd));
+  cn_sb_append_cstr(&sb, "cn_flat_expr head", cn_flat_head(c, hd));
   for (size_t i = 0; i < n; i++) {
     ax_sb_append_lit(&sb, " ");
-    ax_sb_append_cstr(&sb, cn_flat_expr(c, args[i]));
+    cn_sb_append_cstr(&sb, "cn_flat_expr arg", cn_flat_expr(c, args[i]));
   }
   ax_sb_append_lit(&sb, ")");
   arrfree(args);
-  return ax_sb_build(&sb, NULL);
+  return cn_sb_build_flat(c, &sb, "cn_flat_expr build");
 }
 
 /* ── Wide ── */
 
 static const char* cn_pp(cn* c, int col, cn_doc* d) {
+  size_t mark = cn_arena_mark(c);
   const char* flat = cn_pp_flat(c, d);
-  if (strlen(flat) <= (size_t)c->maxw)
+  if (cn_strlen("cn_pp flat", flat) <= (size_t)c->maxw)
     return flat;
+  cn_arena_rewind(c, mark);
   return cn_pp_wide(c, col, d);
 }
 
@@ -796,10 +865,13 @@ static size_t cn_take_fitting(cn* c, long budget, cn_doc** xs, size_t n,
   const char** flats = NULL;
   size_t taken = 0;
   while (taken < n) {
+    size_t mark = cn_arena_mark(c);
     const char* flat = cn_pp_flat(c, xs[taken]);
-    long len = (long)strlen(flat);
-    if (len > budget)
+    long len = (long)cn_strlen("cn_take_fitting flat", flat);
+    if (len > budget) {
+      cn_arena_rewind(c, mark);
       break;
+    }
     arrpush(flats, flat);
     budget -= len + 1;
     taken++;
@@ -810,79 +882,86 @@ static size_t cn_take_fitting(cn* c, long budget, cn_doc** xs, size_t n,
 
 static const char* cn_pack_lines(cn* c, int col, cn_doc** xs, size_t n) {
   ax_sb sb;
-  ax_sb_init(&sb, ax_arena_as_allocator(c->ar));
+  cn_sb_init(&sb);
   size_t i = 0;
   while (i < n) {
     const char** flats;
     size_t taken = cn_take_fitting(c, c->maxw - col, xs + i, n - i, &flats);
-    ax_sb_append_cstr(&sb, cn_nl(c, col));
+    cn_sb_append_cstr(&sb, "cn_pack_lines newline", cn_nl(c, col));
     if (taken == 0) {
-      ax_sb_append_cstr(&sb, cn_pp_wide(c, col, xs[i]));
+      cn_sb_append_cstr(&sb, "cn_pack_lines wide", cn_pp_wide(c, col, xs[i]));
       i += 1;
     } else {
       for (size_t j = 0; j < taken; j++) {
         if (j > 0)
           ax_sb_append_lit(&sb, " ");
-        ax_sb_append_cstr(&sb, flats[j]);
+        cn_sb_append_cstr(&sb, "cn_pack_lines flat", flats[j]);
       }
       i += taken;
     }
     arrfree(flats);
   }
-  return ax_sb_build(&sb, NULL);
+  return cn_sb_build(c, &sb, "cn_pack_lines build");
 }
 
 static const char* cn_wide_app(cn* c, int col, cn_doc* d) {
   int col2 = col + 2;
-  const char* sf = cn_pp(c, col + 1, d->head);
-  long budget = c->maxw - col2 - (long)strlen(sf);
+  const char* sf = cn_cstr("cn_wide_app head", cn_pp(c, col + 1, d->head));
+  long budget = c->maxw - col2 - (long)cn_strlen("cn_wide_app head", sf);
 
   ax_sb sb;
-  ax_sb_init(&sb, ax_arena_as_allocator(c->ar));
+  cn_sb_init(&sb);
   ax_sb_append_lit(&sb, "(");
-  ax_sb_append_cstr(&sb, sf);
+  cn_sb_append_cstr(&sb, "cn_wide_app head", sf);
 
   const char** flats;
   size_t taken = cn_take_fitting(c, budget, d->args, d->nargs, &flats);
   if (taken == 0 && d->nargs > 0) {
-    ax_sb_append_cstr(&sb, cn_nl(c, col2));
-    ax_sb_append_cstr(&sb, cn_pp_wide(c, col2, d->args[0]));
-    ax_sb_append_cstr(&sb, cn_pack_lines(c, col2, d->args + 1, d->nargs - 1));
+    cn_sb_append_cstr(&sb, "cn_wide_app newline", cn_nl(c, col2));
+    cn_sb_append_cstr(&sb, "cn_wide_app first wide",
+                      cn_pp_wide(c, col2, d->args[0]));
+    cn_sb_append_cstr(&sb, "cn_wide_app rest",
+                      cn_pack_lines(c, col2, d->args + 1, d->nargs - 1));
   } else if (taken > 0) {
     ax_sb_append_lit(&sb, " ");
     for (size_t j = 0; j < taken; j++) {
       if (j > 0)
         ax_sb_append_lit(&sb, " ");
-      ax_sb_append_cstr(&sb, flats[j]);
+      cn_sb_append_cstr(&sb, "cn_wide_app flat", flats[j]);
     }
-    ax_sb_append_cstr(
-        &sb, cn_pack_lines(c, col2, d->args + taken, d->nargs - taken));
+    cn_sb_append_cstr(
+        &sb, "cn_wide_app rest",
+        cn_pack_lines(c, col2, d->args + taken, d->nargs - taken));
   }
   arrfree(flats);
   ax_sb_append_lit(&sb, ")");
-  return ax_sb_build(&sb, NULL);
+  return cn_sb_build(c, &sb, "cn_wide_app build");
 }
 
 static const char* cn_wide_head(cn* c, int ec, cn_expr* hd) {
   switch (hd->k) {
   case CN_EVAR:
-    return hd->ref->name;
+    return cn_cstr("cn_wide_head EVAR", hd->ref->name);
   case CN_ECONST:
     if (hd->doc->k == CN_DAPP) {
+      size_t mark = cn_arena_mark(c);
       const char* flat = cn_flat_head(c, hd);
-      if (ec + (long)strlen(flat) <= (long)c->maxw)
+      if (ec + (long)cn_strlen("cn_wide_head flat", flat) <= (long)c->maxw)
         return flat;
+      cn_arena_rewind(c, mark);
       int col2 = ec + 2;
       ax_sb sb;
-      ax_sb_init(&sb, ax_arena_as_allocator(c->ar));
+      cn_sb_init(&sb);
       ax_sb_append_lit(&sb, "(#app ");
-      ax_sb_append_cstr(&sb, cn_pp(c, ec + 6, hd->doc->head));
+      cn_sb_append_cstr(&sb, "cn_wide_head app head",
+                        cn_pp(c, ec + 6, hd->doc->head));
       for (size_t i = 0; i < hd->doc->nargs; i++) {
-        ax_sb_append_cstr(&sb, cn_nl(c, col2));
-        ax_sb_append_cstr(&sb, cn_pp(c, col2, hd->doc->args[i]));
+        cn_sb_append_cstr(&sb, "cn_wide_head newline", cn_nl(c, col2));
+        cn_sb_append_cstr(&sb, "cn_wide_head app arg",
+                          cn_pp(c, col2, hd->doc->args[i]));
       }
       ax_sb_append_lit(&sb, ")");
-      return ax_sb_build(&sb, NULL);
+      return cn_sb_build(c, &sb, "cn_wide_head build");
     }
     return cn_pp(c, ec, hd->doc);
   case CN_EESC: {
@@ -902,10 +981,13 @@ static size_t cn_take_exprs(cn* c, long budget, cn_expr** xs, size_t n,
   const char** flats = NULL;
   size_t taken = 0;
   while (taken < n) {
+    size_t mark = cn_arena_mark(c);
     const char* flat = cn_flat_expr(c, xs[taken]);
-    long len = (long)strlen(flat);
-    if (len > budget)
+    long len = (long)cn_strlen("cn_take_exprs flat", flat);
+    if (len > budget) {
+      cn_arena_rewind(c, mark);
       break;
+    }
     arrpush(flats, flat);
     budget -= len + 1;
     taken++;
@@ -916,26 +998,26 @@ static size_t cn_take_exprs(cn* c, long budget, cn_expr** xs, size_t n,
 
 static const char* cn_pack_exprs(cn* c, int col, cn_expr** xs, size_t n) {
   ax_sb sb;
-  ax_sb_init(&sb, ax_arena_as_allocator(c->ar));
+  cn_sb_init(&sb);
   size_t i = 0;
   while (i < n) {
     const char** flats;
     size_t taken = cn_take_exprs(c, c->maxw - col, xs + i, n - i, &flats);
-    ax_sb_append_cstr(&sb, cn_nl(c, col));
+    cn_sb_append_cstr(&sb, "cn_pack_exprs newline", cn_nl(c, col));
     if (taken == 0) {
-      ax_sb_append_cstr(&sb, cn_wide_expr(c, col, xs[i]));
+      cn_sb_append_cstr(&sb, "cn_pack_exprs wide", cn_wide_expr(c, col, xs[i]));
       i += 1;
     } else {
       for (size_t j = 0; j < taken; j++) {
         if (j > 0)
           ax_sb_append_lit(&sb, " ");
-        ax_sb_append_cstr(&sb, flats[j]);
+        cn_sb_append_cstr(&sb, "cn_pack_exprs flat", flats[j]);
       }
       i += taken;
     }
     arrfree(flats);
   }
-  return ax_sb_build(&sb, NULL);
+  return cn_sb_build(c, &sb, "cn_pack_exprs build");
 }
 
 static const char* cn_wide_expr(cn* c, int ec, cn_expr* e) {
@@ -949,103 +1031,119 @@ static const char* cn_wide_expr(cn* c, int ec, cn_expr* e) {
 
   /* try flat first */
   {
+    size_t mark = cn_arena_mark(c);
     ax_sb sb;
-    ax_sb_init(&sb, ax_arena_as_allocator(c->ar));
+    cn_sb_init(&sb);
     ax_sb_append_lit(&sb, "(");
-    ax_sb_append_cstr(&sb, cn_flat_head(c, hd));
+    cn_sb_append_cstr(&sb, "cn_wide_expr flat head", cn_flat_head(c, hd));
     for (size_t i = 0; i < n; i++) {
       ax_sb_append_lit(&sb, " ");
-      ax_sb_append_cstr(&sb, cn_flat_expr(c, args[i]));
+      cn_sb_append_cstr(&sb, "cn_wide_expr flat arg",
+                        cn_flat_expr(c, args[i]));
     }
     ax_sb_append_lit(&sb, ")");
-    const char* flat = ax_sb_build(&sb, NULL);
-    if (strlen(flat) <= (size_t)c->maxw) {
+    const char* flat = cn_sb_build_flat(c, &sb, "cn_wide_expr flat build");
+    if (cn_strlen("cn_wide_expr flat", flat) <= (size_t)c->maxw) {
       arrfree(args);
       return flat;
     }
+    cn_arena_rewind(c, mark);
   }
 
   int col2 = ec + 2;
   const char* sh = cn_wide_head(c, ec + 1, hd);
-  long budget = c->maxw - col2 - (long)strlen(sh);
+  long budget = c->maxw - col2 - (long)cn_strlen("cn_wide_expr head", sh);
 
   ax_sb sb;
-  ax_sb_init(&sb, ax_arena_as_allocator(c->ar));
+  cn_sb_init(&sb);
   ax_sb_append_lit(&sb, "(");
-  ax_sb_append_cstr(&sb, sh);
+  cn_sb_append_cstr(&sb, "cn_wide_expr head", sh);
 
   const char** flats;
   size_t taken = cn_take_exprs(c, budget, args, n, &flats);
   if (taken == 0 && n > 0) {
-    ax_sb_append_cstr(&sb, cn_nl(c, col2));
-    ax_sb_append_cstr(&sb, cn_wide_expr(c, col2, args[0]));
-    ax_sb_append_cstr(&sb, cn_pack_exprs(c, col2, args + 1, n - 1));
+    cn_sb_append_cstr(&sb, "cn_wide_expr newline", cn_nl(c, col2));
+    cn_sb_append_cstr(&sb, "cn_wide_expr first wide",
+                      cn_wide_expr(c, col2, args[0]));
+    cn_sb_append_cstr(&sb, "cn_wide_expr rest",
+                      cn_pack_exprs(c, col2, args + 1, n - 1));
   } else if (taken > 0) {
     ax_sb_append_lit(&sb, " ");
     for (size_t j = 0; j < taken; j++) {
       if (j > 0)
         ax_sb_append_lit(&sb, " ");
-      ax_sb_append_cstr(&sb, flats[j]);
+      cn_sb_append_cstr(&sb, "cn_wide_expr flat", flats[j]);
     }
-    ax_sb_append_cstr(&sb, cn_pack_exprs(c, col2, args + taken, n - taken));
+    cn_sb_append_cstr(&sb, "cn_wide_expr rest",
+                      cn_pack_exprs(c, col2, args + taken, n - taken));
   }
   arrfree(flats);
   arrfree(args);
   ax_sb_append_lit(&sb, ")");
-  return ax_sb_build(&sb, NULL);
+  return cn_sb_build(c, &sb, "cn_wide_expr build");
 }
 
 static const char* cn_wide_law(cn* c, int col, cn_law* law) {
   int col2 = col + 2;
 
   ax_sb sig;
-  ax_sb_init(&sig, ax_arena_as_allocator(c->ar));
+  cn_sb_init(&sig);
   ax_sb_append_lit(&sig, "(");
-  ax_sb_append_cstr(&sig, law->self->name);
+  cn_sb_append_cstr(&sig, "cn_wide_law self", law->self->name);
   for (size_t i = 0; i < law->nargs; i++) {
     ax_sb_append_lit(&sig, " ");
-    ax_sb_append_cstr(&sig, law->args[i]->name);
+    cn_sb_append_cstr(&sig, "cn_wide_law arg", law->args[i]->name);
   }
   ax_sb_append_lit(&sig, ")");
-  const char* sig_s = ax_sb_build(&sig, NULL);
+  const char* sig_s = cn_sb_build(c, &sig, "cn_wide_law sig build");
 
   const char* header =
       CN_CAT(c, "(#law ", cn_pp(c, col + 6, law->tag), " ", sig_s);
 
+  size_t flat_body_mark = cn_arena_mark(c);
   ax_sb fb;
-  ax_sb_init(&fb, ax_arena_as_allocator(c->ar));
+  cn_sb_init(&fb);
   for (size_t j = 0; j < law->nlets; j++) {
     ax_sb_append_lit(&fb, " ");
-    ax_sb_append_cstr(&fb, law->lets[j]->name);
-    ax_sb_append_cstr(&fb, cn_wrap(c, cn_flat_expr(c, law->rhss[j])));
+    cn_sb_append_cstr(&fb, "cn_wide_law flat let", law->lets[j]->name);
+    cn_sb_append_cstr(&fb, "cn_wide_law flat rhs",
+                      cn_wrap(c, cn_flat_expr(c, law->rhss[j])));
   }
   ax_sb_append_lit(&fb, " ");
-  ax_sb_append_cstr(&fb, cn_flat_expr(c, law->body));
-  const char* flat_body = ax_sb_build(&fb, NULL);
+  cn_sb_append_cstr(&fb, "cn_wide_law flat body",
+                    cn_flat_expr(c, law->body));
+  const char* flat_body = cn_sb_build_flat(c, &fb, "cn_wide_law body build");
 
-  if (col + (long)strlen(header) + (long)strlen(flat_body) + 1 <= (long)c->maxw)
+  if (col + (long)cn_strlen("cn_wide_law header", header) +
+          (long)cn_strlen("cn_wide_law flat_body", flat_body) + 1 <=
+      (long)c->maxw)
     return CN_CAT(c, header, flat_body, ")");
+  cn_arena_rewind(c, flat_body_mark);
 
   ax_sb sb;
-  ax_sb_init(&sb, ax_arena_as_allocator(c->ar));
-  ax_sb_append_cstr(&sb, header);
+  cn_sb_init(&sb);
+  cn_sb_append_cstr(&sb, "cn_wide_law header", header);
   for (size_t j = 0; j < law->nlets; j++) {
-    ax_sb_append_cstr(&sb, cn_nl(c, col2));
-    ax_sb_append_cstr(&sb, law->lets[j]->name);
+    cn_sb_append_cstr(&sb, "cn_wide_law newline", cn_nl(c, col2));
+    cn_sb_append_cstr(&sb, "cn_wide_law let", law->lets[j]->name);
     const char* e =
-        cn_wide_expr(c, col2 + (int)strlen(law->lets[j]->name), law->rhss[j]);
+        cn_wide_expr(c,
+                     col2 + (int)cn_strlen("cn_wide_law let name",
+                                           law->lets[j]->name),
+                     law->rhss[j]);
     if (e[0] == '(') {
-      ax_sb_append_cstr(&sb, e);
+      cn_sb_append_cstr(&sb, "cn_wide_law rhs", e);
     } else {
       ax_sb_append_lit(&sb, "(");
-      ax_sb_append_cstr(&sb, e);
+      cn_sb_append_cstr(&sb, "cn_wide_law rhs", e);
       ax_sb_append_lit(&sb, ")");
     }
   }
-  ax_sb_append_cstr(&sb, cn_nl(c, col2));
-  ax_sb_append_cstr(&sb, cn_wide_expr(c, col2, law->body));
+  cn_sb_append_cstr(&sb, "cn_wide_law body newline", cn_nl(c, col2));
+  cn_sb_append_cstr(&sb, "cn_wide_law body",
+                    cn_wide_expr(c, col2, law->body));
   ax_sb_append_lit(&sb, ")");
-  return ax_sb_build(&sb, NULL);
+  return cn_sb_build(c, &sb, "cn_wide_law build");
 }
 
 static const char* cn_pp_wide(cn* c, int col, cn_doc* d) {
@@ -1055,7 +1153,7 @@ static const char* cn_pp_wide(cn* c, int col, cn_doc* d) {
   case CN_DSTR:
     return cn_str_show(c, d->nat);
   case CN_DREF:
-    return d->ref->name;
+    return cn_cstr("cn_pp_wide DREF", d->ref->name);
   case CN_DPIN:
     return CN_CAT(c, "(#pin ", cn_pp(c, col + 6, d->inner), ")");
   case CN_DLAW:
@@ -1104,9 +1202,12 @@ static char* cn_finish(const ax_allocator* a, const char* s, size_t* out_s) {
 }
 
 static void cn_free(cn* c) {
+  for (size_t i = 0; i < arrlenu(c->temps); i++)
+    ax_free(ax_allocator_system(), c->temps[i]);
   arrfree(c->globals);
   hmfree(c->pinidx);
   arrfree(c->used);
+  arrfree(c->temps);
   ax_arena_destroy(c->ar);
 }
 
@@ -1136,7 +1237,7 @@ char* pl_canonize(const ax_allocator* a, pl_val v, size_t* out_s) {
   cn_doc* doc = cn_pipeline(&c, inner);
 
   ax_sb sb;
-  ax_sb_init(&sb, ax_arena_as_allocator(c.ar));
+  cn_sb_init(&sb);
 
   size_t maxlen = 0;
   for (size_t i = 0; i < arrlenu(c.globals); i++) {
@@ -1147,11 +1248,11 @@ char* pl_canonize(const ax_allocator* a, pl_val v, size_t* out_s) {
   for (size_t i = 0; i < arrlenu(c.globals); i++) {
     cn_global* g = &c.globals[i];
     ax_sb_append_lit(&sb, "@");
-    ax_sb_append_cstr(&sb, g->b58);
+    cn_sb_append_cstr(&sb, "pl_canonize b58", g->b58);
     for (size_t p = strlen(g->b58); p < maxlen; p++)
       ax_sb_append_lit(&sb, " ");
     ax_sb_append_lit(&sb, " (#bind ");
-    ax_sb_append_cstr(&sb, g->name);
+    cn_sb_append_cstr(&sb, "pl_canonize global", g->name);
     ax_sb_append_lit(&sb, " _)\n");
   }
 
@@ -1162,10 +1263,10 @@ char* pl_canonize(const ax_allocator* a, pl_val v, size_t* out_s) {
   bind->args[0] = cn_ref_doc(&c, "_");
   bind->args[1] = cn_app1_doc(&c, cn_ref_doc(&c, "#pin"), doc);
 
-  ax_sb_append_cstr(&sb, cn_pp(&c, 0, bind));
+  cn_sb_append_cstr(&sb, "pl_canonize body", cn_pp(&c, 0, bind));
   ax_sb_append_lit(&sb, "\n(#export _)\n");
 
-  char* out = cn_finish(a, ax_sb_build(&sb, NULL), out_s);
+  char* out = cn_finish(a, cn_sb_build(&c, &sb, "pl_canonize build"), out_s);
   cn_free(&c);
   return out;
 }
