@@ -135,6 +135,28 @@ eval:
     }
   }
 
+exec: {
+#define NEXT() (fr->code->ops[fr->k++])
+  fr = &t->fstack[t->fsp-1];
+  for (;;) {
+    switch (NEXT()) {
+      case OP_PUSH_VAR:
+        pl_vpush(t, pl_env_slots(pl_ptr(fr->a))[NEXT()]); break;
+      case OP_PUSH_LIT: pl_vpush(t, NEXT()); break;
+      case OP_MK_THK: break;
+      case OP_EVAL:
+        v = pl_vpop(t);
+        goto eval;
+      case OP_INTERP:
+        env = fr->a; expr = NEXT();
+        goto eval_expr;
+      default: ax_abort("exec: unsupported op");
+    }
+  }
+}
+#undef NEXT
+
+
   /*
    * Decompose a law-body expression under env.  Mirrors KAL, except a
    * top-level application (0 f x) is evaluated in place (function side
@@ -453,7 +475,9 @@ ret:
     t->fsp--;
     goto ret;
   }
-
+  case PL_F_EXEC:
+    pl_vpush(t, v); // deliver to operand stack
+    goto exec;
   default:
     ax_abort("RETURN: bad frame kind %d", (int)fr->kind);
   }

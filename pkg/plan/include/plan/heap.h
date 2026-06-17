@@ -17,6 +17,7 @@
 #include <stddef.h>
 
 #include "plan/value.h"
+#include "plan/bytecode.h"
 
 typedef struct pl_store pl_store;
 typedef struct pl_heap pl_heap;
@@ -45,17 +46,19 @@ typedef enum {
   PL_F_OPDEEP,     /* primop deep (nf) phase over arg 0                 */
   PL_F_NF,         /* normalize the incoming value                      */
   PL_F_NFOBJ,      /* a: object being normalized, k: field index        */
+  PL_F_EXEC,       /* a: env, ip: pointer  */
 } pl_frame_kind;
 
 typedef struct pl_frame {
   uint8_t kind;
-  uint32_t k;     /* field index / mask cursor */
+  uint32_t k;     /* field index / mask cursor / ip */
   uint32_t op;    /* op descriptor index (F_OPARG/F_OPDEEP) */
   uint64_t opset; /* op set number (F_OPENT) */
   pl_val a;       /* root */
   pl_val b;       /* root */
   size_t argbase; /* offset into vstack (never a pointer) */
   uint32_t argc;
+  pl_code* code;
 } pl_frame;
 
 /* ── Thread ────────────────────────────────────────────────────────────── */

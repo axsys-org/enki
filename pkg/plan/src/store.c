@@ -22,11 +22,17 @@ typedef struct pl_intern_entry {
   pl_val value;
 } pl_intern_entry;
 
+typedef struct pl_code_entry {
+  pl_hash key;
+  pl_code* value;
+} pl_code_entry;
+
 struct pl_store {
   ax_arena* region;
   uint8_t* lo;
   uint8_t* hi;
   pl_intern_entry* intern; /* stb_ds hashmap: hash -> PIN val */
+  pl_code_entry* code; /* stb_ds hashmap: hash -> bytecode */
   pl_store_backend be;
   pl_val ix0_expr, ix1_expr;
 };
@@ -84,6 +90,24 @@ bool pl_store_put_root(pl_store* s, const uint8_t hash[32]) {
 bool pl_store_get_root(pl_store* s, uint8_t hash[32]) {
   return s->be.get_root(s->be.ctx, hash);
 }
+
+bool pl_store_get_code(pl_store* s, const uint8_t hash[32], pl_code** out) {
+  pl_hash k;
+  memcpy(k.b, hash, 32);
+  ptrdiff_t i = hmgeti(s->code, k);
+  if (i < 0)
+    return false;
+  *out = s->code[i].value;
+  ax_assume(*out != NULL, "oom");
+  return true;
+}
+
+void pl_store_put_code(pl_store* s, const uint8_t hash[32], pl_code* code) {
+  pl_hash k;
+  memcpy(k.b, hash, 32);
+  hmput(s->code, k, code);
+}
+
 
 /* ── Store-resident value construction (no GC interaction) ─────────────── */
 
@@ -258,6 +282,9 @@ static void mem_close(void* ctx) {
   hmfree(m->map);
   free(m);
 }
+
+
+
 
 pl_store* pl_store_new_mem(void) {
   mem_backend* m = calloc(1, sizeof(*m));

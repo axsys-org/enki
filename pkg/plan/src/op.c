@@ -696,6 +696,18 @@ static pl_val op_equal(pl_thread* t, size_t ab) {
   return pl_eq_deep(ARG(0), ARG(1)) ? 1 : 0;
 }
 
+static pl_val op_install(pl_thread* t, size_t ab) {
+  uint8_t hash[32];
+  pl_cell* p = pl_as(PL_TAG_PIN, ARG(0));
+  memcpy(hash, pl_pin_hash_bytes(p), 32);
+  if (pl_tag(ARG(0)) != PL_TAG_PIN) return 0;
+  pl_store* s = pl_heap_store(t->heap);
+  pl_code* code = pl_bytecode_from_val(ARG(1));
+  if (code == NULL) return 0;
+  pl_store_put_code(s, hash, code);
+  return 1;
+}
+
 /*
  * savePinOnly: write snap/<base58>.plan for the pin and (depth-first)
  * its sub-pins, skipping files that already exist; the file content is
@@ -869,6 +881,7 @@ const pl_opdesc pl_ops[] = {
     OP66(ax_s4('L', 'a', 's', 't'), 1, 0b1, false, op_last),
     OP66(ax_s4('I', 'n', 'i', 't'), 1, 0b1, false, op_init),
     OP66(ax_s5('E', 'q', 'u', 'a', 'l'), 2, 0b11, true, op_equal),
+    OP66(ax_s7('I', 'n', 's', 't', 'a', 'l', 'l'), 2, 0b11, true, op_install),
 
     /* op 82: rplan I/O (mode-gated in eval.c) */
     OP82("Input", 1, 0b1, pl_op82_input),
