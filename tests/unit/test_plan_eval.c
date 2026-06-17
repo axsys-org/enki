@@ -1,4 +1,5 @@
 #include <criterion/criterion.h>
+#include <criterion/redirect.h>
 #include <string.h>
 
 #include "test_plan.h"
@@ -24,6 +25,15 @@ static pl_val test_throwing(pl_thread* t, uint64_t code) {
   pl_val expr = test_app2(t, 0, t->vstack[base + 2], t->vstack[base + 1]);
   t->vsp = base;
   return test_thunk(t, expr);
+}
+
+/* A one-element app whose field is a thunk that evaluates to value. */
+static pl_val test_app1_thunk_to(pl_thread* t, pl_val value) {
+  size_t base = t->vsp;
+  pl_vpush(t, test_thunk(t, test_app1(t, 0, value)));
+  pl_val out = test_app1(t, 0, t->vstack[base]);
+  t->vsp = base;
+  return out;
 }
 
 /* ── Application shapes ────────────────────────────────────────────────── */
@@ -192,6 +202,59 @@ Test(ops, seq_and_force) {
   }
   pl_catch_unwind(t, &c);
   cr_assert_eq(t->exn, 7);
+  test_rt_free(&rt);
+}
+
+Test(ops, force_deep_normalizes_arg) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  pl_vpush(t, test_app1_thunk_to(t, 42));
+  pl_val args[1] = {t->vstack[base]};
+  pl_val r = test_op66(t, ax_s5('F', 'o', 'r', 'c', 'e'), 1, args);
+  pl_cell* p = pl_as(PL_TAG_APP, r);
+  cr_assert_not_null(p);
+  cr_assert_eq(pl_app_args(p)[0], 42);
+  cr_assert((pl_hdr_flags(p[0]) & PL_F_NORMAL) != 0);
+  test_rt_free(&rt);
+}
+
+Test(ops, deepseq_normalizes_first_and_returns_second_lazily) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  pl_vpush(t, test_app1_thunk_to(t, 42));
+  pl_vpush(t, test_throwing(t, 7));
+  pl_vpush(t, test_app1(t, 0, t->vstack[base + 1]));
+  pl_val r = test_op66_2(t, ax_s7('D', 'e', 'e', 'p', 'S', 'e', 'q'),
+                         t->vstack[base], t->vstack[base + 2]);
+  cr_assert_eq(r, t->vstack[base + 2]);
+  pl_cell* xp = pl_as(PL_TAG_APP, t->vstack[base]);
+  cr_assert_not_null(xp);
+  cr_assert_eq(pl_app_args(xp)[0], 42);
+  cr_assert((pl_hdr_flags(xp[0]) & PL_F_NORMAL) != 0);
+  pl_cell* yp = pl_as(PL_TAG_APP, r);
+  cr_assert_not_null(yp);
+  cr_assert_eq(pl_tag(pl_app_args(yp)[0]), PL_TAG_DEFER);
+  test_rt_free(&rt);
+}
+
+Test(ops, trace_deep_normalizes_before_showing, .init = cr_redirect_stderr) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  pl_vpush(t, test_app1_thunk_to(t, 42));
+  pl_vpush(t, test_throwing(t, 7));
+  pl_vpush(t, test_app1(t, 0, t->vstack[base + 1]));
+  pl_val r = test_op66_2(t, ax_s5('T', 'r', 'a', 'c', 'e'), t->vstack[base],
+                         t->vstack[base + 2]);
+  cr_assert_eq(r, t->vstack[base + 2]);
+  pl_cell* xp = pl_as(PL_TAG_APP, t->vstack[base]);
+  cr_assert_not_null(xp);
+  cr_assert_eq(pl_app_args(xp)[0], 42);
+  pl_cell* yp = pl_as(PL_TAG_APP, r);
+  cr_assert_not_null(yp);
+  cr_assert_eq(pl_tag(pl_app_args(yp)[0]), PL_TAG_DEFER);
   test_rt_free(&rt);
 }
 

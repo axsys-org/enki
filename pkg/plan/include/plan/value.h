@@ -28,7 +28,7 @@ typedef uint64_t pl_cell;
 #define PL_NAT63_MAX UINT64_C(0x7fffffffffffffff)
 
 /* Tags live in the top byte (bit 63 implied set). */
-#define PL_TAG_NAT   UINT64_C(0x81) /* boxed nat (>= 2^63) */
+#define PL_TAG_NAT   UINT64_C(0x80) /* boxed nat (>= 2^63) */
 #define PL_TAG_APP   UINT64_C(0x82)
 #define PL_TAG_LAW   UINT64_C(0x83)
 #define PL_TAG_PIN   UINT64_C(0x84)
@@ -88,6 +88,8 @@ static inline uint64_t pl_tag(pl_val v) {
 static inline pl_cell* pl_ptr(pl_val v) {
   /* Pointers MUST be masked before dereference on every target. */
   return (pl_cell*)(uintptr_t)(v & PL_ADDR_MASK);
+  /* But not on arm64 */
+  // return (pl_cell*)(uintptr_t)(v);
 }
 static inline pl_val pl_make(uint64_t tag, void* p) {
   return (tag << 56) | ((uint64_t)(uintptr_t)p & PL_ADDR_MASK);
@@ -95,7 +97,7 @@ static inline pl_val pl_make(uint64_t tag, void* p) {
 
 /* WHNF needs no memory access except for PL_TAG_DEFER. */
 static inline bool pl_is_whnf(pl_val v) {
-  return pl_is_nat63(v) || pl_tag(v) != PL_TAG_DEFER;
+  return pl_tag(v) != PL_TAG_DEFER;
 }
 
 /* True kind: tag, or header load for PL_TAG_DEFER. */
@@ -215,11 +217,11 @@ static inline pl_val pl_ind_target(pl_cell* p) {
 /* ── Convenience predicates (WHNF inputs) ──────────────────────────────── */
 
 static inline bool pl_is_nat(pl_val v) {
-  return pl_is_nat63(v) || pl_tag(v) == PL_TAG_NAT;
+  return pl_tag(v) <= PL_TAG_NAT;
 }
 
 static inline pl_cell* pl_as(uint64_t tag, pl_val v) {
-  return (!pl_is_nat63(v) && pl_tag(v) == tag) ? pl_ptr(v) : (pl_cell*)0;
+  return pl_tag(v) == tag ? pl_ptr(v) : (pl_cell*)0;
 }
 
 #endif

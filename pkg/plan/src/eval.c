@@ -466,13 +466,11 @@ oparg_next:
     while (fr->k < fr->argc && ((d->strict_mask >> fr->k) & 1u) == 0)
       fr->k++;
     if (fr->k < fr->argc) {
+      if (d->deep) {
+        fr->kind = PL_F_OPDEEP;
+        pl_push_nf(t);
+      }
       v = t->vstack[fr->argbase + fr->k];
-      goto eval;
-    }
-    if (d->deep) {
-      fr->kind = PL_F_OPDEEP;
-      pl_push_nf(t);
-      v = t->vstack[fr->argbase];
       goto eval;
     }
   }

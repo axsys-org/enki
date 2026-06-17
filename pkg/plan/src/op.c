@@ -609,13 +609,12 @@ static pl_val op_sap2(pl_thread* t, size_t ab) {
   return ARG(0);
 }
 static pl_val op_force(pl_thread* t, size_t ab) {
-  pl_push_nf(t);
+  /* pl_push_nf(t); handled in flag */
   return ARG(0);
 }
 static pl_val op_deepseq(pl_thread* t, size_t ab) {
   pl_push_seq(t, ARG(1));
-  pl_push_nf(t);
-  return ARG(0);
+  return ARG(1);
 }
 
 /* ── Exceptions ────────────────────────────────────────────────────────── */
@@ -648,7 +647,7 @@ static pl_val op_try(pl_thread* t, size_t ab) {
 /* ── Misc ──────────────────────────────────────────────────────────────── */
 
 static pl_val op_trace(pl_thread* t, size_t ab) {
-  ARG(0) = pl_nf(t, ARG(0)); /* the reference shows the value deeply */
+  // ARG(0) = pl_nf(t, ARG(0)); /* deep flag */
   char* s = pl_show_val(ax_allocator_system(), ARG(0), NULL);
   fprintf(stderr, "%s\n", s);
   ax_free(ax_allocator_system(), s);
@@ -693,7 +692,7 @@ static bool pl_eq_deep(pl_val a, pl_val b) {
 }
 
 static pl_val op_equal(pl_thread* t, size_t ab) {
-  ARG(1) = pl_nf(t, ARG(1)); /* arg 0 deep via flag */
+  // ARG(1) = pl_nf(t, ARG(1)); /* arg 0 deep via flag */
   return pl_eq_deep(ARG(0), ARG(1)) ? 1 : 0;
 }
 
@@ -832,8 +831,8 @@ const pl_opdesc pl_ops[] = {
     OP66(ax_s3('R', 'e', 'p'), 3, 0b101, false, op_rep),
     OP66(ax_s5('S', 'l', 'i', 'c', 'e'), 3, 0b111, false, op_slice),
     OP66(ax_s4('W', 'e', 'l', 'd'), 2, 0b11, false, op_weld),
-    OP66(ax_s5('F', 'o', 'r', 'c', 'e'), 1, 0, false, op_force),
-    OP66(ax_s7('D', 'e', 'e', 'p', 'S', 'e', 'q'), 2, 0, false, op_deepseq),
+    OP66(ax_s5('F', 'o', 'r', 'c', 'e'), 1, 0b1, true, op_force),
+    OP66(ax_s7('D', 'e', 'e', 'p', 'S', 'e', 'q'), 2, 0b01, true, op_deepseq),
     OP66(ax_s2('U', 'p'), 3, 0b101, false, op_up),
     OP66(ax_s6('U', 'p', 'U', 'n', 'i', 'q'), 3, 0b101, false, op_up),
     OP66(ax_s4('C', 'o', 'u', 'p'), 2, 0b11, false, op_coup),
@@ -851,7 +850,7 @@ const pl_opdesc pl_ops[] = {
     OP66(ax_s3('I', 'x', '7'), 1, 0b1, false, op_ix7),
     OP66(ax_s4('S', 'a', 'v', 'e'), 1, 0b1, false, op_save),
     OP66(ax_s4('L', 'o', 'a', 'd'), 1, 0b1, false, op_load),
-    OP66(ax_s5('T', 'r', 'a', 'c', 'e'), 2, 0, false, op_trace),
+    OP66(ax_s5('T', 'r', 'a', 'c', 'e'), 2, 0b01, true, op_trace),
     OP66(ax_s3('N', 'i', 'l'), 1, 0b1, false, op_nil),
     OP66(ax_s5('T', 'r', 'u', 't', 'h'), 1, 0b1, false, op_truth),
     OP66(ax_s2('O', 'r'), 2, 0b01, false, op_or),
