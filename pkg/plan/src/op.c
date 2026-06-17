@@ -13,6 +13,7 @@
 #include "plan/build.h"
 #include "plan/canon.h"
 #include "plan/debug.h"
+#include "plan/value.h"
 #include "plan/nat.h"
 #include "plan/store.h"
 
@@ -26,14 +27,15 @@
 
 #define ARG(i) (t->vstack[ab + (i)])
 
+
+
+/* ── Small helpers ─────────────────────────────────────────────────────── */
 static pl_val pl_resolve(pl_val v) {
   while (!pl_is_nat63(v) && pl_tag(v) == PL_TAG_DEFER &&
          pl_hdr_kind(*pl_ptr(v)) == PL_K_IND)
     v = pl_ind_target(pl_ptr(v));
   return v;
 }
-
-/* ── Small helpers ─────────────────────────────────────────────────────── */
 
 static pl_val mk_app1_rooted(pl_thread* t, pl_val head, pl_val* slot) {
   pl_gc_reserve(t, PL_APP_CELLS(1));
@@ -613,7 +615,7 @@ static pl_val op_force(pl_thread* t, size_t ab) {
   return ARG(0);
 }
 static pl_val op_deepseq(pl_thread* t, size_t ab) {
-  pl_push_seq(t, ARG(1));
+  AX_UNUSED(t);
   return ARG(1);
 }
 
@@ -692,17 +694,20 @@ static bool pl_eq_deep(pl_val a, pl_val b) {
 }
 
 static pl_val op_equal(pl_thread* t, size_t ab) {
-  // ARG(1) = pl_nf(t, ARG(1)); /* arg 0 deep via flag */
+  ARG(1) = pl_nf(t, ARG(1)); /* arg 0 deep via flag */
   return pl_eq_deep(ARG(0), ARG(1)) ? 1 : 0;
 }
 
 static pl_val op_install(pl_thread* t, size_t ab) {
   uint8_t hash[32];
+  pl_val a = pl_resolve(ARG(1));
   pl_cell* p = pl_as(PL_TAG_PIN, ARG(0));
   memcpy(hash, pl_pin_hash_bytes(p), 32);
   if (pl_tag(ARG(0)) != PL_TAG_PIN) return 0;
   pl_store* s = pl_heap_store(t->heap);
-  pl_code* code = pl_bytecode_from_val(ARG(1));
+  char* str = pl_show_val(ax_allocator_system(), a, NULL);
+  fprintf(stderr, "installing: %s\n", str);
+  pl_code* code = pl_bytecode_from_val(a);
   if (code == NULL) return 0;
   pl_store_put_code(s, hash, code);
   return 1;

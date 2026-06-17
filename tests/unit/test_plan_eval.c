@@ -306,6 +306,18 @@ Test(ops, equal_deep_and_pin_identity) {
   test_rt_free(&rt);
 }
 
+Test(ops, equal_deep_normalizes_second_arg) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  pl_vpush(t, test_app1_thunk_to(t, 42));
+  pl_vpush(t, test_app1_thunk_to(t, 42));
+  cr_assert_eq(test_op66_2(t, ax_s5('E', 'q', 'u', 'a', 'l'),
+                           t->vstack[base], t->vstack[base + 1]),
+               1);
+  test_rt_free(&rt);
+}
+
 Test(ops, row_elements_stay_lazy) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;

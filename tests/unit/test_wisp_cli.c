@@ -1,5 +1,6 @@
 #include <criterion/criterion.h>
 
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,6 +19,20 @@
 static const char* reaver_plan_dir(void) {
   const char* env_c = getenv("ENKI_REAVER_PLAN_DIR");
   return env_c != NULL && env_c[0] != '\0' ? env_c : ENKI_REAVER_PLAN_DIR;
+}
+
+static void reaver_src_dir(char* out, size_t out_cap) {
+  const char* env_c = getenv("ENKI_REAVER_SRC_DIR");
+  if (env_c != NULL && env_c[0] != '\0') {
+    int s = snprintf(out, out_cap, "%s", env_c);
+    cr_assert(s >= 0 && (size_t)s < out_cap, "ENKI_REAVER_SRC_DIR too long");
+    return;
+  }
+
+  char cwd[2048];
+  cr_assert_not_null(getcwd(cwd, sizeof(cwd)), "failed to get cwd");
+  int s = snprintf(out, out_cap, "%s/reaver/src", cwd);
+  cr_assert(s >= 0 && (size_t)s < out_cap, "reaver src path too long");
 }
 
 static const char* wisp_bin(void) {
@@ -59,6 +74,29 @@ static int run_cmd(const char* cmd, char* out, size_t out_cap) {
     out[n++] = (char)ch;
   out[n] = '\0';
   return pclose(p);
+}
+
+static bool file_contains(const char* path, const char* needle) {
+  FILE* f = fopen(path, "r");
+  cr_assert_not_null(f, "failed to open `%s`", path);
+
+  bool found = false;
+  size_t needle_n = strlen(needle);
+  size_t matched = 0;
+  int ch;
+  while ((ch = fgetc(f)) != EOF) {
+    if ((char)ch == needle[matched]) {
+      matched++;
+      if (matched == needle_n) {
+        found = true;
+        break;
+      }
+    } else {
+      matched = (char)ch == needle[0] ? 1u : 0u;
+    }
+  }
+  fclose(f);
+  return found;
 }
 
 Test(wisp_cli, save_snapshot_round_trip) {
@@ -180,4 +218,61 @@ Test(wisp_cli, read_file_honors_file_root) {
   st = run_cmd(cmd, out, sizeof(out));
   cr_assert(WIFEXITED(st) && WEXITSTATUS(st) == 0, "escape run failed");
   cr_assert_null(strstr(out, "outside-secret"), "escaped file root: `%s`", out);
+}
+
+Test(wisp_cli, boot_reset_imports_stdlib_primitives) {
+  char dir[] = "/tmp/enki-boot-XXXXXX";
+  cr_assert_not_null(mkdtemp(dir), "failed to make temp dir");
+
+  char src_dir[4096];
+  reaver_src_dir(src_dir, sizeof(src_dir));
+
+  char plan_dir[4096];
+  int s = snprintf(plan_dir, sizeof(plan_dir), "%s/plan", src_dir);
+  cr_assert(s >= 0 && (size_t)s < sizeof(plan_dir),
+            "reaver plan path too long");
+
+  char cmd[16384];
+  s = snprintf(cmd, sizeof(cmd),
+               "cd %s && %s --file-root %s %s reaver main "
+               ">reset.out 2>&1",
+               dir, wisp_bin(), src_dir, plan_dir);
+  cr_assert(s >= 0 && (size_t)s < sizeof(cmd), "reset command too long");
+  int st = system(cmd);
+  cr_assert(WIFEXITED(st) && WEXITSTATUS(st) == 0,
+            "boot reset failed; see %s/reset.out", dir);
+
+  s = snprintf(cmd, sizeof(cmd),
+               "cd %s && %s --file-root %s snap root _ "
+               ">load.out 2>&1 <<'EOF'\n"
+               "(#bind std (#module std))\n"
+               "(#import std)\n"
+               ":*app-todo\n"
+               "EOF\n",
+               dir, wisp_bin(), src_dir);
+  cr_assert(s >= 0 && (size_t)s < sizeof(cmd), "load command too long");
+  st = system(cmd);
+  cr_assert(WIFEXITED(st) && WEXITSTATUS(st) == 0,
+            "stdlib import failed; see %s/load.out", dir);
+
+  s = snprintf(cmd, sizeof(cmd),
+               "cd %s && %s --file-root %s snap root _ "
+               ">query.out 2>&1 <<'EOF'\n"
+               "(Add 1 2)\n"
+               "EOF\n",
+               dir, wisp_bin(), src_dir);
+  cr_assert(s >= 0 && (size_t)s < sizeof(cmd), "query command too long");
+  st = system(cmd);
+  cr_assert(WIFEXITED(st) && WEXITSTATUS(st) == 0,
+            "query failed; see %s/query.out", dir);
+
+  char query_path[512];
+  s = snprintf(query_path, sizeof(query_path), "%s/query.out", dir);
+  cr_assert(s >= 0 && (size_t)s < sizeof(query_path),
+            "query output path too long");
+  cr_assert_not(file_contains(query_path, "(\"ERROR\""),
+                "booted REPL returned an error; see %s", query_path);
+  cr_assert(file_contains(query_path, "\n3\n"),
+            "booted REPL did not evaluate (Add 1 2) to 3; see %s",
+            query_path);
 }

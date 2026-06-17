@@ -101,11 +101,22 @@ static pl_cell* pl_lawp(pl_val head) {
   return pl_ptr(pl_pin_body(pl_ptr(head)));
 }
 
+static void pl_law_code(pl_store* s, pl_val law, pl_code** out) {
+  pl_cell* p = pl_as(PL_TAG_PIN, law);
+  *out = NULL;
+  if ( !p ) {
+    return;
+  }
+  pl_store_get_code(s, pl_pin_hash_bytes(p), out);
+}
+
 /* ── The machine ───────────────────────────────────────────────────────── */
 
 static pl_val pl_run(pl_thread* t, pl_val v, size_t base) {
   pl_val env, expr;
   pl_frame* fr;
+  pl_code* code = NULL;
+  pl_store* s = pl_heap_store(t->heap);
 
 eval:
   if (pl_is_whnf(v))
@@ -350,14 +361,7 @@ ret:
     }
 
   judge: {
-    if (pl_hook != NULL) {
-      pl_val out;
-      if (pl_hook(t, hbase, argc, &out)) {
-        t->vsp = hbase;
-        v = out;
-        goto eval;
-      }
-    }
+
     /*
      * JUDGE: the recursive-let prelude.  Scan the body for the (1 v k)
      * chain, then build the env knot in one no-collect window.
@@ -396,8 +400,15 @@ ret:
       slots[1 + i] = t->vstack[hbase + 1 + i];
     for (uint32_t j = 0; j < m; j++)
       slots[1 + argc + j] = pl_mk_thunk(t, envv, t->vstack[cursor + 1 + j]);
+    pl_law_code(s, t->vstack[hbase], &code);
     v = pl_kal1(t, envv, t->vstack[cursor]);
-    PL_GC_ALLOW(t);
+    if ( code != NULL ) {
+      fprintf(stderr, "code\n");
+      PL_GC_ALLOW(t);
+    } else {
+      PL_GC_ALLOW(t);
+    }
+
     t->vsp = hbase;
     goto eval;
   }
