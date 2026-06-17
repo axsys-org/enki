@@ -294,9 +294,9 @@ ret:
       }
       pl_vpush(t, v);
       pl_gc_reserve(t, PL_APP_CELLS(n + 1));
+      PL_GC_FORBID(t);
       pl_val f2 = pl_vpop(t);
       pl_val x2 = fr->b; /* re-read: collection rewrites frames in place */
-      PL_GC_FORBID(t);
       v = pl_mk_app_snoc(t, f2, x2);
       PL_GC_ALLOW(t);
       t->fsp--;
@@ -470,7 +470,8 @@ ret:
       goto eval;
     }
     pl_cell* p = pl_ptr(fr->a);
-    p[0] |= (pl_cell)PL_F_NORMAL << 4;
+    p[0] = pl_hdr_make(pl_hdr_kind(p[0]), pl_hdr_flags(p[0]) | PL_F_NORMAL,
+                       pl_hdr_meta(p[0]), pl_hdr_cells(p[0]));
     v = fr->a;
     t->fsp--;
     goto ret;
