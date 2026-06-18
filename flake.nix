@@ -80,7 +80,7 @@
         in
           import ./nix/mkenki.nix {
             inherit lib stdenv src;
-            inherit (pkgs) gnumake pkg-config criterion gmp lmdb openssl;
+            inherit (pkgs) gnumake pkg-config criterion gmp lmdb openssl binutils;
             inherit (selected) compiler cc;
           };
 
@@ -116,7 +116,7 @@
           '';
         wispPackage = mkBinPackage "wisp" ''
           mkdir -p $out/share/enki/reaver
-          cp -R ${reaver}/src/plan $out/share/enki/reaver/plan
+          cp -R ${reaver}/src $out/share/enki/reaver/src
         '';
         assemblerPackage = mkBinPackage "assembler" "";
 
@@ -138,7 +138,8 @@
                 ];
             }
             // lib.optionalAttrs (kind == "unit-tests") {
-              ENKI_REAVER_PLAN_DIR = "${wispPackage}/share/enki/reaver/plan";
+              ENKI_REAVER_SRC_DIR = "${wispPackage}/share/enki/reaver/src";
+              ENKI_REAVER_PLAN_DIR = "${wispPackage}/share/enki/reaver/src/plan";
             });
 
         mkCheck = kind: buildType: mkCheckArgs kind buildType "" "";
@@ -179,7 +180,8 @@
             (compilerFor "coverage").compiler
           ];
 
-          ENKI_REAVER_PLAN_DIR = "${wispPackage}/share/enki/reaver/plan";
+          ENKI_REAVER_SRC_DIR = "${wispPackage}/share/enki/reaver/src";
+          ENKI_REAVER_PLAN_DIR = "${wispPackage}/share/enki/reaver/src/plan";
           buildInputs = [
             pkgs.criterion
             pkgs.gmp
@@ -211,6 +213,7 @@
 
           nativeBuildInputs = [
             pkgs.gnumake
+            pkgs.binutils
             pkgs.pkg-config
             pkgs.bear
             pkgs.clang
@@ -324,7 +327,8 @@
         formatter = treefmtEval.config.build.wrapper;
 
         devShells.default = pkgs.mkShell {
-          ENKI_REAVER_PLAN_DIR = "${wispPackage}/share/enki/reaver/plan";
+          ENKI_REAVER_SRC_DIR = "${wispPackage}/share/enki/reaver/src";
+          ENKI_REAVER_PLAN_DIR = "${wispPackage}/share/enki/reaver/src/plan";
 
           packages =
             [
@@ -349,7 +353,7 @@
             ]
             ++ lib.optionals stdenv.isLinux [
               pkgs.valgrind
-              pkgs.aflplusplus
+              pkgs.binutils
             ];
 
           shellHook = ''

@@ -3,11 +3,15 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <assert.h>
+#include <inttypes.h>
 
 #include "axsys/assume.h"
+#include "axsys/allocator.h"
 #include "axsys/perf.h"
 #include "internal.h"
 #include "plan/build.h"
+#include "plan/canon.h"
 #include "plan/nat.h"
 #include "plan/store.h"
 
@@ -123,6 +127,15 @@ static pl_cell* pl_lawp(pl_val head) {
   return pl_ptr(pl_pin_body(pl_ptr(head)));
 }
 
+static void pl_law_code(pl_store* s, pl_val law, pl_code** out) {
+  pl_cell* p = pl_as(PL_TAG_PIN, law);
+  *out = NULL;
+  if (!p) {
+    return;
+  }
+  pl_store_get_code(s, pl_pin_hash_bytes(p), out);
+}
+
 /* ── Suspension slow path ──────────────────────────────────────────────── */
 
 /*
@@ -157,6 +170,8 @@ static pl_run_status pl_run(pl_thread* t, pl_val v, size_t base,
                             bool at_return) {
   pl_val env, expr;
   pl_frame* fr;
+  size_t hbase = 0;
+  uint32_t argc = 0;
   /* JUDGE scan coordinates; restored from the F_JUDGE frame on resume
    * (offsets only — the chain itself lives on the value stack) */
   size_t jbase = 0;
@@ -199,10 +214,79 @@ eval:
       fr->a = v;
       goto eval_expr;
     }
+    case PL_K_THKE: {
+      /* TODO: set blackhole */
+      p[0] = pl_hdr_set_flag(p[0], PL_F_HOLE);
+      fr = pl_fpush(t);
+      fr->kind = PL_F_UPD;
+      fr->a = v;
+      goto eval_thke;
+    }
     default:
       ax_abort("EVAL: bad defer kind");
     }
   }
+eval_thke: {
+  fr = &t->fstack[t->fsp - 1];
+  v = fr->a;
+  pl_val* args;
+  switch (pl_thke_bane(pl_ptr(v))) {
+  case PL_BAN_FAST:
+    hbase = t->vsp;
+    argc = pl_thke_n(pl_ptr(v));
+    args = pl_thke_args(pl_ptr(v));
+    for (uint32_t i = 0; i < argc; i++) {
+      pl_vpush(t, args[i]);
+    }
+    argc--;
+    goto judge;
+  case PL_BAN_SLOW:
+  default:
+    ax_abort("EVAL: bad bane");
+  }
+}
+
+exec: {
+#define NEXT() (fr->code->ops[fr->k++])
+  fr = &t->fstack[t->fsp - 1];
+  pl_op_t op;
+  for (;;) {
+    op = NEXT();
+    switch (op) {
+    case OP_PUSH_VAR:
+      pl_vpush(t, pl_env_slots(pl_ptr(fr->a))[NEXT()]);
+      break;
+    case OP_PUSH_LIT:
+      pl_vpush(t, NEXT());
+      break;
+    case OP_MK_THK: {
+      argc = (uint32_t)NEXT();
+      pl_bane bane = (pl_bane)NEXT();
+      pl_gc_reserve(t, PL_THKE_CELLS(argc));
+      PL_GC_FORBID(t);
+      pl_val thke = pl_mk_thke(t, fr->a, bane, argc, pl_vpeek(t, argc));
+      pl_vreplace(t, argc, thke);
+      PL_GC_ALLOW(t);
+      break;
+    };
+
+    case OP_INTERP:
+      env = fr->a;
+      expr = NEXT();
+      goto eval_expr;
+    case OP_RET:
+      v = pl_vpop(t);
+      t->vsp = fr->argbase;
+      t->fsp--;
+      goto ret;
+
+    case OP_EVAL:
+    default:
+      ax_abort("exec: unsupported op");
+    }
+  }
+}
+#undef NEXT
 
   /*
    * Decompose a law-body expression under env.  Mirrors KAL, except a
@@ -243,6 +327,7 @@ eval_expr:
          * subexpression, which forces it to WHNF first; the fast path
          * below covers the common already-WHNF case, the F_KAPP frame
          * the dynamically-built ones.
+         *
          */
         if (pl_is_whnf(pl_app_args(p)[0]) && pl_is_whnf(pl_app_args(p)[1])) {
           pl_vpush(t, env);
@@ -283,10 +368,15 @@ ret:
     return PL_RUN_DONE;
   }
   fr = &t->fstack[t->fsp - 1];
+  /** TODO: store jump labels direct in frame */
   switch (fr->kind) {
 
   case PL_F_UPDATE:
     pl_thunk_update(t, fr->a, v);
+    t->fsp--;
+    goto ret;
+  case PL_F_UPD:
+    pl_thke_update(t, fr->a, v);
     t->fsp--;
     goto ret;
 
@@ -343,9 +433,9 @@ ret:
       }
       pl_vpush(t, v);
       pl_gc_reserve(t, PL_APP_CELLS(n + 1));
+      PL_GC_FORBID(t);
       pl_val f2 = pl_vpop(t);
       pl_val x2 = fr->b; /* re-read: collection rewrites frames in place */
-      PL_GC_FORBID(t);
       v = pl_mk_app_snoc(t, f2, x2);
       PL_GC_ALLOW(t);
       t->fsp--;
@@ -354,7 +444,7 @@ ret:
     /* saturated: ENTER */
     pl_val x = fr->b;
     t->fsp--;
-    size_t hbase = t->vsp;
+    hbase = t->vsp;
     {
       pl_cell* p = pl_as(PL_TAG_APP, v);
       if (p != NULL) {
@@ -367,10 +457,13 @@ ret:
       }
     }
     pl_vpush(t, x);
-    uint32_t argc = (uint32_t)(t->vsp - hbase - 1);
-    pl_val head = t->vstack[hbase];
+    goto fast_apply;
+
+  fast_apply:
+    argc = (uint32_t)(t->vsp - hbase - 1);
 
     /* dispatch on the ultimate head */
+    pl_val head = t->vstack[hbase];
     if (pl_is_nat63(head))
       ax_abort("ENTER: direct nat head");
     switch (pl_tag(head)) {
@@ -440,7 +533,7 @@ ret:
         pl_vpush(t, v);
       }
     }
-    uint32_t argc = (uint32_t)(t->vsp - listbase - 1);
+    argc = (uint32_t)(t->vsp - listbase - 1);
     pl_val name = t->vstack[listbase];
     if (opset == 82 && !t->rplan_f)
       pl_raise_msg(t, "Not in RPLAN Mode");
@@ -492,11 +585,16 @@ ret:
       goto eval;
     }
     pl_cell* p = pl_ptr(fr->a);
-    p[0] |= (pl_cell)PL_F_NORMAL << 4;
+    p[0] = pl_hdr_make(pl_hdr_kind(p[0]), pl_hdr_flags(p[0]) | PL_F_NORMAL,
+                       pl_hdr_meta(p[0]), pl_hdr_cells(p[0]));
     v = fr->a;
     t->fsp--;
     goto ret;
   }
+
+  case PL_F_EXEC:
+    pl_vpush(t, v); /* deliver to operand stack */
+    goto exec;
 
   case PL_F_TRY: {
     /* force (f x) succeeded under the barrier: the reference planTry's
@@ -591,6 +689,21 @@ judge_scan:
       slots[1 + i] = t->vstack[jbase + 1 + i];
     for (uint32_t j = 0; j < m; j++)
       slots[1 + jargc + j] = pl_mk_thunk(t, envv, t->vstack[cursor + 1 + j]);
+    pl_code* code = NULL;
+    pl_store* s = pl_heap_store(t->heap);
+    if (s != NULL)
+      pl_law_code(s, t->vstack[jbase], &code);
+    if (code != NULL) {
+      t->vsp = jbase;
+      fr = pl_fpush(t);
+      fr->kind = PL_F_EXEC;
+      fr->a = envv;
+      fr->code = code;
+      fr->k = 0;
+      fr->argbase = t->vsp;
+      PL_GC_ALLOW(t);
+      goto exec;
+    }
     v = pl_kal1(t, envv, t->vstack[cursor]);
     PL_GC_ALLOW(t);
     t->vsp = jbase;

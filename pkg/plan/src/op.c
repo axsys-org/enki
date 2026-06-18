@@ -13,6 +13,7 @@
 #include "plan/build.h"
 #include "plan/canon.h"
 #include "plan/debug.h"
+#include "plan/value.h"
 #include "plan/nat.h"
 #include "plan/store.h"
 
@@ -27,6 +28,7 @@
 
 #define ARG(i) (t->vstack[ab + (i)])
 
+/* ── Small helpers ─────────────────────────────────────────────────────── */
 static pl_val pl_resolve(pl_val v) {
   while (!pl_is_nat63(v) && pl_tag(v) == PL_TAG_DEFER &&
          pl_hdr_kind(*pl_ptr(v)) == PL_K_IND)
@@ -175,6 +177,14 @@ static pl_val op_load8(pl_thread* t, size_t ab) {
   COERCE(1);
   return pl_nat_byte_at(ARG(1), pl_nat_u64_clamp(ARG(0)));
 }
+
+static pl_val op_loadvar(pl_thread* t, size_t ab) {
+  COERCE(0);
+  COERCE(1);
+  COERCE(2);
+  return pl_nat_load_var(t, &ARG(0), &ARG(1), &ARG(2));
+}
+
 static pl_val op_store8(pl_thread* t, size_t ab) {
   COERCE(0);
   COERCE(1);
@@ -678,6 +688,34 @@ static pl_val op_equal(pl_thread* t, size_t ab) {
   return pl_eq_deep(ARG(0), ARG(1)) ? 1 : 0;
 }
 
+static pl_val op_install(pl_thread* t, size_t ab) {
+  uint8_t hash[32];
+  pl_val a = pl_resolve(ARG(0));
+  pl_cell* p = pl_as(PL_TAG_PIN, a);
+  if (!p) {
+    fprintf(stderr, "compiler not pin, ignoring\n");
+    return 0;
+  }
+  memcpy(hash, pl_pin_hash_bytes(p), 32);
+  pl_store* s = pl_heap_store(t->heap);
+  pl_store_put_compiler(s, hash);
+  return 1;
+}
+
+static pl_val op_compile(pl_thread* t, size_t ab) {
+  pl_val a = pl_resolve(ARG(0));
+  uint8_t hash[32];
+  pl_cell* p = pl_as(PL_TAG_PIN, a);
+  if (!p) {
+    fprintf(stderr, "no pin, failing compile\n");
+    return 0;
+  }
+  memcpy(hash, pl_pin_hash_bytes(p), 32);
+  pl_store_put_code(t, hash);
+
+  return 1;
+}
+
 /*
  * savePinOnly: write snap/<base58>.plan for the pin and (depth-first)
  * its sub-pins, skipping files that already exist; the file content is
@@ -784,6 +822,7 @@ const pl_opdesc pl_ops[] = {
     OP66(ax_s4('T', 'e', 's', 't'), 2, 0b11, 0, op_test),
     OP66(ax_s3('N', 'i', 'b'), 2, 0b11, 0, op_nib),
     OP66(ax_s5('L', 'o', 'a', 'd', '8'), 2, 0b11, 0, op_load8),
+    OP66(ax_s7('L', 'o', 'a', 'd', 'V', 'a', 'r'), 3, 0b111, 0, op_loadvar),
     OP66(ax_s6('S', 't', 'o', 'r', 'e', '8'), 3, 0b111, 0, op_store8),
     OP66(ax_s3('S', 'e', 't'), 2, 0b11, 0, op_set),
     OP66(ax_s5('C', 'l', 'e', 'a', 'r'), 2, 0b11, 0, op_clear),
@@ -854,6 +893,8 @@ const pl_opdesc pl_ops[] = {
     OP66(ax_s4('L', 'a', 's', 't'), 1, 0b1, 0, op_last),
     OP66(ax_s4('I', 'n', 'i', 't'), 1, 0b1, 0, op_init),
     OP66(ax_s5('E', 'q', 'u', 'a', 'l'), 2, 0b11, 0b11, op_equal),
+    OP66(ax_s7('I', 'n', 's', 't', 'a', 'l', 'l'), 1, 0b1, 0b1, op_install),
+    OP66(ax_s7('C', 'o', 'm', 'p', 'i', 'l', 'e'), 1, 0b1, 0b1, op_compile),
 
     /* op 82: rplan I/O (mode-gated in eval.c) */
     OP82("Input", 1, 0b1, pl_op82_input),

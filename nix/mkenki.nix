@@ -8,6 +8,7 @@
   gmp,
   lmdb,
   openssl,
+  binutils,
   compiler,
   cc,
   extraNativeBuildInputs ? [],
@@ -27,6 +28,7 @@ stdenv.mkDerivation {
       gnumake
       pkg-config
       compiler
+      binutils
     ]
     ++ extraNativeBuildInputs;
 
@@ -39,7 +41,7 @@ stdenv.mkDerivation {
 
   dontConfigure = true;
   enableParallelBuilding = true;
-  hardeningDisable = lib.optional (buildType == "debug") "fortify";
+  hardeningDisable = ["fortify" "fortify3"];
 
   buildPhase = ''
     runHook preBuild
@@ -62,8 +64,7 @@ stdenv.mkDerivation {
     '';
 
   meta = {
-    description = "Small C11 dynamic array library with injected allocation";
-    homepage = "https://example.invalid/enki";
+    description = "";
     license = lib.licenses.mit;
     platforms = lib.platforms.unix;
   };

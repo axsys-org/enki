@@ -449,7 +449,7 @@ static const char* boot_env_file_root(void) {
 
 int main(int argc, char** argv) {
   const char* file_root_c = boot_env_file_root();
-  int argi = 1;
+  volatile int argi = 1;
   while (argi < argc && strncmp(argv[argi], "--", 2) == 0) {
     if (strcmp(argv[argi], "--") == 0) {
       argi++;

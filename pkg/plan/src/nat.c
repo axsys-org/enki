@@ -392,6 +392,33 @@ pl_val pl_nat_trunc(pl_thread* t, pl_val* width, pl_val* a) {
   return r;
 }
 
+static uint64_t clamp_to_width(uint64_t w, uint64_t a) {
+  if (w >= 8)
+    return 0;
+  return a & ((UINT64_C(1) << (w * 8)) - 1);
+}
+
+/* LoadVar: simple memcpy from one nat to another */
+pl_val pl_nat_load_var(pl_thread* t, pl_val* off, pl_val* width, pl_val* a) {
+  uint64_t w = pl_nat_u64_clamp(*width);
+  uint64_t o = pl_nat_u64_clamp(*off);
+  if (w == 0)
+    return 0;
+  if (pl_is_nat63(*a)) {
+    return clamp_to_width(w, (*a) >> (8 * o));
+  }
+  pl_gc_reserve(t, PL_NAT_CELLS(w));
+  PL_GC_FORBID(t);
+  uint64_t* out;
+  pl_val r = pl_mk_nat_limbs(t, w, &out);
+  mp_limb_t ta;
+  pl_limbs va = pl_limb_view(a, &ta);
+  memcpy(out, (char*)va.p + o, w);
+  r = pl_nat_trim(r);
+  PL_GC_ALLOW(t);
+  return r;
+}
+
 /* writeByte from the reference: replace byte i of n with b. */
 pl_val pl_nat_store_byte(pl_thread* t, pl_val* idx, pl_val* byte, pl_val* a) {
   uint64_t i = pl_nat_u64_clamp(*idx);

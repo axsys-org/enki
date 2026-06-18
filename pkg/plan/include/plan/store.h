@@ -19,6 +19,7 @@
 
 #include "plan/heap.h"
 #include "plan/value.h"
+#include "plan/bytecode.h"
 
 typedef struct pl_store_backend {
   void* ctx;
@@ -30,6 +31,8 @@ typedef struct pl_store_backend {
   bool (*put_root)(void* ctx, const uint8_t hash[32]);
   bool (*get_root)(void* ctx, uint8_t hash[32]);
   void (*close)(void* ctx);
+  void (*get_code)(void* ctx, const uint8_t hash[32], pl_code** out);
+  void (*put_code)(void* ctx, const uint8_t hash[32], pl_code* out);
 } pl_store_backend;
 
 pl_store* pl_store_new(pl_store_backend backend);
@@ -63,4 +66,9 @@ bool pl_store_get_root(pl_store* s, uint8_t hash[32]);
 pl_val pl_store_ix0_expr(pl_store* s);
 pl_val pl_store_ix1_expr(pl_store* s);
 
+/* bytecode manipulation */
+void pl_store_put_code(pl_thread* t, const uint8_t hash[32]);
+bool pl_store_get_code(pl_store* s, const uint8_t hash[32], pl_code** out);
+
+void pl_store_put_compiler(pl_store* s, const uint8_t hash[32]);
 #endif

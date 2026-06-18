@@ -15,8 +15,10 @@
 
 #include <setjmp.h>
 #include <stddef.h>
+#include <assert.h>
 
 #include "plan/value.h"
+#include "plan/bytecode.h"
 
 typedef struct pl_store pl_store;
 typedef struct pl_heap pl_heap;
@@ -45,20 +47,24 @@ typedef enum {
   PL_F_OPDEEP,     /* primop deep (nf) phase over the deep_mask args    */
   PL_F_NF,         /* normalize the incoming value                      */
   PL_F_NFOBJ,      /* a: object being normalized, k: field index        */
+  PL_F_EXEC,       /* a: env, ip: pointer  */
+  PL_F_UPD,        /* a: newstyle thunk update */
   PL_F_TRY,        /* exception barrier (op 66 Try); argbase: vsp mark  */
   PL_F_JUDGE,      /* forcing a law-body chain node; argbase: hbase     */
   PL_F_NIL,        /* RETURN planNil(v): 1 if the value is 0, else 0    */
 } pl_frame_kind;
 
+/** TODO make union */
 typedef struct pl_frame {
   uint8_t kind;
-  uint32_t k;     /* field index / mask cursor */
+  uint32_t k;     /* field index / mask cursor / ip */
   uint32_t op;    /* op descriptor index (F_OPARG/F_OPDEEP) */
   uint64_t opset; /* op set number (F_OPENT) */
   pl_val a;       /* root */
   pl_val b;       /* root */
   size_t argbase; /* offset into vstack (never a pointer) */
   uint32_t argc;
+  pl_code* code;
 } pl_frame;
 
 /* ── Thread ────────────────────────────────────────────────────────────── */
@@ -153,6 +159,19 @@ static inline void pl_vpush(pl_thread* t, pl_val v) {
 
 static inline pl_val pl_vpop(pl_thread* t) {
   return t->vstack[--t->vsp];
+}
+
+static inline pl_val pl_vreplace(pl_thread* t, uint32_t n, pl_val r) {
+  assert(n >= 1 && t->vsp >= n);
+  t->vsp -= n - 1;
+  t->vstack[t->vsp - 1] = r;
+  return r;
+}
+
+/* read, n down from TOS */
+static inline pl_val* pl_vpeek(pl_thread* t, uint32_t n) {
+  assert(n < t->vsp);
+  return &t->vstack[t->vsp - n];
 }
 
 static inline pl_frame* pl_fpush(pl_thread* t) {

@@ -27,12 +27,15 @@ pl_val pl_mk_app_from(pl_thread* t, pl_val head, uint32_t n,
 pl_val pl_mk_law(pl_thread* t, uint64_t arity, pl_val name, pl_val body);
 pl_val pl_mk_env(pl_thread* t, uint32_t nslots); /* slots zeroed to nat 0 */
 pl_val pl_mk_thunk(pl_thread* t, pl_val env, pl_val expr);
+pl_val pl_mk_thke(pl_thread* t, pl_val env, pl_bane bane, uint32_t nargs,
+                  pl_val* args);
 
 /* Arity of a WHNF value (never forces). */
 uint64_t pl_arity(pl_val v);
 
 /* ── The only two mutation sites (I8, future write-barrier hooks) ──────── */
 
+void pl_thke_update(pl_thread* t, pl_val thke, pl_val result);
 /* Overwrite a THUNK or BLACKHOLE in place as K_IND -> result. */
 void pl_thunk_update(pl_thread* t, pl_val thunk_or_bh, pl_val result);
 
