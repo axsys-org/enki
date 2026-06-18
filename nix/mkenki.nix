@@ -64,8 +64,7 @@ stdenv.mkDerivation {
     '';
 
   meta = {
-    description = "Small C11 dynamic array library with injected allocation";
-    homepage = "https://example.invalid/enki";
+    description = "";
     license = lib.licenses.mit;
     platforms = lib.platforms.unix;
   };
