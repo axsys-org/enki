@@ -21,6 +21,7 @@
 
 /* hash maps keyed by a value field named `key` */
 #define ax_hmput  stbds_hmput
+#define ax_dshead stbds_header
 #define ax_hmgeti stbds_hmgeti
 #define ax_hmlen  stbds_hmlen
 #define ax_hmfree stbds_hmfree
