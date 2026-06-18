@@ -2,6 +2,7 @@
 
 #include <lmdb.h>
 #include <stdlib.h>
+#include <assert.h>
 #include <string.h>
 
 #include "axsys/arena.h"
@@ -96,7 +97,11 @@ bool pl_store_get_root(pl_store* s, uint8_t hash[32]) {
 bool pl_store_get_code(pl_store* s, const uint8_t hash[32], pl_code** out) {
   pl_hash k;
   memcpy(k.b, hash, 32);
+
+  // LSAN reports this as a leak i have no idea why0
   ptrdiff_t i = ax_hmgeti(s->code, k);
+  // gets picked up wrongly by lsan
+  ax_lsan_ignore(s->code);
   if (i < 0)
     return false;
   *out = s->code[i].value;

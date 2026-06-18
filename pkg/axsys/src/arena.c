@@ -31,12 +31,14 @@ ax_arena* ax_arena_create(const ax_allocator* loc_a, size_t cap_s) {
   return a;
 }
 
+/** TODO: added MAP_NORESERVE which will create a SIGBUS at fault time instead
+ * of failing at allocation time on OOM. ADD SIGNAL HANDLING!!*/
 ax_arena* ax_arena_create_overcommit(size_t cap_s) {
   if (cap_s > SIZE_MAX - sizeof(ax_arena))
     return NULL;
   size_t siz_s = sizeof(ax_arena) + cap_s;
   void* mem = mmap(NULL, siz_s, PROT_READ | PROT_WRITE,
-                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
   if (mem == MAP_FAILED)
     return NULL;
   ax_arena* a = mem;
