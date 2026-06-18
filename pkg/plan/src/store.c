@@ -35,6 +35,8 @@ struct pl_store {
   pl_code_entry* code; /* stb_ds hashmap: hash -> bytecode */
   pl_store_backend be;
   pl_val ix0_expr, ix1_expr;
+  uint8_t compiler[32];
+  bool compiler_f;
 };
 
 /* ── Region allocation ─────────────────────────────────────────────────── */
@@ -102,10 +104,33 @@ bool pl_store_get_code(pl_store* s, const uint8_t hash[32], pl_code** out) {
   return true;
 }
 
-void pl_store_put_code(pl_store* s, const uint8_t hash[32], pl_code* code) {
+void pl_store_put_code(pl_thread* t, const uint8_t hash[32]) {
+  pl_store* s = pl_heap_store(t->heap);
   pl_hash k;
-  memcpy(k.b, hash, 32);
-  hmput(s->code, k, code);
+  if ( !s->compiler_f ) {
+    fprintf(stderr, "no compiler set! failing compile\n");
+    return;
+  }
+  PL_GC_FORBID(t);
+  pl_val compiler = pl_store_load(t, s->compiler);
+  pl_val fun = pl_store_load(t, hash);
+  pl_val res = pl_apply(t, compiler, fun);
+  pl_val pin = pl_pin(t, &res);
+  pl_cell* p = pl_as(PL_TAG_PIN, pin);
+  ax_assume(p, "wack");
+  pl_code* code = pl_bytecode_from_val(pl_pin_body(p));
+  PL_GC_ALLOW(t);
+  if (code != NULL) {
+    memcpy(k.b, hash, 32);
+    hmput(s->code, k, code);
+  }
+}
+
+void pl_store_put_compiler(pl_store* s, const uint8_t hash[32]) {
+  s->compiler_f = hash[0] ? memcmp(hash, hash + 1, 31) != 0 : true;
+  memcpy(s->compiler, hash, 32);
+  // moar leaks, TODO: fix
+  hmfree(s->code);
 }
 
 

@@ -144,13 +144,34 @@ pl_val pl_mk_thunk(pl_thread* t, pl_val env, pl_val expr) {
   return pl_make(PL_TAG_DEFER, p);
 }
 
-/* ── Mutation sites (I8) ───────────────────────────────────────────────── */
+pl_val pl_mk_thke(pl_thread* t, pl_val env, pl_bane bane, uint32_t nargs, pl_val* args) {
+  uint32_t size = PL_THKE_CELLS(nargs);
+  pl_cell* p = pl_bump(t, PL_THKE_CELLS(nargs));
+  p[0] = pl_hdr_make(PL_K_THKE, 0, 0, size);
+  p[1] = env;
+  p[2] = (pl_bane)bane;
+  memcpy(p + 3, args, sizeof(pl_val) * nargs);
+  return pl_make(PL_TAG_DEFER, p);
+}
+
+/* ── Mutation sites ───────────────────────────────────────────────── */
 
 void pl_thunk_update(pl_thread* t, pl_val thunk_or_bh, pl_val result) {
   (void)t;
   pl_cell* p = pl_ptr(thunk_or_bh);
   pl_kind k = pl_hdr_kind(p[0]);
   ax_assume(k == PL_K_THUNK || k == PL_K_BH, "thunk_update on kind %d", (int)k);
+  /* keep the original cell count so the collector copies correctly */
+  p[0] = pl_hdr_make(PL_K_IND, 0, 0, pl_hdr_cells(p[0]));
+  p[1] = result;
+}
+
+void pl_thke_update(pl_thread* t, pl_val thke, pl_val result) {
+  (void)t;
+  (void)thke;
+  pl_cell* p = pl_ptr(thke);
+  pl_kind k = pl_hdr_kind(p[0]);
+  ax_assume(k == PL_K_THKE, "thunk_update on kind %d", (int)k);
   /* keep the original cell count so the collector copies correctly */
   p[0] = pl_hdr_make(PL_K_IND, 0, 0, pl_hdr_cells(p[0]));
   p[1] = result;

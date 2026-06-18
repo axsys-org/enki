@@ -3,11 +3,15 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <assert.h>
+#include <inttypes.h>
 
 #include "axsys/assume.h"
+#include "axsys/allocator.h"
 #include "axsys/perf.h"
 #include "internal.h"
 #include "plan/build.h"
+#include "plan/canon.h"
 #include "plan/nat.h"
 #include "plan/store.h"
 
@@ -56,6 +60,35 @@ void pl_catch_unwind(pl_thread* t, pl_catch* c) {
   t->fsp = c->fsp;
 }
 
+static void debug_stack(pl_thread* t, uint32_t n) {
+  for (uint32_t i = 0; i < n; i++) {
+    pl_val v =  t->vstack[t->vsp - 1 - i];
+    if (pl_is_normal(v)) {
+      char* str = pl_show_val(
+          ax_allocator_system(), v,
+          NULL);
+      fprintf(stderr, " stack[%u] = %s\n", i, str);
+    } else {
+      fprintf(stderr, " stack[%u] = THUNK\n", i);
+
+    }
+  }
+}
+
+static char* show_bytecode(pl_op_t op) {
+  switch (op) {
+    case OP_PUSH_VAR: return "PUSH_VAR";
+    case  OP_PUSH_LIT: return "PUSH_LIT";
+    case  OP_MK_THK: return "MK_THK";
+    case  OP_EVAL: return "EVAL";
+    case  OP_CALL: return "CALL";
+    case  OP_TAILCALL: return "TAILCALL";
+    case  OP_INTERP: return "INTERP";
+    case  OP_RET: return "RET";
+    default: return "UNKNOWN OP";
+  }
+}
+
 /* ── Enter hook seam ───────────────────────────────────────────────────── */
 
 static pl_enter_hook pl_hook = NULL;
@@ -94,6 +127,7 @@ static pl_val pl_kal1(pl_thread* t, pl_val env, pl_val expr) {
   return expr;
 }
 
+
 /* Law object behind a head value that is a LAW or a pinned LAW. */
 static pl_cell* pl_lawp(pl_val head) {
   if (pl_tag(head) == PL_TAG_LAW)
@@ -117,7 +151,8 @@ static pl_val pl_run(pl_thread* t, pl_val v, size_t base) {
   pl_frame* fr;
   pl_code* code = NULL;
   pl_store* s = pl_heap_store(t->heap);
-
+  uint32_t argc;
+  size_t hbase; /*entry base for judge*/
 eval:
   if (pl_is_whnf(v))
     goto ret;
@@ -141,31 +176,85 @@ eval:
       fr->a = v;
       goto eval_expr;
     }
+    case PL_K_THKE: {
+      /* TODO: set blackhole */
+      p[0] = pl_hdr_set_flag(PL_F_HOLE);
+      // p[0] = pl_hdr_make(PL_K_BH, 0, 0, pl_hdr_cells(p[0]));
+      // p[1] = 0;
+      // p[2] = 0;
+      fr = pl_fpush(t);
+      fr->kind = PL_F_UPD;
+      fr->a = v;
+      goto eval_thke;
+    }
     default:
       ax_abort("EVAL: bad defer kind");
     }
   }
+eval_thke: {
+  fr = &t->fstack[t->fsp-1];
+  v = fr->a;
+  pl_val* args;
+  switch (pl_thke_bane(pl_ptr(v))) {
+    case PL_BAN_FAST:
+      hbase = t->vsp;
+      argc = pl_thke_n(pl_ptr(v));
+      args = pl_thke_args(pl_ptr(v));
+      for (uint32_t i = 0; i < argc; i++) {
+        pl_vpush(t, args[i]);
+      }
+      argc--;
+      debug_stack(t, argc);
+      goto judge;
+    case PL_BAN_SLOW:
+    default:
+      ax_abort("EVAL: bad bane");
+  }
+
+}
+
 
 exec: {
 #define NEXT() (fr->code->ops[fr->k++])
+#define VTOS (fr->vsp-1)
   fr = &t->fstack[t->fsp-1];
+  pl_op_t op;
   for (;;) {
-    switch (NEXT()) {
+    op = NEXT();
+    fprintf(stderr, "exec: %s\n", show_bytecode(op));
+    debug_stack(t, (uint32_t)(t-> vsp - fr->argbase));
+    // TODO: lift to goto trampoline
+    switch (op) {
       case OP_PUSH_VAR:
         pl_vpush(t, pl_env_slots(pl_ptr(fr->a))[NEXT()]); break;
       case OP_PUSH_LIT: pl_vpush(t, NEXT()); break;
-      case OP_MK_THK: break;
-      case OP_EVAL:
-        v = pl_vpop(t);
-        goto eval;
+      case OP_MK_THK: {
+        argc = (uint32_t)NEXT();
+        pl_bane bane = (pl_bane)NEXT();
+        pl_gc_reserve(t, PL_THKE_CELLS(argc));
+        PL_GC_FORBID(t);
+        pl_val thke = pl_mk_thke(t, fr->a, bane, argc, pl_vpeek(t, argc));
+        pl_vreplace(t, argc, thke);
+        PL_GC_ALLOW(t);
+        break;
+      };
+
       case OP_INTERP:
         env = fr->a; expr = NEXT();
         goto eval_expr;
+      case OP_RET:
+        v = pl_vpop(t);
+        t->vsp = fr->argbase;
+        t->fsp--;
+        goto ret;
+
+      case OP_EVAL:
       default: ax_abort("exec: unsupported op");
     }
   }
 }
 #undef NEXT
+
 
 
   /*
@@ -207,6 +296,7 @@ eval_expr:
          * subexpression, which forces it to WHNF first; the fast path
          * below covers the common already-WHNF case, the F_KAPP frame
          * the dynamically-built ones.
+         *
          */
         if (pl_is_whnf(pl_app_args(p)[0]) && pl_is_whnf(pl_app_args(p)[1])) {
           pl_vpush(t, env);
@@ -245,10 +335,15 @@ ret:
   if (t->fsp == base)
     return v;
   fr = &t->fstack[t->fsp - 1];
+  /** TODO: store jump labels direct in frame */
   switch (fr->kind) {
 
   case PL_F_UPDATE:
     pl_thunk_update(t, fr->a, v);
+    t->fsp--;
+    goto ret;
+  case PL_F_UPD:
+    pl_thke_update(t, fr->a, v);
     t->fsp--;
     goto ret;
 
@@ -316,7 +411,7 @@ ret:
     /* saturated: ENTER */
     pl_val x = fr->b;
     t->fsp--;
-    size_t hbase = t->vsp;
+    hbase = t->vsp;
     {
       pl_cell* p = pl_as(PL_TAG_APP, v);
       if (p != NULL) {
@@ -329,10 +424,13 @@ ret:
       }
     }
     pl_vpush(t, x);
-    uint32_t argc = (uint32_t)(t->vsp - hbase - 1);
-    pl_val head = t->vstack[hbase];
+    goto fast_apply;
+
+fast_apply:
+    argc = (uint32_t)(t->vsp - hbase - 1);
 
     /* dispatch on the ultimate head */
+    pl_val head = t->vstack[hbase];
     if (pl_is_nat63(head))
       ax_abort("ENTER: direct nat head");
     switch (pl_tag(head)) {
@@ -401,16 +499,24 @@ ret:
     for (uint32_t j = 0; j < m; j++)
       slots[1 + argc + j] = pl_mk_thunk(t, envv, t->vstack[cursor + 1 + j]);
     pl_law_code(s, t->vstack[hbase], &code);
-    v = pl_kal1(t, envv, t->vstack[cursor]);
     if ( code != NULL ) {
       fprintf(stderr, "code\n");
-      PL_GC_ALLOW(t);
-    } else {
-      PL_GC_ALLOW(t);
-    }
+      t->vsp = hbase;
 
-    t->vsp = hbase;
-    goto eval;
+      fr = pl_fpush(t);
+      fr->kind = PL_F_EXEC;
+      fr->a = envv;
+      PL_GC_ALLOW(t);
+      fr->code = code;
+      fr->k = 0;
+      fr->argbase = t->vsp;
+      goto exec;
+    } else {
+      v = pl_kal1(t, envv, t->vstack[cursor]);
+      PL_GC_ALLOW(t);
+      t->vsp = hbase;
+      goto eval;
+    }
   }
   }
 
@@ -430,7 +536,7 @@ ret:
         pl_vpush(t, v);
       }
     }
-    uint32_t argc = (uint32_t)(t->vsp - listbase - 1);
+    argc = (uint32_t)(t->vsp - listbase - 1);
     pl_val name = t->vstack[listbase];
     if (opset == 82 && !t->rplan_f)
       pl_raise_msg(t, "Not in RPLAN Mode");

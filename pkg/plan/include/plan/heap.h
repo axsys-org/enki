@@ -15,6 +15,7 @@
 
 #include <setjmp.h>
 #include <stddef.h>
+#include <assert.h>
 
 #include "plan/value.h"
 #include "plan/bytecode.h"
@@ -47,8 +48,10 @@ typedef enum {
   PL_F_NF,         /* normalize the incoming value                      */
   PL_F_NFOBJ,      /* a: object being normalized, k: field index        */
   PL_F_EXEC,       /* a: env, ip: pointer  */
+  PL_F_UPD,        /* a: newstyle thunk update */
 } pl_frame_kind;
 
+/** TODO make union */
 typedef struct pl_frame {
   uint8_t kind;
   uint32_t k;     /* field index / mask cursor / ip */
@@ -131,6 +134,19 @@ static inline void pl_vpush(pl_thread* t, pl_val v) {
 
 static inline pl_val pl_vpop(pl_thread* t) {
   return t->vstack[--t->vsp];
+}
+
+static inline pl_val pl_vreplace(pl_thread* t, uint32_t n, pl_val r) {
+  assert(n >= 1 && t->vsp >= n);
+  t->vsp -= n - 1;
+  t->vstack[t->vsp - 1] = r;
+  return r;
+}
+
+/* read, n down from TOS */
+static inline pl_val* pl_vpeek(pl_thread *t, uint32_t n) {
+    assert(n < t->vsp);
+    return &t->vstack[t->vsp - n];
 }
 
 static inline pl_frame* pl_fpush(pl_thread* t) {

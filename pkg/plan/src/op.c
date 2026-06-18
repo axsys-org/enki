@@ -700,16 +700,29 @@ static pl_val op_equal(pl_thread* t, size_t ab) {
 
 static pl_val op_install(pl_thread* t, size_t ab) {
   uint8_t hash[32];
-  pl_val a = pl_resolve(ARG(1));
-  pl_cell* p = pl_as(PL_TAG_PIN, ARG(0));
+  pl_val a = pl_resolve(ARG(0));
+  pl_cell* p = pl_as(PL_TAG_PIN, a);
+  if ( !p ) {
+    fprintf(stderr, "compiler not pin, ignoring\n");
+    return 0;
+  }
   memcpy(hash, pl_pin_hash_bytes(p), 32);
-  if (pl_tag(ARG(0)) != PL_TAG_PIN) return 0;
   pl_store* s = pl_heap_store(t->heap);
-  char* str = pl_show_val(ax_allocator_system(), a, NULL);
-  fprintf(stderr, "installing: %s\n", str);
-  pl_code* code = pl_bytecode_from_val(a);
-  if (code == NULL) return 0;
-  pl_store_put_code(s, hash, code);
+  pl_store_put_compiler(s, hash);
+  return 1;
+}
+
+static pl_val op_compile(pl_thread* t, size_t ab) {
+  pl_val a = pl_resolve(ARG(0));
+  uint8_t hash[32];
+  pl_cell* p = pl_as(PL_TAG_PIN, a);
+  if ( !p ) {
+    fprintf(stderr, "no pin, failing compile\n");
+    return 0;
+  }
+  memcpy(hash, pl_pin_hash_bytes(p), 32);
+  pl_store_put_code(t, hash);
+
   return 1;
 }
 
@@ -886,7 +899,9 @@ const pl_opdesc pl_ops[] = {
     OP66(ax_s4('L', 'a', 's', 't'), 1, 0b1, false, op_last),
     OP66(ax_s4('I', 'n', 'i', 't'), 1, 0b1, false, op_init),
     OP66(ax_s5('E', 'q', 'u', 'a', 'l'), 2, 0b11, true, op_equal),
-    OP66(ax_s7('I', 'n', 's', 't', 'a', 'l', 'l'), 2, 0b11, true, op_install),
+    OP66(ax_s7('I', 'n', 's', 't', 'a', 'l', 'l'), 1, 0b1, true, op_install),
+    OP66(ax_s7('C', 'o', 'm', 'p', 'i', 'l', 'e'), 1, 0b1, true, op_compile),
+
 
     /* op 82: rplan I/O (mode-gated in eval.c) */
     OP82("Input", 1, 0b1, pl_op82_input),

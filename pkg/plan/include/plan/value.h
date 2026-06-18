@@ -49,12 +49,19 @@ typedef enum {
   PL_K_THKE, /* newstyle thunks, variably sized */
 } pl_kind;
 
+/* executioner types for newstyle thunks */
+typedef enum {
+  PL_BAN_FAST = 1, /* known exact arity match */
+  PL_BAN_SLOW = 2, /* fallback - possibly over or under applied */
+} pl_bane;
+
 /*
  * Header word, one per object:
  *   [ kind:8 | flags:4 | meta:20 | cells:32 ]
  * cells is the total size in 8-byte cells including the header.
  */
 #define PL_F_NORMAL 0x1u /* deep normal form reached (§ nf) */
+#define PL_F_HOLE 0x2u /* currently evaluating */
 
 static inline pl_cell pl_hdr_make(pl_kind kind, uint32_t flags, uint32_t meta,
                                   uint32_t cells) {
@@ -62,12 +69,21 @@ static inline pl_cell pl_hdr_make(pl_kind kind, uint32_t flags, uint32_t meta,
          ((pl_cell)(meta & 0xFFFFFu) << 12) | ((pl_cell)cells << 32);
 }
 
+
+
 static inline pl_kind pl_hdr_kind(pl_cell hdr) {
   return (pl_kind)(hdr & 0xFFu);
 }
 static inline uint32_t pl_hdr_flags(pl_cell hdr) {
   return (uint32_t)(hdr >> 8) & 0xFu;
 }
+
+static inline pl_cell pl_hdr_set_flag(pl_cell hdr, uint32_t flags) {
+  uint32_t old = pl_hdr_flags(hdr);
+  old |= flags;
+  return hdr | ((pl_cell)((old) & 0xFu) << 8);
+}
+
 static inline uint32_t pl_hdr_meta(pl_cell hdr) {
   return (uint32_t)(hdr >> 12) & 0xFFFFFu;
 }
@@ -208,8 +224,8 @@ static inline pl_val pl_thke_env(pl_cell* p) {
   return (pl_val)p[1];
 }
 
-static inline pl_val pl_thke_exec(pl_cell* p) {
-  return (pl_val)p[2];
+static inline pl_bane pl_thke_bane(pl_cell* p) {
+  return (pl_bane)p[2];
 }
 
 static inline uint32_t pl_thke_n(pl_cell* p) {

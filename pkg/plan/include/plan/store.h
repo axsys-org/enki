@@ -66,6 +66,8 @@ pl_val pl_store_ix0_expr(pl_store* s);
 pl_val pl_store_ix1_expr(pl_store* s);
 
 /* bytecode manipulation */
-void pl_store_put_code(pl_store* s, const uint8_t hash[32], pl_code* code);
+void pl_store_put_code(pl_thread* t, const uint8_t hash[32]);
 bool pl_store_get_code(pl_store* s, const uint8_t hash[32], pl_code** out);
+
+void pl_store_put_compiler(pl_store* s, const uint8_t hash[32]);
 #endif
