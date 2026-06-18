@@ -143,7 +143,9 @@
             });
 
         mkCheck = kind: buildType: mkCheckArgs kind buildType "" "";
-        /* no TSAN- threading unused RN and criterion hates it */
+        /*
+        no TSAN- threading unused RN and criterion hates it
+        */
         testBuildTypes = ["debug" "asan" "ubsan"];
         testChecks =
           lib.listToAttrs
