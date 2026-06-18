@@ -9,7 +9,6 @@ enforced dependency direction:
 | `pkg/plan` | `pl_` | The PLAN core: value representation, semispace Cheney heap with safepoint+reserve discipline, the explicit-frame reduction machine (whnf/nf), primops, pins, and the content-addressed store (LMDB or in-memory backend). |
 | `pkg/enki` | `en_` | Everything above the core: the wisp PLAN-assembly front end (parser, macro expander, module loader) and the `wisp` / `assembler` apps. |
 
-
 ## GC Discipline
 
 The collector runs only inside `pl_gc_reserve`; allocation (`pl_bump` and
@@ -113,7 +112,6 @@ vendored under `tests/property/vendor/theft/` as a tiny deterministic
 single-purpose runner, because upstream theft is not reliably packaged in
 nixpkgs. FFF is vendored as a single header under `tests/support/fff.h`.
 
-
 ## Coverage
 
 Generate local HTML coverage:
@@ -145,5 +143,3 @@ nix fmt
 `make tidy` consumes `compile_commands.json` (generate with Bear) and runs
 clang-tidy with checks from `.clang-tidy`. `nix fmt` uses treefmt-nix with
 clang-format for C and headers, alejandra for Nix, and mdformat for Markdown.
-
-

@@ -19,4 +19,3 @@ x/boot
 ## reboot (clear current snapshots)
 x/boot --reset
 ```
-
