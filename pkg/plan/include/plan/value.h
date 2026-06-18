@@ -13,7 +13,8 @@
  * place.  THUNK -> BLACKHOLE -> IND transitions happen under aliasing, so
  * all three share PL_TAG_DEFER and dispatch reads the object header for
  * the true kind.  Consequently WHNF is a register test:
- *   pl_is_nat63(v) || pl_tag(v) != PL_TAG_DEFER.
+ *   pl_tag(v) < PL_TAG_DEFER.
+ *
  */
 
 #include <stdint.h>
@@ -44,8 +45,8 @@ typedef enum {
   PL_K_THUNK,
   PL_K_ENV,
   PL_K_IND,
-  PL_K_BH,
-  PL_K_FWD, /* forwarding pointer, exists only during collection */
+  PL_K_BH,   /* TODO move (BH, IND) to newstyle thunks */
+  PL_K_FWD,  /* forwarding pointer, exists only during collection */
   PL_K_THKE, /* newstyle thunks, variably sized */
 } pl_kind;
 
@@ -61,15 +62,13 @@ typedef enum {
  * cells is the total size in 8-byte cells including the header.
  */
 #define PL_F_NORMAL 0x1u /* deep normal form reached (§ nf) */
-#define PL_F_HOLE 0x2u /* currently evaluating */
+#define PL_F_HOLE   0x2u /* currently evaluating */
 
 static inline pl_cell pl_hdr_make(pl_kind kind, uint32_t flags, uint32_t meta,
                                   uint32_t cells) {
   return (pl_cell)(kind & 0xFFu) | ((pl_cell)(flags & 0xFu) << 8) |
          ((pl_cell)(meta & 0xFFFFFu) << 12) | ((pl_cell)cells << 32);
 }
-
-
 
 static inline pl_kind pl_hdr_kind(pl_cell hdr) {
   return (pl_kind)(hdr & 0xFFu);
@@ -232,12 +231,9 @@ static inline uint32_t pl_thke_n(pl_cell* p) {
   return pl_hdr_cells(p[0]) - 3u;
 }
 
-
 static inline pl_val* pl_thke_args(pl_cell* p) {
-  return (pl_val*)(p+3);
+  return (pl_val*)(p + 3);
 }
-
-
 
 /* K_ENV { hdr(n=cells-1); slot[n] } — law activation [self, args…, binds…]. */
 static inline uint32_t pl_env_n(pl_cell* p) {
@@ -261,6 +257,5 @@ static inline bool pl_is_nat(pl_val v) {
 static inline pl_cell* pl_as(uint64_t tag, pl_val v) {
   return pl_tag(v) == tag ? pl_ptr(v) : (pl_cell*)0;
 }
-
 
 #endif

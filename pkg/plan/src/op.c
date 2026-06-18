@@ -27,8 +27,6 @@
 
 #define ARG(i) (t->vstack[ab + (i)])
 
-
-
 /* ── Small helpers ─────────────────────────────────────────────────────── */
 static pl_val pl_resolve(pl_val v) {
   while (!pl_is_nat63(v) && pl_tag(v) == PL_TAG_DEFER &&
@@ -702,7 +700,7 @@ static pl_val op_install(pl_thread* t, size_t ab) {
   uint8_t hash[32];
   pl_val a = pl_resolve(ARG(0));
   pl_cell* p = pl_as(PL_TAG_PIN, a);
-  if ( !p ) {
+  if (!p) {
     fprintf(stderr, "compiler not pin, ignoring\n");
     return 0;
   }
@@ -716,7 +714,7 @@ static pl_val op_compile(pl_thread* t, size_t ab) {
   pl_val a = pl_resolve(ARG(0));
   uint8_t hash[32];
   pl_cell* p = pl_as(PL_TAG_PIN, a);
-  if ( !p ) {
+  if (!p) {
     fprintf(stderr, "no pin, failing compile\n");
     return 0;
   }
@@ -901,7 +899,6 @@ const pl_opdesc pl_ops[] = {
     OP66(ax_s5('E', 'q', 'u', 'a', 'l'), 2, 0b11, true, op_equal),
     OP66(ax_s7('I', 'n', 's', 't', 'a', 'l', 'l'), 1, 0b1, true, op_install),
     OP66(ax_s7('C', 'o', 'm', 'p', 'i', 'l', 'e'), 1, 0b1, true, op_compile),
-
 
     /* op 82: rplan I/O (mode-gated in eval.c) */
     OP82("Input", 1, 0b1, pl_op82_input),

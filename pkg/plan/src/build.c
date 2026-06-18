@@ -144,7 +144,8 @@ pl_val pl_mk_thunk(pl_thread* t, pl_val env, pl_val expr) {
   return pl_make(PL_TAG_DEFER, p);
 }
 
-pl_val pl_mk_thke(pl_thread* t, pl_val env, pl_bane bane, uint32_t nargs, pl_val* args) {
+pl_val pl_mk_thke(pl_thread* t, pl_val env, pl_bane bane, uint32_t nargs,
+                  pl_val* args) {
   uint32_t size = PL_THKE_CELLS(nargs);
   pl_cell* p = pl_bump(t, PL_THKE_CELLS(nargs));
   p[0] = pl_hdr_make(PL_K_THKE, 0, 0, size);

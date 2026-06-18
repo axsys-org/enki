@@ -393,7 +393,8 @@ pl_val pl_nat_trunc(pl_thread* t, pl_val* width, pl_val* a) {
 }
 
 static uint64_t clamp_to_width(uint64_t w, uint64_t a) {
-  if (w >= 8) return 0;
+  if (w >= 8)
+    return 0;
   return a & ((UINT64_C(1) << (w * 8)) - 1);
 }
 
@@ -401,7 +402,8 @@ static uint64_t clamp_to_width(uint64_t w, uint64_t a) {
 pl_val pl_nat_load_var(pl_thread* t, pl_val* off, pl_val* width, pl_val* a) {
   uint64_t w = pl_nat_u64_clamp(*width);
   uint64_t o = pl_nat_u64_clamp(*off);
-  if ( w == 0 ) return 0;
+  if (w == 0)
+    return 0;
   if (pl_is_nat63(*a)) {
     return clamp_to_width(w, (*a) >> (8 * o));
   }

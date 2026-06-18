@@ -2,7 +2,7 @@
 #define PLAN_BYTECODE_H
 #include "plan/value.h"
 
-typedef uint64_t pl_op_t;      /* one slot per opcode and per operand */
+typedef uint64_t pl_op_t; /* one slot per opcode and per operand */
 
 typedef struct pl_code {
   pl_op_t* ops;
@@ -21,6 +21,5 @@ typedef enum pl_op {
 } pl_op;
 
 pl_code* pl_bytecode_from_val(pl_val val);
-
 
 #endif

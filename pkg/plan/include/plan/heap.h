@@ -144,9 +144,9 @@ static inline pl_val pl_vreplace(pl_thread* t, uint32_t n, pl_val r) {
 }
 
 /* read, n down from TOS */
-static inline pl_val* pl_vpeek(pl_thread *t, uint32_t n) {
-    assert(n < t->vsp);
-    return &t->vstack[t->vsp - n];
+static inline pl_val* pl_vpeek(pl_thread* t, uint32_t n) {
+  assert(n < t->vsp);
+  return &t->vstack[t->vsp - n];
 }
 
 static inline pl_frame* pl_fpush(pl_thread* t) {

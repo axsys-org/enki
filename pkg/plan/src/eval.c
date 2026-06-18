@@ -62,30 +62,36 @@ void pl_catch_unwind(pl_thread* t, pl_catch* c) {
 
 static void debug_stack(pl_thread* t, uint32_t n) {
   for (uint32_t i = 0; i < n; i++) {
-    pl_val v =  t->vstack[t->vsp - 1 - i];
+    pl_val v = t->vstack[t->vsp - 1 - i];
     if (pl_is_normal(v)) {
-      char* str = pl_show_val(
-          ax_allocator_system(), v,
-          NULL);
+      char* str = pl_show_val(ax_allocator_system(), v, NULL);
       fprintf(stderr, " stack[%u] = %s\n", i, str);
     } else {
       fprintf(stderr, " stack[%u] = THUNK\n", i);
-
     }
   }
 }
 
 static char* show_bytecode(pl_op_t op) {
   switch (op) {
-    case OP_PUSH_VAR: return "PUSH_VAR";
-    case  OP_PUSH_LIT: return "PUSH_LIT";
-    case  OP_MK_THK: return "MK_THK";
-    case  OP_EVAL: return "EVAL";
-    case  OP_CALL: return "CALL";
-    case  OP_TAILCALL: return "TAILCALL";
-    case  OP_INTERP: return "INTERP";
-    case  OP_RET: return "RET";
-    default: return "UNKNOWN OP";
+  case OP_PUSH_VAR:
+    return "PUSH_VAR";
+  case OP_PUSH_LIT:
+    return "PUSH_LIT";
+  case OP_MK_THK:
+    return "MK_THK";
+  case OP_EVAL:
+    return "EVAL";
+  case OP_CALL:
+    return "CALL";
+  case OP_TAILCALL:
+    return "TAILCALL";
+  case OP_INTERP:
+    return "INTERP";
+  case OP_RET:
+    return "RET";
+  default:
+    return "UNKNOWN OP";
   }
 }
 
@@ -127,7 +133,6 @@ static pl_val pl_kal1(pl_thread* t, pl_val env, pl_val expr) {
   return expr;
 }
 
-
 /* Law object behind a head value that is a LAW or a pinned LAW. */
 static pl_cell* pl_lawp(pl_val head) {
   if (pl_tag(head) == PL_TAG_LAW)
@@ -138,7 +143,7 @@ static pl_cell* pl_lawp(pl_val head) {
 static void pl_law_code(pl_store* s, pl_val law, pl_code** out) {
   pl_cell* p = pl_as(PL_TAG_PIN, law);
   *out = NULL;
-  if ( !p ) {
+  if (!p) {
     return;
   }
   pl_store_get_code(s, pl_pin_hash_bytes(p), out);
@@ -147,12 +152,12 @@ static void pl_law_code(pl_store* s, pl_val law, pl_code** out) {
 /* ── The machine ───────────────────────────────────────────────────────── */
 
 static pl_val pl_run(pl_thread* t, pl_val v, size_t base) {
-  pl_val env, expr;
+  pl_val env, expr; /* entry points for interpreted (non-bytecode) path */
   pl_frame* fr;
   pl_code* code = NULL;
   pl_store* s = pl_heap_store(t->heap);
   uint32_t argc;
-  size_t hbase; /*entry base for judge*/
+  size_t hbase; /* (hbase, argc) - entry for judge*/
 eval:
   if (pl_is_whnf(v))
     goto ret;
@@ -178,10 +183,7 @@ eval:
     }
     case PL_K_THKE: {
       /* TODO: set blackhole */
-      p[0] = pl_hdr_set_flag(PL_F_HOLE);
-      // p[0] = pl_hdr_make(PL_K_BH, 0, 0, pl_hdr_cells(p[0]));
-      // p[1] = 0;
-      // p[2] = 0;
+      p[0] = pl_hdr_set_flag(p[0], PL_F_HOLE);
       fr = pl_fpush(t);
       fr->kind = PL_F_UPD;
       fr->a = v;
@@ -192,70 +194,71 @@ eval:
     }
   }
 eval_thke: {
-  fr = &t->fstack[t->fsp-1];
+  fr = &t->fstack[t->fsp - 1];
   v = fr->a;
   pl_val* args;
   switch (pl_thke_bane(pl_ptr(v))) {
-    case PL_BAN_FAST:
-      hbase = t->vsp;
-      argc = pl_thke_n(pl_ptr(v));
-      args = pl_thke_args(pl_ptr(v));
-      for (uint32_t i = 0; i < argc; i++) {
-        pl_vpush(t, args[i]);
-      }
-      argc--;
-      debug_stack(t, argc);
-      goto judge;
-    case PL_BAN_SLOW:
-    default:
-      ax_abort("EVAL: bad bane");
+  case PL_BAN_FAST:
+    hbase = t->vsp;
+    argc = pl_thke_n(pl_ptr(v));
+    args = pl_thke_args(pl_ptr(v));
+    for (uint32_t i = 0; i < argc; i++) {
+      pl_vpush(t, args[i]);
+    }
+    argc--;
+    debug_stack(t, argc);
+    goto judge;
+  case PL_BAN_SLOW:
+  default:
+    ax_abort("EVAL: bad bane");
   }
-
 }
-
 
 exec: {
 #define NEXT() (fr->code->ops[fr->k++])
-#define VTOS (fr->vsp-1)
-  fr = &t->fstack[t->fsp-1];
+#define VTOS   (fr->vsp - 1)
+  fr = &t->fstack[t->fsp - 1];
   pl_op_t op;
   for (;;) {
     op = NEXT();
     fprintf(stderr, "exec: %s\n", show_bytecode(op));
-    debug_stack(t, (uint32_t)(t-> vsp - fr->argbase));
+    debug_stack(t, (uint32_t)(t->vsp - fr->argbase));
     // TODO: lift to goto trampoline
     switch (op) {
-      case OP_PUSH_VAR:
-        pl_vpush(t, pl_env_slots(pl_ptr(fr->a))[NEXT()]); break;
-      case OP_PUSH_LIT: pl_vpush(t, NEXT()); break;
-      case OP_MK_THK: {
-        argc = (uint32_t)NEXT();
-        pl_bane bane = (pl_bane)NEXT();
-        pl_gc_reserve(t, PL_THKE_CELLS(argc));
-        PL_GC_FORBID(t);
-        pl_val thke = pl_mk_thke(t, fr->a, bane, argc, pl_vpeek(t, argc));
-        pl_vreplace(t, argc, thke);
-        PL_GC_ALLOW(t);
-        break;
-      };
+    case OP_PUSH_VAR:
+      pl_vpush(t, pl_env_slots(pl_ptr(fr->a))[NEXT()]);
+      break;
+    case OP_PUSH_LIT:
+      pl_vpush(t, NEXT());
+      break;
+    case OP_MK_THK: {
+      argc = (uint32_t)NEXT();
+      pl_bane bane = (pl_bane)NEXT();
+      pl_gc_reserve(t, PL_THKE_CELLS(argc));
+      PL_GC_FORBID(t);
+      pl_val thke = pl_mk_thke(t, fr->a, bane, argc, pl_vpeek(t, argc));
+      pl_vreplace(t, argc, thke);
+      PL_GC_ALLOW(t);
+      break;
+    };
 
-      case OP_INTERP:
-        env = fr->a; expr = NEXT();
-        goto eval_expr;
-      case OP_RET:
-        v = pl_vpop(t);
-        t->vsp = fr->argbase;
-        t->fsp--;
-        goto ret;
+    case OP_INTERP:
+      env = fr->a;
+      expr = NEXT();
+      goto eval_expr;
+    case OP_RET:
+      v = pl_vpop(t);
+      t->vsp = fr->argbase;
+      t->fsp--;
+      goto ret;
 
-      case OP_EVAL:
-      default: ax_abort("exec: unsupported op");
+    case OP_EVAL:
+    default:
+      ax_abort("exec: unsupported op");
     }
   }
 }
 #undef NEXT
-
-
 
   /*
    * Decompose a law-body expression under env.  Mirrors KAL, except a
@@ -426,7 +429,7 @@ ret:
     pl_vpush(t, x);
     goto fast_apply;
 
-fast_apply:
+  fast_apply:
     argc = (uint32_t)(t->vsp - hbase - 1);
 
     /* dispatch on the ultimate head */
@@ -499,7 +502,7 @@ fast_apply:
     for (uint32_t j = 0; j < m; j++)
       slots[1 + argc + j] = pl_mk_thunk(t, envv, t->vstack[cursor + 1 + j]);
     pl_law_code(s, t->vstack[hbase], &code);
-    if ( code != NULL ) {
+    if (code != NULL) {
       fprintf(stderr, "code\n");
       t->vsp = hbase;
 

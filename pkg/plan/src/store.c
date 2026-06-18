@@ -32,7 +32,7 @@ struct pl_store {
   uint8_t* lo;
   uint8_t* hi;
   pl_intern_entry* intern; /* stb_ds hashmap: hash -> PIN val */
-  pl_code_entry* code; /* stb_ds hashmap: hash -> bytecode */
+  pl_code_entry* code;     /* stb_ds hashmap: hash -> bytecode */
   pl_store_backend be;
   pl_val ix0_expr, ix1_expr;
   uint8_t compiler[32];
@@ -107,7 +107,7 @@ bool pl_store_get_code(pl_store* s, const uint8_t hash[32], pl_code** out) {
 void pl_store_put_code(pl_thread* t, const uint8_t hash[32]) {
   pl_store* s = pl_heap_store(t->heap);
   pl_hash k;
-  if ( !s->compiler_f ) {
+  if (!s->compiler_f) {
     fprintf(stderr, "no compiler set! failing compile\n");
     return;
   }
@@ -132,7 +132,6 @@ void pl_store_put_compiler(pl_store* s, const uint8_t hash[32]) {
   // moar leaks, TODO: fix
   hmfree(s->code);
 }
-
 
 /* ── Store-resident value construction (no GC interaction) ─────────────── */
 
@@ -307,9 +306,6 @@ static void mem_close(void* ctx) {
   hmfree(m->map);
   free(m);
 }
-
-
-
 
 pl_store* pl_store_new_mem(void) {
   mem_backend* m = calloc(1, sizeof(*m));
