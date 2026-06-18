@@ -51,6 +51,12 @@ ifdef GC_STRESS
 BASE_CFLAGS += -DPL_GC_STRESS
 endif
 
+# Yield stress: every depth-0 safepoint suspends and resumes the thread
+# (see pkg/plan/src/eval.c, spec §10.1)
+ifdef YIELD_STRESS
+BASE_CFLAGS += -DPL_YIELD_STRESS
+endif
+
 APP_DIR := pkg/enki/app
 APP_SRCS := $(wildcard $(APP_DIR)/*.c)
 APP_BINS := $(patsubst $(APP_DIR)/%.c,$(BUILD_DIR)/bin/%,$(APP_SRCS))

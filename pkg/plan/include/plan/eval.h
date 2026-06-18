@@ -21,6 +21,86 @@ pl_val pl_apply(pl_thread* t, pl_val f, pl_val x);
 /* Deep normalization (the reference rnf). */
 pl_val pl_nf(pl_thread* t, pl_val v);
 
+/* ── Suspension ────────────────────────────────────────────────────────── */
+
+/*
+ * A green thread is not a saved C stack: the complete continuation lives
+ * in the thread's value/frame stacks plus the resume slots.  Suspension
+ * is returning from pl_thread_run; resumption is calling it again.
+ *
+ * Fuel is the only yield trigger: one decrement per machine step at
+ * the EVAL position, deterministic for identical state and fuel.  Yields
+ * fire only at depth-0 safepoints; inside C-entry regions (re-entrant
+ * evaluator calls, op bodies, jets) the request is deferred and fires at
+ * the first depth-0 step.
+ */
+
+typedef enum {
+  PL_RUN_DONE = 0, /* normal completion; value in t->result */
+  PL_RUN_EXN,      /* PLAN exception; t->exn / t->exn_msg, stacks unwound */
+  PL_RUN_YIELDED,  /* fuel exhausted; resume with pl_thread_run */
+  PL_RUN_BLOCKED,  /* awaiting an effect response (t->blocked_on);
+                      deposit one with pl_thread_deposit, then run */
+} pl_run_status;
+
+typedef enum {
+  PL_RES_EVAL = 0, /* re-enter the machine EVALing t->resume_val */
+  PL_RES_RETURN,   /* re-enter RETURNing t->resume_val to the top frame */
+  PL_RES_RUN,      /* reserved: compiled-law re-entry at a saved offset */
+} pl_resume_kind;
+
+/*
+ * Arm a thread to evaluate v (to WHNF) from the current stack position.
+ * Records the entry watermarks: an uncaught exception unwinds to
+ * them, and the run completes when the frame stack returns to base.
+ */
+void pl_thread_start(pl_thread* t, pl_val v);
+/* As pl_thread_start, but drive a deep normalization of v. */
+void pl_thread_start_nf(pl_thread* t, pl_val v);
+/* Arm a deep normalization of (f x) — the actor boot shape, the
+ * reference `force (fn % N 0)`. */
+void pl_thread_start_call_nf(pl_thread* t, pl_val f, pl_val x);
+
+/*
+ * Run until done, exception, or fuel exhaustion.  The only public
+ * execution entry for suspendable threads.  Resumes per
+ * t->resume_kind; must not be re-entered from evaluator C code.
+ */
+pl_run_status pl_thread_run(pl_thread* t, uint64_t fuel);
+
+/* Deposit an effect response into a PL_RUN_BLOCKED thread: the
+ * machine resumes by RETURNing the response (a WHNF) to the pending
+ * frame.  Coordination ops (op 82 Spawn/Send/SendCaps/Recv/CloseHandle)
+ * are the PL_RUN_BLOCKED producers; the parked request is the spine
+ * [OpName, args…] with strict args already forced. */
+void pl_thread_deposit(pl_thread* t, pl_val response);
+
+/* Result of the last PL_RUN_DONE. */
+pl_val pl_thread_result(pl_thread* t);
+
+/* The parked effect request of a PL_RUN_BLOCKED thread. */
+pl_val pl_thread_request(pl_thread* t);
+
+/* ── Direct-effect interception (the record/replay seam) ───────────────── */
+
+/*
+ * When set, the machine consults the hook instead of the handler for
+ * every direct (non-coordination) op-82 effect.  Return true with *out
+ * filled to substitute a result (replay: no syscall happens); return
+ * false to run the real handler.  A live-logging hook performs the
+ * effect itself via pl_io_run and records the result.  The hook runs
+ * inside the op's C-entry region; out must be WHNF.
+ */
+typedef bool (*pl_io_hook)(pl_thread* t, uint32_t op, size_t argbase,
+                           pl_val* out);
+void pl_set_io_hook(pl_io_hook hook);
+
+/* Run the real handler of direct op `op` (hooks only). */
+pl_val pl_io_run(pl_thread* t, uint32_t op, size_t argbase);
+/* Stable identity for the log: the op's name and arg count. */
+const char* pl_io_name(uint32_t op);
+uint32_t pl_io_argc(uint32_t op);
+
 /* ── Errors ────────────────────────────────────────────────────────────── */
 
 /* Raise PLAN_EXN carrying a PLAN value (catchable by Try). */
@@ -45,13 +125,14 @@ typedef struct pl_catch {
   jmp_buf jb;
   jmp_buf* prev;
   size_t vsp, fsp;
+  uint32_t centry; /* centry_depth watermark; restored on unwind */
 } pl_catch;
 
 void pl_catch_init(pl_thread* t, pl_catch* c);
 void pl_catch_pop(pl_thread* t, pl_catch* c);
 void pl_catch_unwind(pl_thread* t, pl_catch* c);
 
-/* ── enki hook seam (§11.1): jets / compiled code ──────────────────────── */
+/* ── enki hook seam: jets / compiled code ──────────────────────────────── */
 
 /*
  * Consulted by ENTER before the naive JUDGE/KAL path runs a law.  The

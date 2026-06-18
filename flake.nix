@@ -120,10 +120,10 @@
         '';
         assemblerPackage = mkBinPackage "assembler" "";
 
-        mkCheck = kind: buildType:
+        mkCheckArgs = kind: buildType: suffix: makeArgs:
           (mkWithCompiler buildType {
-            pname = "enki-${kind}-${buildType}";
-            inherit buildType;
+            pname = "enki-${kind}-${buildType}${suffix}";
+            inherit buildType makeArgs;
             makeTarget =
               if kind == "unit-tests"
               then "test-unit"
@@ -142,6 +142,8 @@
               ENKI_REAVER_PLAN_DIR = "${wispPackage}/share/enki/reaver/src/plan";
             });
 
+        mkCheck = kind: buildType: mkCheckArgs kind buildType "" "";
+
         testBuildTypes = ["debug" "asan" "ubsan" "tsan"];
         testChecks =
           lib.listToAttrs
@@ -156,7 +158,14 @@
                 value = mkCheck "property-tests" buildType;
               }
             ])
-            testBuildTypes);
+            testBuildTypes)
+          // {
+            # YIELD_STRESS (spec §10.1): every depth-0 safepoint suspends
+            unit-tests-debug-yield-stress =
+              mkCheckArgs "unit-tests" "debug" "-yield-stress" "YIELD_STRESS=1";
+            property-tests-debug-yield-stress =
+              mkCheckArgs "property-tests" "debug" "-yield-stress" "YIELD_STRESS=1";
+          };
 
         coverageReport = stdenv.mkDerivation {
           pname = "enki-coverage-report";

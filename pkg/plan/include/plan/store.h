@@ -45,11 +45,12 @@ void pl_store_free(pl_store* s);
 bool pl_store_owns(pl_store* s, pl_val v);
 
 /*
- * Pin the value in the rooted slot: nf, canonize + SHA-256, intern.
- * Returns the (store-resident, deduplicated) PIN.  The slot is updated
- * with the normalized value as a side effect.
+ * Pin a value: nf, canonize + SHA-256, intern.  Returns the
+ * (store-resident, deduplicated) PIN.  v is rooted internally for the
+ * normalization; the caller's copy may be stale afterwards and should
+ * be re-fetched from a root if reused.
  */
-pl_val pl_pin(pl_thread* t, pl_val* slot);
+pl_val pl_pin(pl_thread* t, pl_val v);
 
 /* Hash bytes of a PIN value (32 bytes, borrowed). */
 const uint8_t* pl_pin_hash(pl_val pin);

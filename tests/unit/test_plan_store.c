@@ -17,8 +17,8 @@ Test(pin, dedup_is_semantic) {
   /* two structurally equal but distinct graphs intern to the same pin */
   pl_vpush(t, test_app2(t, 0, 7, test_law(t, 1, 0, 1)));
   pl_vpush(t, test_app2(t, 0, 7, test_law(t, 1, 0, 1)));
-  pl_val p1 = pl_pin(t, &t->vstack[base]);
-  pl_val p2 = pl_pin(t, &t->vstack[base + 1]);
+  pl_val p1 = pl_pin(t, t->vstack[base]);
+  pl_val p2 = pl_pin(t, t->vstack[base + 1]);
   cr_assert_eq(p1, p2);
   cr_assert_eq(memcmp(pl_pin_hash(p1), pl_pin_hash(p2), 32), 0);
   test_rt_free(&rt);
@@ -29,9 +29,9 @@ Test(pin, sub_pins_collected_shallow) {
   pl_thread* t = rt.t;
   size_t base = t->vsp;
   pl_vpush(t, 42);
-  pl_val inner = pl_pin(t, &t->vstack[base]);
+  pl_val inner = pl_pin(t, t->vstack[base]);
   pl_vpush(t, test_app2(t, 0, inner, inner));
-  pl_val outer = pl_pin(t, &t->vstack[base + 1]);
+  pl_val outer = pl_pin(t, t->vstack[base + 1]);
   pl_cell* p = pl_as(PL_TAG_PIN, outer);
   cr_assert_not_null(p);
   cr_assert_eq(pl_pin_npins(p), 1); /* deduplicated, shallow */
@@ -49,7 +49,7 @@ Test(pin, pinning_normalizes) {
   pl_vpush(t, 2);
   pl_vpush(t, test_op66_2(t, ax_s3('A', 'd', 'd'), t->vstack[base],
                           t->vstack[base + 1]));
-  pl_val pinned = pl_pin(t, &t->vstack[base + 2]);
+  pl_val pinned = pl_pin(t, t->vstack[base + 2]);
   cr_assert_eq(pl_pin_body(pl_ptr(pinned)), 3);
   test_rt_free(&rt);
 }
@@ -67,10 +67,10 @@ static void roundtrip_via(pl_store* (*mk)(const char* dir), const char* dir) {
     pl_thread* t = pl_thread_new(h);
     size_t base = t->vsp;
     pl_vpush(t, 42);
-    pl_val inner = pl_pin(t, &t->vstack[base]);
+    pl_val inner = pl_pin(t, t->vstack[base]);
     pl_vpush(t, test_law(t, 2, ax_s2('h', 'i'), 1));
     pl_vpush(t, test_app2(t, 0, inner, t->vstack[base + 1]));
-    pl_val pin = pl_pin(t, &t->vstack[base + 2]);
+    pl_val pin = pl_pin(t, t->vstack[base + 2]);
     memcpy(hash, pl_pin_hash(pin), 32);
     cr_assert(pl_store_put_root(s, hash));
     pl_thread_free(t);
@@ -109,7 +109,7 @@ static void roundtrip_via(pl_store* (*mk)(const char* dir), const char* dir) {
     /* re-pinning the rehydrated body yields the same hash */
     size_t base = t->vsp;
     pl_vpush(t, pl_pin_body(p));
-    pl_val again = pl_pin(t, &t->vstack[base]);
+    pl_val again = pl_pin(t, t->vstack[base]);
     cr_assert_eq(again, pin);
 
     pl_thread_free(t);

@@ -9,13 +9,21 @@
 #include "plan/value.h"
 
 /*
- * Primop descriptor (§9).  Strictness is data: strict_mask bit i forces
- * arg i to WHNF (low to high) before the body runs; deep additionally
- * normalizes arg 0.  Bodies address their args as value-stack slots
+ * Primop descriptor.  Strictness is data: strict_mask bit i forces
+ * arg i to WHNF (low to high) before the body runs; deep_mask bit i
+ * additionally deep-normalizes arg i — through the machine at depth 0,
+ * so effects inside the normalization suspend and block correctly
+ * (coordination ops use this to force payloads before the request
+ * parks).  Bodies address their args as value-stack slots
  * t->vstack[ab + i]: slots survive reserves (the collector rewrites them
  * in place) and remain valid across nested machine runs, which may grow
  * the stack.  Bodies may push F_APPLY/F_SEQ/F_NF frames and return a
  * value that the machine continues to evaluate.
+ *
+ * coord marks a coordination effect: the body only validates the forced
+ * args and returns the request spine [name, args…]; the machine parks
+ * it in t->blocked_on and suspends with PL_RUN_BLOCKED instead of
+ * evaluating the body's result.  The name slot sits at vstack[ab - 1].
  */
 typedef struct pl_opdesc {
   uint64_t opset;     /* 0, 66 or 82 */
@@ -24,7 +32,8 @@ typedef struct pl_opdesc {
                          (op-82 names can exceed the 7-byte mote width) */
   uint8_t argc;
   uint32_t strict_mask;
-  bool deep;
+  uint32_t deep_mask;
+  bool coord;
   pl_val (*body)(pl_thread* t, size_t ab);
 } pl_opdesc;
 
@@ -47,7 +56,13 @@ pl_val pl_op82_listen(pl_thread* t, size_t ab);
 pl_val pl_op82_accept(pl_thread* t, size_t ab);
 pl_val pl_op82_read(pl_thread* t, size_t ab);
 pl_val pl_op82_write(pl_thread* t, size_t ab);
-pl_val pl_op82_actor(pl_thread* t, size_t ab);
+
+/* op 82 coordination effects: validate + build the request spine. */
+pl_val pl_op82_spawn(pl_thread* t, size_t ab);
+pl_val pl_op82_send(pl_thread* t, size_t ab);
+pl_val pl_op82_send_caps(pl_thread* t, size_t ab);
+pl_val pl_op82_recv(pl_thread* t, size_t ab);
+pl_val pl_op82_close_handle(pl_thread* t, size_t ab);
 
 /* Frame-push helpers usable from op bodies. */
 static inline void pl_push_apply(pl_thread* t, pl_val x) {

@@ -6,7 +6,7 @@
 
 #include "axsys/arena.h"
 #include "axsys/assume.h"
-#include "axsys/stb_ds.h"
+#include "axsys/ds.h"
 #include "axsys/util.h"
 #include "internal.h"
 #include "plan/build.h"
@@ -65,14 +65,14 @@ bool pl_store_owns(pl_store* s, pl_val v) {
 pl_val pl_store_intern_get(pl_store* s, const uint8_t hash[32]) {
   pl_hash k;
   memcpy(k.b, hash, 32);
-  ptrdiff_t i = hmgeti(s->intern, k);
+  ptrdiff_t i = ax_hmgeti(s->intern, k);
   return i < 0 ? 0 : s->intern[i].value;
 }
 
 void pl_store_intern_put(pl_store* s, const uint8_t hash[32], pl_val pin) {
   pl_hash k;
   memcpy(k.b, hash, 32);
-  hmput(s->intern, k, pin);
+  ax_hmput(s->intern, k, pin);
 }
 
 bool pl_store_backend_put(pl_store* s, const uint8_t hash[32], const uint8_t* b,
@@ -96,7 +96,7 @@ bool pl_store_get_root(pl_store* s, uint8_t hash[32]) {
 bool pl_store_get_code(pl_store* s, const uint8_t hash[32], pl_code** out) {
   pl_hash k;
   memcpy(k.b, hash, 32);
-  ptrdiff_t i = hmgeti(s->code, k);
+  ptrdiff_t i = ax_hmgeti(s->code, k);
   if (i < 0)
     return false;
   *out = s->code[i].value;
@@ -111,18 +111,16 @@ void pl_store_put_code(pl_thread* t, const uint8_t hash[32]) {
     fprintf(stderr, "no compiler set! failing compile\n");
     return;
   }
-  PL_GC_FORBID(t);
   pl_val compiler = pl_store_load(t, s->compiler);
   pl_val fun = pl_store_load(t, hash);
   pl_val res = pl_apply(t, compiler, fun);
-  pl_val pin = pl_pin(t, &res);
+  pl_val pin = pl_pin(t, res);
   pl_cell* p = pl_as(PL_TAG_PIN, pin);
   ax_assume(p, "wack");
   pl_code* code = pl_bytecode_from_val(pl_pin_body(p));
-  PL_GC_ALLOW(t);
   if (code != NULL) {
     memcpy(k.b, hash, 32);
-    hmput(s->code, k, code);
+    ax_hmput(s->code, k, code);
   }
 }
 
@@ -130,7 +128,7 @@ void pl_store_put_compiler(pl_store* s, const uint8_t hash[32]) {
   s->compiler_f = hash[0] ? memcmp(hash, hash + 1, 31) != 0 : true;
   memcpy(s->compiler, hash, 32);
   // moar leaks, TODO: fix
-  hmfree(s->code);
+  ax_hmfree(s->code);
 }
 
 /* ── Store-resident value construction (no GC interaction) ─────────────── */
@@ -227,7 +225,7 @@ void pl_store_free(pl_store* s) {
     return;
   if (s->be.close != NULL)
     s->be.close(s->be.ctx);
-  hmfree(s->intern);
+  ax_hmfree(s->intern);
   ax_arena_destroy(s->region);
   free(s);
 }
@@ -253,7 +251,7 @@ static bool mem_get(void* ctx, const uint8_t hash[32], uint8_t** out_b,
   mem_backend* m = ctx;
   pl_hash k;
   memcpy(k.b, hash, 32);
-  ptrdiff_t i = hmgeti(m->map, k);
+  ptrdiff_t i = ax_hmgeti(m->map, k);
   if (i < 0)
     return false;
   *out_b = malloc(m->map[i].value.n);
@@ -268,12 +266,12 @@ static bool mem_put(void* ctx, const uint8_t hash[32], const uint8_t* b,
   mem_backend* m = ctx;
   pl_hash k;
   memcpy(k.b, hash, 32);
-  if (hmgeti(m->map, k) >= 0)
+  if (ax_hmgeti(m->map, k) >= 0)
     return true;
   uint8_t* copy = malloc(n);
   ax_assume(copy != NULL, "oom");
   memcpy(copy, b, n);
-  hmput(m->map, k, ((typeof(m->map[0].value)){copy, n}));
+  ax_hmput(m->map, k, ((typeof(m->map[0].value)){copy, n}));
   return true;
 }
 
@@ -281,7 +279,7 @@ static bool mem_has(void* ctx, const uint8_t hash[32]) {
   mem_backend* m = ctx;
   pl_hash k;
   memcpy(k.b, hash, 32);
-  return hmgeti(m->map, k) >= 0;
+  return ax_hmgeti(m->map, k) >= 0;
 }
 
 static bool mem_put_root(void* ctx, const uint8_t hash[32]) {
@@ -301,9 +299,9 @@ static bool mem_get_root(void* ctx, uint8_t hash[32]) {
 
 static void mem_close(void* ctx) {
   mem_backend* m = ctx;
-  for (ptrdiff_t i = 0; i < hmlen(m->map); i++)
+  for (ptrdiff_t i = 0; i < ax_hmlen(m->map); i++)
     free(m->map[i].value.b);
-  hmfree(m->map);
+  ax_hmfree(m->map);
   free(m);
 }
 

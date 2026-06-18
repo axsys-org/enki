@@ -44,11 +44,14 @@ typedef enum {
                    /* interpret them (the reference unapp forces)       */
   PL_F_OPENT,      /* op entry: forcing the op's single argument        */
   PL_F_OPARG,      /* primop strict-arg driver                          */
-  PL_F_OPDEEP,     /* primop deep (nf) phase over arg 0                 */
+  PL_F_OPDEEP,     /* primop deep (nf) phase over the deep_mask args    */
   PL_F_NF,         /* normalize the incoming value                      */
   PL_F_NFOBJ,      /* a: object being normalized, k: field index        */
   PL_F_EXEC,       /* a: env, ip: pointer  */
   PL_F_UPD,        /* a: newstyle thunk update */
+  PL_F_TRY,        /* exception barrier (op 66 Try); argbase: vsp mark  */
+  PL_F_JUDGE,      /* forcing a law-body chain node; argbase: hbase     */
+  PL_F_NIL,        /* RETURN planNil(v): 1 if the value is 0, else 0    */
 } pl_frame_kind;
 
 /** TODO make union */
@@ -79,6 +82,23 @@ struct pl_thread {
   const char* exn_msg; /* non-NULL: runtime error, not catchable by Try */
   jmp_buf* handler;
 
+  /*
+   * Suspension state (driven by pl_thread_run in eval.c).
+   * A suspended thread is a complete continuation: value stack, frame
+   * stack, and these slots.  All pl_val fields here are root slots.
+   */
+  uint64_t fuel;         /* reductions remaining this quantum */
+  uint32_t centry_depth; /* >0: native frames below us — suspension deferred */
+  bool suspendable;      /* true only while pl_thread_run drives this thread */
+  bool pending_yield;    /* fuel hit 0 inside a C-entry region */
+  uint8_t resume_kind;   /* pl_resume_kind */
+  uint8_t status;        /* last pl_run_status */
+  size_t base_vsp;       /* entry watermarks: EXN unwinds to these; */
+  size_t base_fsp;       /* the run is DONE when fsp returns to base_fsp */
+  pl_val resume_val;     /* root: value to EVAL or RETURN on re-entry */
+  pl_val blocked_on;     /* root: effect request while blocked */
+  pl_val result;         /* root: final value after PL_RUN_DONE */
+
   /* The reference vMode: op 82 (rplan I/O) is callable only in RPLAN
    * mode (REPL / snapshot execution), never while assembling modules. */
   bool rplan_f;
@@ -86,6 +106,11 @@ struct pl_thread {
   /* When non-NULL, ReadFile resolves its argument relative to this root and
    * refuses paths whose canonical target escapes it. */
   const char* rplan_file_root_c;
+
+  /* Opaque embedder slot (the actor runtime stores its er_actor here so
+   * the pl_io_hook can attribute effects); never touched by the plan
+   * layer. */
+  void* host;
 };
 
 pl_heap* pl_heap_new(size_t cells, pl_store* store);
