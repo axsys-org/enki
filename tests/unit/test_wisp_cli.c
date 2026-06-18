@@ -187,19 +187,18 @@ Test(wisp_cli, read_file_honors_file_root) {
   (void)snprintf(path, sizeof(path), "%s/snap/root.plan", dir);
   f = fopen(path, "w");
   cr_assert_not_null(f);
-  fprintf(f,
-          "(#bind Output\n"
-          "  (#pin (#law \"Output\" (Output x) ((#pin \"R\") (\"Output\" "
-          "x)))))\n"
-          "(#bind ReadFile\n"
-          "  (#pin (#law \"ReadFile\" (ReadFile x) ((#pin \"R\") "
-          "(\"ReadFile\" x)))))\n"
-          "(#bind inside\n"
-          "  (#pin (#law \"inside\" (inside args) ((#pin \"R\") (\"Output\" "
-          "((#pin \"R\") (\"ReadFile\" \"allowed.txt\")))))))\n"
-          "(#bind escape\n"
-          "  (#pin (#law \"escape\" (escape args) ((#pin \"R\") (\"Output\" "
-          "((#pin \"R\") (\"ReadFile\" \"../secret.txt\")))))))\n");
+  fprintf(f, "(#bind Output\n"
+             "  (#pin (#law \"Output\" (Output x) ((#pin \"R\") (\"Output\" "
+             "x)))))\n"
+             "(#bind ReadFile\n"
+             "  (#pin (#law \"ReadFile\" (ReadFile x) ((#pin \"R\") "
+             "(\"ReadFile\" x)))))\n"
+             "(#bind inside\n"
+             "  (#pin (#law \"inside\" (inside args) ((#pin \"R\") (\"Output\" "
+             "((#pin \"R\") (\"ReadFile\" \"allowed.txt\")))))))\n"
+             "(#bind escape\n"
+             "  (#pin (#law \"escape\" (escape args) ((#pin \"R\") (\"Output\" "
+             "((#pin \"R\") (\"ReadFile\" \"../secret.txt\")))))))\n");
   fclose(f);
 
   char cmd[1024];
@@ -273,6 +272,5 @@ Test(wisp_cli, boot_reset_imports_stdlib_primitives) {
   cr_assert_not(file_contains(query_path, "(\"ERROR\""),
                 "booted REPL returned an error; see %s", query_path);
   cr_assert(file_contains(query_path, "\n3\n"),
-            "booted REPL did not evaluate (Add 1 2) to 3; see %s",
-            query_path);
+            "booted REPL did not evaluate (Add 1 2) to 3; see %s", query_path);
 }

@@ -8,6 +8,7 @@
   gmp,
   lmdb,
   openssl,
+  binutils,
   compiler,
   cc,
   extraNativeBuildInputs ? [],
@@ -26,6 +27,7 @@ stdenv.mkDerivation {
       gnumake
       pkg-config
       compiler
+      binutils
     ]
     ++ extraNativeBuildInputs;
 
@@ -38,7 +40,7 @@ stdenv.mkDerivation {
 
   dontConfigure = true;
   enableParallelBuilding = true;
-  hardeningDisable = lib.optional (buildType == "debug") "fortify";
+  hardeningDisable = ["fortify" "fortify3"];
 
   buildPhase = ''
     runHook preBuild

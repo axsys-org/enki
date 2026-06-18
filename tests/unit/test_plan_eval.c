@@ -312,8 +312,8 @@ Test(ops, equal_deep_normalizes_second_arg) {
   size_t base = t->vsp;
   pl_vpush(t, test_app1_thunk_to(t, 42));
   pl_vpush(t, test_app1_thunk_to(t, 42));
-  cr_assert_eq(test_op66_2(t, ax_s5('E', 'q', 'u', 'a', 'l'),
-                           t->vstack[base], t->vstack[base + 1]),
+  cr_assert_eq(test_op66_2(t, ax_s5('E', 'q', 'u', 'a', 'l'), t->vstack[base],
+                           t->vstack[base + 1]),
                1);
   test_rt_free(&rt);
 }
