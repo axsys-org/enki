@@ -32,6 +32,7 @@
 #define ax_s8(a, b, c, d, e, f, g, h)                                          \
   ((ax_s4(e, f, g, h) << 32) | ax_s4(a, b, c, d))
 
+#ifdef __linux__
 __attribute__((weak)) void __lsan_ignore_object(const void* p);
 
 static inline void ax_lsan_ignore(const void* p) {
@@ -39,4 +40,10 @@ static inline void ax_lsan_ignore(const void* p) {
     __lsan_ignore_object(p);
   }
 }
+#else
+static inline void ax_lsan_ignore(const void* p) {
+  (void)p;
+}
+#endif
+
 #endif
