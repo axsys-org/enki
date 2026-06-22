@@ -345,6 +345,8 @@ eval_thke: {
     }
     argc--;
     goto judge;
+  case PL_BAN_PRIM:
+    ax_abort("EVAL: no prim yet");
   case PL_BAN_SLOW:
   default:
     ax_abort("EVAL: bad bane");

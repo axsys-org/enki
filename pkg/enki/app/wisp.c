@@ -25,7 +25,8 @@
  */
 
 #define BOOT_HEAP_CELLS        ((size_t)1 << 26) /* 32 MiB per semispace, grows */
-// ./build/release/bin/wisp --file-root ../reaver/src ../reaver/src/plan  main  35.43s user 0.55s system 99% cpu 36.136 total
+// ./build/release/bin/wisp --file-root ../reaver/src ../reaver/src/plan
+// main  35.43s user 0.55s system 99% cpu 36.136 total
 #define BOOT_DEFAULT_FILE_ROOT "./reaver/src"
 
 typedef struct boot_module {
@@ -68,6 +69,10 @@ static void boot_roots(pl_root_visit visit, void* gc_ctx, void* src_ctx) {
 static void boot_env_root_push(boot_ctx* ctx, en_env_entry* env) {
   ax_assertf(ctx->tmp_env_s < BOOT_TMP_ENV_CAP, "env root overflow");
   ctx->tmp_env_v[ctx->tmp_env_s++] = env;
+}
+
+static void boot_collect_after_invocation(boot_ctx* ctx) {
+  pl_gc_collect_now(ctx->w->t);
 }
 
 /* ── Environment list helpers (host-side, allocator-backed) ────────────── */
@@ -254,8 +259,10 @@ static bool boot_process_form(boot_ctx* ctx, pl_val form) {
 
   en_wisp* w = ctx->w;
   pl_val exp = en_wisp_macroexpand(w, form);
-  if (exp == 0)
+  if (exp == 0) {
+    boot_collect_after_invocation(ctx);
     return true;
+  }
   pl_val out = en_wisp_thunk(w, exp);
   if (ctx->emit_top_level_f) {
     /* the reference prints `force (showVal out)`: deep-force first */
@@ -266,6 +273,7 @@ static bool boot_process_form(boot_ctx* ctx, pl_val form) {
     fprintf(stderr, "%s\n", out_c);
     ax_free(ctx->loc_a, out_c);
   }
+  boot_collect_after_invocation(ctx);
   return true;
 }
 
@@ -392,6 +400,8 @@ static bool boot_run_function(boot_ctx* ctx, pl_val fun, int argc,
                               char** argv) {
   en_wisp* w = ctx->w;
   en_env_entry* old_env = w->env;
+  size_t env_mark = ctx->tmp_env_s;
+  boot_env_root_push(ctx, old_env);
   w->env = NULL;
   w->t->rplan_f = true; /* runRepl runs the program in RPLAN mode */
 
@@ -406,6 +416,7 @@ static bool boot_run_function(boot_ctx* ctx, pl_val fun, int argc,
   er_drive_status ds = er_scheduler_drive(w->sched, w->self);
   en_root_pop(w, mark);
   w->env = old_env;
+  ctx->tmp_env_s = env_mark;
   if (ds != ER_DRIVE_DONE) {
     fprintf(stderr, "wisp: runtime error: %s\n",
             ds == ER_DRIVE_DEADLOCK ? "deadlock: every actor is blocked on Recv"
@@ -413,6 +424,7 @@ static bool boot_run_function(boot_ctx* ctx, pl_val fun, int argc,
                                     : "PLAN exception");
     return false;
   }
+  boot_collect_after_invocation(ctx);
   return true;
 }
 

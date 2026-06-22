@@ -42,42 +42,42 @@ static void ax_wait_for_tracy(double tim_df) {
 
 #define AX_PROFILE_ZONE(name)            AX_PROFILE_ZONE_IMPL(name, __LINE__)
 #define AX_PROFILE_ZONE_BEGIN(ctx, name) TracyCZoneN(ctx, name, 1)
-#define AX_PROFILE_ZONE_BEGIN_ASSIGN(ctx, name)                               \
-  do {                                                                        \
-    static const struct ___tracy_source_location_data                          \
-        AX_PROFILE_JOIN(ax_tracy_source_, __LINE__) = {                        \
-            name, __func__, TracyFile, (uint32_t)TracyLine, 0};                \
+#define AX_PROFILE_ZONE_BEGIN_ASSIGN(ctx, name)                                \
+  do {                                                                         \
+    static const struct ___tracy_source_location_data AX_PROFILE_JOIN(         \
+        ax_tracy_source_, __LINE__) = {name, __func__, TracyFile,              \
+                                       (uint32_t)TracyLine, 0};                \
     (ctx) = ___tracy_emit_zone_begin_callstack(                                \
-        &AX_PROFILE_JOIN(ax_tracy_source_, __LINE__), TRACY_CALLSTACK, 1);      \
+        &AX_PROFILE_JOIN(ax_tracy_source_, __LINE__), TRACY_CALLSTACK, 1);     \
   } while (0)
-#define AX_PROFILE_ZONE_BEGIN_ALLOC_NAME(ctx, name, size)                     \
-  do {                                                                        \
-    uint64_t AX_PROFILE_JOIN(ax_tracy_srcloc_, __LINE__) =                    \
-        ___tracy_alloc_srcloc_name(                                           \
-            (uint32_t)TracyLine, TracyFile, strlen(TracyFile), __func__,       \
-            strlen(__func__), name, size, 0);                                  \
+#define AX_PROFILE_ZONE_BEGIN_ALLOC_NAME(ctx, name, size)                      \
+  do {                                                                         \
+    uint64_t AX_PROFILE_JOIN(ax_tracy_srcloc_, __LINE__) =                     \
+        ___tracy_alloc_srcloc_name((uint32_t)TracyLine, TracyFile,             \
+                                   strlen(TracyFile), __func__,                \
+                                   strlen(__func__), name, size, 0);           \
     (ctx) = ___tracy_emit_zone_begin_alloc_callstack(                          \
-        AX_PROFILE_JOIN(ax_tracy_srcloc_, __LINE__), TRACY_CALLSTACK, 1);       \
+        AX_PROFILE_JOIN(ax_tracy_srcloc_, __LINE__), TRACY_CALLSTACK, 1);      \
   } while (0)
-#define AX_PROFILE_ZONE_END(ctx)         TracyCZoneEnd(ctx)
+#define AX_PROFILE_ZONE_END(ctx)              TracyCZoneEnd(ctx)
 #define AX_PROFILE_ZONE_NAME(ctx, name, size) TracyCZoneName(ctx, name, size)
-#define AX_PROFILE_THREAD(name)          TracyCSetThreadName(name)
-#define AX_PROFILE_FRAME(name)           TracyCFrameMarkNamed(name)
-#define AX_PROFILE_PLOT_I(name, value)   TracyCPlotI(name, value)
+#define AX_PROFILE_THREAD(name)               TracyCSetThreadName(name)
+#define AX_PROFILE_FRAME(name)                TracyCFrameMarkNamed(name)
+#define AX_PROFILE_PLOT_I(name, value)        TracyCPlotI(name, value)
 
 #else
 
 typedef const void* ax_profile_zone_ctx;
 
-#define AX_PROFILE_ZONE(name)            ((void)0)
-#define AX_PROFILE_ZONE_BEGIN(ctx, name) ((void)0)
-#define AX_PROFILE_ZONE_BEGIN_ASSIGN(ctx, name) ((void)0)
+#define AX_PROFILE_ZONE(name)                             ((void)0)
+#define AX_PROFILE_ZONE_BEGIN(ctx, name)                  ((void)0)
+#define AX_PROFILE_ZONE_BEGIN_ASSIGN(ctx, name)           ((void)0)
 #define AX_PROFILE_ZONE_BEGIN_ALLOC_NAME(ctx, name, size) ((void)0)
-#define AX_PROFILE_ZONE_END(ctx)         ((void)0)
-#define AX_PROFILE_ZONE_NAME(ctx, name, size) ((void)0)
-#define AX_PROFILE_THREAD(name)          ((void)0)
-#define AX_PROFILE_FRAME(name)           ((void)0)
-#define AX_PROFILE_PLOT_I(name, value)   ((void)0)
+#define AX_PROFILE_ZONE_END(ctx)                          ((void)0)
+#define AX_PROFILE_ZONE_NAME(ctx, name, size)             ((void)0)
+#define AX_PROFILE_THREAD(name)                           ((void)0)
+#define AX_PROFILE_FRAME(name)                            ((void)0)
+#define AX_PROFILE_PLOT_I(name, value)                    ((void)0)
 
 static void ax_wait_for_tracy(double tim_df) {
   (void)tim_df;
