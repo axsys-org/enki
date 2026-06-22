@@ -2,7 +2,8 @@ BUILD_TYPE ?= debug
 PROFILE ?=
 CC ?= cc
 PREFIX ?= /usr/local
-BUILD_DIR ?= build/$(BUILD_TYPE)
+BUILD_PROFILE_SUFFIX := $(if $(PROFILE),-$(PROFILE),$(if $(filter profile,$(BUILD_TYPE)),-plain,))
+BUILD_DIR ?= build/$(BUILD_TYPE)$(BUILD_PROFILE_SUFFIX)
 AR ?= ar
 
 VALID_BUILD_TYPES := debug release asan ubsan tsan coverage profile

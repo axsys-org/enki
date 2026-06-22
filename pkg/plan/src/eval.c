@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <assert.h>
 #include <inttypes.h>
+#include <string.h>
 
 #include "axsys/assume.h"
 #include "axsys/allocator.h"
@@ -136,6 +137,109 @@ static void pl_law_code(pl_store* s, pl_val law, pl_code** out) {
   pl_store_get_code(s, pl_pin_hash_bytes(p), out);
 }
 
+/* ── Tracy law attribution ─────────────────────────────────────────────── */
+
+#ifdef TRACY_ENABLE
+static size_t pl_profile_append(char* buf, size_t pos, size_t cap,
+                                const char* s) {
+  if (pos >= cap)
+    return pos;
+  size_t n = strlen(s);
+  size_t avail = cap - pos - 1;
+  if (n > avail)
+    n = avail;
+  memcpy(buf + pos, s, n);
+  pos += n;
+  buf[pos] = '\0';
+  return pos;
+}
+
+static size_t pl_profile_law_name(pl_cell* lp, char* buf, size_t cap) {
+  size_t pos = pl_profile_append(buf, 0, cap, "law:");
+  pl_val name = pl_law_name(lp);
+  bool printable = pl_is_nat(name);
+  size_t n = printable ? pl_nat_byte_len(name) : 0;
+  if (n == 0)
+    printable = false;
+  for (size_t i = 0; printable && i < n; i++) {
+    uint8_t b = pl_nat_byte_at(name, i);
+    if (b < 0x20 || b > 0x7e)
+      printable = false;
+  }
+
+  if (printable) {
+    size_t room = cap > pos + 24 ? cap - pos - 24 : 0;
+    for (size_t i = 0; i < n && i < room; i++)
+      buf[pos++] = (char)pl_nat_byte_at(name, i);
+    buf[pos] = '\0';
+    if (n > room)
+      pos = pl_profile_append(buf, pos, cap, "...");
+  } else {
+    pos = pl_profile_append(buf, pos, cap, "<anon>");
+  }
+
+  int wrote = snprintf(buf + pos, cap - pos, "/%" PRIu64, pl_law_arity(lp));
+  if (wrote > 0)
+    pos += (size_t)wrote < cap - pos ? (size_t)wrote : cap - pos - 1;
+  return pos;
+}
+
+static void pl_profile_frame_begin(pl_frame* fr) {
+  char name[160];
+  pl_cell* lp = pl_lawp(fr->a);
+  size_t name_s = pl_profile_law_name(lp, name, sizeof(name));
+  AX_PROFILE_ZONE_BEGIN_ALLOC_NAME(fr->profile_ctx, name, name_s);
+  fr->profile_live = true;
+}
+
+static void pl_profile_frame_end(pl_frame* fr) {
+  if (fr->kind == PL_F_PROF && fr->profile_live) {
+    AX_PROFILE_ZONE_END(fr->profile_ctx);
+    fr->profile_live = false;
+  }
+}
+
+static void pl_profile_law_push(pl_thread* t, pl_val head) {
+  pl_frame* fr = pl_fpush(t);
+  fr->kind = PL_F_PROF;
+  fr->a = head;
+  pl_profile_frame_begin(fr);
+}
+
+static void pl_profile_close_above(pl_thread* t, size_t base) {
+  for (size_t i = t->fsp; i > base; i--)
+    pl_profile_frame_end(&t->fstack[i - 1]);
+}
+
+static void pl_profile_reopen_above(pl_thread* t, size_t base) {
+  for (size_t i = base; i < t->fsp; i++) {
+    pl_frame* fr = &t->fstack[i];
+    if (fr->kind == PL_F_PROF && !fr->profile_live)
+      pl_profile_frame_begin(fr);
+  }
+}
+
+#else
+static void pl_profile_frame_end(pl_frame* fr) {
+  (void)fr;
+}
+
+static void pl_profile_law_push(pl_thread* t, pl_val head) {
+  (void)t;
+  (void)head;
+}
+
+static void pl_profile_close_above(pl_thread* t, size_t base) {
+  (void)t;
+  (void)base;
+}
+
+static void pl_profile_reopen_above(pl_thread* t, size_t base) {
+  (void)t;
+  (void)base;
+}
+#endif
+
 /* ── Suspension slow path ──────────────────────────────────────────────── */
 
 /*
@@ -190,6 +294,7 @@ eval:
   if (ax_unlikely(--t->fuel == 0) && pl_yield_now(t)) {
     t->resume_kind = PL_RES_EVAL;
     t->resume_val = v;
+    pl_profile_close_above(t, base);
     return PL_RUN_YIELDED;
   }
   if (pl_is_whnf(v))
@@ -492,12 +597,17 @@ ret:
     }
 
   judge: {
+    pl_cell* lp = pl_lawp(t->vstack[hbase]);
+    ax_assume(pl_law_arity(lp) == argc, "JUDGE: arity mismatch");
+    pl_profile_law_push(t, t->vstack[hbase]);
     if (pl_hook != NULL) {
       pl_val out;
       t->centry_depth++; /* jets are C-entry regions */
       bool handled = pl_hook(t, hbase, argc, &out);
       t->centry_depth--;
       if (handled) {
+        pl_profile_frame_end(&t->fstack[t->fsp - 1]);
+        t->fsp--;
         t->vsp = hbase;
         v = out;
         goto eval;
@@ -508,8 +618,6 @@ ret:
      * chain, then build the env knot in one no-collect window.
      * Layout on the value stack: [head, args… | cursor, bind-exprs…].
      */
-    pl_cell* lp = pl_lawp(t->vstack[hbase]);
-    ax_assume(pl_law_arity(lp) == argc, "JUDGE: arity mismatch");
     pl_vpush(t, pl_law_body(lp)); /* the chain cursor slot */
     jbase = hbase;
     jargc = argc;
@@ -621,6 +729,11 @@ ret:
   case PL_F_NIL:
     /* planNil of the conditionally-forced value (op 66 Nor) */
     v = v == 0 ? 1 : 0;
+    t->fsp--;
+    goto ret;
+
+  case PL_F_PROF:
+    pl_profile_frame_end(fr);
     t->fsp--;
     goto ret;
 
@@ -763,6 +876,7 @@ op_body:
         pl_raise_msg(t, "actor op with no executor");
       }
       t->blocked_on = r;
+      pl_profile_close_above(t, base);
       return PL_RUN_BLOCKED;
     }
     v = r;
@@ -808,6 +922,7 @@ static pl_run_status pl_run_caught(pl_thread* t, pl_val v0, size_t base,
         i--;
       if (i > base) {
         /* unwind to the barrier and deliver (1 exn) */
+        pl_profile_close_above(t, i);
         t->fsp = i - 1;
         t->vsp = t->fstack[i - 1].argbase;
         pl_gc_reserve(t, PL_APP_CELLS(1));
@@ -820,6 +935,7 @@ static pl_run_status pl_run_caught(pl_thread* t, pl_val v0, size_t base,
       }
     }
     /* uncaught within this entry: unwind it and propagate */
+    pl_profile_close_above(t, base);
     t->vsp = c.vsp;
     t->fsp = c.fsp;
     if (t->exn_msg != NULL)
@@ -910,9 +1026,11 @@ pl_run_status pl_thread_run(pl_thread* t, uint64_t fuel) {
   pl_run_status s;
   switch (t->resume_kind) {
   case PL_RES_EVAL:
+    pl_profile_reopen_above(t, t->base_fsp);
     s = pl_run_caught(t, t->resume_val, t->base_fsp, false);
     break;
   case PL_RES_RETURN:
+    pl_profile_reopen_above(t, t->base_fsp);
     s = pl_run_caught(t, t->resume_val, t->base_fsp, true);
     break;
   default:
