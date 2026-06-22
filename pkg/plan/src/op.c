@@ -763,6 +763,7 @@ static pl_val op_save(pl_thread* t, size_t ab) {
   fprintf(f, "@%s\n", b58);
   if (fclose(f) != 0)
     pl_raise_msg(t, "Save: short write");
+  pl_gc_collect_now(t);
   return 0;
 }
 
