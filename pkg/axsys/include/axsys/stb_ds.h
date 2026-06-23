@@ -920,7 +920,11 @@ typedef struct {
 static size_t stbds_hash_seed = 0x31415926;
 
 void stbds_rand_seed(size_t seed) {
+#if defined(__GNUC__) || defined(__clang__)
+  __atomic_store_n(&stbds_hash_seed, seed, __ATOMIC_RELAXED);
+#else
   stbds_hash_seed = seed;
+#endif
 }
 
 #define stbds_load_32_or_64(var, temp, v32, v64_hi, v64_lo)                    \
@@ -928,6 +932,25 @@ void stbds_rand_seed(size_t seed) {
   temp >>= 16,                              /* discard if 32-bit */            \
       var = v64_hi, var <<= 16, var <<= 16, /* discard if 32-bit */            \
       var ^= temp ^ v32
+
+static size_t stbds_next_hash_seed(void) {
+  size_t a, b, temp;
+  stbds_load_32_or_64(a, temp, 2147001325, 0x27bb2ee6, 0x87b0b0fd);
+  stbds_load_32_or_64(b, temp, 715136305, 0, 0xb504f32d);
+#if defined(__GNUC__) || defined(__clang__)
+  size_t seed = __atomic_load_n(&stbds_hash_seed, __ATOMIC_RELAXED);
+  for (;;) {
+    size_t next = seed * a + b;
+    if (__atomic_compare_exchange_n(&stbds_hash_seed, &seed, next, 0,
+                                    __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+      return seed;
+  }
+#else
+  size_t seed = stbds_hash_seed;
+  stbds_hash_seed = stbds_hash_seed * a + b;
+  return seed;
+#endif
+}
 
 #define STBDS_SIZE_T_BITS ((sizeof(size_t)) * 8)
 
@@ -1031,15 +1054,8 @@ static stbds_hash_index* stbds_make_hash_index(size_t slot_count,
     // doesn't do any hashing
     t->seed = ot->seed;
   } else {
-    size_t a, b, temp;
     memset(&t->string, 0, sizeof(t->string));
-    t->seed = stbds_hash_seed;
-    // LCG
-    // in 32-bit, a =          2147001325   b =  715136305
-    // in 64-bit, a = 2862933555777941757   b = 3037000493
-    stbds_load_32_or_64(a, temp, 2147001325, 0x27bb2ee6, 0x87b0b0fd);
-    stbds_load_32_or_64(b, temp, 715136305, 0, 0xb504f32d);
-    stbds_hash_seed = stbds_hash_seed * a + b;
+    t->seed = stbds_next_hash_seed();
   }
 
   {

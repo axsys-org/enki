@@ -146,8 +146,9 @@
         /*
         no TSAN for macOS - threading unused RN and criterion hates it
         */
-        testBuildTypes = ["debug" "asan" "ubsan"];
-        linuxTestBuildTypes = ["tsan"];
+        testBuildTypes = ["debug" "asan" "ubsan" "tsan"];
+        # linuxTestBuildTypes = ["tsan"];
+        linuxTestBuildTypes = [];
         testChecks =
           lib.listToAttrs
           (lib.concatMap

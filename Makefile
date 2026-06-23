@@ -111,7 +111,7 @@ LIB_ENKI := $(BUILD_DIR)/lib/libenki.a
 LIBS := $(LIB_AXSYS) $(LIB_PLAN) $(LIB_ENKI)
 
 UNAME_S := $(shell uname -s 2>/dev/null)
-ifeq ($(BUILD_TYPE)-$(UNAME_S),tsan-Darwin)
+ifeq ($(BUILD_TYPE),tsan)
 ACTIVE_UNIT_BINS := $(TSAN_UNIT_BINS)
 else
 ACTIVE_UNIT_BINS := $(UNIT_BINS)
@@ -224,11 +224,7 @@ test: check-layering test-unit test-property
 
 test-unit: $(ACTIVE_UNIT_BINS) $(APP_BINS)
 	@set -eu; for test_bin in $(ACTIVE_UNIT_BINS); do \
-		if [ "$(BUILD_TYPE)-$(UNAME_S)" = "tsan-Darwin" ]; then \
-			ENKI_WISP_BIN=$(CURDIR)/$(BUILD_DIR)/bin/wisp "$$test_bin"; \
-		else \
-			ENKI_WISP_BIN=$(CURDIR)/$(BUILD_DIR)/bin/wisp "$$test_bin" --jobs 1; \
-		fi; \
+		ENKI_WISP_BIN=$(CURDIR)/$(BUILD_DIR)/bin/wisp "$$test_bin" --jobs 1; \
 	done
 
 test-property: $(PROPERTY_BINS)

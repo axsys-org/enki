@@ -2,12 +2,12 @@
 #define AX_DS_H
 
 /*
- * ax facade over the vendored stb_ds (axsys/stb_ds.h, upstream v0.67,
- * kept byte-identical to upstream).  STBDS_NO_SHORT_NAMES stops the
- * vendor header from spilling unprefixed macros (arrput, hmget, …) into
- * the global namespace; everything callers touch is ax_-prefixed here.
- * Include this header, never axsys/stb_ds.h directly.  Extend the
- * mapping as more of the stb_ds API is needed.
+ * ax facade over the vendored stb_ds (axsys/stb_ds.h, upstream v0.67, with
+ * local patches).  STBDS_NO_SHORT_NAMES stops the vendor header from spilling
+ * unprefixed macros (arrput, hmget, …) into the global namespace; everything
+ * callers touch is ax_-prefixed here. Include this header, never
+ * axsys/stb_ds.h directly. Extend the mapping as more of the stb_ds API is
+ * needed.
  */
 
 #define STBDS_NO_SHORT_NAMES

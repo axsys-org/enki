@@ -52,7 +52,7 @@ void pl_store_lock(pl_store* s) {
 
 bool pl_store_trylock(pl_store* s) {
   int rc = pthread_mutex_trylock(&s->mu);
-  if ( !rc ) {
+  if (!rc) {
     return true;
   } else {
     ax_assume(rc == EBUSY, "pthread_mutex_trylock");
@@ -146,7 +146,7 @@ bool pl_store_get_root(pl_store* s, uint8_t hash[32]) {
 }
 
 bool pl_store_get_code(pl_store* s, const uint8_t hash[32], pl_code** out) {
-  if ( !pl_store_trylock(s) ) {
+  if (!pl_store_trylock(s)) {
     return false;
   }
   pl_hash k;
