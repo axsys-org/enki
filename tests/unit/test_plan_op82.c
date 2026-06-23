@@ -1,5 +1,12 @@
 #include <criterion/criterion.h>
 
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
 #include "test_plan.h"
 
 /*
@@ -57,6 +64,33 @@ static pl_run_status test_run(pl_thread* t) {
     cr_assert_lt(++quanta, 1 << 20, "runaway resume loop");
   } while (s == PL_RUN_YIELDED);
   return s;
+}
+
+static pl_val test_op82_write_file(pl_thread* t, const char* path,
+                                   const uint8_t* bytes, size_t n) {
+  size_t base = t->vsp;
+  pl_vpush(t, pl_nat_from_bytes(t, (const uint8_t*)"WriteFile", 9));
+  pl_vpush(t, pl_nat_from_bytes(t, (const uint8_t*)path, strlen(path)));
+  pl_vpush(t, pl_nat_from_bytes(t, bytes, n));
+  pl_val args[2] = {t->vstack[base + 1], t->vstack[base + 2]};
+  pl_thread_start(t, test_op82_thunk(t, t->vstack[base], 2, args));
+  cr_assert_eq(test_run(t), PL_RUN_DONE);
+  pl_val result = pl_thread_result(t);
+  t->vsp = base;
+  return result;
+}
+
+static bool test_file_eq(const char* path, const char* expected) {
+  FILE* f = fopen(path, "rb");
+  cr_assert_not_null(f, "failed to open `%s`", path);
+  for (size_t i = 0; expected[i] != '\0'; i++)
+    if (fgetc(f) != (unsigned char)expected[i]) {
+      fclose(f);
+      return false;
+    }
+  int ch = fgetc(f);
+  fclose(f);
+  return ch == EOF;
 }
 
 Test(op82, recv_blocks_then_deposit_resumes) {
@@ -130,6 +164,56 @@ Test(op82, send_normalizes_payload_at_initiation) {
   cr_assert_eq(test_run(t), PL_RUN_DONE);
   cr_assert_eq(pl_thread_result(t), 0);
   t->vsp = base;
+  test_rt_free(&rt);
+}
+
+Test(op82, write_file_honors_file_root) {
+  char dir[] = "/tmp/enki-write-root-XXXXXX";
+  cr_assert_not_null(mkdtemp(dir), "failed to make temp dir");
+
+  char root[512], inside[512], secret[512], link[512];
+  int s = snprintf(root, sizeof(root), "%s/files", dir);
+  cr_assert(s >= 0 && (size_t)s < sizeof(root));
+  cr_assert_eq(mkdir(root, 0700), 0);
+  s = snprintf(inside, sizeof(inside), "%s/out.txt", root);
+  cr_assert(s >= 0 && (size_t)s < sizeof(inside));
+  s = snprintf(secret, sizeof(secret), "%s/secret.txt", dir);
+  cr_assert(s >= 0 && (size_t)s < sizeof(secret));
+  s = snprintf(link, sizeof(link), "%s/link.txt", root);
+  cr_assert(s >= 0 && (size_t)s < sizeof(link));
+
+  FILE* f = fopen(inside, "wb");
+  cr_assert_not_null(f);
+  fputs("old", f);
+  fclose(f);
+  f = fopen(secret, "wb");
+  cr_assert_not_null(f);
+  fputs("secret", f);
+  fclose(f);
+  cr_assert_eq(symlink(secret, link), 0);
+
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  t->rplan_f = true;
+  t->rplan_file_root_c = root;
+
+  static const uint8_t inside_bytes[] = "inside-ok\001";
+  cr_assert_eq(test_op82_write_file(t, "out.txt", inside_bytes,
+                                    sizeof(inside_bytes) - 1),
+               1);
+  cr_assert(test_file_eq(inside, "inside-ok"));
+
+  static const uint8_t leak_bytes[] = "leaked\001";
+  cr_assert_eq(test_op82_write_file(t, "../secret.txt", leak_bytes,
+                                    sizeof(leak_bytes) - 1),
+               0);
+  cr_assert(test_file_eq(secret, "secret"));
+
+  cr_assert_eq(
+      test_op82_write_file(t, "link.txt", leak_bytes, sizeof(leak_bytes) - 1),
+      0);
+  cr_assert(test_file_eq(secret, "secret"));
+
   test_rt_free(&rt);
 }
 

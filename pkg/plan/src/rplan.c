@@ -1,5 +1,6 @@
 #include <errno.h>
 #include <fcntl.h>
+#include <libgen.h>
 #include <netinet/in.h>
 #include <stdlib.h>
 #include <string.h>
@@ -148,6 +149,81 @@ static bool rp_resolve_read_path(pl_thread* t, const char* arg_path,
   return true;
 }
 
+static bool rp_split_write_path(const char* arg_path, char** out_dir,
+                                char** out_base) {
+  char* dir_buf = rp_strdup(arg_path);
+  char* base_buf = rp_strdup(arg_path);
+  const char* dir_part = dirname(dir_buf);
+  const char* base_part = basename(base_buf);
+  bool ok = base_part[0] != '\0' && strcmp(base_part, ".") != 0 &&
+            strcmp(base_part, "..") != 0;
+  if (ok) {
+    *out_dir = rp_strdup(dir_part);
+    *out_base = rp_strdup(base_part);
+  }
+  free(dir_buf);
+  free(base_buf);
+  return ok;
+}
+
+static bool rp_resolve_write_path(pl_thread* t, const char* arg_path,
+                                  char** out_path) {
+  char* dir_path = NULL;
+  char* base_path = NULL;
+  char* resolved_dir = NULL;
+  char* candidate = NULL;
+  char* resolved_target = NULL;
+  char* root = NULL;
+  bool res = false;
+
+  if (!rp_split_write_path(arg_path, &dir_path, &base_path))
+    goto cleanup;
+
+  if (!rp_resolve_read_path(t, dir_path, &resolved_dir))
+    goto cleanup;
+
+  candidate = rp_join_path(resolved_dir, base_path);
+  if (t->rplan_file_root_c == NULL || t->rplan_file_root_c[0] == '\0') {
+    *out_path = candidate;
+    candidate = NULL;
+    res = true;
+    goto cleanup;
+  }
+
+  root = realpath(t->rplan_file_root_c, NULL);
+  if (root == NULL)
+    goto cleanup;
+
+  errno = 0;
+  resolved_target = realpath(candidate, NULL);
+  if (resolved_target != NULL) {
+    if (!rp_path_under_root(root, resolved_target))
+      goto cleanup;
+    *out_path = resolved_target;
+    resolved_target = NULL;
+    res = true;
+    goto cleanup;
+  }
+
+  if (errno == ENOENT) {
+    struct stat st;
+    if (lstat(candidate, &st) < 0 && errno == ENOENT) {
+      *out_path = candidate;
+      candidate = NULL;
+      res = true;
+    }
+  }
+
+cleanup:
+  free(dir_path);
+  free(base_path);
+  free(resolved_dir);
+  free(candidate);
+  free(resolved_target);
+  free(root);
+  return res;
+}
+
 /* bytesBar: the data bytes followed by a 0x01 terminator. */
 static pl_val rp_bar(pl_thread* t, const uint8_t* b, size_t n) {
   uint8_t* bar = malloc(n + 1);
@@ -249,6 +325,35 @@ pl_val pl_op82_read_file(pl_thread* t, size_t ab) {
   return out;
 }
 
+pl_val pl_op82_write_file(pl_thread* t, size_t ab) {
+  char* arg_path = rp_nat_path(rp_want_nat(t, ARG(0)));
+  char* path = NULL;
+  bool res = rp_resolve_write_path(t, arg_path, &path);
+  if (!res) {
+    fprintf(stderr, "Failed to canonise %s\n", arg_path);
+    free(arg_path);
+    return 0;
+  }
+  free(arg_path);
+  int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+  if (fd < 0) {
+    perror("WriteFile: open");
+    free(path);
+    return 0;
+  }
+  free(path);
+  size_t n;
+  uint8_t* b = rp_nat_bytes(rp_want_nat(t, ARG(1)), true, &n);
+  int rc = rp_write_all(fd, b, n);
+  free(b);
+  if (rc < 0) {
+    perror("failed to write file");
+    pl_raise_msg(t, "WriteFile: failed to write file");
+  }
+  ax_assume(0 == close(fd), "failed to close file");
+  return 1;
+}
+
 pl_val pl_op82_stamp(pl_thread* t, size_t ab) {
   char* path = rp_nat_path(rp_want_nat(t, ARG(0)));
   struct stat st;
@@ -271,19 +376,25 @@ pl_val pl_op82_now(pl_thread* t, size_t ab) {
 
 pl_val pl_op82_closefd(pl_thread* t, size_t ab) {
   uint64_t h = pl_nat_u64_clamp(rp_want_nat(t, ARG(0)));
-  if (ax_fd_close((size_t)h) < 0)
+  int rc = ax_fd_close((size_t)h);
+  if (rc < 0) {
+    perror("bad handle");
     pl_raise_msg(t, "CloseFd: bad handle");
+  }
   return 0;
 }
 
 pl_val pl_op82_listen(pl_thread* t, size_t ab) {
   uint64_t port = pl_nat_u64_clamp(rp_want_nat(t, ARG(0)));
   int fd = socket(AF_INET, SOCK_STREAM, 0);
-  if (fd < 0)
+  if (fd < 0) {
+    perror("socket failed");
     pl_raise_msg(t, "Listen: socket failed");
+  }
   int yes = 1;
   if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes)) < 0) {
     close(fd);
+    perror("setsockopt failed");
     pl_raise_msg(t, "Listen: setsockopt failed");
   }
   struct sockaddr_in addr = {0};
@@ -293,6 +404,7 @@ pl_val pl_op82_listen(pl_thread* t, size_t ab) {
   if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0 ||
       listen(fd, 128) < 0) {
     close(fd);
+    perror("bind/listen failed");
     pl_raise_msg(t, "Listen: bind/listen failed");
   }
   size_t h = ax_fd_add(fd);
@@ -358,8 +470,6 @@ pl_val pl_op82_write(pl_thread* t, size_t ab) {
   free(b);
   if (rc < 0)
     pl_raise_msg(t, "Write: write failed");
-  /* the reference closes the socket after a write */
-  (void)ax_fd_close((size_t)h);
   return 0;
 }
 

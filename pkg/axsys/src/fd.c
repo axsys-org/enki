@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 #include <unistd.h>
+#include <errno.h>
 
 ax_fd_table ax_global_fd_table = {
     .next = 3,
@@ -40,11 +41,15 @@ int ax_fd_get(size_t hdl) {
 }
 
 int ax_fd_close(size_t hdl) {
-  if (hdl >= AX_FD_MAX)
+  if (hdl >= AX_FD_MAX) {
+    errno = EMFILE;
     return -1;
+  }
   ax_fd_slot* slot = &ax_global_fd_table.slots[hdl];
-  if (!slot->live)
+  if (!slot->live) {
+    errno = EBADF;
     return -1;
+  }
   int rc = close(slot->fd);
   slot->fd = -1;
   slot->refs = 0;
