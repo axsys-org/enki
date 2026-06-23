@@ -229,6 +229,7 @@ static pl_val pin_from_canon(pl_store* s, canon_ctx* c, pl_val body) {
 pl_val pl_pin(pl_thread* t, pl_val v) {
   pl_store* s = pl_heap_store(t->heap);
   ax_assume(s != NULL, "pinning requires a store");
+  pl_store_lock(s);
   /* v is rooted by the machine while it normalizes; afterwards nothing
    * below can collect (serialization buffers are malloc'd and the pin
    * itself is built in the non-moving store region), so the bare val is
@@ -243,6 +244,7 @@ pl_val pl_pin(pl_thread* t, pl_val v) {
   ax_arrfree(c.buf);
   ax_arrfree(c.subpins);
   ax_hmfree(c.idx);
+  pl_store_unlock(s);
   return pin;
 }
 
@@ -340,14 +342,19 @@ static pl_val deser(pl_store* s, deser_ctx* d) {
 
 pl_val pl_store_load(pl_thread* t, const uint8_t hash[32]) {
   pl_store* s = pl_heap_store(t->heap);
+  pl_store_lock(s);
   ax_assume(s != NULL, "store_load requires a store");
   pl_val hit = pl_store_intern_get(s, hash);
-  if (hit != 0)
+  if (hit != 0) {
+    pl_store_unlock(s);
     return hit;
+  }
   uint8_t* bytes;
   size_t n;
-  if (!pl_store_backend_get(s, hash, &bytes, &n))
+  if (!pl_store_backend_get(s, hash, &bytes, &n)) {
+    pl_store_unlock(s);
     pl_raise_msgf(t, "store_load: missing pin");
+  }
   deser_ctx d = {.b = bytes, .n = n, .t = t};
   uint64_t ver = dget(&d, 1);
   ax_assume(ver == PL_CANON_VERSION, "bad pin version %u", (unsigned)ver);
@@ -366,5 +373,6 @@ pl_val pl_store_load(pl_thread* t, const uint8_t hash[32]) {
   pl_store_intern_put(s, hash, pin);
   ax_arrfree(subs);
   free(bytes);
+  pl_store_unlock(s);
   return pin;
 }
