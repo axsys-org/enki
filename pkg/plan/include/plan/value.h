@@ -54,6 +54,7 @@ typedef enum {
 typedef enum {
   PL_BAN_FAST = 1, /* known exact arity match */
   PL_BAN_SLOW = 2, /* fallback - possibly over or under applied */
+  PL_BAN_PRIM = 3, /* primop [op, name, args] */
 } pl_bane;
 
 /*

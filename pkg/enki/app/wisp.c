@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "axsys/allocator.h"
+#include "axsys/profile.h"
 #include "axsys/util.h"
 #include "enki/actor.h"
 #include "enki/wisp.h"
@@ -23,7 +24,9 @@
  * reference loadAssembly / runRepl drivers.
  */
 
-#define BOOT_HEAP_CELLS        ((size_t)1 << 22) /* 32 MiB per semispace, grows */
+#define BOOT_HEAP_CELLS        ((size_t)1 << 26) /* 32 MiB per semispace, grows */
+// ./build/release/bin/wisp --file-root ../reaver/src ../reaver/src/plan
+// main  35.43s user 0.55s system 99% cpu 36.136 total
 #define BOOT_DEFAULT_FILE_ROOT "./reaver/src"
 
 typedef struct boot_module {
@@ -66,6 +69,10 @@ static void boot_roots(pl_root_visit visit, void* gc_ctx, void* src_ctx) {
 static void boot_env_root_push(boot_ctx* ctx, en_env_entry* env) {
   ax_assertf(ctx->tmp_env_s < BOOT_TMP_ENV_CAP, "env root overflow");
   ctx->tmp_env_v[ctx->tmp_env_s++] = env;
+}
+
+static void boot_collect_after_invocation(boot_ctx* ctx) {
+  pl_gc_collect_now(ctx->w->t);
 }
 
 /* ── Environment list helpers (host-side, allocator-backed) ────────────── */
@@ -252,8 +259,10 @@ static bool boot_process_form(boot_ctx* ctx, pl_val form) {
 
   en_wisp* w = ctx->w;
   pl_val exp = en_wisp_macroexpand(w, form);
-  if (exp == 0)
+  if (exp == 0) {
+    boot_collect_after_invocation(ctx);
     return true;
+  }
   pl_val out = en_wisp_thunk(w, exp);
   if (ctx->emit_top_level_f) {
     /* the reference prints `force (showVal out)`: deep-force first */
@@ -264,6 +273,7 @@ static bool boot_process_form(boot_ctx* ctx, pl_val form) {
     fprintf(stderr, "%s\n", out_c);
     ax_free(ctx->loc_a, out_c);
   }
+  boot_collect_after_invocation(ctx);
   return true;
 }
 
@@ -390,6 +400,8 @@ static bool boot_run_function(boot_ctx* ctx, pl_val fun, int argc,
                               char** argv) {
   en_wisp* w = ctx->w;
   en_env_entry* old_env = w->env;
+  size_t env_mark = ctx->tmp_env_s;
+  boot_env_root_push(ctx, old_env);
   w->env = NULL;
   w->t->rplan_f = true; /* runRepl runs the program in RPLAN mode */
 
@@ -404,6 +416,7 @@ static bool boot_run_function(boot_ctx* ctx, pl_val fun, int argc,
   er_drive_status ds = er_scheduler_drive(w->sched, w->self);
   en_root_pop(w, mark);
   w->env = old_env;
+  ctx->tmp_env_s = env_mark;
   if (ds != ER_DRIVE_DONE) {
     fprintf(stderr, "wisp: runtime error: %s\n",
             ds == ER_DRIVE_DEADLOCK ? "deadlock: every actor is blocked on Recv"
@@ -411,6 +424,7 @@ static bool boot_run_function(boot_ctx* ctx, pl_val fun, int argc,
                                     : "PLAN exception");
     return false;
   }
+  boot_collect_after_invocation(ctx);
   return true;
 }
 
@@ -437,8 +451,19 @@ static bool boot_load_assembly(boot_ctx* ctx, const char* mod_c,
   return boot_run_function(ctx, ent->val_v, argc, argv);
 }
 
+static bool boot_parse_double(const char* s, double* out) {
+  char* end = NULL;
+  double v = strtod(s, &end);
+  if (end == s || *end != '\0' || v < 0.0)
+    return false;
+  *out = v;
+  return true;
+}
+
 static void boot_usage(const char* argv0_c) {
-  fprintf(stderr, "usage: %s [--file-root DIR] DIR MODULE [FUNCTION ARGS...]\n",
+  fprintf(stderr,
+          "usage: %s [--file-root DIR] [--wait-for-tracy[=SECONDS]] "
+          "DIR MODULE [FUNCTION ARGS...]\n",
           argv0_c);
 }
 
@@ -449,6 +474,7 @@ static const char* boot_env_file_root(void) {
 
 int main(int argc, char** argv) {
   const char* file_root_c = boot_env_file_root();
+  double tracy_wait_s = 0.0;
   volatile int argi = 1;
   while (argi < argc && strncmp(argv[argi], "--", 2) == 0) {
     if (strcmp(argv[argi], "--") == 0) {
@@ -471,6 +497,28 @@ int main(int argc, char** argv) {
       argi++;
       continue;
     }
+    if (strcmp(argv[argi], "--wait-for-tracy") == 0) {
+      tracy_wait_s = 10.0;
+      if (argi + 1 < argc && strncmp(argv[argi + 1], "--", 2) != 0) {
+        double parsed_s;
+        if (boot_parse_double(argv[argi + 1], &parsed_s)) {
+          tracy_wait_s = parsed_s;
+          argi++;
+        }
+      }
+      argi++;
+      continue;
+    }
+    const char tracy_prefix_c[] = "--wait-for-tracy=";
+    size_t tracy_prefix_s = sizeof(tracy_prefix_c) - 1;
+    if (strncmp(argv[argi], tracy_prefix_c, tracy_prefix_s) == 0) {
+      if (!boot_parse_double(argv[argi] + tracy_prefix_s, &tracy_wait_s)) {
+        boot_usage(argv[0]);
+        return 2;
+      }
+      argi++;
+      continue;
+    }
     boot_usage(argv[0]);
     return 2;
   }
@@ -483,6 +531,8 @@ int main(int argc, char** argv) {
     boot_usage(argv[0]);
     return 2;
   }
+
+  ax_wait_for_tracy(tracy_wait_s);
 
   pl_store* store = pl_store_new_mem();
   pl_heap* heap = pl_heap_new(BOOT_HEAP_CELLS, store);

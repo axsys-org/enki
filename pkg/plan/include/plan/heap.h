@@ -17,6 +17,7 @@
 #include <stddef.h>
 #include <assert.h>
 
+#include "axsys/profile.h"
 #include "plan/value.h"
 #include "plan/bytecode.h"
 
@@ -52,6 +53,7 @@ typedef enum {
   PL_F_TRY,        /* exception barrier (op 66 Try); argbase: vsp mark  */
   PL_F_JUDGE,      /* forcing a law-body chain node; argbase: hbase     */
   PL_F_NIL,        /* RETURN planNil(v): 1 if the value is 0, else 0    */
+  PL_F_PROF,       /* Tracy law-attribution boundary; a: law head       */
 } pl_frame_kind;
 
 /** TODO make union */
@@ -65,6 +67,8 @@ typedef struct pl_frame {
   size_t argbase; /* offset into vstack (never a pointer) */
   uint32_t argc;
   pl_code* code;
+  ax_profile_zone_ctx profile_ctx;
+  bool profile_live;
 } pl_frame;
 
 /* ── Thread ────────────────────────────────────────────────────────────── */
@@ -180,6 +184,8 @@ static inline pl_frame* pl_fpush(pl_thread* t) {
   pl_frame* f = &t->fstack[t->fsp++];
   f->a = 0;
   f->b = 0;
+  f->profile_ctx = (ax_profile_zone_ctx){0};
+  f->profile_live = false;
   return f;
 }
 
