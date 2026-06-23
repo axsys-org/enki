@@ -173,7 +173,7 @@
                 value = mkCheck "property-tests" buildType;
               }
             ])
-            testBuildTypes)))
+            linuxTestBuildTypes)))
           // {
             # YIELD_STRESS (spec §10.1): every depth-0 safepoint suspends
             unit-tests-debug-yield-stress =
