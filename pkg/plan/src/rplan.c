@@ -335,7 +335,7 @@ pl_val pl_op82_write_file(pl_thread* t, size_t ab) {
     return 0;
   }
   free(arg_path);
-  int fd = open(path, O_WRONLY | O_CREAT, 0644);
+  int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
   if (fd < 0) {
     perror("WriteFile: open");
     free(path);
@@ -344,9 +344,13 @@ pl_val pl_op82_write_file(pl_thread* t, size_t ab) {
   free(path);
   size_t n;
   uint8_t* b = rp_nat_bytes(rp_want_nat(t, ARG(1)), true, &n);
-  rp_write_all(fd, b, n);
-  ax_assume(0 == close(fd), "failed to close file");
+  int rc = rp_write_all(fd, b, n);
   free(b);
+  if (rc < 0) {
+    perror("failed to write file");
+    pl_raise_msg(t, "WriteFile: failed to write file");
+  }
+  ax_assume(0 == close(fd), "failed to close file");
   return 1;
 }
 
