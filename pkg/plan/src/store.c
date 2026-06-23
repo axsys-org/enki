@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <assert.h>
 #include <string.h>
+#include <errno.h>
 
 #include "axsys/arena.h"
 #include "axsys/assume.h"
@@ -47,6 +48,16 @@ struct pl_store {
 
 void pl_store_lock(pl_store* s) {
   ax_assume(pthread_mutex_lock(&s->mu) == 0, "pthread_mutex_lock");
+}
+
+bool pl_store_trylock(pl_store* s) {
+  int rc = pthread_mutex_trylock(&s->mu);
+  if ( !rc ) {
+    return true;
+  } else {
+    ax_assume(rc == EBUSY, "pthread_mutex_trylock");
+    return false;
+  }
 }
 
 void pl_store_unlock(pl_store* s) {
@@ -135,7 +146,9 @@ bool pl_store_get_root(pl_store* s, uint8_t hash[32]) {
 }
 
 bool pl_store_get_code(pl_store* s, const uint8_t hash[32], pl_code** out) {
-  pl_store_lock(s);
+  if ( !pl_store_trylock(s) ) {
+    return false;
+  }
   pl_hash k;
   memcpy(k.b, hash, 32);
 

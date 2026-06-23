@@ -16,6 +16,7 @@ void pl_store_release(pl_store* s, size_t mark);
 
 void pl_store_lock(pl_store* s);
 void pl_store_unlock(pl_store* s);
+bool pl_store_trylock(pl_store* s);
 
 pl_val pl_store_intern_get(pl_store* s, const uint8_t hash[32]);
 void pl_store_intern_put(pl_store* s, const uint8_t hash[32], pl_val pin);

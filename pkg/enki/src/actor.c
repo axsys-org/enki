@@ -1,7 +1,6 @@
 #include "enki/actor.h"
 
 #include <pthread.h>
-#include <sched.h>
 #include <setjmp.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -84,6 +83,7 @@ struct er_scheduler {
   pl_store* store;
   er_config cfg;
   pthread_mutex_t mu;
+  pthread_cond_t cv;
   er_actor* qhead; /* run queue */
   er_actor* qtail;
   er_actor* all_head; /* every actor, creation order */
@@ -112,6 +112,7 @@ er_scheduler* er_scheduler_new(pl_store* store, er_config cfg) {
   er_scheduler* sys = calloc(1, sizeof(*sys));
   ax_assume(sys != NULL, "oom");
   ax_assume(pthread_mutex_init(&sys->mu, NULL) == 0, "pthread_mutex_init");
+  ax_assume(pthread_cond_init(&sys->cv, NULL) == 0, "pthread_cond_init");
   sys->store = store;
   sys->cfg = cfg;
   if (sys->cfg.quantum == 0)
@@ -178,6 +179,7 @@ void er_scheduler_free(er_scheduler* sys) {
     free(a);
     a = next;
   }
+  pthread_cond_destroy(&sys->cv);
   pthread_mutex_destroy(&sys->mu);
   free(sys);
 }
@@ -217,6 +219,7 @@ static void er_enqueue(er_actor* a) {
   else
     a->sys->qhead = a;
   a->sys->qtail = a;
+  pthread_cond_signal(&a->sys->cv);
 }
 
 static er_actor* er_dequeue(er_scheduler* sys) {
@@ -614,20 +617,22 @@ static void* er_mt_worker(void* arg) {
   for (;;) {
     pthread_mutex_lock(&sys->mu);
     er_actor* a = NULL;
-    if (!ex->stopping)
-      a = ex->root == NULL ? er_dequeue(sys) : er_dequeue_spawned(sys);
-    if (a == NULL) {
-      if (ex->root == NULL && !ex->stopping && ex->active == 0) {
-        ex->reason = er_run_reason_locked(sys);
-        ex->stopping = true;
-      }
+    for (;;) {
       if (ex->stopping) {
         pthread_mutex_unlock(&sys->mu);
         return NULL;
       }
-      pthread_mutex_unlock(&sys->mu);
-      sched_yield();
-      continue;
+      a = ex->root == NULL ? er_dequeue(sys) : er_dequeue_spawned(sys);
+      if (a != NULL)
+        break;
+      if (ex->root == NULL && ex->active == 0) {
+        ex->reason = er_run_reason_locked(sys);
+        ex->stopping = true;
+        pthread_cond_broadcast(&sys->cv);
+        pthread_mutex_unlock(&sys->mu);
+        return NULL;
+      }
+      pthread_cond_wait(&sys->cv, &sys->mu);
     }
     ax_assume(!a->adopted, "er_mt_executor_run: adopted actors run under "
                            "er_scheduler_drive");
@@ -642,6 +647,9 @@ static void* er_mt_worker(void* arg) {
     if (ex->root == NULL && sys->qhead == NULL && ex->active == 0) {
       ex->reason = er_run_reason_locked(sys);
       ex->stopping = true;
+      pthread_cond_broadcast(&sys->cv);
+    } else {
+      pthread_cond_broadcast(&sys->cv);
     }
     pthread_mutex_unlock(&sys->mu);
   }
@@ -769,10 +777,12 @@ er_drive_status er_mt_executor_drive(er_mt_executor* ex, er_actor* root) {
       case PL_RUN_DONE:
         out = ER_DRIVE_DONE;
         ex->stopping = true;
+        pthread_cond_broadcast(&sys->cv);
         goto done;
       case PL_RUN_EXN:
         out = ER_DRIVE_EXN;
         ex->stopping = true;
+        pthread_cond_broadcast(&sys->cv);
         goto done;
       case PL_RUN_BLOCKED:
         er_service(sys, root);
@@ -780,6 +790,7 @@ er_drive_status er_mt_executor_drive(er_mt_executor* ex, er_actor* root) {
           er_root_unwind(root);
           out = ER_DRIVE_EXN;
           ex->stopping = true;
+          pthread_cond_broadcast(&sys->cv);
           goto done;
         }
         break;
@@ -792,12 +803,11 @@ er_drive_status er_mt_executor_drive(er_mt_executor* ex, er_actor* root) {
       er_root_unwind(root);
       out = ER_DRIVE_DEADLOCK;
       ex->stopping = true;
+      pthread_cond_broadcast(&sys->cv);
       goto done;
     }
 
-    pthread_mutex_unlock(&sys->mu);
-    sched_yield();
-    pthread_mutex_lock(&sys->mu);
+    pthread_cond_wait(&sys->cv, &sys->mu);
   }
 
 done:
