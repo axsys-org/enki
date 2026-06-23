@@ -18,6 +18,7 @@
 
 typedef struct er_scheduler er_scheduler; /* enki/actor.h */
 typedef struct er_actor er_actor;
+typedef struct er_mt_executor er_mt_executor;
 
 typedef struct en_env_entry {
   pl_val key_v;
@@ -46,6 +47,8 @@ typedef struct en_wisp {
    */
   er_scheduler* sched;
   er_actor* self;
+  /* Optional multithreaded executor for scheduler-driven evaluations. */
+  er_mt_executor* exec;
 } en_wisp;
 
 en_wisp* en_wisp_new(pl_heap* heap);

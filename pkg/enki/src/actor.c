@@ -97,6 +97,7 @@ struct er_scheduler {
 
 struct er_mt_executor {
   er_scheduler* sys;
+  er_actor* root;
   uint32_t workers;
   pthread_t* thread_v;
   size_t active;
@@ -227,6 +228,35 @@ static er_actor* er_dequeue(er_scheduler* sys) {
     a->qnext = NULL;
   }
   return a;
+}
+
+static bool er_remove_from_queue(er_scheduler* sys, er_actor* target) {
+  er_actor* prev = NULL;
+  for (er_actor* a = sys->qhead; a != NULL; a = a->qnext) {
+    if (a != target) {
+      prev = a;
+      continue;
+    }
+    if (prev != NULL)
+      prev->qnext = a->qnext;
+    else
+      sys->qhead = a->qnext;
+    if (sys->qtail == a)
+      sys->qtail = prev;
+    a->qnext = NULL;
+    return true;
+  }
+  return false;
+}
+
+static er_actor* er_dequeue_spawned(er_scheduler* sys) {
+  for (er_actor* a = sys->qhead; a != NULL; a = a->qnext) {
+    if (!a->adopted) {
+      (void)er_remove_from_queue(sys, a);
+      return a;
+    }
+  }
+  return NULL;
 }
 
 static uint64_t er_handle_alloc(er_actor* a, er_actor* target) {
@@ -585,9 +615,9 @@ static void* er_mt_worker(void* arg) {
     pthread_mutex_lock(&sys->mu);
     er_actor* a = NULL;
     if (!ex->stopping)
-      a = er_dequeue(sys);
+      a = ex->root == NULL ? er_dequeue(sys) : er_dequeue_spawned(sys);
     if (a == NULL) {
-      if (!ex->stopping && ex->active == 0) {
+      if (ex->root == NULL && !ex->stopping && ex->active == 0) {
         ex->reason = er_run_reason_locked(sys);
         ex->stopping = true;
       }
@@ -609,7 +639,7 @@ static void* er_mt_worker(void* arg) {
     pthread_mutex_lock(&sys->mu);
     er_step(sys, a, s);
     ex->active--;
-    if (sys->qhead == NULL && ex->active == 0) {
+    if (ex->root == NULL && sys->qhead == NULL && ex->active == 0) {
       ex->reason = er_run_reason_locked(sys);
       ex->stopping = true;
     }
@@ -651,6 +681,7 @@ er_run_reason er_mt_executor_run(er_mt_executor* ex) {
   ax_assume(sys->mode == ER_MODE_LIVE,
             "er_mt_executor_run: record/replay requires the deterministic "
             "executor");
+  ex->root = NULL;
   ex->active = 0;
   ex->stopping = false;
   ex->reason = ER_RUN_IDLE;
@@ -702,6 +733,79 @@ er_drive_status er_scheduler_drive(er_scheduler* sys, er_actor* root) {
       break;
     }
   }
+}
+
+er_drive_status er_mt_executor_drive(er_mt_executor* ex, er_actor* root) {
+  ax_assume(ex != NULL, "er_mt_executor_drive: executor required");
+  ax_assume(root->adopted, "er_mt_executor_drive: actor is not adopted");
+  er_scheduler* sys = ex->sys;
+  ax_assume(root->sys == sys, "er_mt_executor_drive: root is from another "
+                              "scheduler");
+  ax_assume(sys->mode == ER_MODE_LIVE,
+            "er_mt_executor_drive: record/replay requires the deterministic "
+            "executor");
+
+  ex->root = root;
+  ex->active = 0;
+  ex->stopping = false;
+  ex->reason = ER_RUN_IDLE;
+  for (uint32_t i = 0; i < ex->workers; i++)
+    ax_assume(pthread_create(&ex->thread_v[i], NULL, er_mt_worker, ex) == 0,
+              "pthread_create");
+
+  er_drive_status out = ER_DRIVE_DEADLOCK;
+  pthread_mutex_lock(&sys->mu);
+  root->status = ER_ACTOR_RUNNABLE;
+  for (;;) {
+    if (root->status == ER_ACTOR_RUNNABLE) {
+      (void)er_remove_from_queue(sys, root);
+      pthread_mutex_unlock(&sys->mu);
+      pl_run_status s = pl_thread_run(root->t, sys->cfg.quantum);
+      pthread_mutex_lock(&sys->mu);
+      switch (s) {
+      case PL_RUN_YIELDED:
+        root->status = ER_ACTOR_RUNNABLE;
+        break;
+      case PL_RUN_DONE:
+        out = ER_DRIVE_DONE;
+        ex->stopping = true;
+        goto done;
+      case PL_RUN_EXN:
+        out = ER_DRIVE_EXN;
+        ex->stopping = true;
+        goto done;
+      case PL_RUN_BLOCKED:
+        er_service(sys, root);
+        if (root->status == ER_ACTOR_CRASHED) {
+          er_root_unwind(root);
+          out = ER_DRIVE_EXN;
+          ex->stopping = true;
+          goto done;
+        }
+        break;
+      }
+      continue;
+    }
+
+    if (root->status == ER_ACTOR_BLOCKED && sys->qhead == NULL &&
+        ex->active == 0) {
+      er_root_unwind(root);
+      out = ER_DRIVE_DEADLOCK;
+      ex->stopping = true;
+      goto done;
+    }
+
+    pthread_mutex_unlock(&sys->mu);
+    sched_yield();
+    pthread_mutex_lock(&sys->mu);
+  }
+
+done:
+  pthread_mutex_unlock(&sys->mu);
+  for (uint32_t i = 0; i < ex->workers; i++)
+    ax_assume(pthread_join(ex->thread_v[i], NULL) == 0, "pthread_join");
+  ex->root = NULL;
+  return out;
 }
 
 /* ── Event log & replay ────────────────────────────────────────────────── */
