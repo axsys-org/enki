@@ -210,6 +210,7 @@ static pl_val pin_from_canon(pl_store* s, canon_ctx* c, pl_val body) {
     ax_free(ax_allocator_system(), text);
   }
 
+  pl_store_lock(s);
   pl_val pin = pl_store_intern_get(s, hash);
   if (pin == 0) {
     copy_entry* map = NULL;
@@ -220,6 +221,7 @@ static pl_val pin_from_canon(pl_store* s, canon_ctx* c, pl_val body) {
     ax_assume(pl_store_backend_put(s, hash, full, (size_t)ax_arrlen(full)),
               "store backend put failed");
   }
+  pl_store_unlock(s);
   ax_arrfree(full);
   return pin;
 }

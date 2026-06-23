@@ -1,5 +1,6 @@
 #include "plan/store.h"
 
+#include <pthread.h>
 #include <lmdb.h>
 #include <stdlib.h>
 #include <assert.h>
@@ -18,6 +19,9 @@
 #define PL_STORE_REGION_BYTES (((size_t)1) << 38)
 #endif
 
+/** TODO: the locking mechanism is fucking trash (but probably correct)
+ * fix imminently
+ */
 typedef struct pl_intern_entry {
   pl_hash key;
   pl_val value;
@@ -29,6 +33,7 @@ typedef struct pl_code_entry {
 } pl_code_entry;
 
 struct pl_store {
+  pthread_mutex_t mu;
   ax_arena* region;
   uint8_t* lo;
   uint8_t* hi;
@@ -40,61 +45,97 @@ struct pl_store {
   bool compiler_f;
 };
 
+void pl_store_lock(pl_store* s) {
+  ax_assume(pthread_mutex_lock(&s->mu) == 0, "pthread_mutex_lock");
+}
+
+void pl_store_unlock(pl_store* s) {
+  ax_assume(pthread_mutex_unlock(&s->mu) == 0, "pthread_mutex_unlock");
+}
+
 /* ── Region allocation ─────────────────────────────────────────────────── */
 
 pl_cell* pl_store_alloc(pl_store* s, size_t cells) {
+  pl_store_lock(s);
   void* p = ax_arena_alloc_aligned(s->region, cells * sizeof(pl_cell), 8);
   ax_assume(p != NULL, "store region exhausted");
+  pl_store_unlock(s);
   return p;
 }
 
 size_t pl_store_mark(pl_store* s) {
-  return s->region->off_o;
+  pl_store_lock(s);
+  size_t mark = s->region->off_o;
+  pl_store_unlock(s);
+  return mark;
 }
 
 void pl_store_release(pl_store* s, size_t mark) {
+  pl_store_lock(s);
   s->region->off_o = mark;
+  pl_store_unlock(s);
 }
 
 bool pl_store_owns(pl_store* s, pl_val v) {
+  pl_store_lock(s);
   uint8_t* p = (uint8_t*)pl_ptr(v);
-  return p >= s->lo && p < s->hi;
+  bool owns = p >= s->lo && p < s->hi;
+  pl_store_unlock(s);
+  return owns;
 }
 
 /* ── Intern table ──────────────────────────────────────────────────────── */
 
 pl_val pl_store_intern_get(pl_store* s, const uint8_t hash[32]) {
+  pl_store_lock(s);
   pl_hash k;
   memcpy(k.b, hash, 32);
   ptrdiff_t i = ax_hmgeti(s->intern, k);
-  return i < 0 ? 0 : s->intern[i].value;
+  pl_val value = i < 0 ? 0 : s->intern[i].value;
+  pl_store_unlock(s);
+  return value;
 }
 
 void pl_store_intern_put(pl_store* s, const uint8_t hash[32], pl_val pin) {
+  pl_store_lock(s);
   pl_hash k;
   memcpy(k.b, hash, 32);
   ax_hmput(s->intern, k, pin);
+  pl_store_unlock(s);
 }
 
 bool pl_store_backend_put(pl_store* s, const uint8_t hash[32], const uint8_t* b,
                           size_t n) {
-  return s->be.put(s->be.ctx, hash, b, n);
+  pl_store_lock(s);
+  bool ok = s->be.put(s->be.ctx, hash, b, n);
+  pl_store_unlock(s);
+  return ok;
 }
 
 bool pl_store_backend_get(pl_store* s, const uint8_t hash[32], uint8_t** out_b,
                           size_t* out_s) {
-  return s->be.get(s->be.ctx, hash, out_b, out_s);
+  pl_store_lock(s);
+  bool ok = s->be.get(s->be.ctx, hash, out_b, out_s);
+  pl_store_unlock(s);
+  return ok;
 }
 
 bool pl_store_put_root(pl_store* s, const uint8_t hash[32]) {
-  return s->be.put_root(s->be.ctx, hash);
+  pl_store_lock(s);
+  bool ok = s->be.put_root(s->be.ctx, hash);
+  pl_store_unlock(s);
+  return ok;
 }
 
 bool pl_store_get_root(pl_store* s, uint8_t hash[32]) {
-  return s->be.get_root(s->be.ctx, hash);
+  pl_store_lock(s);
+  bool ok = s->be.get_root(s->be.ctx, hash);
+  pl_store_unlock(s);
+  return ok;
 }
 
 bool pl_store_get_code(pl_store* s, const uint8_t hash[32], pl_code** out) {
+  pl_store_lock(s);
   pl_hash k;
   memcpy(k.b, hash, 32);
 
@@ -102,21 +143,29 @@ bool pl_store_get_code(pl_store* s, const uint8_t hash[32], pl_code** out) {
   ptrdiff_t i = ax_hmgeti(s->code, k);
   // gets picked up wrongly by lsan
   ax_lsan_ignore(s->code);
-  if (i < 0)
+  if (i < 0) {
+    pl_store_unlock(s);
     return false;
+  }
   *out = s->code[i].value;
   ax_assume(*out != NULL, "oom");
+  pl_store_unlock(s);
   return true;
 }
 
 void pl_store_put_code(pl_thread* t, const uint8_t hash[32]) {
   pl_store* s = pl_heap_store(t->heap);
   pl_hash k;
+  pl_store_lock(s);
   if (!s->compiler_f) {
+    pl_store_unlock(s);
     fprintf(stderr, "no compiler set! failing compile\n");
     return;
   }
-  pl_val compiler = pl_store_load(t, s->compiler);
+  uint8_t compiler_hash[32];
+  memcpy(compiler_hash, s->compiler, 32);
+  pl_store_unlock(s);
+  pl_val compiler = pl_store_load(t, compiler_hash);
   pl_val fun = pl_store_load(t, hash);
   pl_val res = pl_apply(t, compiler, fun);
   pl_val pin = pl_pin(t, res);
@@ -125,15 +174,19 @@ void pl_store_put_code(pl_thread* t, const uint8_t hash[32]) {
   pl_code* code = pl_bytecode_from_val(pl_pin_body(p));
   if (code != NULL) {
     memcpy(k.b, hash, 32);
+    pl_store_lock(s);
     ax_hmput(s->code, k, code);
+    pl_store_unlock(s);
   }
 }
 
 void pl_store_put_compiler(pl_store* s, const uint8_t hash[32]) {
+  pl_store_lock(s);
   s->compiler_f = hash[0] ? memcmp(hash, hash + 1, 31) != 0 : true;
   memcpy(s->compiler, hash, 32);
   // moar leaks, TODO: fix
   ax_hmfree(s->code);
+  pl_store_unlock(s);
 }
 
 /* ── Store-resident value construction (no GC interaction) ─────────────── */
@@ -192,11 +245,14 @@ static pl_val st_ix_expr(pl_store* s, pl_val p66, uint64_t name) {
 }
 
 static void pl_store_init_ix(pl_store* s) {
+  pl_store_lock(s);
   if (s->ix0_expr != 0)
-    return;
+    goto done;
   pl_val p66 = pl_store_pin_of_nat(s, 66);
   s->ix0_expr = st_ix_expr(s, p66, ax_s3('I', 'x', '0'));
   s->ix1_expr = st_ix_expr(s, p66, ax_s3('I', 'x', '1'));
+done:
+  pl_store_unlock(s);
 }
 
 pl_val pl_store_ix0_expr(pl_store* s) {
@@ -214,6 +270,12 @@ pl_val pl_store_ix1_expr(pl_store* s) {
 pl_store* pl_store_new(pl_store_backend backend) {
   pl_store* s = calloc(1, sizeof(*s));
   ax_assume(s != NULL, "oom");
+  pthread_mutexattr_t attr;
+  ax_assume(pthread_mutexattr_init(&attr) == 0, "pthread_mutexattr_init");
+  ax_assume(pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE) == 0,
+            "pthread_mutexattr_settype");
+  ax_assume(pthread_mutex_init(&s->mu, &attr) == 0, "pthread_mutex_init");
+  pthread_mutexattr_destroy(&attr);
   s->region = ax_arena_create_overcommit(PL_STORE_REGION_BYTES);
   ax_assume(s->region != NULL, "store region reservation failed");
   s->lo = (uint8_t*)s->region;
@@ -232,6 +294,7 @@ void pl_store_free(pl_store* s) {
     s->be.close(s->be.ctx);
   ax_hmfree(s->intern);
   ax_arena_destroy(s->region);
+  pthread_mutex_destroy(&s->mu);
   free(s);
 }
 

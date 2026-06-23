@@ -146,6 +146,47 @@ Test(actor, send_to_self_then_recv) {
   test_rt_free(&rt);
 }
 
+Test(actor, mt_multiple_actors_halt) {
+  test_rt rt = test_rt_new();
+  er_scheduler* sys = er_scheduler_new(rt.store, (er_config){.quantum = 2});
+  er_actor* a = er_scheduler_actor(sys);
+  er_actor* b = er_scheduler_actor(sys);
+  er_actor_start(a, actor_fn(er_actor_thread(a), 7));
+  er_actor_start(b, actor_fn(er_actor_thread(b), 9));
+
+  er_mt_executor* ex = er_mt_executor_new(sys, (er_mt_config){.workers = 2});
+  cr_assert_eq(er_mt_executor_run(ex), ER_RUN_IDLE);
+  cr_assert_eq(er_actor_state(a), ER_ACTOR_HALTED);
+  cr_assert_eq(er_actor_result(a), 7);
+  cr_assert_eq(er_actor_state(b), ER_ACTOR_HALTED);
+  cr_assert_eq(er_actor_result(b), 9);
+  er_mt_executor_free(ex);
+  er_scheduler_free(sys);
+  test_rt_free(&rt);
+}
+
+Test(actor, mt_recv_blocks_until_injection) {
+  test_rt rt = test_rt_new();
+  er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
+  er_actor* a = er_scheduler_actor(sys);
+  pl_thread* t = er_actor_thread(a);
+  er_actor_start(a, actor_fn(t, recv_code(t)));
+
+  er_mt_executor* ex = er_mt_executor_new(sys, (er_mt_config){.workers = 2});
+  cr_assert_eq(er_mt_executor_run(ex), ER_RUN_QUIESCENT);
+  cr_assert_eq(er_actor_state(a), ER_ACTOR_BLOCKED);
+
+  er_scheduler_inject(sys, a, 123);
+  cr_assert_eq(er_mt_executor_run(ex), ER_RUN_IDLE);
+  cr_assert_eq(er_actor_state(a), ER_ACTOR_HALTED);
+  pl_cell* r = pl_as(PL_TAG_APP, er_actor_result(a));
+  cr_assert_not_null(r);
+  cr_assert_eq(pl_app_args(r)[0], 123);
+  er_mt_executor_free(ex);
+  er_scheduler_free(sys);
+  test_rt_free(&rt);
+}
+
 Test(actor, results_independent_of_quantum) {
   /* results must not depend on the quantum: one step per quantum and a huge
    * quantum agree */

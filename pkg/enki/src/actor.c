@@ -1,9 +1,12 @@
 #include "enki/actor.h"
 
+#include <pthread.h>
+#include <sched.h>
 #include <setjmp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "axsys/assume.h"
 #include "axsys/ds.h"
@@ -80,6 +83,7 @@ typedef enum { ER_MODE_LIVE = 0, ER_MODE_RECORD, ER_MODE_REPLAY } er_mode;
 struct er_scheduler {
   pl_store* store;
   er_config cfg;
+  pthread_mutex_t mu;
   er_actor* qhead; /* run queue */
   er_actor* qtail;
   er_actor* all_head; /* every actor, creation order */
@@ -91,12 +95,22 @@ struct er_scheduler {
   size_t cursor;      /* next replay event */
 };
 
+struct er_mt_executor {
+  er_scheduler* sys;
+  uint32_t workers;
+  pthread_t* thread_v;
+  size_t active;
+  bool stopping;
+  er_run_reason reason;
+};
+
 /* ── Construction ──────────────────────────────────────────────────────── */
 
 er_scheduler* er_scheduler_new(pl_store* store, er_config cfg) {
   ax_assume(store != NULL, "er_scheduler_new: store required");
   er_scheduler* sys = calloc(1, sizeof(*sys));
   ax_assume(sys != NULL, "oom");
+  ax_assume(pthread_mutex_init(&sys->mu, NULL) == 0, "pthread_mutex_init");
   sys->store = store;
   sys->cfg = cfg;
   if (sys->cfg.quantum == 0)
@@ -163,6 +177,7 @@ void er_scheduler_free(er_scheduler* sys) {
     free(a);
     a = next;
   }
+  pthread_mutex_destroy(&sys->mu);
   free(sys);
 }
 
@@ -554,6 +569,97 @@ er_run_reason er_scheduler_run(er_scheduler* sys) {
               "er_scheduler_run: adopted actors run under er_scheduler_drive");
     er_step(sys, a, pl_thread_run(a->t, sys->cfg.quantum));
   }
+}
+
+static er_run_reason er_run_reason_locked(er_scheduler* sys) {
+  for (er_actor* it = sys->all_head; it != NULL; it = it->all_next)
+    if (it->status == ER_ACTOR_BLOCKED)
+      return ER_RUN_QUIESCENT;
+  return ER_RUN_IDLE;
+}
+
+static void* er_mt_worker(void* arg) {
+  er_mt_executor* ex = arg;
+  er_scheduler* sys = ex->sys;
+  for (;;) {
+    pthread_mutex_lock(&sys->mu);
+    er_actor* a = NULL;
+    if (!ex->stopping)
+      a = er_dequeue(sys);
+    if (a == NULL) {
+      if (!ex->stopping && ex->active == 0) {
+        ex->reason = er_run_reason_locked(sys);
+        ex->stopping = true;
+      }
+      if (ex->stopping) {
+        pthread_mutex_unlock(&sys->mu);
+        return NULL;
+      }
+      pthread_mutex_unlock(&sys->mu);
+      sched_yield();
+      continue;
+    }
+    ax_assume(!a->adopted, "er_mt_executor_run: adopted actors run under "
+                           "er_scheduler_drive");
+    ex->active++;
+    pthread_mutex_unlock(&sys->mu);
+
+    pl_run_status s = pl_thread_run(a->t, sys->cfg.quantum);
+
+    pthread_mutex_lock(&sys->mu);
+    er_step(sys, a, s);
+    ex->active--;
+    if (sys->qhead == NULL && ex->active == 0) {
+      ex->reason = er_run_reason_locked(sys);
+      ex->stopping = true;
+    }
+    pthread_mutex_unlock(&sys->mu);
+  }
+}
+
+static uint32_t er_default_worker_count(void) {
+  long n = sysconf(_SC_NPROCESSORS_ONLN);
+  if (n < 2)
+    return 2;
+  if (n > UINT32_MAX)
+    return UINT32_MAX;
+  return (uint32_t)n;
+}
+
+er_mt_executor* er_mt_executor_new(er_scheduler* sys, er_mt_config cfg) {
+  ax_assume(sys != NULL, "er_mt_executor_new: scheduler required");
+  er_mt_executor* ex = calloc(1, sizeof(*ex));
+  ax_assume(ex != NULL, "oom");
+  ex->sys = sys;
+  ex->workers = cfg.workers == 0 ? er_default_worker_count() : cfg.workers;
+  ax_assume(ex->workers > 0, "er_mt_executor_new: workers required");
+  ex->thread_v = calloc(ex->workers, sizeof(*ex->thread_v));
+  ax_assume(ex->thread_v != NULL, "oom");
+  return ex;
+}
+
+void er_mt_executor_free(er_mt_executor* ex) {
+  if (ex == NULL)
+    return;
+  free(ex->thread_v);
+  free(ex);
+}
+
+er_run_reason er_mt_executor_run(er_mt_executor* ex) {
+  ax_assume(ex != NULL, "er_mt_executor_run: executor required");
+  er_scheduler* sys = ex->sys;
+  ax_assume(sys->mode == ER_MODE_LIVE,
+            "er_mt_executor_run: record/replay requires the deterministic "
+            "executor");
+  ex->active = 0;
+  ex->stopping = false;
+  ex->reason = ER_RUN_IDLE;
+  for (uint32_t i = 0; i < ex->workers; i++)
+    ax_assume(pthread_create(&ex->thread_v[i], NULL, er_mt_worker, ex) == 0,
+              "pthread_create");
+  for (uint32_t i = 0; i < ex->workers; i++)
+    ax_assume(pthread_join(ex->thread_v[i], NULL) == 0, "pthread_join");
+  return ex->reason;
 }
 
 /* Abandon the root's parked continuation: unwind to the watermarks the
