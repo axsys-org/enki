@@ -45,6 +45,18 @@ void pl_store_free(pl_store* s);
 bool pl_store_owns(pl_store* s, pl_val v);
 
 /*
+ * Concurrency mode (the multithreaded actor executor).  When on, pin and
+ * load are serialized by an internal mutex so worker threads may pin
+ * message payloads into the shared store in parallel; the single-threaded
+ * paths leave it off and pay no lock cost.  Enabling pre-initializes the
+ * lazy Row singletons so concurrent evaluation never mutates the store
+ * (the only remaining store writes are pin/load, both locked).  The
+ * Compile / SetCompiler ops mutate the unlocked code cache and must be
+ * quiescent while concurrency is on.  Idempotent.
+ */
+void pl_store_set_concurrent(pl_store* s, bool on);
+
+/*
  * Pin a value: nf, canonize + SHA-256, intern.  Returns the
  * (store-resident, deduplicated) PIN.  v is rooted internally for the
  * normalization; the caller's copy may be stale afterwards and should

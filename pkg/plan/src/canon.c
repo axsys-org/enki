@@ -147,7 +147,11 @@ static const char* cn_sb_build(cn* c, ax_sb* sb, const char* where) {
 }
 
 static const char* cn_overwide(cn* c) {
-  static char s[4096];
+  /* Thread-local: pl_canonize runs on multiple OS threads under the
+   * multithreaded actor executor (pins / the Save op), and this scratch
+   * is lazily filled.  A shared static would be a benign-but-real data
+   * race on first fill; per-thread storage removes it. */
+  static _Thread_local char s[4096];
   if (s[0] == '\0') {
     s[0] = '(';
     memset(s + 1, 'x', sizeof(s) - 2);

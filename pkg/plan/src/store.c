@@ -1,6 +1,7 @@
 #include "plan/store.h"
 
 #include <lmdb.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <assert.h>
 #include <string.h>
@@ -38,7 +39,31 @@ struct pl_store {
   pl_val ix0_expr, ix1_expr;
   uint8_t compiler[32];
   bool compiler_f;
+  pthread_mutex_t lock; /* guards the compound pin/load sections in mode */
+  bool concurrent;      /* see pl_store_set_concurrent */
 };
+
+/* ── Concurrency mode ──────────────────────────────────────────────────── */
+
+void pl_store_lock(pl_store* s) {
+  if (s->concurrent)
+    pthread_mutex_lock(&s->lock);
+}
+
+void pl_store_unlock(pl_store* s) {
+  if (s->concurrent)
+    pthread_mutex_unlock(&s->lock);
+}
+
+void pl_store_set_concurrent(pl_store* s, bool on) {
+  if (on) {
+    /* Realize the lazy Row singletons now, single-threaded, so op_row
+     * never mutates the store once workers are live. */
+    (void)pl_store_ix0_expr(s);
+    (void)pl_store_ix1_expr(s);
+  }
+  s->concurrent = on;
+}
 
 /* ── Region allocation ─────────────────────────────────────────────────── */
 
@@ -112,6 +137,10 @@ bool pl_store_get_code(pl_store* s, const uint8_t hash[32], pl_code** out) {
 void pl_store_put_code(pl_thread* t, const uint8_t hash[32]) {
   pl_store* s = pl_heap_store(t->heap);
   pl_hash k;
+  ax_assume(!s->concurrent,
+            "pl_store_put_code: compilation must be quiescent in "
+            "concurrency mode (the code cache is read lock-free on the "
+            "eval hot path)");
   if (!s->compiler_f) {
     fprintf(stderr, "no compiler set! failing compile\n");
     return;
@@ -130,6 +159,9 @@ void pl_store_put_code(pl_thread* t, const uint8_t hash[32]) {
 }
 
 void pl_store_put_compiler(pl_store* s, const uint8_t hash[32]) {
+  ax_assume(!s->concurrent,
+            "pl_store_put_compiler: compilation must be quiescent in "
+            "concurrency mode");
   s->compiler_f = hash[0] ? memcmp(hash, hash + 1, 31) != 0 : true;
   memcpy(s->compiler, hash, 32);
   // moar leaks, TODO: fix
@@ -222,6 +254,7 @@ pl_store* pl_store_new(pl_store_backend backend) {
             "store address exceeds 56 bits");
   s->intern = NULL;
   s->be = backend;
+  pthread_mutex_init(&s->lock, NULL);
   return s;
 }
 
@@ -232,6 +265,7 @@ void pl_store_free(pl_store* s) {
     s->be.close(s->be.ctx);
   ax_hmfree(s->intern);
   ax_arena_destroy(s->region);
+  pthread_mutex_destroy(&s->lock);
   free(s);
 }
 

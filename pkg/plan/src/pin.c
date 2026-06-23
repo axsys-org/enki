@@ -210,6 +210,10 @@ static pl_val pin_from_canon(pl_store* s, canon_ctx* c, pl_val body) {
     ax_free(ax_allocator_system(), text);
   }
 
+  /* The intern-or-copy step is the store's only mutation outside load:
+   * hold the store lock so the get/copy/put is atomic against parallel
+   * pins from other worker threads (a no-op when not concurrent). */
+  pl_store_lock(s);
   pl_val pin = pl_store_intern_get(s, hash);
   if (pin == 0) {
     copy_entry* map = NULL;
@@ -220,6 +224,7 @@ static pl_val pin_from_canon(pl_store* s, canon_ctx* c, pl_val body) {
     ax_assume(pl_store_backend_put(s, hash, full, (size_t)ax_arrlen(full)),
               "store backend put failed");
   }
+  pl_store_unlock(s);
   ax_arrfree(full);
   return pin;
 }
@@ -336,9 +341,11 @@ static pl_val deser(pl_store* s, deser_ctx* d) {
   }
 }
 
-pl_val pl_store_load(pl_thread* t, const uint8_t hash[32]) {
-  pl_store* s = pl_heap_store(t->heap);
-  ax_assume(s != NULL, "store_load requires a store");
+/* The recursive load worker; the public entry holds the store lock so
+ * the whole transitive load (this node and its sub-pins) is one atomic
+ * critical section against parallel pins/loads. */
+static pl_val store_load_rec(pl_thread* t, pl_store* s,
+                             const uint8_t hash[32]) {
   pl_val hit = pl_store_intern_get(s, hash);
   if (hit != 0)
     return hit;
@@ -356,7 +363,7 @@ pl_val pl_store_load(pl_thread* t, const uint8_t hash[32]) {
     ax_assume(d.off + 32 <= d.n, "pin bytes truncated");
     memcpy(sub, d.b + d.off, 32);
     d.off += 32;
-    ax_arrpush(subs, pl_store_load(t, sub));
+    ax_arrpush(subs, store_load_rec(t, s, sub));
   }
   d.subpins = subs;
   pl_val body = deser(s, &d);
@@ -364,5 +371,22 @@ pl_val pl_store_load(pl_thread* t, const uint8_t hash[32]) {
   pl_store_intern_put(s, hash, pin);
   ax_arrfree(subs);
   free(bytes);
+  return pin;
+}
+
+/*
+ * Loading is a single-threaded / quiescent operation (module boot and
+ * the Compile op); the concurrent executor never reaches it — eval holds
+ * already-resident pins, it does not rehydrate by hash.  So the lock here
+ * is effectively uncontended, and the catchable "missing pin" raise in
+ * the worker cannot strand it (a raising load only happens off the
+ * concurrent path, where the lock is a no-op).
+ */
+pl_val pl_store_load(pl_thread* t, const uint8_t hash[32]) {
+  pl_store* s = pl_heap_store(t->heap);
+  ax_assume(s != NULL, "store_load requires a store");
+  pl_store_lock(s);
+  pl_val pin = store_load_rec(t, s, hash);
+  pl_store_unlock(s);
   return pin;
 }

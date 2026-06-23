@@ -14,6 +14,12 @@ pl_cell* pl_store_alloc(pl_store* s, size_t cells);
 size_t pl_store_mark(pl_store* s);
 void pl_store_release(pl_store* s, size_t mark);
 
+/* Serialize a compound store-mutating critical section (pin/load) when
+ * the store is in concurrency mode; no-ops otherwise.  Not recursive:
+ * callers must not nest these.  See pl_store_set_concurrent. */
+void pl_store_lock(pl_store* s);
+void pl_store_unlock(pl_store* s);
+
 pl_val pl_store_intern_get(pl_store* s, const uint8_t hash[32]);
 void pl_store_intern_put(pl_store* s, const uint8_t hash[32], pl_val pin);
 

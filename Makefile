@@ -15,7 +15,9 @@ PLAN_INC := -Ipkg/plan/include $(AXSYS_INC)
 ENKI_INC := -Ipkg/enki/include $(PLAN_INC)
 
 BASE_CPPFLAGS := -Itests/support -Itests/property/vendor/theft $(NIX_CFLAGS_COMPILE)
-BASE_CFLAGS := -std=c23 -MMD -MP -D_GNU_SOURCE
+# -pthread: the multithreaded actor executor (pkg/enki) and the store's
+# concurrency mode use pthreads; the flag sets it for compile and link.
+BASE_CFLAGS := -std=c23 -MMD -MP -D_GNU_SOURCE -pthread
 
 WARN_COMMON := -Wall -Wextra  \
 	-Wpedantic -Wshadow -Wconversion -Wstrict-prototypes \
