@@ -48,6 +48,7 @@ pl_val pl_op82_input(pl_thread* t, size_t ab);
 pl_val pl_op82_output(pl_thread* t, size_t ab);
 pl_val pl_op82_warn(pl_thread* t, size_t ab);
 pl_val pl_op82_read_file(pl_thread* t, size_t ab);
+pl_val pl_op82_write_file(pl_thread* t, size_t ab);
 pl_val pl_op82_print(pl_thread* t, size_t ab);
 pl_val pl_op82_stamp(pl_thread* t, size_t ab);
 pl_val pl_op82_now(pl_thread* t, size_t ab);

@@ -902,6 +902,7 @@ const pl_opdesc pl_ops[] = {
     OP82("Output", 1, 0b1, pl_op82_output),
     OP82("Warn", 1, 0b1, pl_op82_warn),
     OP82("ReadFile", 1, 0b1, pl_op82_read_file),
+    OP82("WriteFile", 2, 0b11, pl_op82_write_file),
     OP82("Print", 1, 0b1, pl_op82_print),
     OP82("Stamp", 1, 0b1, pl_op82_stamp),
     OP82("Now", 1, 0, pl_op82_now),
