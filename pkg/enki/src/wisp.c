@@ -138,7 +138,9 @@ static pl_val en_run_drive(en_wisp* w, pl_val v, bool nf) {
     pl_thread_start_nf(w->t, v);
   else
     pl_thread_start(w->t, v);
-  switch (er_scheduler_drive(w->sched, w->self)) {
+  er_drive_status ds = w->exec != NULL ? er_mt_executor_drive(w->exec, w->self)
+                                       : er_scheduler_drive(w->sched, w->self);
+  switch (ds) {
   case ER_DRIVE_DONE:
     return pl_thread_result(w->t);
   case ER_DRIVE_EXN:

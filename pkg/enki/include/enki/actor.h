@@ -23,6 +23,7 @@
 
 typedef struct er_actor er_actor;
 typedef struct er_scheduler er_scheduler;
+typedef struct er_mt_executor er_mt_executor;
 
 typedef enum {
   ER_ACTOR_RUNNABLE = 0, /* in the run queue (or not yet started) */
@@ -77,6 +78,25 @@ typedef enum {
 
 /* Drive the system until nothing is runnable. */
 er_run_reason er_scheduler_run(er_scheduler* sys);
+
+typedef struct er_mt_config {
+  uint32_t workers; /* worker OS threads; 0 = default (hardware or 2) */
+} er_mt_config;
+
+/*
+ * Optional multithreaded executor.  This runner shares the scheduler/actor
+ * objects created by the API above but may run different scheduler-owned
+ * actors on different OS threads.  er_mt_executor_drive keeps the adopted
+ * root actor on the caller thread while workers run spawned actors in
+ * parallel.  The deterministic er_scheduler_run / er_scheduler_drive paths
+ * remain the replay-capable reference executor; record/replay mode is
+ * intentionally rejected here because concurrent direct-effect ordering is
+ * nondeterministic.
+ */
+er_mt_executor* er_mt_executor_new(er_scheduler* sys, er_mt_config cfg);
+void er_mt_executor_free(er_mt_executor* ex);
+er_run_reason er_mt_executor_run(er_mt_executor* ex);
+er_drive_status er_mt_executor_drive(er_mt_executor* ex, er_actor* root);
 
 /*
  * Host injection: append a message to an actor's mailbox (waking it if

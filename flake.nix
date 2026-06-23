@@ -144,9 +144,11 @@
 
         mkCheck = kind: buildType: mkCheckArgs kind buildType "" "";
         /*
-        no TSAN- threading unused RN and criterion hates it
+        no TSAN for macOS - threading unused RN and criterion hates it
         */
-        testBuildTypes = ["debug" "asan" "ubsan"];
+        testBuildTypes = ["debug" "asan" "ubsan" "tsan"];
+        # linuxTestBuildTypes = ["tsan"];
+        linuxTestBuildTypes = [];
         testChecks =
           lib.listToAttrs
           (lib.concatMap
@@ -161,6 +163,18 @@
               }
             ])
             testBuildTypes)
+          // (lib.optionalAttrs (stdenv.isLinux) (lib.listToAttrs (lib.concatMap
+            (buildType: [
+              {
+                name = "unit-tests-${buildType}";
+                value = mkCheck "unit-tests" buildType;
+              }
+              {
+                name = "property-tests-${buildType}";
+                value = mkCheck "property-tests" buildType;
+              }
+            ])
+            linuxTestBuildTypes)))
           // {
             # YIELD_STRESS (spec §10.1): every depth-0 safepoint suspends
             unit-tests-debug-yield-stress =

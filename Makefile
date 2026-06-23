@@ -15,7 +15,7 @@ PLAN_INC := -Ipkg/plan/include $(AXSYS_INC)
 ENKI_INC := -Ipkg/enki/include $(PLAN_INC)
 
 BASE_CPPFLAGS := -Itests/support -Itests/property/vendor/theft $(NIX_CFLAGS_COMPILE)
-BASE_CFLAGS := -std=c23 -MMD -MP -D_GNU_SOURCE
+BASE_CFLAGS := -std=c23 -MMD -MP -D_GNU_SOURCE -pthread
 
 WARN_COMMON := -Wall -Wextra  \
 	-Wpedantic -Wshadow -Wconversion -Wstrict-prototypes \
@@ -64,7 +64,7 @@ APP_BINS := $(patsubst $(APP_DIR)/%.c,$(BUILD_DIR)/bin/%,$(APP_SRCS))
 
 CPPFLAGS_ALL := $(BASE_CPPFLAGS) $(CPPFLAGS)
 CFLAGS_ALL := $(BASE_CFLAGS) $(WARN_CFLAGS) $(BUILD_CFLAGS_$(BUILD_TYPE)) $(CFLAGS)
-LDFLAGS_ALL := $(BUILD_LDFLAGS_$(BUILD_TYPE)) $(LDFLAGS) -L/opt/homebrew/lib -lgmp -llmdb -lcrypto
+LDFLAGS_ALL := $(BUILD_LDFLAGS_$(BUILD_TYPE)) $(LDFLAGS) -pthread -L/opt/homebrew/lib -lgmp -llmdb -lcrypto
 
 ifeq ($(PROFILE),tracy)
 CPPFLAGS_ALL += -I/opt/homebrew/opt/tracy/include/tracy
@@ -111,7 +111,7 @@ LIB_ENKI := $(BUILD_DIR)/lib/libenki.a
 LIBS := $(LIB_AXSYS) $(LIB_PLAN) $(LIB_ENKI)
 
 UNAME_S := $(shell uname -s 2>/dev/null)
-ifeq ($(BUILD_TYPE)-$(UNAME_S),tsan-Darwin)
+ifeq ($(BUILD_TYPE),tsan)
 ACTIVE_UNIT_BINS := $(TSAN_UNIT_BINS)
 else
 ACTIVE_UNIT_BINS := $(UNIT_BINS)
@@ -224,11 +224,7 @@ test: check-layering test-unit test-property
 
 test-unit: $(ACTIVE_UNIT_BINS) $(APP_BINS)
 	@set -eu; for test_bin in $(ACTIVE_UNIT_BINS); do \
-		if [ "$(BUILD_TYPE)-$(UNAME_S)" = "tsan-Darwin" ]; then \
-			ENKI_WISP_BIN=$(CURDIR)/$(BUILD_DIR)/bin/wisp "$$test_bin"; \
-		else \
-			ENKI_WISP_BIN=$(CURDIR)/$(BUILD_DIR)/bin/wisp "$$test_bin" --jobs 1; \
-		fi; \
+		ENKI_WISP_BIN=$(CURDIR)/$(BUILD_DIR)/bin/wisp "$$test_bin" --jobs 1; \
 	done
 
 test-property: $(PROPERTY_BINS)

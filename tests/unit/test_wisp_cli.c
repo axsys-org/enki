@@ -164,9 +164,9 @@ Test(wisp_cli, rplan_op_rejected_in_bplan) {
 
 /*
  * P4: actor scenarios through the boot driver — the wisp boot thread is
- * the root actor (the reference withNewRts), spawned actors run under
- * the deterministic executor, and op-82 coordination effects in the run
- * function block and resume instead of raising.
+ * the root actor (the reference withNewRts), spawned actors run through
+ * the binary's default executor, and op-82 coordination effects in the
+ * run function block and resume instead of raising.
  */
 
 static int run_scenario(const char* bin, const char* fn, char* out,
