@@ -1047,7 +1047,7 @@ int pl_op_lookup(uint64_t opset, pl_val name, uint32_t argc) {
     size_t i = b.ix[j];
     const pl_opdesc* d = &pl_ops[i];
     // ax_assume(d->opset == opset && d->argc == argc,
-              // "primop lookup bucket mismatch");
+    // "primop lookup bucket mismatch");
     if (d->name_c != NULL ? nat_name_eq(name, d->name_c)
                           : (pl_is_nat63(name) && d->name == name))
       return (int)i;
