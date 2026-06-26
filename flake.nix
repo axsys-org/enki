@@ -156,11 +156,11 @@
 
         mkCheck = kind: buildType: mkCheckArgs kind buildType "" "";
         /*
-        no TSAN for macOS - threading unused RN and criterion hates it
+        no TSAN for macOS - causes occasional (nondeterministic) crashes in CI
         */
-        testBuildTypes = ["debug" "asan" "ubsan" "tsan"];
-        # linuxTestBuildTypes = ["tsan"];
-        linuxTestBuildTypes = [];
+        testBuildTypes = ["debug" "asan" "ubsan"];
+        linuxTestBuildTypes = ["tsan"];
+        # linuxTestBuildTypes = [];
         testChecks =
           lib.listToAttrs
           (lib.concatMap
