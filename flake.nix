@@ -84,14 +84,24 @@
             inherit (selected) compiler cc;
           };
 
-        mkenki = buildType:
+        mkenki = buildType: let
+          selected = compilerFor buildType;
+          pgoMakeArgs =
+            lib.optionalString (buildType == "pgo")
+            (lib.concatStringsSep " " [
+              "PGO_REAVER_SRC=${reaver}/src"
+              "PGO_CC=${selected.compiler}/bin/${selected.cc}"
+              "LLVM_PROFDATA=${pkgs.llvmPackages.llvm}/bin/llvm-profdata"
+            ]);
+        in
           (mkWithCompiler buildType {
             pname = "enki${lib.optionalString (buildType != "release") "-${buildType}"}";
             inherit buildType;
+            makeArgs = pgoMakeArgs;
           }).overrideAttrs (_old: {
             installPhase = ''
               runHook preInstall
-              make install BUILD_TYPE=${buildType} PREFIX=$out
+              make install BUILD_TYPE=${buildType} PREFIX=$out ${pgoMakeArgs}
               install -d $out/bin
               install -m 0755 build/${buildType}/bin/wisp $out/bin/wisp
               install -m 0755 build/${buildType}/bin/assembler $out/bin/assembler
@@ -99,7 +109,9 @@
             '';
           });
 
-        enkiRelease = mkenki "release";
+        enkiRelease = mkenki "pgo";
+        enkiReleaseNoPGO = mkenki "release";
+
         mkBinPackage = name: extraInstall:
           pkgs.runCommand "enki-${name}-0.1.0" {
             meta = {
@@ -309,6 +321,7 @@
         packages = {
           default = enkiRelease;
           enki = enkiRelease;
+          enki-release = enkiReleaseNoPGO;
           wisp = wispPackage;
           assembler = assemblerPackage;
           enki-debug = mkenki "debug";

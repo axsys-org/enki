@@ -7,6 +7,19 @@ BUILD_DIR ?= build/$(BUILD_TYPE)$(BUILD_PROFILE_SUFFIX)
 AR ?= ar
 
 VALID_BUILD_TYPES := debug release asan ubsan tsan coverage profile
+VALID_BUILD_TYPES += pgo-generate pgo
+
+PGO_CC ?= clang
+LLVM_PROFDATA ?= llvm-profdata
+PGO_DIR ?= build/pgo
+PGO_GEN_BUILD_DIR ?= build/pgo-generate
+PGO_USE_BUILD_DIR ?= $(PGO_DIR)
+PGO_RUN_DIR ?= $(PGO_DIR)/run
+PGO_RAW_DIR ?= $(PGO_DIR)/raw
+PGO_PROFILE ?= $(PGO_DIR)/enki.profdata
+PGO_PROFILE_PATTERN ?= $(CURDIR)/$(PGO_RAW_DIR)/wisp-%m.profraw
+PGO_REAVER_SRC ?= $(CURDIR)/reaver/src
+PGO_WORKLOAD ?= --file-root ./reaver/src ./reaver/src/plan reaver main
 
 # Per-package include paths enforce the layering (axsys < plan < enki):
 # compiling pkg/plan, the pkg/enki include directory is not on the path.
@@ -30,6 +43,8 @@ HARDEN_CFLAGS := -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3 -fstack-protector-strong
 BUILD_CFLAGS_debug := -O0 -g3 -DDEBUG
 BUILD_CFLAGS_release := -O3 -DNDEBUG $(HARDEN_CFLAGS)
 BUILD_CFLAGS_profile := $(BUILD_CFLAGS_release) -g3 -fno-omit-frame-pointer -fdebug-info-for-profiling
+BUILD_CFLAGS_pgo-generate := $(BUILD_CFLAGS_release) -fprofile-instr-generate
+BUILD_CFLAGS_pgo := $(BUILD_CFLAGS_release) -fprofile-instr-use=$(PGO_PROFILE) -Wno-error=profile-instr-unprofiled
 BUILD_CFLAGS_asan := -O1 -g3 -fsanitize=address -fno-omit-frame-pointer $(HARDEN_CFLAGS)
 BUILD_CFLAGS_ubsan := -O1 -g3 -fsanitize=undefined -fno-omit-frame-pointer $(HARDEN_CFLAGS)
 BUILD_CFLAGS_tsan := -O1 -g3 -fsanitize=thread -fno-omit-frame-pointer $(HARDEN_CFLAGS)
@@ -38,6 +53,8 @@ BUILD_CFLAGS_coverage := -O1 -g3 --coverage -Wno-pedantic $(HARDEN_CFLAGS)
 BUILD_LDFLAGS_debug :=
 BUILD_LDFLAGS_release :=
 BUILD_LDFLAGS_profile :=
+BUILD_LDFLAGS_pgo-generate := -fprofile-instr-generate
+BUILD_LDFLAGS_pgo := -fprofile-instr-use=$(PGO_PROFILE)
 BUILD_LDFLAGS_asan := -fsanitize=address
 BUILD_LDFLAGS_ubsan := -fsanitize=undefined
 BUILD_LDFLAGS_tsan := -fsanitize=thread
@@ -117,6 +134,14 @@ else
 ACTIVE_UNIT_BINS := $(UNIT_BINS)
 endif
 
+ifeq ($(BUILD_TYPE),pgo)
+PGO_PROFILE_TARGETS := $(LIB_OBJS) $(THEFT_OBJS) $(APP_BINS) $(UNIT_BINS) \
+	$(TSAN_UNIT_BINS) $(PROPERTY_BINS) $(FUZZ_BINS) $(PERF_BINS)
+$(PGO_PROFILE_TARGETS): $(PGO_PROFILE)
+$(PGO_PROFILE):
+	$(MAKE) pgo-profile
+endif
+
 TIDY_FILES := $(AXSYS_SRCS) $(PLAN_SRCS) $(ENKI_SRCS) $(UNIT_SRCS) $(PROPERTY_SRCS) $(FUZZ_SRCS) $(TSAN_UNIT_SRCS)
 TIDY_FILES_ABS := $(addprefix $(CURDIR)/,$(TIDY_FILES))
 
@@ -139,8 +164,8 @@ LCOV_FILTERED_INFO := $(BUILD_DIR)/coverage/enki.filtered.info
 COVERAGE_HTML_DIR := $(BUILD_DIR)/html
 LCOV_IGNORE_ERRORS ?= --ignore-errors inconsistent,inconsistent,mismatch,mismatch,gcov,gcov,unused,unused
 
-.PHONY: all lib bin install test test-binaries test-unit test-property fuzz fuzz-bin perf-binaries coverage tidy \
-	check-layering format format-check compile-commands clean distclean
+.PHONY: all lib bin install test test-binaries test-unit test-property fuzz fuzz-bin perf-binaries pgo \
+	pgo-profile coverage tidy check-layering format format-check compile-commands clean distclean
 
 all: lib bin
 
@@ -250,6 +275,19 @@ fuzz: $(FUZZ_BINS)
 	@set -eu; for fuzz_bin in $(FUZZ_BINS); do "$$fuzz_bin" $(FUZZ_ARGS); done
 
 perf-binaries: $(PERF_BINS)
+
+pgo: pgo-profile
+	$(MAKE) BUILD_TYPE=pgo BUILD_DIR=$(PGO_USE_BUILD_DIR) CC=$(PGO_CC) bin
+
+pgo-profile:
+	@mkdir -p $(PGO_RAW_DIR) $(dir $(PGO_PROFILE)) $(PGO_RUN_DIR)/reaver $(PGO_DIR)/reaver
+	@rm -f $(PGO_RAW_DIR)/*.profraw $(PGO_PROFILE)
+	@rm -rf $(PGO_RUN_DIR)/snap $(PGO_RUN_DIR)/reaver/src $(PGO_DIR)/reaver/src
+	@ln -s $(PGO_REAVER_SRC) $(PGO_RUN_DIR)/reaver/src
+	@ln -s $(PGO_REAVER_SRC) $(PGO_DIR)/reaver/src
+	$(MAKE) BUILD_TYPE=pgo-generate BUILD_DIR=$(PGO_GEN_BUILD_DIR) CC=$(PGO_CC) bin
+	cd $(PGO_RUN_DIR) && LLVM_PROFILE_FILE="$(PGO_PROFILE_PATTERN)" $(CURDIR)/$(PGO_GEN_BUILD_DIR)/bin/wisp $(PGO_WORKLOAD)
+	$(LLVM_PROFDATA) merge -output=$(PGO_PROFILE) $(PGO_RAW_DIR)/*.profraw
 
 coverage:
 	$(MAKE) BUILD_TYPE=coverage test
