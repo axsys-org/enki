@@ -1,6 +1,7 @@
 #include <setjmp.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -923,6 +924,110 @@ const pl_opdesc pl_ops[] = {
 
 const size_t pl_nops = sizeof(pl_ops) / sizeof(pl_ops[0]);
 
+typedef struct pl_opbucket {
+  const uint16_t* ix;
+  size_t n;
+} pl_opbucket;
+
+#define PL_IX_BUCKET(a) ((pl_opbucket){(a), sizeof(a) / sizeof((a)[0])})
+
+static const uint16_t pl_op0_argc1[] = {0};
+static const uint16_t pl_op0_argc3[] = {1};
+static const uint16_t pl_op0_argc6[] = {2};
+
+static const uint16_t pl_op66_argc1[] = {
+    3,  6,  7,  38, 39, 40, 41, 42, 44,  45,  46,  52, 53, 54,
+    55, 56, 57, 58, 59, 60, 65, 71, 72,  74,  75,  76, 77, 78,
+    79, 80, 81, 82, 83, 85, 86, 99, 100, 101, 103, 104};
+static const uint16_t pl_op66_argc2[] = {
+    8,  9,  10, 11, 12, 13, 14, 31, 32, 33, 36, 37, 43, 47, 50, 64,
+    66, 69, 70, 73, 84, 87, 88, 89, 92, 93, 94, 95, 96, 97, 98, 102};
+static const uint16_t pl_op66_argc3[] = {4,  15, 30, 34, 35, 48, 51,
+                                         61, 62, 63, 67, 68, 90, 91};
+static const uint16_t pl_op66_argc4[] = {16, 49};
+static const uint16_t pl_op66_argc5[] = {17};
+static const uint16_t pl_op66_argc6[] = {5, 18};
+static const uint16_t pl_op66_argc7[] = {19};
+static const uint16_t pl_op66_argc8[] = {20};
+static const uint16_t pl_op66_argc9[] = {21};
+static const uint16_t pl_op66_argc10[] = {22};
+static const uint16_t pl_op66_argc11[] = {23};
+static const uint16_t pl_op66_argc12[] = {24};
+static const uint16_t pl_op66_argc13[] = {25};
+static const uint16_t pl_op66_argc14[] = {26};
+static const uint16_t pl_op66_argc15[] = {27};
+static const uint16_t pl_op66_argc16[] = {28};
+static const uint16_t pl_op66_argc17[] = {29};
+
+static const uint16_t pl_op82_argc1[] = {105, 106, 107, 108, 110, 111, 112,
+                                         113, 114, 115, 118, 121, 122};
+static const uint16_t pl_op82_argc2[] = {109, 116, 117, 119};
+static const uint16_t pl_op82_argc3[] = {120};
+
+static pl_opbucket pl_op_lookup_bucket(uint64_t opset, uint32_t argc) {
+  switch (opset) {
+  case 0:
+    switch (argc) {
+    case 1:
+      return PL_IX_BUCKET(pl_op0_argc1);
+    case 3:
+      return PL_IX_BUCKET(pl_op0_argc3);
+    case 6:
+      return PL_IX_BUCKET(pl_op0_argc6);
+    }
+    break;
+  case 66:
+    switch (argc) {
+    case 1:
+      return PL_IX_BUCKET(pl_op66_argc1);
+    case 2:
+      return PL_IX_BUCKET(pl_op66_argc2);
+    case 3:
+      return PL_IX_BUCKET(pl_op66_argc3);
+    case 4:
+      return PL_IX_BUCKET(pl_op66_argc4);
+    case 5:
+      return PL_IX_BUCKET(pl_op66_argc5);
+    case 6:
+      return PL_IX_BUCKET(pl_op66_argc6);
+    case 7:
+      return PL_IX_BUCKET(pl_op66_argc7);
+    case 8:
+      return PL_IX_BUCKET(pl_op66_argc8);
+    case 9:
+      return PL_IX_BUCKET(pl_op66_argc9);
+    case 10:
+      return PL_IX_BUCKET(pl_op66_argc10);
+    case 11:
+      return PL_IX_BUCKET(pl_op66_argc11);
+    case 12:
+      return PL_IX_BUCKET(pl_op66_argc12);
+    case 13:
+      return PL_IX_BUCKET(pl_op66_argc13);
+    case 14:
+      return PL_IX_BUCKET(pl_op66_argc14);
+    case 15:
+      return PL_IX_BUCKET(pl_op66_argc15);
+    case 16:
+      return PL_IX_BUCKET(pl_op66_argc16);
+    case 17:
+      return PL_IX_BUCKET(pl_op66_argc17);
+    }
+    break;
+  case 82:
+    switch (argc) {
+    case 1:
+      return PL_IX_BUCKET(pl_op82_argc1);
+    case 2:
+      return PL_IX_BUCKET(pl_op82_argc2);
+    case 3:
+      return PL_IX_BUCKET(pl_op82_argc3);
+    }
+    break;
+  }
+  return (pl_opbucket){NULL, 0};
+}
+
 static bool nat_name_eq(pl_val v, const char* s) {
   if (!pl_is_nat(v))
     return false;
@@ -937,10 +1042,12 @@ static bool nat_name_eq(pl_val v, const char* s) {
 }
 
 int pl_op_lookup(uint64_t opset, pl_val name, uint32_t argc) {
-  for (size_t i = 0; i < pl_nops; i++) {
+  pl_opbucket b = pl_op_lookup_bucket(opset, argc);
+  for (size_t j = 0; j < b.n; j++) {
+    size_t i = b.ix[j];
     const pl_opdesc* d = &pl_ops[i];
-    if (d->opset != opset || d->argc != argc)
-      continue;
+    // ax_assume(d->opset == opset && d->argc == argc,
+    // "primop lookup bucket mismatch");
     if (d->name_c != NULL ? nat_name_eq(name, d->name_c)
                           : (pl_is_nat63(name) && d->name == name))
       return (int)i;
