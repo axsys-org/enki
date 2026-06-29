@@ -804,21 +804,22 @@ judge_scan:
       slots[1 + i] = t->vstack[jbase + 1 + i];
     for (uint32_t j = 0; j < m; j++)
       slots[1 + jargc + j] = pl_mk_thunk(t, envv, t->vstack[cursor + 1 + j]);
-    pl_code* code = NULL;
-    pl_store* s = pl_heap_store(t->heap);
-    if (s != NULL)
-      pl_law_code(s, t->vstack[jbase], &code);
-    if (code != NULL) {
-      t->vsp = jbase;
-      fr = pl_fpush(t);
-      fr->kind = PL_F_EXEC;
-      fr->a = envv;
-      fr->code = code;
-      fr->k = 0;
-      fr->argbase = t->vsp;
-      PL_GC_ALLOW(t);
-      goto exec;
-    }
+    // XX: works, revive when compiler done
+    // pl_code* code = NULL;
+    // pl_store* s = pl_heap_store(t->heap);
+    // if (s != NULL)
+    // pl_law_code(s, t->vstack[jbase], &code);
+    // if (code != NULL) {
+    //   t->vsp = jbase;
+    //   fr = pl_fpush(t);
+    //   fr->kind = PL_F_EXEC;
+    //   fr->a = envv;
+    //   fr->code = code;
+    //   fr->k = 0;
+    //   fr->argbase = t->vsp;
+    //   PL_GC_ALLOW(t);
+    //   goto exec;
+    // }
     v = pl_kal1(t, envv, t->vstack[cursor]);
     PL_GC_ALLOW(t);
     t->vsp = jbase;

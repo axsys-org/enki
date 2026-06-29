@@ -131,6 +131,33 @@ nix run .#coverage-report
 
 The Nix build writes the report under `result/html/`.
 
+## Clang PGO
+
+Build a Clang profile-guided `wisp` and `assembler` locally:
+
+```sh
+make pgo
+```
+
+The target builds an instrumented binary under `build/pgo-generate`, runs this
+training workload from `build/pgo/run`:
+
+```sh
+../../../build/pgo-generate/bin/wisp --file-root ./reaver/src ../reaver/src/plan reaver main
+```
+
+and merges the generated profiles into `build/pgo/enki.profdata`. Any snapshots
+created by the workload stay under `build/pgo/run/snap`. It then rebuilds the
+optimized binaries under `build/pgo/bin` with
+`-fprofile-instr-use=build/pgo/enki.profdata`.
+
+Useful overrides:
+
+```sh
+make pgo PGO_CC=/path/to/clang LLVM_PROFDATA=/path/to/llvm-profdata
+make pgo PGO_WORKLOAD="--file-root ./reaver/src ../reaver/src/plan reaver main"
+```
+
 ## Formatting And Analysis
 
 ```sh

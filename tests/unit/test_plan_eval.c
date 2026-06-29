@@ -36,6 +36,19 @@ static pl_val test_app1_thunk_to(pl_thread* t, pl_val value) {
   return out;
 }
 
+static void test_expect_no_op66(pl_thread* t, pl_val name, size_t n,
+                                const pl_val* args) {
+  pl_catch c;
+  pl_catch_init(t, &c);
+  if (setjmp(c.jb) == 0) {
+    (void)test_op66(t, name, n, args);
+    cr_assert_fail("expected no primop");
+  }
+  pl_catch_unwind(t, &c);
+  cr_assert_not_null(t->exn_msg);
+  cr_assert_str_eq(t->exn_msg, "no primop 66 (argc 1)");
+}
+
 /* ── Application shapes ────────────────────────────────────────────────── */
 
 Test(apply, under_application_builds_app) {
@@ -141,6 +154,15 @@ Test(ops, strict_args_force_left_to_right) {
   pl_catch_unwind(t, &c);
   cr_assert_null(t->exn_msg);
   cr_assert_eq(t->exn, 7); /* arg 0 forced first */
+  test_rt_free(&rt);
+}
+
+Test(ops, lookup_segregates_opcode_set_and_argc) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  pl_val arg1[1] = {0};
+  test_expect_no_op66(t, ax_s3('A', 'd', 'd'), 1, arg1);
+  test_expect_no_op66(t, ax_s4('R', 'e', 'c', 'v'), 1, arg1);
   test_rt_free(&rt);
 }
 
