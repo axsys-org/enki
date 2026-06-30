@@ -920,6 +920,7 @@ const pl_opdesc pl_ops[] = {
     OP82C("SendCaps", 3, 0b1, 0b110, pl_op82_send_caps),
     OP82C("Recv", 1, 0b1, 0, pl_op82_recv),
     OP82C("CloseHandle", 1, 0b1, 0, pl_op82_close_handle),
+    OP82("Connect", 3, 0b111, pl_op82_connect),
 };
 
 const size_t pl_nops = sizeof(pl_ops) / sizeof(pl_ops[0]);
@@ -962,7 +963,7 @@ static const uint16_t pl_op66_argc17[] = {29};
 static const uint16_t pl_op82_argc1[] = {105, 106, 107, 108, 110, 111, 112,
                                          113, 114, 115, 118, 121, 122};
 static const uint16_t pl_op82_argc2[] = {109, 116, 117, 119};
-static const uint16_t pl_op82_argc3[] = {120};
+static const uint16_t pl_op82_argc3[] = {120, 123};
 
 static pl_opbucket pl_op_lookup_bucket(uint64_t opset, uint32_t argc) {
   switch (opset) {

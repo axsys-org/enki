@@ -13,6 +13,8 @@
 #include "axsys/ds.h"
 #include "plan/nat.h"
 #include "plan/store.h"
+#include "plan/store.h"
+#include "plan/xtract.h"
 
 /*
  * Faithful port of the reference printer (Print.hs).  Printing is split
@@ -282,14 +284,7 @@ static const char* cn_str_show(cn* c, pl_val v) {
 
 /* tagName: the readable name of a law tag, or NULL. */
 static const char* cn_tag_name(cn* c, pl_val tag) {
-  if (!pl_is_nat(tag) || !cn_nat_is_str(tag))
-    return NULL;
-  size_t n = pl_nat_byte_len(tag);
-  char* s = cn_alloc(c, n + 1);
-  for (size_t i = 0; i < n; i++)
-    s[i] = (char)pl_nat_byte_at(tag, i);
-  s[n] = '\0';
-  return s;
+  return pl_nat_to_cstr(ax_arena_as_allocator(c->ar), tag);
 }
 
 /* ── Pass 1: extract (with nameSelf fused) ─────────────────────────────── */

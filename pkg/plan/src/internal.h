@@ -55,6 +55,7 @@ pl_val pl_op82_now(pl_thread* t, size_t ab);
 pl_val pl_op82_closefd(pl_thread* t, size_t ab);
 pl_val pl_op82_listen(pl_thread* t, size_t ab);
 pl_val pl_op82_accept(pl_thread* t, size_t ab);
+pl_val pl_op82_connect(pl_thread* t, size_t ab);
 pl_val pl_op82_read(pl_thread* t, size_t ab);
 pl_val pl_op82_write(pl_thread* t, size_t ab);
 
