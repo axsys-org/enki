@@ -399,12 +399,16 @@ static void* get_in_addr(struct sockaddr* sa) {
 }
 
 pl_val pl_op82_connect(pl_thread* t, size_t ab) {
+  int fd = -1;
   const char* err_reason = NULL;
+  char s[INET6_ADDRSTRLEN];
+  struct addrinfo hints, *servinfo, *cur;
+
   bool is_dns = rp_want_nat(t, ARG(0)) == 1 ? true : false;
   uint64_t port = pl_nat_u64_clamp(rp_want_nat(t, ARG(2)));
   char* host = pl_nat_to_cstr(ax_allocator_system(), rp_want_nat(t, ARG(1)));
-  char s[INET6_ADDRSTRLEN];
-  struct addrinfo hints, *servinfo, *cur;
+
+  servinfo = NULL;
   memset(&hints, 0, sizeof(hints));
   hints.ai_family = AF_INET;
   hints.ai_socktype = SOCK_STREAM;
@@ -417,7 +421,6 @@ pl_val pl_op82_connect(pl_thread* t, size_t ab) {
     err_reason = gai_strerror(rc);
     goto cleanup;
   }
-  int fd = -1;
   for (cur = servinfo; cur != NULL; cur = cur->ai_next) {
     if ((fd = socket(cur->ai_family, cur->ai_socktype, cur->ai_protocol)) ==
         -1) {
@@ -430,6 +433,7 @@ pl_val pl_op82_connect(pl_thread* t, size_t ab) {
 
     if (connect(fd, cur->ai_addr, cur->ai_addrlen) == -1) {
       perror("connect: syscall");
+      close(fd);
       continue;
     }
 
@@ -444,9 +448,18 @@ cleanup:
   freeaddrinfo(servinfo);
   ax_free(ax_allocator_system(), host);
   if (err_reason) {
+    if (fd >= 0)
+      close(fd);
     pl_raise_msg(t, err_reason);
+  } else if (fd >= 0) {
+    size_t h = ax_fd_add(fd);
+    if (h == AX_FD_INVALID) {
+      close(fd);
+      pl_raise_msg(t, "Connect: fd table full");
+    }
+    return (pl_val)h;
   } else {
-    return ((pl_val)fd) || 0;
+    pl_raise_msg(t, "Connect: bad fd");
   }
 }
 
