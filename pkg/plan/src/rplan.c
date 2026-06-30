@@ -1,18 +1,24 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <libgen.h>
+#include <inttypes.h>
 #include <netinet/in.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/types.h>
+#include <netdb.h>
+#include <arpa/inet.h>
 #include <time.h>
 #include <unistd.h>
 
+#include "axsys/allocator.h"
 #include "axsys/fd.h"
 #include "axsys/util.h"
 #include "internal.h"
 #include "plan/nat.h"
+#include "plan/xtract.h"
 
 /*
  * op 82: rplan I/O, gated on RPLAN mode (checked in eval.c before
@@ -382,6 +388,66 @@ pl_val pl_op82_closefd(pl_thread* t, size_t ab) {
     pl_raise_msg(t, "CloseFd: bad handle");
   }
   return 0;
+}
+
+static void* get_in_addr(struct sockaddr* sa) {
+  if (sa->sa_family == AF_INET) {
+    return &(((struct sockaddr_in*)sa)->sin_addr);
+  }
+
+  return &(((struct sockaddr_in6*)sa)->sin6_addr);
+}
+
+pl_val pl_op82_connect(pl_thread* t, size_t ab) {
+  const char* err_reason = NULL;
+  bool is_dns = rp_want_nat(t, ARG(0)) == 1 ? true : false;
+  uint64_t port = pl_nat_u64_clamp(rp_want_nat(t, ARG(2)));
+  char* host = pl_nat_to_cstr(ax_allocator_system(), rp_want_nat(t, ARG(1)));
+  char s[INET6_ADDRSTRLEN];
+  struct addrinfo hints, *servinfo, *cur;
+  memset(&hints, 0, sizeof(hints));
+  hints.ai_family = AF_INET;
+  hints.ai_socktype = SOCK_STREAM;
+  if (!is_dns)
+    hints.ai_flags = AI_NUMERICHOST;
+  char port_c[20];
+  snprintf(port_c, sizeof(port_c), "%" PRIu64, port);
+  int rc = getaddrinfo(host, port_c, &hints, &servinfo);
+  if (rc != 0) {
+    err_reason = gai_strerror(rc);
+    goto cleanup;
+  }
+  int fd = -1;
+  for (cur = servinfo; cur != NULL; cur = cur->ai_next) {
+    if ((fd = socket(cur->ai_family, cur->ai_socktype, cur->ai_protocol)) ==
+        -1) {
+      perror("connect: socket");
+      continue;
+    }
+
+    inet_ntop(cur->ai_family, get_in_addr((struct sockaddr*)cur->ai_addr), s,
+              sizeof(s));
+
+    if (connect(fd, cur->ai_addr, cur->ai_addrlen) == -1) {
+      perror("connect: syscall");
+      continue;
+    }
+
+    break;
+  }
+  if (cur == NULL) {
+    err_reason = "connect: failed";
+    goto cleanup;
+  }
+
+cleanup:
+  freeaddrinfo(servinfo);
+  ax_free(ax_allocator_system(), host);
+  if (err_reason) {
+    pl_raise_msg(t, err_reason);
+  } else {
+    return ((pl_val)fd) || 0;
+  }
 }
 
 pl_val pl_op82_listen(pl_thread* t, size_t ab) {
