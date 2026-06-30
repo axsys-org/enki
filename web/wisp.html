@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Wisp REPL</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #090b0d;
+        --panel: #101418;
+        --panel-2: #171d23;
+        --text: #edf2f7;
+        --muted: #94a3b8;
+        --line: #2f3a45;
+        --line-strong: #4b5b69;
+        --accent: #6ee7b7;
+        --accent-strong: #a7f3d0;
+        --danger: #fb7185;
+        --warn: #facc15;
+        --stdout: #e5e7eb;
+        --stderr: #c4b5fd;
+        --error: #fecdd3;
+        --input: #bbf7d0;
+        font-family:
+          ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono",
+          monospace;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background:
+          linear-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 1px),
+          var(--bg);
+        background-size: 100% 24px;
+        color: var(--text);
+      }
+
+      main {
+        width: min(1120px, 100%);
+        min-height: 100vh;
+        margin: 0 auto;
+        padding: 16px;
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr);
+        gap: 14px;
+      }
+
+      header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        border-bottom: 1px solid var(--line);
+        padding: 2px 0 14px;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 18px;
+        line-height: 1.1;
+        letter-spacing: 0;
+      }
+
+      .brand {
+        display: grid;
+        gap: 4px;
+      }
+
+      .prompt-line {
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .prompt-line::before,
+      .prompt::before {
+        content: "$ ";
+        color: var(--accent);
+      }
+
+      .metrics {
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .metric,
+      .status {
+        border: 1px solid var(--line);
+        border-radius: 4px;
+        padding: 5px 7px;
+        background: #0d1013;
+        color: var(--muted);
+        font-size: 11px;
+        white-space: nowrap;
+      }
+
+      .metric.ok,
+      .status.ok {
+        color: var(--accent);
+      }
+
+      .metric.fail,
+      .status.fail {
+        color: var(--danger);
+      }
+
+      .repl {
+        min-height: 0;
+        display: grid;
+        grid-template-rows: minmax(0, 1fr) auto;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        overflow: hidden;
+        background: var(--panel);
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+      }
+
+      .terminal-head {
+        min-height: 38px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 0 12px;
+        border-bottom: 1px solid var(--line);
+        background: var(--panel-2);
+      }
+
+      .terminal-head span {
+        color: var(--muted);
+        font-size: 11px;
+      }
+
+      .terminal-body {
+        min-height: 0;
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr);
+      }
+
+      pre {
+        min-height: 0;
+        overflow: auto;
+        margin: 0;
+        padding: 14px 12px 18px;
+        background: #050607;
+        color: var(--stdout);
+        font-size: 13px;
+        line-height: 1.5;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+
+      .entry.input {
+        color: var(--input);
+      }
+
+      .entry.stderr {
+        color: var(--stderr);
+      }
+
+      .entry.error {
+        color: var(--error);
+      }
+
+      form {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr) auto auto;
+        gap: 10px;
+        align-items: end;
+        border-top: 1px solid var(--line);
+        padding: 10px;
+        background: #0c0f12;
+      }
+
+      .prompt {
+        align-self: center;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      textarea {
+        width: 100%;
+        min-height: 42px;
+        max-height: 180px;
+        resize: vertical;
+        border: 1px solid var(--line-strong);
+        border-radius: 4px;
+        padding: 10px;
+        background: #050607;
+        color: var(--text);
+        font: inherit;
+        font-size: 13px;
+        line-height: 1.45;
+      }
+
+      textarea:focus {
+        outline: 1px solid var(--accent);
+        border-color: var(--accent);
+      }
+
+      button {
+        min-height: 42px;
+        border: 1px solid var(--accent);
+        border-radius: 4px;
+        padding: 0 14px;
+        background: var(--accent);
+        color: #03120a;
+        font: inherit;
+        font-weight: 800;
+        cursor: pointer;
+      }
+
+      button:hover {
+        background: var(--accent-strong);
+        border-color: var(--accent-strong);
+      }
+
+      button.secondary {
+        background: transparent;
+        color: var(--accent);
+      }
+
+      button.secondary:hover {
+        background: #10251b;
+      }
+
+      button:disabled,
+      textarea:disabled {
+        cursor: wait;
+        opacity: 0.55;
+      }
+
+      @media (max-width: 720px) {
+        main {
+          padding: 12px;
+        }
+
+        header {
+          align-items: start;
+          flex-direction: column;
+        }
+
+        .metrics {
+          justify-content: flex-start;
+        }
+
+        form {
+          grid-template-columns: auto minmax(0, 1fr);
+        }
+
+        form button {
+          grid-column: 2;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <div class="brand">
+          <h1>Wisp REPL</h1>
+          <div class="prompt-line" id="prompt">x/boot</div>
+        </div>
+        <div class="metrics">
+          <span class="metric" id="bundle-state">bundle: loading</span>
+          <span class="metric" id="file-state">snap: --</span>
+          <span class="metric" id="run-state">rc: --</span>
+          <span class="status" id="status">loading wasm</span>
+        </div>
+      </header>
+
+      <section class="repl">
+        <div class="terminal-body">
+          <div class="terminal-head">
+            <span>reaver</span>
+            <span id="transcript-meta">0 bytes</span>
+          </div>
+          <pre id="terminal"></pre>
+        </div>
+        <form id="repl-form">
+          <span class="prompt"></span>
+          <textarea id="repl-input" spellcheck="false" autofocus></textarea>
+          <button id="send" type="submit">Enter</button>
+          <button id="reset" class="secondary" type="button">Reset</button>
+        </form>
+      </section>
+    </main>
+    <script type="module" src="./wisp.js"></script>
+  </body>
+</html>

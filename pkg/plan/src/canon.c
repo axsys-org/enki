@@ -1,6 +1,8 @@
 #include "plan/canon.h"
 
+#ifndef ENKI_WASM
 #include <gmp.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -102,7 +104,11 @@ typedef struct cn {
   int nc;             /* nameVars fresh counter, threads whole doc */
 } cn;
 
+#ifdef ENKI_WASM
+#define CN_ARENA_CAP ((size_t)1 << 24)
+#else
 #define CN_ARENA_CAP ((size_t)1 << 31)
+#endif
 
 static void* cn_alloc(cn* c, size_t n) {
   void* p = ax_arena_alloc(c->ar, n);
@@ -209,6 +215,7 @@ static const char* cn_nl(cn* c, int col) {
 
 /* ── Nat rendering helpers ─────────────────────────────────────────────── */
 
+#ifndef ENKI_WASM
 static void cn_gmp_free(void* ptr, size_t size_s) {
   if (ptr == NULL)
     return;
@@ -216,6 +223,7 @@ static void cn_gmp_free(void* ptr, size_t size_s) {
   mp_get_memory_functions(NULL, NULL, &free_fn);
   free_fn(ptr, size_s);
 }
+#endif
 
 static const char* cn_num_str(cn* c, pl_val v) {
   if (pl_is_nat63(v)) {
@@ -223,6 +231,34 @@ static const char* cn_num_str(cn* c, pl_val v) {
     int n = snprintf(buf, sizeof(buf), "%llu", (unsigned long long)v);
     return cn_strdup_n(c, buf, (size_t)n);
   }
+#ifdef ENKI_WASM
+  size_t limbs = pl_nat_limb_len(v);
+  uint64_t* tmp = ax_calloc(ax_allocator_system(), uint64_t, limbs);
+  ax_assume(tmp != NULL, "canon: oom");
+  for (size_t i = 0; i < limbs; i++)
+    tmp[i] = pl_nat_limb_at(v, i);
+  char* digits = ax_calloc(ax_allocator_system(), char, limbs * 20 + 1);
+  ax_assume(digits != NULL, "canon: oom");
+  size_t nd = 0;
+  while (limbs > 0) {
+    unsigned __int128 rem = 0;
+    for (size_t i = limbs; i > 0; i--) {
+      unsigned __int128 cur = (rem << 64u) | tmp[i - 1];
+      tmp[i - 1] = (uint64_t)(cur / 10u);
+      rem = cur % 10u;
+    }
+    digits[nd++] = (char)('0' + (char)rem);
+    while (limbs > 0 && tmp[limbs - 1] == 0)
+      limbs--;
+  }
+  char* dec = cn_alloc(c, nd + 1);
+  for (size_t i = 0; i < nd; i++)
+    dec[i] = digits[nd - 1 - i];
+  dec[nd] = '\0';
+  ax_free(ax_allocator_system(), digits);
+  ax_free(ax_allocator_system(), tmp);
+  return dec;
+#else
   mpz_t z;
   mpz_init(z);
   size_t limbs = pl_nat_limb_len(v);
@@ -232,6 +268,7 @@ static const char* cn_num_str(cn* c, pl_val v) {
   cn_gmp_free(dec, strlen(dec) + 1);
   mpz_clear(z);
   return out;
+#endif
 }
 
 /* The reference natShowStr: which nats render as readable strings. */

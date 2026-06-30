@@ -7,7 +7,9 @@
 #include "axsys/util.h"
 
 static_assert(CHAR_BIT == 8, "byte must be 8 bits");
+#ifndef ENKI_WASM
 static_assert(sizeof(void*) == 8, "tagged pointer scheme assumes 64-bit");
+#endif
 static_assert(sizeof(size_t) == sizeof(uintptr_t),
               "size_t must match pointer width");
 

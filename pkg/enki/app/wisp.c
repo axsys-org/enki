@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 
 #include "axsys/allocator.h"
 #include "axsys/profile.h"
@@ -47,6 +48,53 @@ typedef struct boot_ctx {
   size_t tmp_env_s;
   bool emit_top_level_f;
 } boot_ctx;
+
+typedef char* (*boot_read_file_fn)(void* io_ctx, const ax_allocator* a,
+                                   const char* path_c);
+typedef void (*boot_emit_fn)(void* io_ctx, int channel, const char* bytes,
+                             size_t len);
+
+static boot_read_file_fn boot_read_file_hook = NULL;
+static boot_emit_fn boot_emit_hook = NULL;
+static void* boot_io_ctx = NULL;
+
+static void boot_io_set(void* io_ctx, boot_read_file_fn read_file,
+                        boot_emit_fn emit) {
+  boot_io_ctx = io_ctx;
+  boot_read_file_hook = read_file;
+  boot_emit_hook = emit;
+}
+
+static void boot_emit_bytes(int channel, const char* bytes, size_t len) {
+  if (boot_emit_hook != NULL) {
+    boot_emit_hook(boot_io_ctx, channel, bytes, len);
+    return;
+  }
+  FILE* f = channel == 1 ? stdout : stderr;
+  (void)fwrite(bytes, 1, len, f);
+}
+
+static void boot_emitf(int channel, const char* fmt, ...) {
+  char stack[512];
+  va_list ap;
+  va_start(ap, fmt);
+  int n = vsnprintf(stack, sizeof(stack), fmt, ap);
+  va_end(ap);
+  if (n < 0)
+    return;
+  if ((size_t)n < sizeof(stack)) {
+    boot_emit_bytes(channel, stack, (size_t)n);
+    return;
+  }
+  char* heap = ax_calloc(ax_allocator_system(), char, (size_t)n + 1);
+  if (heap == NULL)
+    return;
+  va_start(ap, fmt);
+  (void)vsnprintf(heap, (size_t)n + 1, fmt, ap);
+  va_end(ap);
+  boot_emit_bytes(channel, heap, (size_t)n);
+  ax_free(ax_allocator_system(), heap);
+}
 
 static void boot_trace_env(pl_root_visit visit, void* gc_ctx,
                            en_env_entry* env) {
@@ -217,9 +265,12 @@ static char* boot_module_path(boot_ctx* ctx, const char* mod_c) {
 }
 
 static char* boot_read_file(boot_ctx* ctx, const char* path_c) {
+  if (boot_read_file_hook != NULL)
+    return boot_read_file_hook(boot_io_ctx, ctx->loc_a, path_c);
+
   FILE* file = fopen(path_c, "rb");
   if (file == NULL) {
-    fprintf(stderr, "wisp: failed to open %s\n", path_c);
+    boot_emitf(2, "wisp: failed to open %s\n", path_c);
     return NULL;
   }
   if (fseek(file, 0, SEEK_END) != 0) {
@@ -270,7 +321,7 @@ static bool boot_process_form(boot_ctx* ctx, pl_val form) {
     char* out_c = en_wisp_print(w, out, NULL);
     if (out_c == NULL)
       return false;
-    fprintf(stderr, "%s\n", out_c);
+    boot_emitf(2, "%s\n", out_c);
     ax_free(ctx->loc_a, out_c);
   }
   boot_collect_after_invocation(ctx);
@@ -280,7 +331,7 @@ static bool boot_process_form(boot_ctx* ctx, pl_val form) {
 static en_env_entry* boot_load_module(boot_ctx* ctx, const char* mod_c) {
   en_wisp* w = ctx->w;
   if (!boot_ok_module_name(mod_c)) {
-    fprintf(stderr, "wisp: bad path: %s\n", mod_c);
+    boot_emitf(2, "wisp: bad path: %s\n", mod_c);
     return NULL;
   }
 
@@ -419,10 +470,11 @@ static bool boot_run_function(boot_ctx* ctx, pl_val fun, int argc,
   w->env = old_env;
   ctx->tmp_env_s = env_mark;
   if (ds != ER_DRIVE_DONE) {
-    fprintf(stderr, "wisp: runtime error: %s\n",
-            ds == ER_DRIVE_DEADLOCK ? "deadlock: every actor is blocked on Recv"
-            : w->t->exn_msg != NULL ? w->t->exn_msg
-                                    : "PLAN exception");
+    boot_emitf(2, "wisp: runtime error: %s\n",
+               ds == ER_DRIVE_DEADLOCK
+                   ? "deadlock: every actor is blocked on Recv"
+               : w->t->exn_msg != NULL ? w->t->exn_msg
+                                       : "PLAN exception");
     return false;
   }
   boot_collect_after_invocation(ctx);
@@ -446,7 +498,7 @@ static bool boot_load_assembly(boot_ctx* ctx, const char* mod_c,
   en_env_entry* ent = en_wisp_getenv(w, w->tmp_v[mark]);
   en_root_pop(w, mark);
   if (ent == NULL) {
-    fprintf(stderr, "wisp: program unbound: %s\n", fn_c);
+    boot_emitf(2, "wisp: program unbound: %s\n", fn_c);
     return false;
   }
   return boot_run_function(ctx, ent->val_v, argc, argv);
@@ -462,10 +514,10 @@ static bool boot_parse_double(const char* s, double* out) {
 }
 
 static void boot_usage(const char* argv0_c) {
-  fprintf(stderr,
-          "usage: %s [--file-root DIR] [--wait-for-tracy[=SECONDS]] "
-          "DIR MODULE [FUNCTION ARGS...]\n",
-          argv0_c);
+  boot_emitf(2,
+             "usage: %s [--file-root DIR] [--wait-for-tracy[=SECONDS]] "
+             "DIR MODULE [FUNCTION ARGS...]\n",
+             argv0_c);
 }
 
 static const char* boot_env_file_root(void) {
@@ -473,6 +525,7 @@ static const char* boot_env_file_root(void) {
   return env_c != NULL && env_c[0] != '\0' ? env_c : BOOT_DEFAULT_FILE_ROOT;
 }
 
+#ifndef ENKI_WISP_EMBEDDED
 int main(int argc, char** argv) {
   const char* file_root_c = boot_env_file_root();
   double tracy_wait_s = 0.0;
@@ -539,7 +592,7 @@ int main(int argc, char** argv) {
   pl_heap* heap = pl_heap_new(BOOT_HEAP_CELLS, store);
   en_wisp* w = en_wisp_new(heap);
   if (w == NULL) {
-    fprintf(stderr, "wisp: oom\n");
+    boot_emitf(2, "wisp: oom\n");
     return 1;
   }
   w->t->rplan_file_root_c = file_root_c;
@@ -564,8 +617,7 @@ int main(int argc, char** argv) {
 
   w->err_f = true;
   if (setjmp(w->errjmp) != 0) {
-    fprintf(stderr, "wisp: %s\n",
-            w->msg_c == NULL ? "unknown error" : w->msg_c);
+    boot_emitf(2, "wisp: %s\n", w->msg_c == NULL ? "unknown error" : w->msg_c);
     return 1;
   }
 
@@ -588,3 +640,4 @@ int main(int argc, char** argv) {
   pl_store_free(store);
   return ok ? 0 : 1;
 }
+#endif
