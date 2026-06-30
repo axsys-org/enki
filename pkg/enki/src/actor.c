@@ -1,11 +1,14 @@
 #include "enki/actor.h"
 
-#include <pthread.h>
 #include <setjmp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifndef ENKI_WASM
+#include <pthread.h>
 #include <unistd.h>
+#endif
 
 #include "axsys/assume.h"
 #include "axsys/ds.h"
@@ -82,8 +85,10 @@ typedef enum { ER_MODE_LIVE = 0, ER_MODE_RECORD, ER_MODE_REPLAY } er_mode;
 struct er_scheduler {
   pl_store* store;
   er_config cfg;
+#ifndef ENKI_WASM
   pthread_mutex_t mu;
   pthread_cond_t cv;
+#endif
   er_actor* qhead; /* run queue */
   er_actor* qtail;
   er_actor* all_head; /* every actor, creation order */
@@ -97,12 +102,14 @@ struct er_scheduler {
 
 struct er_mt_executor {
   er_scheduler* sys;
+#ifndef ENKI_WASM
   er_actor* root;
   uint32_t workers;
   pthread_t* thread_v;
   size_t active;
   bool stopping;
   er_run_reason reason;
+#endif
 };
 
 /* ── Construction ──────────────────────────────────────────────────────── */
@@ -111,8 +118,10 @@ er_scheduler* er_scheduler_new(pl_store* store, er_config cfg) {
   ax_assume(store != NULL, "er_scheduler_new: store required");
   er_scheduler* sys = calloc(1, sizeof(*sys));
   ax_assume(sys != NULL, "oom");
+#ifndef ENKI_WASM
   ax_assume(pthread_mutex_init(&sys->mu, NULL) == 0, "pthread_mutex_init");
   ax_assume(pthread_cond_init(&sys->cv, NULL) == 0, "pthread_cond_init");
+#endif
   sys->store = store;
   sys->cfg = cfg;
   if (sys->cfg.quantum == 0)
@@ -179,8 +188,10 @@ void er_scheduler_free(er_scheduler* sys) {
     free(a);
     a = next;
   }
+#ifndef ENKI_WASM
   pthread_cond_destroy(&sys->cv);
   pthread_mutex_destroy(&sys->mu);
+#endif
   free(sys);
 }
 
@@ -219,7 +230,9 @@ static void er_enqueue(er_actor* a) {
   else
     a->sys->qhead = a;
   a->sys->qtail = a;
+#ifndef ENKI_WASM
   pthread_cond_signal(&a->sys->cv);
+#endif
 }
 
 static er_actor* er_dequeue(er_scheduler* sys) {
@@ -604,6 +617,7 @@ er_run_reason er_scheduler_run(er_scheduler* sys) {
   }
 }
 
+#ifndef ENKI_WASM
 static er_run_reason er_run_reason_locked(er_scheduler* sys) {
   for (er_actor* it = sys->all_head; it != NULL; it = it->all_next)
     if (it->status == ER_ACTOR_BLOCKED)
@@ -700,6 +714,25 @@ er_run_reason er_mt_executor_run(er_mt_executor* ex) {
     ax_assume(pthread_join(ex->thread_v[i], NULL) == 0, "pthread_join");
   return ex->reason;
 }
+#else
+er_mt_executor* er_mt_executor_new(er_scheduler* sys, er_mt_config cfg) {
+  AX_UNUSED(cfg);
+  ax_assume(sys != NULL, "er_mt_executor_new: scheduler required");
+  er_mt_executor* ex = calloc(1, sizeof(*ex));
+  ax_assume(ex != NULL, "oom");
+  ex->sys = sys;
+  return ex;
+}
+
+void er_mt_executor_free(er_mt_executor* ex) {
+  free(ex);
+}
+
+er_run_reason er_mt_executor_run(er_mt_executor* ex) {
+  ax_assume(ex != NULL, "er_mt_executor_run: executor required");
+  return er_scheduler_run(ex->sys);
+}
+#endif
 
 /* Abandon the root's parked continuation: unwind to the watermarks the
  * arming recorded, so the embedder can re-arm the thread cleanly. */
@@ -743,6 +776,7 @@ er_drive_status er_scheduler_drive(er_scheduler* sys, er_actor* root) {
   }
 }
 
+#ifndef ENKI_WASM
 er_drive_status er_mt_executor_drive(er_mt_executor* ex, er_actor* root) {
   ax_assume(ex != NULL, "er_mt_executor_drive: executor required");
   ax_assume(root->adopted, "er_mt_executor_drive: actor is not adopted");
@@ -817,6 +851,12 @@ done:
   ex->root = NULL;
   return out;
 }
+#else
+er_drive_status er_mt_executor_drive(er_mt_executor* ex, er_actor* root) {
+  ax_assume(ex != NULL, "er_mt_executor_drive: executor required");
+  return er_scheduler_drive(ex->sys, root);
+}
+#endif
 
 /* ── Event log & replay ────────────────────────────────────────────────── */
 

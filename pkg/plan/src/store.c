@@ -1,7 +1,9 @@
 #include "plan/store.h"
 
+#ifndef ENKI_WASM
 #include <pthread.h>
 #include <lmdb.h>
+#endif
 #include <stdlib.h>
 #include <assert.h>
 #include <string.h>
@@ -17,7 +19,11 @@
 
 /* Default reserved (overcommitted) size of the store region. */
 #ifndef PL_STORE_REGION_BYTES
+#ifdef ENKI_WASM
+#define PL_STORE_REGION_BYTES (((size_t)64) << 20)
+#else
 #define PL_STORE_REGION_BYTES (((size_t)1) << 38)
+#endif
 #endif
 
 /** TODO: the locking mechanism is fucking trash (but probably correct)
@@ -34,7 +40,9 @@ typedef struct pl_code_entry {
 } pl_code_entry;
 
 struct pl_store {
+#ifndef ENKI_WASM
   pthread_mutex_t mu;
+#endif
   ax_arena* region;
   uint8_t* lo;
   uint8_t* hi;
@@ -47,10 +55,18 @@ struct pl_store {
 };
 
 void pl_store_lock(pl_store* s) {
+#ifdef ENKI_WASM
+  AX_UNUSED(s);
+#else
   ax_assume(pthread_mutex_lock(&s->mu) == 0, "pthread_mutex_lock");
+#endif
 }
 
 bool pl_store_trylock(pl_store* s) {
+#ifdef ENKI_WASM
+  AX_UNUSED(s);
+  return true;
+#else
   int rc = pthread_mutex_trylock(&s->mu);
   if (!rc) {
     return true;
@@ -58,10 +74,15 @@ bool pl_store_trylock(pl_store* s) {
     ax_assume(rc == EBUSY, "pthread_mutex_trylock");
     return false;
   }
+#endif
 }
 
 void pl_store_unlock(pl_store* s) {
+#ifdef ENKI_WASM
+  AX_UNUSED(s);
+#else
   ax_assume(pthread_mutex_unlock(&s->mu) == 0, "pthread_mutex_unlock");
+#endif
 }
 
 /* ── Region allocation ─────────────────────────────────────────────────── */
@@ -283,12 +304,14 @@ pl_val pl_store_ix1_expr(pl_store* s) {
 pl_store* pl_store_new(pl_store_backend backend) {
   pl_store* s = calloc(1, sizeof(*s));
   ax_assume(s != NULL, "oom");
+#ifndef ENKI_WASM
   pthread_mutexattr_t attr;
   ax_assume(pthread_mutexattr_init(&attr) == 0, "pthread_mutexattr_init");
   ax_assume(pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE) == 0,
             "pthread_mutexattr_settype");
   ax_assume(pthread_mutex_init(&s->mu, &attr) == 0, "pthread_mutex_init");
   pthread_mutexattr_destroy(&attr);
+#endif
   s->region = ax_arena_create_overcommit(PL_STORE_REGION_BYTES);
   ax_assume(s->region != NULL, "store region reservation failed");
   s->lo = (uint8_t*)s->region;
@@ -307,7 +330,9 @@ void pl_store_free(pl_store* s) {
     s->be.close(s->be.ctx);
   ax_hmfree(s->intern);
   ax_arena_destroy(s->region);
+#ifndef ENKI_WASM
   pthread_mutex_destroy(&s->mu);
+#endif
   free(s);
 }
 
@@ -401,6 +426,14 @@ pl_store* pl_store_new_mem(void) {
 }
 
 /* ── LMDB backend ──────────────────────────────────────────────────────── */
+
+#ifdef ENKI_WASM
+pl_store* pl_store_new_lmdb(const char* path, size_t map_size) {
+  AX_UNUSED(path);
+  AX_UNUSED(map_size);
+  return NULL;
+}
+#else
 
 typedef struct lmdb_backend {
   MDB_env* env;
@@ -516,3 +549,4 @@ pl_store* pl_store_new_lmdb(const char* path, size_t map_size) {
       .close = lmdb_close,
   });
 }
+#endif
