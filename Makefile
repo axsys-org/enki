@@ -19,7 +19,7 @@ PGO_RAW_DIR ?= $(PGO_DIR)/raw
 PGO_PROFILE ?= $(PGO_DIR)/enki.profdata
 PGO_PROFILE_PATTERN ?= $(CURDIR)/$(PGO_RAW_DIR)/wisp-%m.profraw
 PGO_REAVER_SRC ?= $(CURDIR)/reaver/src
-REAVER_SRC ?= reaver/src
+REAVER_SRC ?= ../reaver/src
 PGO_WORKLOAD ?= --file-root ./reaver/src ./reaver/src/plan reaver main
 
 # Per-package include paths enforce the layering (axsys < plan < enki):
