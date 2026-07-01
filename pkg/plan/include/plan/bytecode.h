@@ -17,7 +17,8 @@ typedef enum pl_op {
   OP_CALL = 4,
   OP_TAILCALL = 5,
   OP_INTERP = 6,
-  OP_RET = 7
+  OP_RET = 7,
+  OP_MK_APP = 8
 } pl_op;
 
 pl_code* pl_bytecode_from_val(pl_val val);

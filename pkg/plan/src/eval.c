@@ -274,6 +274,7 @@ static pl_run_status pl_run(pl_thread* t, pl_val v, size_t base,
                             bool at_return) {
   pl_val env, expr;
   pl_frame* fr;
+  pl_store* s = pl_heap_store(t->heap);
   size_t hbase = 0;
   uint32_t argc = 0;
   /* JUDGE scan coordinates; restored from the F_JUDGE frame on resume
@@ -320,7 +321,8 @@ eval:
       goto eval_expr;
     }
     case PL_K_THKE: {
-      /* TODO: set blackhole */
+      if ((pl_hdr_flags(p[0]) & PL_F_HOLE) != 0)
+        pl_raise_msg(t, "<<loop>>");
       p[0] = pl_hdr_set_flag(p[0], PL_F_HOLE);
       fr = pl_fpush(t);
       fr->kind = PL_F_UPD;
@@ -335,12 +337,25 @@ eval_thke: {
   fr = &t->fstack[t->fsp - 1];
   v = fr->a;
   pl_val* args;
-  switch (pl_thke_bane(pl_ptr(v))) {
+  pl_bane ban = pl_thke_bane(pl_ptr(v));
+  switch (ban) {
   case PL_BAN_FAST:
     hbase = t->vsp;
     argc = pl_thke_n(pl_ptr(v));
     args = pl_thke_args(pl_ptr(v));
-    for (uint32_t i = 0; i < argc; i++) {
+    if (argc == 0)
+      pl_raise_msg(t, "bad empty bytecode thunk");
+    if (!pl_is_whnf(args[0])) {
+      for (uint32_t i = argc; i-- > 1;) {
+        fr = pl_fpush(t);
+        fr->kind = PL_F_APPLY;
+        fr->b = args[i];
+      }
+      v = args[0];
+      goto eval;
+    }
+    pl_vpush(t, args[0]);
+    for (uint32_t i = 1; i < argc; i++) {
       pl_vpush(t, args[i]);
     }
     argc--;
@@ -348,6 +363,17 @@ eval_thke: {
   case PL_BAN_PRIM:
     ax_abort("EVAL: no prim yet");
   case PL_BAN_SLOW:
+    argc = pl_thke_n(pl_ptr(v));
+    args = pl_thke_args(pl_ptr(v));
+    if (argc == 0)
+      pl_raise_msg(t, "bad empty bytecode thunk");
+    for (uint32_t i = argc; i-- > 1;) {
+      fr = pl_fpush(t);
+      fr->kind = PL_F_APPLY;
+      fr->b = args[i];
+    }
+    v = args[0];
+    goto eval;
   default:
     ax_abort("EVAL: bad bane");
   }
@@ -369,6 +395,8 @@ exec: {
     case OP_MK_THK: {
       argc = (uint32_t)NEXT();
       pl_bane bane = (pl_bane)NEXT();
+      if (argc == 0 || argc > t->vsp - fr->argbase)
+        pl_raise_msg(t, "bytecode stack underflow");
       pl_gc_reserve(t, PL_THKE_CELLS(argc));
       PL_GC_FORBID(t);
       pl_val thke = pl_mk_thke(t, fr->a, bane, argc, pl_vpeek(t, argc));
@@ -376,6 +404,21 @@ exec: {
       PL_GC_ALLOW(t);
       break;
     };
+
+    case OP_MK_APP: {
+      argc = (uint32_t)NEXT();
+      if (argc == 0 || argc + 1 > t->vsp - fr->argbase)
+        pl_raise_msg(t, "bytecode stack underflow");
+      pl_gc_reserve(t, PL_APP_CELLS(argc));
+      PL_GC_FORBID(t);
+      size_t appbase = t->vsp - argc - 1;
+      pl_val app =
+          pl_mk_app_from(t, t->vstack[appbase], argc, &t->vstack[appbase + 1]);
+      t->vsp = appbase;
+      pl_vpush(t, app);
+      PL_GC_ALLOW(t);
+      break;
+    }
 
     case OP_INTERP:
       env = fr->a;
@@ -385,7 +428,7 @@ exec: {
       v = pl_vpop(t);
       t->vsp = fr->argbase;
       t->fsp--;
-      goto ret;
+      goto eval;
 
     case OP_EVAL:
     default:
@@ -804,22 +847,20 @@ judge_scan:
       slots[1 + i] = t->vstack[jbase + 1 + i];
     for (uint32_t j = 0; j < m; j++)
       slots[1 + jargc + j] = pl_mk_thunk(t, envv, t->vstack[cursor + 1 + j]);
-    // XX: works, revive when compiler done
-    // pl_code* code = NULL;
-    // pl_store* s = pl_heap_store(t->heap);
-    // if (s != NULL)
-    // pl_law_code(s, t->vstack[jbase], &code);
-    // if (code != NULL) {
-    //   t->vsp = jbase;
-    //   fr = pl_fpush(t);
-    //   fr->kind = PL_F_EXEC;
-    //   fr->a = envv;
-    //   fr->code = code;
-    //   fr->k = 0;
-    //   fr->argbase = t->vsp;
-    //   PL_GC_ALLOW(t);
-    //   goto exec;
-    // }
+    pl_code* code = NULL;
+    if (s != NULL)
+      pl_law_code(s, t->vstack[jbase], &code);
+    if (code != NULL) {
+      t->vsp = jbase;
+      fr = pl_fpush(t);
+      fr->kind = PL_F_EXEC;
+      fr->a = envv;
+      fr->code = code;
+      fr->k = 0;
+      fr->argbase = t->vsp;
+      PL_GC_ALLOW(t);
+      goto exec;
+    }
     v = pl_kal1(t, envv, t->vstack[cursor]);
     PL_GC_ALLOW(t);
     t->vsp = jbase;

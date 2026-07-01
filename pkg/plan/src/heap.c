@@ -161,6 +161,16 @@ static void pl_cheney_scan(pl_gc_ctx* gc) {
       first = 1;
       count = 2;
       break;
+    case PL_K_THKE: {
+      pl_val* env = (pl_val*)&scan[1];
+      *env = pl_forward(gc, *env);
+      for (uint32_t i = 3; i < cells; i++) {
+        pl_val* f = (pl_val*)&scan[i];
+        *f = pl_forward(gc, *f);
+      }
+      scan += cells;
+      continue;
+    }
     case PL_K_IND:
     case PL_K_BH:
       first = 1;

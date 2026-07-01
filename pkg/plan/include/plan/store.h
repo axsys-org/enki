@@ -17,9 +17,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "axsys/arena.h"
 #include "plan/heap.h"
 #include "plan/value.h"
 #include "plan/bytecode.h"
+
+typedef struct pl_hash {
+  uint8_t b[32];
+} pl_hash;
 
 typedef struct pl_store_backend {
   void* ctx;
@@ -34,6 +39,36 @@ typedef struct pl_store_backend {
   void (*get_code)(void* ctx, const uint8_t hash[32], pl_code** out);
   void (*put_code)(void* ctx, const uint8_t hash[32], pl_code* out);
 } pl_store_backend;
+
+
+typedef struct pl_intern_entry {
+  pl_hash key;
+  pl_val value;
+} pl_intern_entry;
+
+typedef struct pl_code_entry {
+  pl_hash key;
+  pl_code* value;
+} pl_code_entry;
+
+
+
+typedef struct pl_store {
+  pthread_mutex_t mu;
+  ax_arena* region;
+  uint8_t* lo;
+  uint8_t* hi;
+  pl_intern_entry* intern; /* stb_ds hashmap: hash -> PIN val */
+  pl_code_entry* code;     /* stb_ds hashmap: hash -> bytecode */
+  pl_store_backend be;
+  pl_val ix0_expr, ix1_expr;
+  uint8_t compiler[32];
+  pl_thread* compiler_t;
+  pl_heap* compiler_h;
+  bool compiler_f;
+} pl_store;
+
+
 
 pl_store* pl_store_new(pl_store_backend backend);
 pl_store* pl_store_new_mem(void);
@@ -67,7 +102,7 @@ pl_val pl_store_ix0_expr(pl_store* s);
 pl_val pl_store_ix1_expr(pl_store* s);
 
 /* bytecode manipulation */
-void pl_store_put_code(pl_thread* t, const uint8_t hash[32]);
+void pl_store_put_code(pl_store* s, const uint8_t hash[32]);
 bool pl_store_get_code(pl_store* s, const uint8_t hash[32], pl_code** out);
 
 void pl_store_put_compiler(pl_store* s, const uint8_t hash[32]);

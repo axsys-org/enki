@@ -21,7 +21,7 @@ pl_code* pl_bytecode_from_val(pl_val val) {
   for (size_t i = 0; i < out->nops; i++) {
     // pl_val v = args[i];
     out->ops[i] = args[i];
-    fprintf(stderr, "op[%zu] = %" PRIu64 "\n", i, args[i]);
+    // fprintf(stderr, "op[%zu] = %" PRIu64 "\n", i, args[i]);
   }
   return out;
 

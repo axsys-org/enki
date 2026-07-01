@@ -14,6 +14,7 @@
  */
 
 #include <setjmp.h>
+#include <pthread.h>
 #include <stddef.h>
 #include <assert.h>
 
@@ -174,7 +175,7 @@ static inline pl_val pl_vreplace(pl_thread* t, uint32_t n, pl_val r) {
 
 /* read, n down from TOS */
 static inline pl_val* pl_vpeek(pl_thread* t, uint32_t n) {
-  assert(n < t->vsp);
+  assert(n <= t->vsp);
   return &t->vstack[t->vsp - n];
 }
 

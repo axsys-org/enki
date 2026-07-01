@@ -97,6 +97,36 @@ Test(apply, args_stay_lazy) {
   test_rt_free(&rt);
 }
 
+Test(apply, slow_bytecode_thunk_applies_unknown_arity) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  pl_vpush(t, test_law(t, 2, 0, 1)); /* K x y = x */
+  pl_vpush(t, 5);
+  pl_vpush(t, test_throwing(t, 7));
+  pl_gc_reserve(t, PL_THKE_CELLS(3));
+  pl_val thke = pl_mk_thke(t, 0, PL_BAN_SLOW, 3, &t->vstack[base]);
+  t->vsp = base;
+
+  cr_assert_eq(pl_whnf(t, thke), 5);
+  test_rt_free(&rt);
+}
+
+Test(apply, fast_bytecode_thunk_applies_deferred_head) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  pl_vpush(t, test_thunk(t, test_app1(t, 0, test_law(t, 2, 0, 1))));
+  pl_vpush(t, 5);
+  pl_vpush(t, test_throwing(t, 7));
+  pl_gc_reserve(t, PL_THKE_CELLS(3));
+  pl_val thke = pl_mk_thke(t, 0, PL_BAN_FAST, 3, &t->vstack[base]);
+  t->vsp = base;
+
+  cr_assert_eq(pl_whnf(t, thke), 5);
+  test_rt_free(&rt);
+}
+
 /* ── Recursive-let knots ───────────────────────────────────────────────── */
 
 /*

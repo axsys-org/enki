@@ -23,28 +23,6 @@
 /** TODO: the locking mechanism is fucking trash (but probably correct)
  * fix imminently
  */
-typedef struct pl_intern_entry {
-  pl_hash key;
-  pl_val value;
-} pl_intern_entry;
-
-typedef struct pl_code_entry {
-  pl_hash key;
-  pl_code* value;
-} pl_code_entry;
-
-struct pl_store {
-  pthread_mutex_t mu;
-  ax_arena* region;
-  uint8_t* lo;
-  uint8_t* hi;
-  pl_intern_entry* intern; /* stb_ds hashmap: hash -> PIN val */
-  pl_code_entry* code;     /* stb_ds hashmap: hash -> bytecode */
-  pl_store_backend be;
-  pl_val ix0_expr, ix1_expr;
-  uint8_t compiler[32];
-  bool compiler_f;
-};
 
 void pl_store_lock(pl_store* s) {
   ax_assume(pthread_mutex_lock(&s->mu) == 0, "pthread_mutex_lock");
@@ -166,8 +144,9 @@ bool pl_store_get_code(pl_store* s, const uint8_t hash[32], pl_code** out) {
   return true;
 }
 
-void pl_store_put_code(pl_thread* t, const uint8_t hash[32]) {
-  pl_store* s = pl_heap_store(t->heap);
+void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
+  // pl_store* s = pl_heap_store(t->heap);
+  pl_thread* t = s->compiler_t;
   pl_hash k;
   pl_store_lock(s);
   if (!s->compiler_f) {
