@@ -158,7 +158,7 @@ static inline uint64_t pl_tag_for_kind(pl_kind k) {
 #define PL_NAT_CELLS(limbs) (1u + (uint32_t)(limbs))
 #define PL_APP_CELLS(n)     (2u + (uint32_t)(n))
 #define PL_LAW_CELLS        4u
-#define PL_PIN_CELLS(np)    (6u + (uint32_t)(np))
+#define PL_PIN_CELLS(np)    (7u + (uint32_t)(np))
 #define PL_THUNK_CELLS      3u
 #define PL_ENV_CELLS(n)     (1u + (uint32_t)(n))
 #define PL_IND_CELLS        2u
@@ -197,18 +197,27 @@ static inline pl_val pl_law_body(pl_cell* p) {
   return (pl_val)p[3];
 }
 
-/* K_PIN { hdr(meta=npins); u8 hash[32]; body; pin[npins] } — store only. */
+/* K_PIN { hdr(meta=npins); u8 hash[32]; body; code; pin[npins] } — store
+ * only.  code caches the pin's compiled bytecode (a pl_code*, owned by
+ * the store; NULL when uncompiled) so JUDGE dispatch needs no table
+ * lookup. */
 static inline uint8_t* pl_pin_hash_bytes(pl_cell* p) {
   return (uint8_t*)(p + 1);
 }
 static inline pl_val pl_pin_body(pl_cell* p) {
   return (pl_val)p[5];
 }
+static inline void* pl_pin_code(pl_cell* p) {
+  return (void*)(uintptr_t)p[6];
+}
+static inline void pl_pin_set_code(pl_cell* p, void* code) {
+  p[6] = (pl_cell)(uintptr_t)code;
+}
 static inline uint32_t pl_pin_npins(pl_cell* p) {
   return pl_hdr_meta(p[0]);
 }
 static inline pl_val* pl_pin_subpins(pl_cell* p) {
-  return (pl_val*)(p + 6);
+  return (pl_val*)(p + 7);
 }
 
 /* K_THUNK { hdr; env; expr } */

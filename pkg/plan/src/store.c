@@ -124,30 +124,8 @@ bool pl_store_get_root(pl_store* s, uint8_t hash[32]) {
   return ok;
 }
 
-bool pl_store_get_code(pl_store* s, const uint8_t hash[32], pl_code** out) {
-  if (!pl_store_trylock(s)) {
-    return false;
-  }
-  pl_hash k;
-  memcpy(k.b, hash, 32);
-
-  // LSAN reports this as a leak i have no idea why0
-  ptrdiff_t i = ax_hmgeti(s->code, k);
-  // gets picked up wrongly by lsan
-  ax_lsan_ignore(s->code);
-  if (i < 0) {
-    pl_store_unlock(s);
-    return false;
-  }
-  *out = s->code[i].value;
-  ax_assume(*out != NULL, "oom");
-  pl_store_unlock(s);
-  return true;
-}
-
 void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
   pl_thread* t = s->compiler_t;
-  pl_hash k;
   pl_store_lock(s);
   if (!s->compiler_f) {
     pl_store_unlock(s);
@@ -176,9 +154,11 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
   ax_assume(p, "wack");
   pl_code* code = pl_bytecode_from_val(pl_pin_body(p));
   if (code != NULL) {
-    memcpy(k.b, hash, 32);
+    /* cache on the law's pin itself: JUDGE reads the field directly */
     pl_store_lock(s);
-    ax_hmput(s->code, k, code);
+    pl_val target = pl_store_intern_get(s, hash);
+    if (target != 0)
+      pl_pin_set_code(pl_ptr(target), code);
     pl_store_unlock(s);
   }
 }
@@ -208,8 +188,10 @@ void pl_store_put_compiler(pl_store* s, const uint8_t hash[32]) {
   s->compiler_f = hash[0] ? memcmp(hash, hash + 1, 31) != 0 : true;
   memcpy(s->compiler, hash, 32);
   bool sweep = s->compiler_f;
-  // moar leaks, TODO: fix
-  ax_hmfree(s->code);
+  /* invalidate code from the previous compiler (the pl_code allocations
+   * leak, as before — TODO: fix) */
+  for (ptrdiff_t i = 0; i < ax_hmlen(s->intern); i++)
+    pl_pin_set_code(pl_ptr(s->intern[i].value), NULL);
   pl_store_unlock(s);
   if (sweep)
     pl_store_compile_existing(s);
@@ -238,8 +220,9 @@ pl_val pl_store_mk_pin(pl_store* s, const uint8_t hash[32], pl_val body,
   p[0] = pl_hdr_make(PL_K_PIN, PL_F_NORMAL, npins, PL_PIN_CELLS(npins));
   memcpy(p + 1, hash, 32);
   p[5] = body;
+  pl_pin_set_code(p, NULL);
   if (npins > 0)
-    memcpy(p + 6, subpins, npins * sizeof(pl_val));
+    memcpy(p + 7, subpins, npins * sizeof(pl_val));
   return pl_make(PL_TAG_PIN, p);
 }
 

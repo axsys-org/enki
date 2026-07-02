@@ -55,6 +55,7 @@ typedef enum {
   PL_F_JUDGE,      /* forcing a law-body chain node; argbase: hbase     */
   PL_F_NIL,        /* RETURN planNil(v): 1 if the value is 0, else 0    */
   PL_F_PROF,       /* Tracy law-attribution boundary; a: law head       */
+  PL_F_KIND_COUNT, /* sentinel: sizes pl_run's RETURN dispatch table    */
 } pl_frame_kind;
 
 /** TODO make union */

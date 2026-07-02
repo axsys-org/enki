@@ -45,18 +45,12 @@ typedef struct pl_intern_entry {
   pl_val value;
 } pl_intern_entry;
 
-typedef struct pl_code_entry {
-  pl_hash key;
-  pl_code* value;
-} pl_code_entry;
-
 typedef struct pl_store {
   pthread_mutex_t mu;
   ax_arena* region;
   uint8_t* lo;
   uint8_t* hi;
   pl_intern_entry* intern; /* stb_ds hashmap: hash -> PIN val */
-  pl_code_entry* code;     /* stb_ds hashmap: hash -> bytecode */
   pl_store_backend be;
   pl_val ix0_expr, ix1_expr;
   uint8_t compiler[32];
@@ -96,9 +90,9 @@ bool pl_store_get_root(pl_store* s, uint8_t hash[32]);
 pl_val pl_store_ix0_expr(pl_store* s);
 pl_val pl_store_ix1_expr(pl_store* s);
 
-/* bytecode manipulation */
+/* Compile the law pin `hash` with the installed compiler and cache the
+ * result on the pin itself (read back via pl_pin_code). */
 void pl_store_put_code(pl_store* s, const uint8_t hash[32]);
-bool pl_store_get_code(pl_store* s, const uint8_t hash[32], pl_code** out);
 
 void pl_store_put_compiler(pl_store* s, const uint8_t hash[32]);
 #endif

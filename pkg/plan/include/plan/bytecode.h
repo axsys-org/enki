@@ -18,7 +18,8 @@ typedef enum pl_op {
   OP_TAILCALL = 5,
   OP_INTERP = 6,
   OP_RET = 7,
-  OP_MK_APP = 8
+  OP_MK_APP = 8,
+  PL_OP_COUNT /* sentinel: sizes pl_run's exec dispatch table */
 } pl_op;
 
 pl_code* pl_bytecode_from_val(pl_val val);
