@@ -51,7 +51,17 @@ HARDEN_CFLAGS := -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3 -fstack-protector-strong
 # loop calls out-of-line builders (pl_bump, pl_mk_thke, ...) across TUs.
 # profile (tracy) skips it for sane attribution; pgo-generate skips it
 # because only the final instr-use build's codegen matters.
+#
+# Darwin-only for now: ld64 links bitcode archive members out of the
+# box, but the Linux legs link with binutils ld.bfd, which chokes on
+# bitcode archives ("archive has no index") — enabling LTO there needs
+# llvm-ar + lld (llvmPackages.bintools) in the build environment first.
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
 LTO_CFLAGS := -flto
+else
+LTO_CFLAGS :=
+endif
 
 BUILD_CFLAGS_debug := -O0 -g3 -DDEBUG
 BUILD_CFLAGS_relbase := -O3 -DNDEBUG $(HARDEN_CFLAGS)
