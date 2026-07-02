@@ -16,6 +16,15 @@
 #include "plan/nat.h"
 #include "plan/store.h"
 
+/* pl_run dispatches with computed gotos (labels-as-values), a GNU
+ * extension.  Clang suppresses the diagnostic with the targeted
+ * -Wno-gnu-label-as-value (Makefile); gcc has no specific flag — the
+ * pedwarn only lives in the -Wpedantic bucket, so silence that for
+ * this translation unit. */
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic ignored "-Wpedantic"
+#endif
+
 /* ── Errors ────────────────────────────────────────────────────────────── */
 
 static _Thread_local char pl_msgbuf[256];

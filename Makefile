@@ -34,7 +34,14 @@ WARN_COMMON := -Wall -Wextra  \
 	-Wpedantic -Wshadow -Wconversion -Wstrict-prototypes \
 	-Wmissing-prototypes -Wold-style-definition -Wnull-dereference \
 	-Wdouble-promotion -Werror \
-	-Wno-sign-conversion -Wno-char-subscripts -Wno-unused-function -Wno-gnu-label-as-value
+	-Wno-sign-conversion -Wno-char-subscripts -Wno-unused-function
+
+# Computed gotos (pl_run) are a GNU extension: clang has a targeted
+# suppression; gcc only has the -Wpedantic bucket, handled by a
+# GCC-only pragma in eval.c.
+ifneq (,$(findstring clang,$(shell $(CC) --version 2>/dev/null)))
+WARN_COMMON += -Wno-gnu-label-as-value
+endif
 
 WARN_CFLAGS = $(WARN_COMMON)
 
