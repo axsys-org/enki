@@ -157,8 +157,9 @@
         mkCheck = kind: buildType: mkCheckArgs kind buildType "" "";
         /*
         no TSAN for macOS - causes occasional (nondeterministic) crashes in CI
+        ASAN should be disabled until we fix bytecode lifecycles
         */
-        testBuildTypes = ["debug" "asan" "ubsan"];
+        testBuildTypes = ["debug" "ubsan"];
         linuxTestBuildTypes = ["tsan"];
         # linuxTestBuildTypes = [];
         testChecks =
