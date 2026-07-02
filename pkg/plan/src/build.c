@@ -155,6 +155,18 @@ pl_val pl_mk_thke(pl_thread* t, pl_val env, pl_bane bane, uint32_t nargs,
   return pl_make(PL_TAG_DEFER, p);
 }
 
+pl_val pl_mk_thke_known(pl_thread* t, pl_val env, uint32_t idx, uint32_t nargs,
+                        pl_val* args) {
+  uint32_t size = PL_THKE_CELLS(nargs + 1);
+  pl_cell* p = pl_bump(t, size);
+  p[0] = pl_hdr_make(PL_K_THKE, 0, 0, size);
+  p[1] = env;
+  p[2] = PL_BAN_PRIM_KNOWN;
+  p[3] = idx; /* the ingest-resolved pl_ops index, a nat63 */
+  memcpy(p + 4, args, sizeof(pl_val) * nargs);
+  return pl_make(PL_TAG_DEFER, p);
+}
+
 /* ── Mutation sites ───────────────────────────────────────────────── */
 
 void pl_thunk_update(pl_thread* t, pl_val thunk_or_bh, pl_val result) {

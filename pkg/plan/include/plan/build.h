@@ -29,6 +29,9 @@ pl_val pl_mk_env(pl_thread* t, uint32_t nslots); /* slots zeroed to nat 0 */
 pl_val pl_mk_thunk(pl_thread* t, pl_val env, pl_val expr);
 pl_val pl_mk_thke(pl_thread* t, pl_val env, pl_bane bane, uint32_t nargs,
                   pl_val* args);
+/* PL_BAN_PRIM_KNOWN thke: args[0] = the ingest-resolved pl_ops index. */
+pl_val pl_mk_thke_known(pl_thread* t, pl_val env, uint32_t idx, uint32_t nargs,
+                        pl_val* args);
 
 /* Arity of a WHNF value (never forces). */
 uint64_t pl_arity(pl_val v);

@@ -398,6 +398,25 @@ eval_thke: {
     argc--;
     goto judge;
   }
+  if (ban == PL_BAN_PRIM_KNOWN) {
+    /* [opidx, e1..en]: ingest already resolved the op — no row, no
+     * F_OPENT, no lookup; enter the strict-arg driver directly */
+    uint32_t idx = (uint32_t)args[0];
+    assert(idx < pl_nops);
+    if (pl_ops[idx].opset == 82 && !t->rplan_f)
+      pl_raise_msg(t, "Not in RPLAN Mode"); /* the F_OPENT gate */
+    size_t listbase = t->vsp;
+    for (uint32_t i = 0; i < argc; i++)
+      pl_vpush(t, args[i]); /* idx fills the name slot: op_body's
+                               vsp = argbase - 1 drops it as usual */
+    fr = pl_fpush(t);
+    fr->kind = PL_F_OPARG;
+    fr->op = idx;
+    fr->argbase = listbase + 1;
+    fr->argc = argc - 1;
+    fr->k = 0;
+    goto oparg_next;
+  }
   if (ban == PL_BAN_PRIM) {
     /* [oppin, arg]: dispatch straight into the primop entry, exactly
      * as fast_apply's pinned-nat case would after re-unwinding */
@@ -457,6 +476,18 @@ x_mk_thk: {
   pl_bane bane = (pl_bane)NEXT();
   if (argc == 0 || argc > t->vsp - fr->argbase)
     pl_raise_msg(t, "bytecode stack underflow");
+  if (bane == PL_BAN_PRIM_KNOWN) {
+    /* two extra operands: the op index (resolved at ingest from the
+     * emitted opset pin + name) and a dead slot */
+    uint32_t idx = (uint32_t)NEXT();
+    (void)NEXT();
+    pl_gc_reserve(t, PL_THKE_CELLS(argc + 1));
+    PL_GC_FORBID(t);
+    pl_val thke = pl_mk_thke_known(t, fr->a, idx, argc, pl_vpeek(t, argc));
+    pl_vreplace(t, argc, thke);
+    PL_GC_ALLOW(t);
+    DISPATCH();
+  }
   if (bane != PL_BAN_FAST && bane != PL_BAN_SLOW && bane != PL_BAN_PRIM)
     pl_raise_msg(t, "exec: bad bane");
   pl_gc_reserve(t, PL_THKE_CELLS(argc));

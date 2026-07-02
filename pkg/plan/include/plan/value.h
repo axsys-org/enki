@@ -52,9 +52,10 @@ typedef enum {
 
 /* executioner types for newstyle thunks */
 typedef enum {
-  PL_BAN_FAST = 1, /* known exact arity match */
-  PL_BAN_SLOW = 2, /* fallback - possibly over or under applied */
-  PL_BAN_PRIM = 3, /* primop [oppin, arg]: dispatch via the op table */
+  PL_BAN_FAST = 1,       /* known exact arity match */
+  PL_BAN_SLOW = 2,       /* fallback - possibly over or under applied */
+  PL_BAN_PRIM = 3,       /* primop [oppin, arg]: dispatch via the op table */
+  PL_BAN_PRIM_KNOWN = 4, /* ingest-resolved primop [opidx, args…] */
 } pl_bane;
 
 /*
