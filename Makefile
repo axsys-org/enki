@@ -40,21 +40,28 @@ WARN_CFLAGS = $(WARN_COMMON)
 
 HARDEN_CFLAGS := -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3 -fstack-protector-strong
 
+# Full LTO for the perf builds (release + final pgo): the evaluator's hot
+# loop calls out-of-line builders (pl_bump, pl_mk_thke, ...) across TUs.
+# profile (tracy) skips it for sane attribution; pgo-generate skips it
+# because only the final instr-use build's codegen matters.
+LTO_CFLAGS := -flto
+
 BUILD_CFLAGS_debug := -O0 -g3 -DDEBUG
-BUILD_CFLAGS_release := -O3 -DNDEBUG $(HARDEN_CFLAGS)
-BUILD_CFLAGS_profile := $(BUILD_CFLAGS_release) -g3 -fno-omit-frame-pointer -fdebug-info-for-profiling
-BUILD_CFLAGS_pgo-generate := $(BUILD_CFLAGS_release) -fprofile-instr-generate
-BUILD_CFLAGS_pgo := $(BUILD_CFLAGS_release) -fprofile-instr-use=$(PGO_PROFILE) -Wno-error=profile-instr-unprofiled
+BUILD_CFLAGS_relbase := -O3 -DNDEBUG $(HARDEN_CFLAGS)
+BUILD_CFLAGS_release := $(BUILD_CFLAGS_relbase) $(LTO_CFLAGS)
+BUILD_CFLAGS_profile := $(BUILD_CFLAGS_relbase) -g3 -fno-omit-frame-pointer -fdebug-info-for-profiling
+BUILD_CFLAGS_pgo-generate := $(BUILD_CFLAGS_relbase) -fprofile-instr-generate
+BUILD_CFLAGS_pgo := $(BUILD_CFLAGS_relbase) $(LTO_CFLAGS) -fprofile-instr-use=$(PGO_PROFILE) -Wno-error=profile-instr-unprofiled
 BUILD_CFLAGS_asan := -O1 -g3 -fsanitize=address -fno-omit-frame-pointer $(HARDEN_CFLAGS)
 BUILD_CFLAGS_ubsan := -O1 -g3 -fsanitize=undefined -fno-omit-frame-pointer $(HARDEN_CFLAGS)
 BUILD_CFLAGS_tsan := -O1 -g3 -fsanitize=thread -fno-omit-frame-pointer $(HARDEN_CFLAGS)
 BUILD_CFLAGS_coverage := -O1 -g3 --coverage -Wno-pedantic $(HARDEN_CFLAGS)
 
 BUILD_LDFLAGS_debug :=
-BUILD_LDFLAGS_release :=
+BUILD_LDFLAGS_release := $(LTO_CFLAGS)
 BUILD_LDFLAGS_profile :=
 BUILD_LDFLAGS_pgo-generate := -fprofile-instr-generate
-BUILD_LDFLAGS_pgo := -fprofile-instr-use=$(PGO_PROFILE)
+BUILD_LDFLAGS_pgo := $(LTO_CFLAGS) -fprofile-instr-use=$(PGO_PROFILE)
 BUILD_LDFLAGS_asan := -fsanitize=address
 BUILD_LDFLAGS_ubsan := -fsanitize=undefined
 BUILD_LDFLAGS_tsan := -fsanitize=thread

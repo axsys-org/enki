@@ -52,8 +52,10 @@ pl_code* pl_bytecode_from_val(pl_val val) {
   pl_op_t* ops = out->ops;
   size_t n = out->nops;
   size_t i = 0;
+  pl_op_t last_op = PL_OP_COUNT;
   while (i < n) {
     pl_op_t op = ops[i++];
+    last_op = op;
     switch (op) {
     case OP_PUSH_VAR:
     case OP_PUSH_LIT:
@@ -66,6 +68,7 @@ pl_code* pl_bytecode_from_val(pl_val val) {
     case OP_RET:
       break;
     case OP_MK_THK: {
+      size_t opslot = i - 1;
       if (i + 2 > n)
         FAIL("truncated operand")
       pl_op_t argc = ops[i];
@@ -93,12 +96,20 @@ pl_code* pl_bytecode_from_val(pl_val val) {
                  bane != PL_BAN_PRIM) {
         FAIL("bad bane")
       }
+      /* a thunk RETurned immediately is forced immediately: fuse into
+       * a direct tail entry (the trailing RET becomes unreachable) */
+      if (i < n && ops[i] == OP_RET)
+        ops[opslot] = OP_TAILCALL;
       break;
     }
     default:
       FAIL("bad opcode")
     }
   }
+  /* exec must never run off the end: the last instruction is a RET
+   * (possibly the unreachable one behind a fused TAILCALL) */
+  if (last_op != OP_RET)
+    FAIL("bad program end")
   return out;
 
 failed:

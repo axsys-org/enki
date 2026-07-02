@@ -293,13 +293,15 @@ static pl_run_status pl_run(pl_thread* t, pl_val v, size_t base,
       [PL_K_BH] = &&defer_bh,
       [PL_K_THKE] = &&defer_thke,
   };
-  /* OP_EVAL/OP_CALL/OP_TAILCALL are unimplemented: abort, in all builds */
+  /* OP_EVAL/OP_CALL are unimplemented: abort, in all builds.
+   * OP_TAILCALL is never emitted by the compiler — the ingest walker
+   * fuses MK_THK+RET into it. */
   static void* const op_tbl[PL_OP_COUNT] = {
       [OP_PUSH_VAR] = &&x_push_var, [OP_PUSH_LIT] = &&x_push_lit,
       [OP_MK_THK] = &&x_mk_thk,     [OP_MK_APP] = &&x_mk_app,
       [OP_INTERP] = &&x_interp,     [OP_RET] = &&x_ret,
       [OP_EVAL] = &&x_bad,          [OP_CALL] = &&x_bad,
-      [OP_TAILCALL] = &&x_bad,
+      [OP_TAILCALL] = &&x_tail,
   };
   static void* const ret_tbl[PL_F_KIND_COUNT] = {
       [PL_F_UPDATE] = &&ret_update, [PL_F_APPLY] = &&ret_apply,
@@ -413,7 +415,7 @@ eval_thke: {
     fr = pl_fpush(t);
     fr->kind = PL_F_OPARG;
     fr->op = idx;
-    fr->argbase = listbase + 1;
+    fr->argbase = (uint32_t)(listbase + 1);
     fr->argc = argc - 1;
     fr->k = 0;
     goto oparg_next;
@@ -449,7 +451,7 @@ thke_slow:
       pl_vpush(t, args[i]);
     fr = pl_fpush(t);
     fr->kind = PL_F_APPLYN;
-    fr->argbase = appbase + 1;
+    fr->argbase = (uint32_t)(appbase + 1);
     fr->argc = argc - 1;
     v = args[0];
     goto eval;
@@ -540,6 +542,121 @@ x_ret:
   t->fsp--;
   goto eval;
 
+x_tail: {
+  /*
+   * MK_THK+RET fused at ingest: the thunk would be forced immediately
+   * and has no other consumer, so enter the application directly at
+   * the caller's frame slot — no thunk, no F_UPD, and tail recursion
+   * runs in constant frame depth.  The group of n values relocates to
+   * tbase, exactly where x_ret's vsp reset would have left the stack.
+   */
+  argc = (uint32_t)NEXT();
+  pl_bane bane = (pl_bane)NEXT();
+  uint32_t idx = 0;
+  if (bane == PL_BAN_PRIM_KNOWN) {
+    idx = (uint32_t)NEXT();
+    (void)NEXT();
+  }
+  if (argc == 0 || argc > t->vsp - fr->argbase)
+    pl_raise_msg(t, "bytecode stack underflow");
+  if (bane != PL_BAN_FAST && bane != PL_BAN_SLOW && bane != PL_BAN_PRIM &&
+      bane != PL_BAN_PRIM_KNOWN)
+    pl_raise_msg(t, "exec: bad bane");
+  size_t tbase = fr->argbase;
+  size_t g = t->vsp - argc;
+  /*
+   * The tail entry skips the eval: safepoint the thunk force would
+   * have hit — take the fuel step here, and on exhaustion fall back
+   * to the thunk so the canonical safepoint captures the yield with a
+   * complete continuation (rearm to 1 so the wraparound is impossible).
+   */
+  if (ax_unlikely(--t->fuel == 0)) {
+    t->fuel = 1;
+    goto tail_fallback;
+  }
+  if (bane == PL_BAN_FAST) {
+    pl_val head = t->vstack[g];
+    pl_cell* lp = NULL;
+    if (pl_tag(head) == PL_TAG_LAW)
+      lp = pl_ptr(head);
+    else if (pl_tag(head) == PL_TAG_PIN &&
+             pl_tag(pl_pin_body(pl_ptr(head))) == PL_TAG_LAW)
+      lp = pl_ptr(pl_pin_body(pl_ptr(head)));
+    if (lp == NULL || pl_law_arity(lp) != argc - 1)
+      goto tail_fallback; /* mis-hinted: the generic path via the thunk */
+    memmove(&t->vstack[tbase], &t->vstack[g], (size_t)argc * sizeof(pl_val));
+    t->vsp = tbase + argc;
+    t->fsp--;
+    hbase = tbase;
+    argc--;
+    goto judge;
+  }
+  if (bane == PL_BAN_PRIM_KNOWN) {
+    assert(idx < pl_nops);
+    if (pl_ops[idx].opset == 82 && !t->rplan_f)
+      pl_raise_msg(t, "Not in RPLAN Mode");
+    pl_vpush(t, 0); /* room for the name slot when g == tbase */
+    memmove(&t->vstack[tbase + 1], &t->vstack[g],
+            (size_t)argc * sizeof(pl_val));
+    t->vstack[tbase] = idx; /* after the move: aliased when g == tbase */
+    t->vsp = tbase + 1 + argc;
+    t->fsp--;
+    fr = pl_fpush(t);
+    fr->kind = PL_F_OPARG;
+    fr->op = idx;
+    fr->argbase = (uint32_t)(tbase + 1);
+    fr->argc = argc;
+    fr->k = 0;
+    goto oparg_next;
+  }
+  if (bane == PL_BAN_PRIM) {
+    pl_cell* pp;
+    if (argc != 2 || (pp = pl_as(PL_TAG_PIN, t->vstack[g])) == NULL ||
+        !pl_is_nat(pl_pin_body(pp)))
+      goto tail_fallback;
+    v = t->vstack[g + 1];
+    t->vsp = tbase;
+    t->fsp--;
+    fr = pl_fpush(t);
+    fr->kind = PL_F_OPENT;
+    fr->opset = pl_nat_u64_clamp(pl_pin_body(pp));
+    goto eval;
+  }
+  /* PL_BAN_SLOW */
+  if (argc == 1) { /* bare head */
+    v = t->vstack[g];
+    t->vsp = tbase;
+    t->fsp--;
+    goto eval;
+  }
+  v = t->vstack[g]; /* before zeroing: aliased when g == tbase */
+  memmove(&t->vstack[tbase + 1], &t->vstack[g + 1],
+          (size_t)(argc - 1) * sizeof(pl_val));
+  t->vstack[tbase] = 0; /* head slot for ret_applyn */
+  t->vsp = tbase + argc;
+  t->fsp--;
+  fr = pl_fpush(t);
+  fr->kind = PL_F_APPLYN;
+  fr->argbase = (uint32_t)(tbase + 1);
+  fr->argc = argc - 1;
+  goto eval;
+
+tail_fallback:
+  /* build the thunk after all (fuel boundary or mis-hint) and take
+   * x_ret's exit: the eval: safepoint owns any yield from here */
+  pl_gc_reserve(t, bane == PL_BAN_PRIM_KNOWN ? PL_THKE_CELLS(argc + 1)
+                                             : PL_THKE_CELLS(argc));
+  PL_GC_FORBID(t);
+  pl_val thke = bane == PL_BAN_PRIM_KNOWN
+                    ? pl_mk_thke_known(t, fr->a, idx, argc, pl_vpeek(t, argc))
+                    : pl_mk_thke(t, fr->a, bane, argc, pl_vpeek(t, argc));
+  PL_GC_ALLOW(t);
+  v = thke;
+  t->vsp = tbase;
+  t->fsp--;
+  goto eval;
+}
+
 x_bad:
   ax_abort("exec: unsupported opcode");
 }
@@ -610,7 +727,7 @@ eval_expr:
         fr->a = env;
         fr->b = expr;
         fr->k = 0;
-        fr->argbase = t->vsp;
+        fr->argbase = (uint32_t)t->vsp;
         pl_vpush(t, 0); /* slot for the interpreted operand */
         v = pl_app_args(p)[1];
         goto eval;
@@ -758,8 +875,12 @@ judge: {
     bool handled = pl_hook(t, hbase, argc, &out);
     t->centry_depth--;
     if (handled) {
+#ifdef TRACY_ENABLE
+      /* pop the PROF frame pl_profile_law_push pushed; without TRACY
+       * nothing was pushed and popping would eat the caller's frame */
       pl_profile_frame_end(&t->fstack[t->fsp - 1]);
       t->fsp--;
+#endif
       t->vsp = hbase;
       v = out;
       goto eval;
@@ -804,7 +925,7 @@ ret_opent: {
   fr = pl_fpush(t);
   fr->kind = PL_F_OPARG;
   fr->op = (uint32_t)idx;
-  fr->argbase = listbase + 1;
+  fr->argbase = (uint32_t)(listbase + 1);
   fr->argc = argc;
   fr->k = 0;
   goto oparg_next;
@@ -984,7 +1105,7 @@ judge_scan:
       if (!pl_is_whnf(b)) {
         fr = pl_fpush(t);
         fr->kind = PL_F_JUDGE;
-        fr->argbase = jbase;
+        fr->argbase = (uint32_t)jbase;
         fr->argc = jargc;
         v = b;
         goto eval;
@@ -1018,7 +1139,7 @@ judge_scan:
       fr->a = envv;
       fr->code = code;
       fr->k = 0;
-      fr->argbase = t->vsp;
+      fr->argbase = (uint32_t)t->vsp;
       PL_GC_ALLOW(t);
       goto exec;
     }

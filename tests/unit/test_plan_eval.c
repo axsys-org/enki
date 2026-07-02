@@ -205,6 +205,45 @@ Test(apply, slow_thke_splices_partial_app_head) {
   test_rt_free(&rt);
 }
 
+Test(apply, tailcall_loops_in_constant_frame_space) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  /* loop x = loop x, as fused tail-call bytecode: must run in constant
+   * frame space AND stay preemptable (the tail path takes a fuel step) */
+  pl_vpush(t, test_law(t, 1, 0, 0));
+  pl_val pin = pl_pin(t, t->vstack[base]); /* store-resident: GC-stable */
+  t->vsp = base;
+  pl_cell* pp = pl_as(PL_TAG_PIN, pin);
+  cr_assert_not_null(pp);
+  static pl_op_t loop_ops[7];
+  loop_ops[0] = OP_PUSH_LIT;
+  loop_ops[1] = pin;
+  loop_ops[2] = OP_PUSH_VAR;
+  loop_ops[3] = 1;
+  loop_ops[4] = OP_TAILCALL;
+  loop_ops[5] = 2;
+  loop_ops[6] = PL_BAN_FAST;
+  static pl_code loop_code = {loop_ops, 7};
+  pl_pin_set_code(pp, &loop_code);
+
+  size_t fcap0 = t->fcap;
+  pl_vpush(t, pin);
+  pl_vpush(t, 5);
+  pl_gc_reserve(t, PL_THKE_CELLS(2));
+  pl_val thke = pl_mk_thke(t, 0, PL_BAN_FAST, 2, &t->vstack[base]);
+  t->vsp = base;
+  pl_thread_start(t, thke);
+  for (int i = 0; i < 200; i++)
+    cr_assert_eq(pl_thread_run(t, 10000), PL_RUN_YIELDED);
+  /* ~2M tail calls: frames grow only at fuel checkpoints (one F_UPD
+   * per quantum survives until the loop would return), never per call */
+  cr_assert_eq(t->fcap, fcap0);
+  cr_assert(t->fsp <= t->base_fsp + 220);
+  pl_pin_set_code(pp, NULL); /* the code is a stack-lifetime fake */
+  test_rt_free(&rt);
+}
+
 Test(apply, slow_thke_over_applied_order) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;

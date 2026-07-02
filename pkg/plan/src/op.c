@@ -631,7 +631,7 @@ static pl_val op_throw(pl_thread* t, size_t ab) {
 static pl_val op_try(pl_thread* t, size_t ab) {
   pl_frame* fr = pl_fpush(t);
   fr->kind = PL_F_TRY;
-  fr->argbase = ab - 1; /* vsp to restore when delivering the exn */
+  fr->argbase = (uint32_t)(ab - 1); /* vsp to restore on exn delivery */
   pl_push_nf(t);
   pl_push_apply(t, ARG(1));
   return ARG(0);

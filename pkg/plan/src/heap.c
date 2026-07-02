@@ -300,6 +300,8 @@ void pl_thread_free(pl_thread* t) {
 
 void pl_vstack_grow(pl_thread* t) {
   t->vcap *= 2;
+  /* frames hold vstack offsets as u32 */
+  ax_assume(t->vcap <= UINT32_MAX, "vstack exceeds u32 frame offsets");
   t->vstack = realloc(t->vstack, t->vcap * sizeof(pl_val));
   ax_assume(t->vstack != NULL, "oom");
 }
