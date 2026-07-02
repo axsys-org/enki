@@ -6,7 +6,7 @@
     flake-utils.url = "github:numtide/flake-utils";
     treefmt-nix.url = "github:numtide/treefmt-nix";
     reaver = {
-      url = "github:sol-plunder/reaver/b8d3cb79c272e64460763c5de79ffdb245a62c1a";
+      url = "github:axsys-org/shrine-plan/lf/bytecode";
       flake = false;
     };
   };

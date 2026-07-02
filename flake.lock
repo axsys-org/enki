@@ -53,17 +53,17 @@
     "reaver": {
       "flake": false,
       "locked": {
-        "lastModified": 1778693203,
-        "narHash": "sha256-o33dYQ/61SX72J3V249DwoVlbyFkvR+QXWQhLAYoEWI=",
-        "owner": "sol-plunder",
-        "repo": "reaver",
-        "rev": "b8d3cb79c272e64460763c5de79ffdb245a62c1a",
+        "lastModified": 1783012763,
+        "narHash": "sha256-PRO7I90XVhigNnSUe7WM1Lp0UxetZXXOK/hVDhMyN7k=",
+        "owner": "axsys-org",
+        "repo": "shrine-plan",
+        "rev": "24cb028a0011eaa91a7a912bce940594a795a074",
         "type": "github"
       },
       "original": {
-        "owner": "sol-plunder",
-        "repo": "reaver",
-        "rev": "b8d3cb79c272e64460763c5de79ffdb245a62c1a",
+        "owner": "axsys-org",
+        "ref": "lf/bytecode",
+        "repo": "shrine-plan",
         "type": "github"
       }
     },
