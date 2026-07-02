@@ -87,6 +87,21 @@ pl_val pl_mk_app_from(pl_thread* t, pl_val head, uint32_t n,
   return pl_make(PL_TAG_APP, p);
 }
 
+pl_val pl_mk_app_cat(pl_thread* t, pl_val f, uint32_t m, const pl_val* args) {
+  ax_assume(m >= 1, "empty cat");
+  pl_cell* fp = pl_as(PL_TAG_APP, f);
+  if (fp == NULL)
+    return pl_mk_app_from(t, f, m, args);
+  uint32_t n = pl_app_n(fp);
+  pl_cell* p = pl_bump(t, PL_APP_CELLS(n + m));
+  p[0] = pl_hdr_make(PL_K_APP, 0, pl_need_after(pl_app_head(fp), n + m),
+                     PL_APP_CELLS(n + m));
+  p[1] = fp[1];
+  memcpy(p + 2, fp + 2, n * sizeof(pl_val));
+  memcpy(p + 2 + n, args, m * sizeof(pl_val));
+  return pl_make(PL_TAG_APP, p);
+}
+
 pl_val pl_mk_app_snoc(pl_thread* t, pl_val f, pl_val x) {
   pl_cell* fp = pl_as(PL_TAG_APP, f);
   if (fp != NULL) {

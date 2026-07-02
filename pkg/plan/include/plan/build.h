@@ -20,6 +20,9 @@ pl_val pl_nat_trim(pl_val v);
 
 /* APP construction.  head must be WHNF (arity is consulted, never forced). */
 pl_val pl_mk_app_snoc(pl_thread* t, pl_val f, pl_val x);
+/* Flat append of m args to f (as m chained snocs, one allocation).
+ * Caller reserves PL_APP_CELLS((f is APP ? pl_app_n(f) : 0) + m). */
+pl_val pl_mk_app_cat(pl_thread* t, pl_val f, uint32_t m, const pl_val* args);
 pl_val pl_mk_app_take(pl_thread* t, pl_val app, uint32_t n);
 pl_val pl_mk_app_from(pl_thread* t, pl_val head, uint32_t n,
                       const pl_val* args);

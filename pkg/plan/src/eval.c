@@ -310,6 +310,7 @@ static pl_run_status pl_run(pl_thread* t, pl_val v, size_t base,
       [PL_F_EXEC] = &&ret_exec,     [PL_F_UPD] = &&ret_upd,
       [PL_F_TRY] = &&ret_try,       [PL_F_JUDGE] = &&ret_judge,
       [PL_F_NIL] = &&ret_nil,       [PL_F_PROF] = &&ret_prof,
+      [PL_F_APPLYN] = &&ret_applyn,
   };
 
   if (at_return)
@@ -433,13 +434,26 @@ eval_thke: {
   if (ax_unlikely(ban != PL_BAN_SLOW))
     ax_abort("EVAL: bad bane");
 thke_slow:
-  for (uint32_t i = argc; i-- > 1;) {
-    fr = pl_fpush(t);
-    fr->kind = PL_F_APPLY;
-    fr->b = args[i];
+  /* [f, p1..pm]: park the pending args on the vstack under a single
+   * F_APPLYN frame; once the head is WHNF its arity decides the whole
+   * application in one step (ret_applyn) — no per-arg frames, no
+   * intermediate partial apps */
+  if (argc == 1) { /* bare head: just force it */
+    v = args[0];
+    goto eval;
   }
-  v = args[0];
-  goto eval;
+  {
+    size_t appbase = t->vsp;
+    pl_vpush(t, 0); /* head slot, filled at ret_applyn */
+    for (uint32_t i = 1; i < argc; i++)
+      pl_vpush(t, args[i]);
+    fr = pl_fpush(t);
+    fr->kind = PL_F_APPLYN;
+    fr->argbase = appbase + 1;
+    fr->argc = argc - 1;
+    v = args[0];
+    goto eval;
+  }
 }
 
 exec: {
@@ -874,6 +888,66 @@ ret_prof:
   pl_profile_frame_end(fr);
   t->fsp--;
   goto ret;
+
+ret_applyn: {
+  /* v is the WHNF head; the pending args sit at [pbase, pbase+m) with
+   * the reserved head slot at pbase-1.  The head's arity decides the
+   * whole application here, in one step. */
+  size_t pbase = fr->argbase;
+  uint32_t m = fr->argc;
+  uint64_t a = pl_arity(v);
+  if (a == 0 || a > m) {
+    /* data head or under-applied: the result is ONE flat app */
+    uint32_t k = 0;
+    {
+      pl_cell* p = pl_as(PL_TAG_APP, v);
+      if (p != NULL)
+        k = pl_app_n(p);
+    }
+    pl_vpush(t, v);
+    pl_gc_reserve(t, PL_APP_CELLS(k + m));
+    PL_GC_FORBID(t);
+    pl_val f2 = pl_vpop(t);
+    v = pl_mk_app_cat(t, f2, m, &t->vstack[pbase]);
+    PL_GC_ALLOW(t);
+    t->vsp = pbase - 1;
+    t->fsp--;
+    goto ret;
+  }
+  t->fsp--;
+  if (a < m) {
+    /* over-applied: the excess tail waits in F_APPLY frames, first
+     * excess arg topmost (left-to-right application order) */
+    for (uint32_t i = m; i > (uint32_t)a; i--) {
+      fr = pl_fpush(t);
+      fr->kind = PL_F_APPLY;
+      fr->b = t->vstack[pbase + i - 1];
+    }
+    t->vsp = pbase + (uint32_t)a;
+  }
+  /* exact arity: enter without building any intermediate app */
+  if (pl_tag(v) == PL_TAG_LAW || pl_tag(v) == PL_TAG_PIN) {
+    t->vstack[pbase - 1] = v;
+    hbase = pbase - 1;
+    goto fast_apply;
+  }
+  {
+    /* partial-application head: splice its spine below the pending
+     * args (spines are flat, so its head is a LAW or PIN) */
+    pl_cell* p = pl_as(PL_TAG_APP, v);
+    if (p == NULL)
+      ax_abort("APPLYN: bad head tag 0x%llx", (unsigned long long)pl_tag(v));
+    uint32_t k = pl_app_n(p);
+    for (uint32_t j = 0; j < k; j++)
+      pl_vpush(t, 0); /* may realloc the vstack; never collects */
+    memmove(&t->vstack[pbase + k], &t->vstack[pbase],
+            (size_t)a * sizeof(pl_val));
+    t->vstack[pbase - 1] = pl_app_head(p);
+    memcpy(&t->vstack[pbase], pl_app_args(p), (size_t)k * sizeof(pl_val));
+    hbase = pbase - 1;
+    goto fast_apply;
+  }
+}
 
 oparg_next:
   /* fr is the F_OPARG frame on top of the stack */
