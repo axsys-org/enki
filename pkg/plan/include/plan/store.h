@@ -40,7 +40,6 @@ typedef struct pl_store_backend {
   void (*put_code)(void* ctx, const uint8_t hash[32], pl_code* out);
 } pl_store_backend;
 
-
 typedef struct pl_intern_entry {
   pl_hash key;
   pl_val value;
@@ -50,8 +49,6 @@ typedef struct pl_code_entry {
   pl_hash key;
   pl_code* value;
 } pl_code_entry;
-
-
 
 typedef struct pl_store {
   pthread_mutex_t mu;
@@ -67,8 +64,6 @@ typedef struct pl_store {
   pl_heap* compiler_h;
   bool compiler_f;
 } pl_store;
-
-
 
 pl_store* pl_store_new(pl_store_backend backend);
 pl_store* pl_store_new_mem(void);

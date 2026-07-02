@@ -338,35 +338,49 @@ eval_thke: {
   v = fr->a;
   pl_val* args;
   pl_bane ban = pl_thke_bane(pl_ptr(v));
+  argc = pl_thke_n(pl_ptr(v));
+  args = pl_thke_args(pl_ptr(v));
+  if (argc == 0)
+    pl_raise_msg(t, "bad empty bytecode thunk");
   switch (ban) {
-  case PL_BAN_FAST:
+  case PL_BAN_FAST: {
+    /*
+     * The bane is a hint from installed (untrusted) PLAN code: verify
+     * that the head really is a law (or pinned law) applied at exact
+     * arity before skipping the generic apply path.  Anything else —
+     * including a non-WHNF head — takes the slow path, which is
+     * semantically identical.
+     */
+    pl_val head = args[0];
+    pl_cell* lp = NULL;
+    if (pl_tag(head) == PL_TAG_LAW)
+      lp = pl_ptr(head);
+    else if (pl_tag(head) == PL_TAG_PIN &&
+             pl_tag(pl_pin_body(pl_ptr(head))) == PL_TAG_LAW)
+      lp = pl_ptr(pl_pin_body(pl_ptr(head)));
+    if (lp == NULL || pl_law_arity(lp) != argc - 1)
+      goto thke_slow;
     hbase = t->vsp;
-    argc = pl_thke_n(pl_ptr(v));
-    args = pl_thke_args(pl_ptr(v));
-    if (argc == 0)
-      pl_raise_msg(t, "bad empty bytecode thunk");
-    if (!pl_is_whnf(args[0])) {
-      for (uint32_t i = argc; i-- > 1;) {
-        fr = pl_fpush(t);
-        fr->kind = PL_F_APPLY;
-        fr->b = args[i];
-      }
-      v = args[0];
-      goto eval;
-    }
-    pl_vpush(t, args[0]);
-    for (uint32_t i = 1; i < argc; i++) {
+    for (uint32_t i = 0; i < argc; i++)
       pl_vpush(t, args[i]);
-    }
     argc--;
     goto judge;
-  case PL_BAN_PRIM:
-    ax_abort("EVAL: no prim yet");
+  }
+  case PL_BAN_PRIM: {
+    /* [oppin, arg]: dispatch straight into the primop entry, exactly
+     * as fast_apply's pinned-nat case would after re-unwinding */
+    pl_cell* pp;
+    if (argc != 2 || (pp = pl_as(PL_TAG_PIN, args[0])) == NULL ||
+        !pl_is_nat(pl_pin_body(pp)))
+      goto thke_slow;
+    fr = pl_fpush(t);
+    fr->kind = PL_F_OPENT;
+    fr->opset = pl_nat_u64_clamp(pl_pin_body(pp));
+    v = args[1];
+    goto eval;
+  }
   case PL_BAN_SLOW:
-    argc = pl_thke_n(pl_ptr(v));
-    args = pl_thke_args(pl_ptr(v));
-    if (argc == 0)
-      pl_raise_msg(t, "bad empty bytecode thunk");
+  thke_slow:
     for (uint32_t i = argc; i-- > 1;) {
       fr = pl_fpush(t);
       fr->kind = PL_F_APPLY;
@@ -380,15 +394,24 @@ eval_thke: {
 }
 
 exec: {
-#define NEXT() (fr->code->ops[fr->k++])
+  /* compiled code comes from installed PLAN code: every fetch is
+   * bounds-checked and malformed programs raise instead of aborting */
+#define NEXT()                                                                 \
+  (ax_likely(fr->k < fr->code->nops)                                           \
+       ? fr->code->ops[fr->k++]                                                \
+       : (pl_raise_msg(t, "exec: truncated bytecode"), (pl_op_t)0))
   fr = &t->fstack[t->fsp - 1];
   pl_op_t op;
   for (;;) {
     op = NEXT();
     switch (op) {
-    case OP_PUSH_VAR:
-      pl_vpush(t, pl_env_slots(pl_ptr(fr->a))[NEXT()]);
+    case OP_PUSH_VAR: {
+      pl_op_t slot = NEXT();
+      if (slot >= pl_env_n(pl_ptr(fr->a)))
+        pl_raise_msg(t, "exec: variable out of range");
+      pl_vpush(t, pl_env_slots(pl_ptr(fr->a))[slot]);
       break;
+    }
     case OP_PUSH_LIT:
       pl_vpush(t, NEXT());
       break;
@@ -397,6 +420,8 @@ exec: {
       pl_bane bane = (pl_bane)NEXT();
       if (argc == 0 || argc > t->vsp - fr->argbase)
         pl_raise_msg(t, "bytecode stack underflow");
+      if (bane != PL_BAN_FAST && bane != PL_BAN_SLOW && bane != PL_BAN_PRIM)
+        pl_raise_msg(t, "exec: bad bane");
       pl_gc_reserve(t, PL_THKE_CELLS(argc));
       PL_GC_FORBID(t);
       pl_val thke = pl_mk_thke(t, fr->a, bane, argc, pl_vpeek(t, argc));
@@ -425,14 +450,15 @@ exec: {
       expr = NEXT();
       goto eval_expr;
     case OP_RET:
+      if (t->vsp == fr->argbase)
+        pl_raise_msg(t, "bytecode stack underflow");
       v = pl_vpop(t);
       t->vsp = fr->argbase;
       t->fsp--;
       goto eval;
 
-    case OP_EVAL:
     default:
-      ax_abort("exec: unsupported op");
+      pl_raise_msg(t, "exec: unsupported opcode");
     }
   }
 }

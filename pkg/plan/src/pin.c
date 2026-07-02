@@ -218,7 +218,7 @@ static pl_val pin_from_canon(pl_store* s, canon_ctx* c, pl_val body) {
     ax_hmfree(map);
     pin = pl_store_mk_pin(s, hash, body_copy, (uint32_t)nsub, c->subpins);
     pl_store_intern_put(s, hash, pin);
-    if ( pl_tag(body_copy) == PL_TAG_LAW )
+    if (pl_tag(body_copy) == PL_TAG_LAW)
       pl_store_put_code(s, hash);
     ax_assume(pl_store_backend_put(s, hash, full, (size_t)ax_arrlen(full)),
               "store backend put failed");
@@ -373,7 +373,7 @@ pl_val pl_store_load(pl_thread* t, const uint8_t hash[32]) {
   pl_val body = deser(s, &d);
   pl_val pin = pl_store_mk_pin(s, hash, body, (uint32_t)d.nsub, subs);
   pl_store_intern_put(s, hash, pin);
-  if ( pl_tag(body) == PL_TAG_LAW )
+  if (pl_tag(body) == PL_TAG_LAW)
     pl_store_put_code(s, hash);
   ax_arrfree(subs);
   free(bytes);

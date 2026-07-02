@@ -2,6 +2,7 @@
 
 #include <pthread.h>
 #include <lmdb.h>
+#include <setjmp.h>
 #include <stdlib.h>
 #include <assert.h>
 #include <string.h>
@@ -145,7 +146,6 @@ bool pl_store_get_code(pl_store* s, const uint8_t hash[32], pl_code** out) {
 }
 
 void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
-  // pl_store* s = pl_heap_store(t->heap);
   pl_thread* t = s->compiler_t;
   pl_hash k;
   pl_store_lock(s);
@@ -157,10 +157,21 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
   uint8_t compiler_hash[32];
   memcpy(compiler_hash, s->compiler, 32);
   pl_store_unlock(s);
+  /* the compiler is installed PLAN code: a compile failure must not
+   * take the runtime down — the law just stays interpreted */
+  pl_catch c;
+  pl_catch_init(t, &c);
+  if (setjmp(c.jb) != 0) {
+    pl_catch_unwind(t, &c);
+    fprintf(stderr, "bytecode compile raised: %s\n",
+            t->exn_msg != NULL ? t->exn_msg : "PLAN exn");
+    return;
+  }
   pl_val compiler = pl_store_load(t, compiler_hash);
   pl_val fun = pl_store_load(t, hash);
   pl_val res = pl_apply(t, compiler, fun);
   pl_val pin = pl_pin(t, res);
+  pl_catch_pop(t, &c);
   pl_cell* p = pl_as(PL_TAG_PIN, pin);
   ax_assume(p, "wack");
   pl_code* code = pl_bytecode_from_val(pl_pin_body(p));
@@ -172,13 +183,36 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
   }
 }
 
+/*
+ * Compile every law pin already interned.  Laws pinned before the
+ * compiler was installed (the boot prelude, snapshot loads) would
+ * otherwise never get bytecode.  put_code interns new pins (the
+ * compiled rows), which mutates the map, so snapshot the hashes first.
+ */
+static void pl_store_compile_existing(pl_store* s) {
+  pl_hash* laws = NULL;
+  pl_store_lock(s);
+  for (ptrdiff_t i = 0; i < ax_hmlen(s->intern); i++) {
+    pl_val pin = s->intern[i].value;
+    if (pl_tag(pl_pin_body(pl_ptr(pin))) == PL_TAG_LAW)
+      ax_arrpush(laws, s->intern[i].key);
+  }
+  pl_store_unlock(s);
+  for (ptrdiff_t i = 0; i < ax_arrlen(laws); i++)
+    pl_store_put_code(s, laws[i].b);
+  ax_arrfree(laws);
+}
+
 void pl_store_put_compiler(pl_store* s, const uint8_t hash[32]) {
   pl_store_lock(s);
   s->compiler_f = hash[0] ? memcmp(hash, hash + 1, 31) != 0 : true;
   memcpy(s->compiler, hash, 32);
+  bool sweep = s->compiler_f;
   // moar leaks, TODO: fix
   ax_hmfree(s->code);
   pl_store_unlock(s);
+  if (sweep)
+    pl_store_compile_existing(s);
 }
 
 /* ── Store-resident value construction (no GC interaction) ─────────────── */
