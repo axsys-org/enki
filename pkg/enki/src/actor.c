@@ -11,6 +11,9 @@
 #include "axsys/ds.h"
 #include "axsys/sha256.h"
 #include "plan/build.h"
+#include "plan/debug.h"
+#include "plan/eval.h"
+#include "axsys/allocator.h"
 #include "plan/nat.h"
 
 /*
@@ -115,10 +118,20 @@ er_scheduler* er_scheduler_new(pl_store* store, er_config cfg) {
   ax_assume(pthread_cond_init(&sys->cv, NULL) == 0, "pthread_cond_init");
   sys->store = store;
   sys->cfg = cfg;
-  if (sys->cfg.quantum == 0)
-    sys->cfg.quantum = ER_DEFAULT_QUANTUM;
-  if (sys->cfg.heap_cells == 0)
-    sys->cfg.heap_cells = ER_DEFAULT_HEAP_CELLS;
+  if (sys->cfg.quantum == 0) {
+    const char* q_c = getenv("ENKI_QUANTUM");
+    sys->cfg.quantum =
+        q_c != NULL && q_c[0] != '\0' ? strtoull(q_c, NULL, 10) : 0;
+    if (sys->cfg.quantum == 0)
+      sys->cfg.quantum = ER_DEFAULT_QUANTUM;
+  }
+  if (sys->cfg.heap_cells == 0) {
+    const char* h_c = getenv("ENKI_ACTOR_HEAP_CELLS");
+    sys->cfg.heap_cells =
+        h_c != NULL && h_c[0] != '\0' ? strtoull(h_c, NULL, 10) : 0;
+    if (sys->cfg.heap_cells == 0)
+      sys->cfg.heap_cells = ER_DEFAULT_HEAP_CELLS;
+  }
   ax_assume(sys->cfg.quantum >= 2, "er_scheduler_new: quantum must be >= 2");
   return sys;
 }
@@ -212,7 +225,16 @@ pl_val er_actor_result(er_actor* a) {
 
 /* ── Run queue / handle table ──────────────────────────────────────────── */
 
+static bool er_trace(void) {
+  static int on = -1;
+  if (on < 0)
+    on = getenv("ENKI_TRACE") != NULL;
+  return on;
+}
+
 static void er_enqueue(er_actor* a) {
+  if (er_trace())
+    fprintf(stderr, "[trace] enqueue actor=%llu\n", (unsigned long long)a->id);
   a->qnext = NULL;
   if (a->sys->qtail != NULL)
     a->sys->qtail->qnext = a;
@@ -256,6 +278,9 @@ static er_actor* er_dequeue_spawned(er_scheduler* sys) {
   for (er_actor* a = sys->qhead; a != NULL; a = a->qnext) {
     if (!a->adopted) {
       (void)er_remove_from_queue(sys, a);
+      if (er_trace())
+        fprintf(stderr, "[trace] dequeue-spawned actor=%llu\n",
+                (unsigned long long)a->id);
       return a;
     }
   }
@@ -294,9 +319,25 @@ static bool er_name_is(pl_val name, const char* s) {
   return true;
 }
 
+/* The evaluator parks coordination requests with the op-table INDEX at
+ * the head of the spine (rp_request rebuilds from the dispatch stack),
+ * while hand-built requests (and the unit tests) use the op-name atom.
+ * Accept both: translate an index head to its table name.
+ *
+ * THIS IS A DUMB HACK: TODO: FIX
+ * */
+static bool er_op_is(pl_val name, const char* s) {
+  extern const size_t pl_nops;
+  if (pl_is_nat63(name) && (size_t)name < pl_nops)
+    return strcmp(pl_io_name((uint32_t)name), s) == 0;
+  return er_name_is(name, s);
+}
+
 /* ── Messaging ─────────────────────────────────────────────────────────── */
 
 void er_actor_start(er_actor* a, pl_val fn) {
+  if (er_trace())
+    fprintf(stderr, "[trace] start actor=%llu\n", (unsigned long long)a->id);
   ax_assume(!a->started && a->status == ER_ACTOR_RUNNABLE,
             "er_actor_start: actor already started");
   a->started = true;
@@ -475,7 +516,7 @@ static void er_service(er_scheduler* sys, er_actor* a) {
   uint32_t argc = pl_app_n(p);
   pl_val* args = pl_app_args(p);
 
-  if (er_name_is(name, "Recv")) {
+  if (er_op_is(name, "Recv")) {
     ax_assume(argc == 1, "Recv arity");
     if (a->mbox_head == NULL)
       a->status = ER_ACTOR_BLOCKED; /* park; a deliver will wake us */
@@ -484,7 +525,7 @@ static void er_service(er_scheduler* sys, er_actor* a) {
     return;
   }
 
-  if (er_name_is(name, "Send")) {
+  if (er_op_is(name, "Send")) {
     ax_assume(argc == 2, "Send arity");
     er_actor* to = er_handle_get(a, args[0]);
     if (to == NULL) {
@@ -503,7 +544,7 @@ static void er_service(er_scheduler* sys, er_actor* a) {
     return;
   }
 
-  if (er_name_is(name, "SendCaps")) {
+  if (er_op_is(name, "SendCaps")) {
     ax_assume(argc == 3, "SendCaps arity");
     er_actor* to = er_handle_get(a, args[0]);
     if (to == NULL) {
@@ -537,7 +578,7 @@ static void er_service(er_scheduler* sys, er_actor* a) {
     return;
   }
 
-  if (er_name_is(name, "Spawn")) {
+  if (er_op_is(name, "Spawn")) {
     ax_assume(argc == 1, "Spawn arity");
     pl_val fn;
     if (!er_pin_payload(a, args[0], &fn)) {
@@ -553,7 +594,7 @@ static void er_service(er_scheduler* sys, er_actor* a) {
     return;
   }
 
-  if (er_name_is(name, "CloseHandle")) {
+  if (er_op_is(name, "CloseHandle")) {
     ax_assume(argc == 1, "CloseHandle arity");
     pl_val h = args[0];
     /* unknown handles are a silent no-op; even handle 0 may be closed
@@ -566,6 +607,11 @@ static void er_service(er_scheduler* sys, er_actor* a) {
     return;
   }
 
+  {
+    size_t dbg_n;
+    char* dbg_s = pl_show(ax_allocator_system(), req, &dbg_n);
+    fprintf(stderr, "er_service: unmatched request: %.*s\n", (int)dbg_n, dbg_s);
+  }
   ax_abort("er_service: unknown coordination op");
 }
 
