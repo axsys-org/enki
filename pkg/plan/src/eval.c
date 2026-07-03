@@ -343,41 +343,47 @@ eval:
   if (pl_is_whnf(v))
     goto ret;
   {
-    pl_cell* p = pl_ptr(v);
     /* the kind is a raw 8-bit header field: bound it before indexing */
-    pl_kind k = pl_hdr_kind(p[0]);
+    pl_kind k = pl_hdr_kind(*pl_ptr(v));
     if (ax_unlikely(k > PL_K_THKE || defer_tbl[k] == NULL))
       ax_abort("EVAL: bad defer kind");
     goto* defer_tbl[k];
-
-  defer_ind:
-    v = pl_ind_target(p);
-    goto eval;
-
-  defer_bh:
-    pl_raise_msg(t, "<<loop>>");
-
-  defer_thunk:
-    env = pl_thunk_env(p);
-    expr = pl_thunk_expr(p);
-    /* blackhole; the F_UPDATE frame writes the result back */
-    p[0] = pl_hdr_make(PL_K_BH, 0, 0, pl_hdr_cells(p[0]));
-    p[1] = 0;
-    p[2] = 0;
-    fr = pl_fpush(t);
-    fr->kind = PL_F_UPDATE;
-    fr->a = v;
-    goto eval_expr;
-
-  defer_thke:
-    if ((pl_hdr_flags(p[0]) & PL_F_HOLE) != 0)
-      pl_raise_msg(t, "<<loop>>");
-    p[0] = pl_hdr_set_flag(p[0], PL_F_HOLE);
-    fr = pl_fpush(t);
-    fr->kind = PL_F_UPD;
-    fr->a = v;
-    goto eval_thke;
   }
+
+  /* each label re-derives its cell pointer from v: pl_ptr is a mask,
+   * and computed-goto targets can't share locals — gcc assumes any
+   * goto* may reach any address-taken label (-Wmaybe-uninitialized) */
+defer_ind:
+  v = pl_ind_target(pl_ptr(v));
+  goto eval;
+
+defer_bh:
+  pl_raise_msg(t, "<<loop>>");
+
+defer_thunk: {
+  pl_cell* p = pl_ptr(v);
+  env = pl_thunk_env(p);
+  expr = pl_thunk_expr(p);
+  /* blackhole; the F_UPDATE frame writes the result back */
+  p[0] = pl_hdr_make(PL_K_BH, 0, 0, pl_hdr_cells(p[0]));
+  p[1] = 0;
+  p[2] = 0;
+  fr = pl_fpush(t);
+  fr->kind = PL_F_UPDATE;
+  fr->a = v;
+  goto eval_expr;
+}
+
+defer_thke: {
+  pl_cell* p = pl_ptr(v);
+  if ((pl_hdr_flags(p[0]) & PL_F_HOLE) != 0)
+    pl_raise_msg(t, "<<loop>>");
+  p[0] = pl_hdr_set_flag(p[0], PL_F_HOLE);
+  fr = pl_fpush(t);
+  fr->kind = PL_F_UPD;
+  fr->a = v;
+  goto eval_thke;
+}
 eval_thke: {
   fr = &t->fstack[t->fsp - 1];
   v = fr->a;

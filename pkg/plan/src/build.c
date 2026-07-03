@@ -5,6 +5,14 @@
 #include "axsys/assume.h"
 #include "plan/nat.h"
 
+/* gcc -O3's inliner chains the pl_as-returned-NULL fact into
+ * pl_arity's APP case and reports an impossible null dereference
+ * (APP-tagged vals always carry an address); clang and lower -O
+ * levels are clean. */
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic ignored "-Wnull-dereference"
+#endif
+
 /* ── Nats ──────────────────────────────────────────────────────────────── */
 
 pl_val pl_mk_nat_u64(pl_thread* t, uint64_t n) {
