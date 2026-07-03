@@ -6,10 +6,6 @@
 #include "plan/store.h"
 #include "plan/value.h"
 
-typedef struct pl_hash {
-  uint8_t b[32];
-} pl_hash;
-
 pl_cell* pl_store_alloc(pl_store* s, size_t cells);
 size_t pl_store_mark(pl_store* s);
 void pl_store_release(pl_store* s, size_t mark);

@@ -14,6 +14,7 @@
  */
 
 #include <setjmp.h>
+#include <pthread.h>
 #include <stddef.h>
 #include <assert.h>
 
@@ -54,22 +55,32 @@ typedef enum {
   PL_F_JUDGE,      /* forcing a law-body chain node; argbase: hbase     */
   PL_F_NIL,        /* RETURN planNil(v): 1 if the value is 0, else 0    */
   PL_F_PROF,       /* Tracy law-attribution boundary; a: law head       */
+  PL_F_APPLYN,     /* n-ary apply: argc pending args parked on the      */
+                   /* vstack at argbase; the head slot is argbase-1     */
+  PL_F_KIND_COUNT, /* sentinel: sizes pl_run's RETURN dispatch table    */
 } pl_frame_kind;
 
-/** TODO make union */
 typedef struct pl_frame {
   uint8_t kind;
-  uint32_t k;     /* field index / mask cursor / ip */
-  uint32_t op;    /* op descriptor index (F_OPARG/F_OPDEEP) */
-  uint64_t opset; /* op set number (F_OPENT) */
-  pl_val a;       /* root */
-  pl_val b;       /* root */
-  size_t argbase; /* offset into vstack (never a pointer) */
+  uint32_t k;       /* field index / mask cursor / ip */
+  uint32_t argbase; /* offset into vstack (never a pointer) */
   uint32_t argc;
-  pl_code* code;
+  pl_val a;         /* root */
+  pl_val b;         /* root */
+  union {           /* kind-exclusive state: */
+    uint64_t opset; /*   op set number (F_OPENT) */
+    pl_code* code;  /*   bytecode (F_EXEC) */
+    uint32_t op;    /*   op descriptor index (F_OPARG/F_OPDEEP) */
+  };
+#ifdef TRACY_ENABLE
   ax_profile_zone_ctx profile_ctx;
   bool profile_live;
+#endif
 } pl_frame;
+
+#ifndef TRACY_ENABLE
+static_assert(sizeof(pl_frame) == 40, "pl_frame grew");
+#endif
 
 /* ── Thread ────────────────────────────────────────────────────────────── */
 
@@ -174,7 +185,7 @@ static inline pl_val pl_vreplace(pl_thread* t, uint32_t n, pl_val r) {
 
 /* read, n down from TOS */
 static inline pl_val* pl_vpeek(pl_thread* t, uint32_t n) {
-  assert(n < t->vsp);
+  assert(n <= t->vsp);
   return &t->vstack[t->vsp - n];
 }
 
@@ -184,8 +195,10 @@ static inline pl_frame* pl_fpush(pl_thread* t) {
   pl_frame* f = &t->fstack[t->fsp++];
   f->a = 0;
   f->b = 0;
+#ifdef TRACY_ENABLE
   f->profile_ctx = (ax_profile_zone_ctx){0};
   f->profile_live = false;
+#endif
   return f;
 }
 

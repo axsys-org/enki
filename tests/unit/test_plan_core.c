@@ -208,3 +208,37 @@ Test(gc, ind_short_circuit_on_evacuation) {
 
   test_rt_free(&rt);
 }
+
+Test(gc, bytecode_thunk_scans_env_and_args) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+
+  size_t base = t->vsp;
+  pl_vpush(t, test_law(t, 1, 0, 1));
+  pl_vpush(t, test_app2(t, 0, 11, 12));
+
+  pl_gc_reserve(t, PL_ENV_CELLS(1) + PL_THKE_CELLS(2));
+  pl_val env = pl_mk_env(t, 1);
+  pl_val thke = pl_mk_thke(t, env, PL_BAN_SLOW, 2, &t->vstack[base]);
+  t->vsp = base;
+  pl_vpush(t, thke);
+
+  pl_gc_collect_now(t);
+
+  pl_cell* p = pl_ptr(t->vstack[base]);
+  cr_assert_eq(pl_hdr_kind(p[0]), PL_K_THKE);
+  cr_assert_eq(pl_thke_bane(p), PL_BAN_SLOW);
+
+  pl_cell* ep = pl_as(PL_TAG_ENV, pl_thke_env(p));
+  cr_assert_not_null(ep);
+  cr_assert_eq(pl_env_n(ep), 1);
+
+  pl_val* args = pl_thke_args(p);
+  cr_assert_eq(pl_kind_of(args[0]), PL_K_LAW);
+  pl_cell* ap = pl_as(PL_TAG_APP, args[1]);
+  cr_assert_not_null(ap);
+  cr_assert_eq(pl_app_args(ap)[0], 11);
+  cr_assert_eq(pl_app_args(ap)[1], 12);
+
+  test_rt_free(&rt);
+}

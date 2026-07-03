@@ -97,6 +97,171 @@ Test(apply, args_stay_lazy) {
   test_rt_free(&rt);
 }
 
+Test(apply, slow_bytecode_thunk_applies_unknown_arity) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  pl_vpush(t, test_law(t, 2, 0, 1)); /* K x y = x */
+  pl_vpush(t, 5);
+  pl_vpush(t, test_throwing(t, 7));
+  pl_gc_reserve(t, PL_THKE_CELLS(3));
+  pl_val thke = pl_mk_thke(t, 0, PL_BAN_SLOW, 3, &t->vstack[base]);
+  t->vsp = base;
+
+  cr_assert_eq(pl_whnf(t, thke), 5);
+  test_rt_free(&rt);
+}
+
+Test(apply, fast_bytecode_thunk_applies_deferred_head) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  pl_vpush(t, test_thunk(t, test_app1(t, 0, test_law(t, 2, 0, 1))));
+  pl_vpush(t, 5);
+  pl_vpush(t, test_throwing(t, 7));
+  pl_gc_reserve(t, PL_THKE_CELLS(3));
+  pl_val thke = pl_mk_thke(t, 0, PL_BAN_FAST, 3, &t->vstack[base]);
+  t->vsp = base;
+
+  cr_assert_eq(pl_whnf(t, thke), 5);
+  test_rt_free(&rt);
+}
+
+Test(apply, slow_thke_under_applied_builds_flat_app) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  pl_vpush(t, test_law(t, 3, 0, 1)); /* K3 x y z = x */
+  pl_vpush(t, 5);
+  pl_vpush(t, 6);
+  pl_gc_reserve(t, PL_THKE_CELLS(3));
+  pl_val thke = pl_mk_thke(t, 0, PL_BAN_SLOW, 3, &t->vstack[base]);
+  t->vsp = base;
+
+  pl_val r = pl_whnf(t, thke);
+  pl_cell* p = pl_as(PL_TAG_APP, r);
+  cr_assert_not_null(p);
+  cr_assert_eq(pl_app_n(p), 2);
+  cr_assert_eq(pl_arity(r), 1);
+  cr_assert_eq(pl_whnf(t, pl_apply(t, r, 7)), 5);
+  test_rt_free(&rt);
+}
+
+Test(apply, slow_thke_under_applied_partial_head_stays_flat) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  pl_val k3 = test_law(t, 3, 0, 1); /* K3 x y z = x */
+  pl_vpush(t, k3);
+  pl_vpush(t, test_app1(t, t->vstack[base], 5)); /* (K3 5), need 2 */
+  pl_vpush(t, 6);
+  pl_gc_reserve(t, PL_THKE_CELLS(2));
+  pl_val thke = pl_mk_thke(t, 0, PL_BAN_SLOW, 2, &t->vstack[base + 1]);
+  t->vsp = base + 1;
+
+  /* the result must extend the spine (flat), not nest an app head */
+  pl_val r = pl_whnf(t, thke);
+  pl_cell* p = pl_as(PL_TAG_APP, r);
+  cr_assert_not_null(p);
+  cr_assert_eq(pl_app_n(p), 2);
+  cr_assert_eq(pl_app_head(p), t->vstack[base]);
+  cr_assert_eq(pl_whnf(t, pl_apply(t, r, 7)), 5);
+  t->vsp = base;
+  test_rt_free(&rt);
+}
+
+Test(apply, slow_thke_data_head_extends_row) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  pl_vpush(t, test_app2(t, 0, 7, 8)); /* the row [7 8] */
+  pl_vpush(t, 9);
+  pl_gc_reserve(t, PL_THKE_CELLS(2));
+  pl_val thke = pl_mk_thke(t, 0, PL_BAN_SLOW, 2, &t->vstack[base]);
+  t->vsp = base;
+
+  /* snoc onto a row: [7 8 9], still flat and 0-headed */
+  pl_val r = pl_whnf(t, thke);
+  pl_cell* p = pl_as(PL_TAG_APP, r);
+  cr_assert_not_null(p);
+  cr_assert_eq(pl_app_n(p), 3);
+  cr_assert_eq(pl_app_head(p), 0);
+  cr_assert_eq(pl_app_args(p)[2], 9);
+  test_rt_free(&rt);
+}
+
+Test(apply, slow_thke_splices_partial_app_head) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  /* head is already a partial application: (K 5) applied to 9 */
+  pl_vpush(t, test_app1(t, test_law(t, 2, 0, 1), 5));
+  pl_vpush(t, 9);
+  pl_gc_reserve(t, PL_THKE_CELLS(2));
+  pl_val thke = pl_mk_thke(t, 0, PL_BAN_SLOW, 2, &t->vstack[base]);
+  t->vsp = base;
+
+  cr_assert_eq(pl_whnf(t, thke), 5);
+  test_rt_free(&rt);
+}
+
+Test(apply, tailcall_loops_in_constant_frame_space) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  /* loop x = loop x, as fused tail-call bytecode: must run in constant
+   * frame space AND stay preemptable (the tail path takes a fuel step) */
+  pl_vpush(t, test_law(t, 1, 0, 0));
+  pl_val pin = pl_pin(t, t->vstack[base]); /* store-resident: GC-stable */
+  t->vsp = base;
+  pl_cell* pp = pl_as(PL_TAG_PIN, pin);
+  cr_assert_not_null(pp);
+  static pl_op_t loop_ops[7];
+  loop_ops[0] = OP_PUSH_LIT;
+  loop_ops[1] = pin;
+  loop_ops[2] = OP_PUSH_VAR;
+  loop_ops[3] = 1;
+  loop_ops[4] = OP_TAILCALL;
+  loop_ops[5] = 2;
+  loop_ops[6] = PL_BAN_FAST;
+  static pl_code loop_code = {loop_ops, 7};
+  pl_pin_set_code(pp, &loop_code);
+
+  size_t fcap0 = t->fcap;
+  pl_vpush(t, pin);
+  pl_vpush(t, 5);
+  pl_gc_reserve(t, PL_THKE_CELLS(2));
+  pl_val thke = pl_mk_thke(t, 0, PL_BAN_FAST, 2, &t->vstack[base]);
+  t->vsp = base;
+  pl_thread_start(t, thke);
+  for (int i = 0; i < 200; i++)
+    cr_assert_eq(pl_thread_run(t, 10000), PL_RUN_YIELDED);
+  /* ~2M tail calls: frames grow only at fuel checkpoints (one F_UPD
+   * per quantum survives until the loop would return), never per call */
+  cr_assert_eq(t->fcap, fcap0);
+  cr_assert(t->fsp <= t->base_fsp + 220);
+  pl_pin_set_code(pp, NULL); /* the code is a stack-lifetime fake */
+  test_rt_free(&rt);
+}
+
+Test(apply, slow_thke_over_applied_order) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  /* (K K' 5) 6 7 = K' 6 7 = 6: the first excess arg applies first */
+  pl_vpush(t, test_law(t, 2, 0, 1)); /* K x y = x */
+  pl_vpush(t, test_law(t, 2, 0, 1)); /* K' */
+  pl_vpush(t, 5);
+  pl_vpush(t, 6);
+  pl_vpush(t, 7);
+  pl_gc_reserve(t, PL_THKE_CELLS(5));
+  pl_val thke = pl_mk_thke(t, 0, PL_BAN_SLOW, 5, &t->vstack[base]);
+  t->vsp = base;
+
+  cr_assert_eq(pl_whnf(t, thke), 6);
+  test_rt_free(&rt);
+}
+
 /* ── Recursive-let knots ───────────────────────────────────────────────── */
 
 /*

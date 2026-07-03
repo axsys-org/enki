@@ -20,6 +20,9 @@ pl_val pl_nat_trim(pl_val v);
 
 /* APP construction.  head must be WHNF (arity is consulted, never forced). */
 pl_val pl_mk_app_snoc(pl_thread* t, pl_val f, pl_val x);
+/* Flat append of m args to f (as m chained snocs, one allocation).
+ * Caller reserves PL_APP_CELLS((f is APP ? pl_app_n(f) : 0) + m). */
+pl_val pl_mk_app_cat(pl_thread* t, pl_val f, uint32_t m, const pl_val* args);
 pl_val pl_mk_app_take(pl_thread* t, pl_val app, uint32_t n);
 pl_val pl_mk_app_from(pl_thread* t, pl_val head, uint32_t n,
                       const pl_val* args);
@@ -29,6 +32,9 @@ pl_val pl_mk_env(pl_thread* t, uint32_t nslots); /* slots zeroed to nat 0 */
 pl_val pl_mk_thunk(pl_thread* t, pl_val env, pl_val expr);
 pl_val pl_mk_thke(pl_thread* t, pl_val env, pl_bane bane, uint32_t nargs,
                   pl_val* args);
+/* PL_BAN_PRIM_KNOWN thke: args[0] = the ingest-resolved pl_ops index. */
+pl_val pl_mk_thke_known(pl_thread* t, pl_val env, uint32_t idx, uint32_t nargs,
+                        pl_val* args);
 
 /* Arity of a WHNF value (never forces). */
 uint64_t pl_arity(pl_val v);

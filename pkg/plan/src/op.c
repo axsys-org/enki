@@ -631,7 +631,7 @@ static pl_val op_throw(pl_thread* t, size_t ab) {
 static pl_val op_try(pl_thread* t, size_t ab) {
   pl_frame* fr = pl_fpush(t);
   fr->kind = PL_F_TRY;
-  fr->argbase = ab - 1; /* vsp to restore when delivering the exn */
+  fr->argbase = (uint32_t)(ab - 1); /* vsp to restore on exn delivery */
   pl_push_nf(t);
   pl_push_apply(t, ARG(1));
   return ARG(0);
@@ -699,6 +699,8 @@ static pl_val op_install(pl_thread* t, size_t ab) {
   }
   memcpy(hash, pl_pin_hash_bytes(p), 32);
   pl_store* s = pl_heap_store(t->heap);
+  s->compiler_h = pl_heap_new(((size_t)1 << 26), s);
+  s->compiler_t = pl_thread_new(s->compiler_h);
   pl_store_put_compiler(s, hash);
   return 1;
 }
@@ -712,7 +714,7 @@ static pl_val op_compile(pl_thread* t, size_t ab) {
     return 0;
   }
   memcpy(hash, pl_pin_hash_bytes(p), 32);
-  pl_store_put_code(t, hash);
+  pl_store_put_code(pl_heap_store(t->heap), hash);
 
   return 1;
 }

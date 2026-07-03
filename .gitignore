@@ -1,4 +1,5 @@
 build/
+snap/
 compile_commands.json
 compile_commands.bear.json
 result
