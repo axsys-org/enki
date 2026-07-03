@@ -67,11 +67,13 @@ void pl_store_release(pl_store* s, size_t mark) {
 }
 
 bool pl_store_owns(pl_store* s, pl_val v) {
-  pl_store_lock(s);
+  /* lo/hi are written once in pl_store_new, before the store pointer
+   * escapes to any other thread, and the overcommitted region is never
+   * moved or resized — immutable reads need no lock. This runs once
+   * per scanned value during every GC, so keeping it lock-free matters
+   * for concurrent actors. */
   uint8_t* p = (uint8_t*)pl_ptr(v);
-  bool owns = p >= s->lo && p < s->hi;
-  pl_store_unlock(s);
-  return owns;
+  return p >= s->lo && p < s->hi;
 }
 
 /* ── Intern table ──────────────────────────────────────────────────────── */
