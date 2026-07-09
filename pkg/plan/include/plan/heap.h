@@ -118,6 +118,10 @@ struct pl_thread {
    * mode (REPL / snapshot execution), never while assembling modules. */
   bool rplan_f;
 
+  /* op 83 (admitted host-call bindings, plan/hostcall.h) is callable
+   * only when the embedder enables it; assembly never sets this. */
+  bool hostcall_f;
+
   /* When non-NULL, ReadFile resolves its argument relative to this root and
    * refuses paths whose canonical target escapes it. */
   const char* rplan_file_root_c;

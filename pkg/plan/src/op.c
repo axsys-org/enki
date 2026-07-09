@@ -923,6 +923,13 @@ const pl_opdesc pl_ops[] = {
     OP82C("Recv", 1, 0b1, 0, pl_op82_recv),
     OP82C("CloseHandle", 1, 0b1, 0, pl_op82_close_handle),
     OP82("Connect", 3, 0b111, pl_op82_connect),
+
+    /* op 66 Rex notation-subset reader/printer (rex.c); appended at the
+     * table end so the hand-maintained bucket indices stay stable */
+    OP66(ax_s8('P', 'a', 'r', 's', 'e', 'R', 'e', 'x'), 1, 0b1, 0,
+         pl_op_parse_rex),
+    OP66(ax_s8('P', 'r', 'i', 'n', 't', 'R', 'e', 'x'), 1, 0b1, 0b1,
+         pl_op_print_rex),
 };
 
 const size_t pl_nops = sizeof(pl_ops) / sizeof(pl_ops[0]);
@@ -939,9 +946,9 @@ static const uint16_t pl_op0_argc3[] = {1};
 static const uint16_t pl_op0_argc6[] = {2};
 
 static const uint16_t pl_op66_argc1[] = {
-    3,  6,  7,  38, 39, 40, 41, 42, 44,  45,  46,  52, 53, 54,
-    55, 56, 57, 58, 59, 60, 65, 71, 72,  74,  75,  76, 77, 78,
-    79, 80, 81, 82, 83, 85, 86, 99, 100, 101, 103, 104};
+    3,  6,  7,  38, 39, 40, 41, 42, 44,  45,  46,  52,  53, 54,
+    55, 56, 57, 58, 59, 60, 65, 71, 72,  74,  75,  76,  77, 78,
+    79, 80, 81, 82, 83, 85, 86, 99, 100, 101, 103, 104, 124, 125};
 static const uint16_t pl_op66_argc2[] = {
     8,  9,  10, 11, 12, 13, 14, 31, 32, 33, 36, 37, 43, 47, 50, 64,
     66, 69, 70, 73, 84, 87, 88, 89, 92, 93, 94, 95, 96, 97, 98, 102};
@@ -1031,7 +1038,7 @@ static pl_opbucket pl_op_lookup_bucket(uint64_t opset, uint32_t argc) {
   return (pl_opbucket){NULL, 0};
 }
 
-static bool nat_name_eq(pl_val v, const char* s) {
+bool pl_nat_name_eq(pl_val v, const char* s) {
   if (!pl_is_nat(v))
     return false;
   size_t n = strlen(s);
@@ -1051,7 +1058,7 @@ int pl_op_lookup(uint64_t opset, pl_val name, uint32_t argc) {
     const pl_opdesc* d = &pl_ops[i];
     // ax_assume(d->opset == opset && d->argc == argc,
     // "primop lookup bucket mismatch");
-    if (d->name_c != NULL ? nat_name_eq(name, d->name_c)
+    if (d->name_c != NULL ? pl_nat_name_eq(name, d->name_c)
                           : (pl_is_nat63(name) && d->name == name))
       return (int)i;
   }

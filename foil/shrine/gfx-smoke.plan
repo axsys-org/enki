@@ -1,0 +1,14 @@
+; Shrine gfx host-call smoke: drive the op-83 binding table from PLAN
+; source.  ((#pin "S") (binding arg..)) is the admitted host-call spine
+; ('S' = 83); each call returns a witness/refusal row the program can
+; route as ordinary data.
+;
+; Run (function mode runs in RPLAN/HOSTCALL mode):
+;
+;   build/debug/bin/wisp foil/shrine gfx-smoke main
+
+(#bind main
+  (#pin
+    (#law "main" (main args)
+      session((#pin "S") ("gpu.session-open" 0))
+      ((#pin "B") ("Trace" session session)))))

@@ -16,6 +16,10 @@
 #include "plan/heap.h"
 #include "plan/store.h"
 
+#ifdef PL_HOST_GPU_METAL
+#include "host/gpu_metal.h"
+#endif
+
 /*
  * wisp [--file-root DIR] DIR MODULE [FUNCTION ARGS...]
  *
@@ -404,6 +408,9 @@ static bool boot_run_function(boot_ctx* ctx, pl_val fun, int argc,
   boot_env_root_push(ctx, old_env);
   w->env = NULL;
   w->t->rplan_f = true; /* runRepl runs the program in RPLAN mode */
+  /* host-call bindings (op 83) follow the RPLAN gate: callable from
+   * running programs, never during assembly */
+  w->t->hostcall_f = true;
 
   size_t mark = en_root_mark(w);
   en_root_push(w, boot_repl_fun(fun));
@@ -434,8 +441,9 @@ static bool boot_load_assembly(boot_ctx* ctx, const char* mod_c,
   en_wisp* w = ctx->w;
   w->env = NULL;
   /* the reference loadAssembly: snapshots load in RPLAN mode, plan
-   * sources in BPLAN mode (op 82 is gated on this) */
+   * sources in BPLAN mode (op 82 is gated on this; op 83 follows) */
   w->t->rplan_f = strcmp(ctx->src_dir_c, "snap") == 0;
+  w->t->hostcall_f = w->t->rplan_f;
   if (!boot_process_file(ctx, mod_c))
     return false;
   if (fn_c == NULL)
@@ -543,6 +551,13 @@ int main(int argc, char** argv) {
     return 1;
   }
   w->t->rplan_file_root_c = file_root_c;
+
+#ifdef PL_HOST_GPU_METAL
+  if (!pl_host_gpu_metal_register()) {
+    fprintf(stderr, "wisp: gpu host-call registration refused\n");
+    return 1;
+  }
+#endif
 
   /* the boot thread is the root actor (the reference withNewRts);
    * spawned actors inherit the ReadFile jail */

@@ -158,6 +158,35 @@ else
 ACTIVE_UNIT_BINS := $(UNIT_BINS)
 endif
 
+# pkg/host: admitted host thunk packages above plan (op-83 bindings).
+# Darwin contributes the direct-Metal gpu.* set; other platforms build
+# without it (the binding table stays empty).
+ifeq ($(UNAME_S),Darwin)
+HOST_GPU_METAL := 1
+endif
+
+ifdef HOST_GPU_METAL
+HOST_INC := -Ipkg/host/include $(PLAN_INC)
+HOST_APP_INC := -Ipkg/host/include
+HOST_SRCS := $(wildcard pkg/host/src/*.m)
+HOST_OBJS := $(patsubst %.m,$(BUILD_DIR)/%.o,$(HOST_SRCS))
+LIB_HOST := $(BUILD_DIR)/lib/libhost.a
+HOST_LDLIBS := -framework Metal -framework Foundation
+HOST_CPPFLAGS := -DPL_HOST_GPU_METAL
+HOST_HEADERS := $(wildcard pkg/host/include/host/*.h)
+LIBS += $(LIB_HOST)
+else
+HOST_APP_INC :=
+HOST_SRCS :=
+HOST_OBJS :=
+LIB_HOST :=
+HOST_LDLIBS :=
+HOST_CPPFLAGS :=
+HOST_HEADERS :=
+endif
+
+CPPFLAGS_ALL += $(HOST_CPPFLAGS)
+
 ifeq ($(BUILD_TYPE),pgo)
 PGO_PROFILE_TARGETS := $(LIB_OBJS) $(THEFT_OBJS) $(APP_BINS) $(UNIT_BINS) \
 	$(TSAN_UNIT_BINS) $(PROPERTY_BINS) $(FUZZ_BINS) $(PERF_BINS)
@@ -197,7 +226,7 @@ bin: $(APP_BINS)
 
 $(BUILD_DIR)/bin/%: $(APP_DIR)/%.c $(LIBS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS_ALL) $(ENKI_INC) $(CFLAGS_ALL) $< $(LIB_ENKI) $(LIB_PLAN) $(LIB_AXSYS) $(LDFLAGS_ALL) -o $@
+	$(CC) $(CPPFLAGS_ALL) $(ENKI_INC) $(HOST_APP_INC) $(CFLAGS_ALL) $< $(LIB_ENKI) $(LIB_HOST) $(LIB_PLAN) $(LIB_AXSYS) $(LDFLAGS_ALL) $(HOST_LDLIBS) -o $@
 
 lib: $(LIBS)
 
@@ -212,6 +241,17 @@ $(LIB_PLAN): $(PLAN_OBJS)
 $(LIB_ENKI): $(ENKI_OBJS)
 	@mkdir -p $(dir $@)
 	$(AR) rcs $@ $^
+
+ifdef HOST_GPU_METAL
+$(LIB_HOST): $(HOST_OBJS)
+	@mkdir -p $(dir $@)
+	$(AR) rcs $@ $^
+
+# ObjC dialect: ARC, and the ObjC headers reject -Wpedantic.
+$(BUILD_DIR)/pkg/host/%.o: pkg/host/%.m
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS_ALL) $(HOST_INC) $(filter-out -Wpedantic,$(CFLAGS_ALL)) -fobjc-arc -c $< -o $@
+endif
 
 # Layered compile rules (R1-R3): each package sees only its own include
 # path and the layers beneath it.
@@ -233,12 +273,12 @@ $(BUILD_DIR)/tests/%.o: tests/%.c
 
 $(BUILD_DIR)/tests/unit/%_tsan: tests/unit/%_tsan.c $(LIBS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS_ALL) $(ENKI_INC) $(CFLAGS_ALL) $< $(LIB_ENKI) $(LIB_PLAN) $(LIB_AXSYS) $(LDFLAGS_ALL) -o $@
+	$(CC) $(CPPFLAGS_ALL) $(ENKI_INC) $(HOST_APP_INC) $(CFLAGS_ALL) $< $(LIB_ENKI) $(LIB_HOST) $(LIB_PLAN) $(LIB_AXSYS) $(LDFLAGS_ALL) $(HOST_LDLIBS) -o $@
 
 $(BUILD_DIR)/tests/unit/%: tests/unit/%.c $(LIBS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS_ALL) $(ENKI_INC) $(CRITERION_CFLAGS) $(CFLAGS_ALL) $< $(LIB_ENKI) $(LIB_PLAN) $(LIB_AXSYS) \
-		$(LDFLAGS_ALL) $(CRITERION_LIBS) -o $@
+	$(CC) $(CPPFLAGS_ALL) $(ENKI_INC) $(HOST_APP_INC) $(CRITERION_CFLAGS) $(CFLAGS_ALL) $< $(LIB_ENKI) $(LIB_HOST) $(LIB_PLAN) $(LIB_AXSYS) \
+		$(LDFLAGS_ALL) $(HOST_LDLIBS) $(CRITERION_LIBS) -o $@
 
 $(BUILD_DIR)/tests/property/%: tests/property/%.c $(LIBS) $(THEFT_OBJS)
 	@mkdir -p $(dir $@)
@@ -280,15 +320,22 @@ test-property: $(PROPERTY_BINS)
 	@set -eu; for test_bin in $(PROPERTY_BINS); do "$$test_bin"; done
 
 # Layering check (R1-R3): grep #include lines against the dependency
-# matrix.  axsys must not include plan/ or enki/; plan must not include
-# enki/.
+# matrix.  axsys must not include plan/, enki/ or host/; plan must not
+# include enki/ or host/; host sits beside enki (above plan) and must
+# not include enki/.
 check-layering:
 	@status=0; \
-	if grep -rnE '#include\s+["<](plan|enki)/' pkg/axsys --include='*.c' --include='*.h' 2>/dev/null; then \
-		echo "layering violation: pkg/axsys includes plan/ or enki/ headers"; status=1; \
+	if grep -rnE '#include\s+["<](plan|enki|host)/' pkg/axsys --include='*.c' --include='*.h' 2>/dev/null; then \
+		echo "layering violation: pkg/axsys includes plan/, enki/ or host/ headers"; status=1; \
 	fi; \
-	if grep -rnE '#include\s+["<]enki/' pkg/plan --include='*.c' --include='*.h' 2>/dev/null; then \
-		echo "layering violation: pkg/plan includes enki/ headers"; status=1; \
+	if grep -rnE '#include\s+["<](enki|host)/' pkg/plan --include='*.c' --include='*.h' 2>/dev/null; then \
+		echo "layering violation: pkg/plan includes enki/ or host/ headers"; status=1; \
+	fi; \
+	if grep -rnE '#include\s+["<]host/' pkg/enki/src pkg/enki/include --include='*.c' --include='*.h' 2>/dev/null; then \
+		echo "layering violation: pkg/enki includes host/ headers"; status=1; \
+	fi; \
+	if grep -rnE '#include\s+["<]enki/' pkg/host --include='*.c' --include='*.h' --include='*.m' 2>/dev/null; then \
+		echo "layering violation: pkg/host includes enki/ headers"; status=1; \
 	fi; \
 	if [ $$status -eq 0 ]; then echo "check-layering: OK"; fi; \
 	exit $$status

@@ -162,7 +162,8 @@ static er_actor* er_register(er_scheduler* sys, pl_heap* heap, pl_thread* t,
 er_actor* er_scheduler_actor(er_scheduler* sys) {
   pl_heap* heap = pl_heap_new(sys->cfg.heap_cells, sys->store);
   pl_thread* t = pl_thread_new(heap);
-  t->rplan_f = true; /* actors exist to perform effects */
+  t->rplan_f = true;    /* actors exist to perform effects */
+  t->hostcall_f = true; /* op 83 follows the effect gate */
   t->rplan_file_root_c = sys->cfg.file_root_c;
   return er_register(sys, heap, t, false);
 }

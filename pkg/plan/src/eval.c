@@ -89,15 +89,15 @@ void pl_set_io_hook(pl_io_hook hook) {
 }
 
 pl_val pl_io_run(pl_thread* t, uint32_t op, size_t argbase) {
-  return pl_ops[op].body(t, argbase);
+  return pl_op_desc(op)->body(t, argbase);
 }
 
 const char* pl_io_name(uint32_t op) {
-  return pl_ops[op].name_c;
+  return pl_op_desc(op)->name_c;
 }
 
 uint32_t pl_io_argc(uint32_t op) {
-  return pl_ops[op].argc;
+  return pl_op_desc(op)->argc;
 }
 
 /* ── KAL: non-forcing law-body operand interpretation ──────────────────── */
@@ -418,11 +418,15 @@ eval_thke: {
   }
   if (ban == PL_BAN_PRIM_KNOWN) {
     /* [opidx, e1..en]: ingest already resolved the op — no row, no
-     * F_OPENT, no lookup; enter the strict-arg driver directly */
+     * F_OPENT, no lookup; enter the strict-arg driver directly.
+     * pl_op_desc bounds-checks: idx >= pl_nops addresses the op-83
+     * host-call registry. */
     uint32_t idx = (uint32_t)args[0];
-    assert(idx < pl_nops);
-    if (pl_ops[idx].opset == 82 && !t->rplan_f)
+    const pl_opdesc* kd = pl_op_desc(idx);
+    if (kd->opset == 82 && !t->rplan_f)
       pl_raise_msg(t, "Not in RPLAN Mode"); /* the F_OPENT gate */
+    if (kd->opset == 83 && !t->hostcall_f)
+      pl_raise_msg(t, "Not in HOSTCALL Mode");
     size_t listbase = t->vsp;
     for (uint32_t i = 0; i < argc; i++)
       pl_vpush(t, args[i]); /* idx fills the name slot: op_body's
@@ -607,9 +611,11 @@ x_tail: {
     goto judge;
   }
   if (bane == PL_BAN_PRIM_KNOWN) {
-    assert(idx < pl_nops);
-    if (pl_ops[idx].opset == 82 && !t->rplan_f)
+    const pl_opdesc* kd = pl_op_desc(idx);
+    if (kd->opset == 82 && !t->rplan_f)
       pl_raise_msg(t, "Not in RPLAN Mode");
+    if (kd->opset == 83 && !t->hostcall_f)
+      pl_raise_msg(t, "Not in HOSTCALL Mode");
     pl_vpush(t, 0); /* room for the name slot when g == tbase */
     memmove(&t->vstack[tbase + 1], &t->vstack[g],
             (size_t)argc * sizeof(pl_val));
@@ -933,7 +939,9 @@ ret_opent: {
   pl_val name = t->vstack[listbase];
   if (opset == 82 && !t->rplan_f)
     pl_raise_msg(t, "Not in RPLAN Mode");
-  int idx = pl_op_lookup(opset, name, argc);
+  if (opset == 83 && !t->hostcall_f)
+    pl_raise_msg(t, "Not in HOSTCALL Mode");
+  int idx = pl_op_lookup_all(opset, name, argc);
   if (idx < 0)
     pl_raise_msgf(t, "no primop %llu (argc %u)", (unsigned long long)opset,
                   argc);
@@ -1089,7 +1097,7 @@ oparg_next:
   /* fr is the F_OPARG frame on top of the stack */
   fr = &t->fstack[t->fsp - 1];
   {
-    const pl_opdesc* d = &pl_ops[fr->op];
+    const pl_opdesc* d = pl_op_desc(fr->op);
     while (fr->k < fr->argc && ((d->strict_mask >> fr->k) & 1u) == 0)
       fr->k++;
     if (fr->k < fr->argc) {
@@ -1170,7 +1178,7 @@ opdeep_next:
    * machine at depth 0, so effects inside it block correctly. */
   fr = &t->fstack[t->fsp - 1];
   {
-    const pl_opdesc* d = &pl_ops[fr->op];
+    const pl_opdesc* d = pl_op_desc(fr->op);
     while (fr->k < fr->argc && ((d->deep_mask >> fr->k) & 1u) == 0)
       fr->k++;
     if (fr->k < fr->argc) {
@@ -1186,7 +1194,7 @@ opdeep_next:
 op_body:
   fr = &t->fstack[t->fsp - 1];
   {
-    const pl_opdesc* d = &pl_ops[fr->op];
+    const pl_opdesc* d = pl_op_desc(fr->op);
     uint32_t opi = fr->op;
     size_t argbase = fr->argbase;
     t->fsp--;          /* pop before the body so its frames take this slot */

@@ -82,7 +82,10 @@ pl_code* pl_bytecode_from_val(pl_val val) {
         if (pin == NULL || !pl_is_nat(pl_pin_body(pin)))
           FAIL("bad known-primop opset")
         uint64_t opset = pl_nat_u64_clamp(pl_pin_body(pin));
-        int idx = pl_op_lookup(opset, name, (uint32_t)argc);
+        /* pl_op_lookup_all also reaches the op-83 host-call registry:
+         * registration happens once at boot, so the baked pl_nops+i
+         * indices are stable for this process's pl_code lifetime */
+        int idx = pl_op_lookup_all(opset, name, (uint32_t)argc);
         if (idx < 0) {
           /* an op this runtime doesn't implement (wrappers are declared
            * speculatively): stay interpreted, silently — the interp
