@@ -409,10 +409,233 @@ signal and samples the produced pixel. 12 GPU tests; suite + layering green.
 
 ---
 
+## Slice 3 — The No-API Floor (pre-Rex completeness)
+
+> *Specs: NoGraphicsApi.md (the Aaltonen prototype API — the mechanics target), the
+> Aaltonen transcript (barrier/sync reality, per-stage roots), CB8 (memory model),
+> CB9 (payload kinds), CB10 (pipeline second relation), CB16 (no per-frame pipeline
+> construction), ACL6.2 (linear residual: no contraction without an admitted law),
+> GF1.4 (Foundry byte-tag classes fix the texture format set), SSH4/SSH10.2
+> (replay classification: Deterministic vs ReDispatchOnly)*
+> **Status: 🔲 PLANNED (2026-07-09)**
+
+**Goal**: complete the jet table + carrier vocabulary to Aaltonen's ~150-line prototype
+surface, so that when the Rex policy layer arrives it **only authors rows — never a new
+jet**. The admission test for every item: irreducible mechanics → jet; derived
+carrier/layout/evidence → Foil record; selection/policy → deferred to `.rex`. Policy
+stays as literal values in fixtures until then.
+
+**Design decisions settled up front** (the think-harder deltas):
+
+- **`gpu.write` is consume-and-mint, not mutation.** A pointer complement is a linear
+  residual (ACL6.2); overwriting bytes another holder's witness attests to is forbidden
+  contraction. Lawful shape: wait the session event (write happens-after all submitted
+  GPU work — the Producer-side dual of `gpu.read`), memcpy, **bump the generation**,
+  witness `(idx, new-gen)`. Every prior complement over the allocation goes stale (950).
+  Frames-in-flight is then a *pattern* (N allocations round-robin — Aaltonen's bump
+  allocator), never native cleverness.
+- **The clear step retires into a `pass-desc` carrier.** Clear-as-first-step (Gap 3) was
+  a workaround for having no pass descriptor. The hardware shape is loadOp+clearValue
+  per attachment (Aaltonen's GpuRenderPassDesc); a pass-desc record buys MRT, depth, and
+  store ops (`DONT_CARE` matters on TBDR) in one stroke. Step kind 2 becomes reserved-refused.
+- **Memory scopes shrink to private textures.** On UMA, readback/default are both shared
+  storage — `gpu.read` already covers readback. `MTLStorageModePrivate`'s only real win
+  here is texture lossless compression → land as private textures uploaded via a copy
+  command (replacing sync `replaceRegion`). Buffer scopes defer to the MoltenVK lane.
+- **Specialization constants split.** Value constants are deterministic and kill PSO
+  permutations → land. **Embedded device addresses** in constants poison content
+  identity (runtime address in the pipeline key → non-replayable; SSH ReDispatchOnly)
+  and buy one indirection over root-embedded addresses, which already work → deferred
+  with reason.
+- **Multi-queue deferred with a named hazard**: `encodeSignalEvent` is a plain set, not
+  atomic-max. One queue ⇒ encode order = signal order ⇒ the timeline is monotonic; two
+  queues on one session timeline can regress the signaled value and break every
+  readback wait. Async compute needs per-queue timelines + cross-queue waits — design
+  work, not a checkbox. Defer to the present/overlap era.
+- **op-83 joins record/replay.** The `er_io_hook` seam covers op-82 only; GPU jets
+  bypass it. Handles/generations/event-values are deterministic given call order and
+  readback results are bytes, so hooking opset-83 makes GPU-using actors **replayable
+  on machines with no Metal device**. Promoted into this slice as its exit criterion's spine.
+- **Consumer anchoring prunes speculation**: texture formats fixed by GF1.4 byte-tag
+  classes (R8, RGBA8, BGRA8, RGBA16F + D32) — no mips/3D/cube until a consumer names
+  them; ICB-MDI and meshlets are mechanics-complete but consumer-gated (same rule that
+  held draw-indexed); placement-heap complements (alloc = literal arena offset — the
+  no_api interval table and CB8's "one logical heap" made literal) is the right endgame
+  but a deep refactor with no consumer-visible gain now → deferred ledger.
+
+### Gap 17 — the main-line port (Phase 0 — numbered last, sequenced FIRST)
+
+> *Size: MEDIUM | Phase: 0 — before any Slice-3 code, so new gaps land on the merged
+> base instead of widening the divergence*
+
+This branch and axsys-org/enki `main` are parallel clean-room lineages (same refactor
+commit message, different hashes; merge-base `df9bb6c` predates both). `main` has the
+bytecode evaluator + threaded dispatch, the actor runtime + `er_io_hook` record/replay
+seam, and op-82 evolution — none of which this tree has. **Strategy: re-port, not
+git-merge.**
+
+- Verbatim (new files): `pkg/plan/hostcall.{h,c}`, `pkg/host/**`, `foil/shrine/**`,
+  `pkg/plan/src/rex.c`, `tests/unit/test_hostcall_gpu.c`, this plan.
+- Hand-applied touch-points on main: the op-83 gate at main's three op-82 gate sites
+  (eval.c:424, 611, 934); `&pl_ops[fr->op]` → `pl_op_desc(fr->op)` at the descriptor
+  derefs (eval.c:1092/1173/1189) and the `pl_io_run/name/argc` accessors (eval.c:92-100);
+  **bytecode.c:85 `pl_op_lookup` → `pl_op_lookup_all`** so compiled laws reach op-83
+  (baked `pl_nops+i` indices are stable: registration is once at boot, `pl_code` is
+  per-process); export op.c's `nat_name_eq` as `pl_nat_name_eq`; `hostcall_f` on
+  `pl_thread`; wisp.c wiring (`hostcall_f` follows the rplan gate — main's wisp already
+  adopts the scheduler); Makefile `pkg/host` layer + `check-layering` extension.
+- The third lineage: shrine-collapse vendors `enki-main`
+  (`shrineOS/Projection Engine/substrate/plan/enki-main`) whose `include/enki/host.h`
+  carries the C-struct floor for the **present arm and active selection** (present
+  witness, platform-surface frame, backend selection/device facts, effective bytemap,
+  projection state, watch-poll carriers) consumed by EnkiBridge/`NoApiMetalBackend.m`.
+  It is the reference for the present-arm lane exactly as `NoApiMetalBackend.m` was for
+  Gaps 0-6 — mechanics awaiting the Foil lift, not a merge source.
+
+*Pass criteria*: (1) all 12 GPU fixtures + the full main suite green on the ported
+main tree (Metal hardware); (2) a bytecode-compiled law invoking an op-83 binding
+dispatches through the unified descriptor path (new fixture — impossible on this
+branch, main-only); (3) `PL_NO_BYTECODE=1` differential run agrees; (4) check-layering
+green with the host layer.
+
+### Gap 11 — sync & data-path completeness
+
+> *Size: SMALL–MEDIUM | Phase: A*
+
+- `gpu.wait` (session, value): CPU-side wait on the session timeline without reading
+  bytes (timeout → 947). Unblocks frames-in-flight patterns.
+- `gpu.write` (session, heap-pointer, bytes-bar): consume-and-mint per the decision
+  above. Refusals: 950 stale, 948 length ≠ window, 942 unknown slot.
+- **Copy step kinds** in the command graph: `copy` (buffer→buffer via blit encoder,
+  kind 7), `copy-to-texture` (kind 8), `copy-from-texture` (kind 9) — all windows
+  validated via `gm_pointer`, destination generation bumped at encode, visibility
+  ordered by the graph's signal value. Closes the reserved blit/readback-step enums.
+
+*Pass criteria*: (1) write → stale-950 on the old complement, new-gen complement reads
+back the new bytes; (2) a graph copy lands byte-identical data (buffer and texture legs);
+(3) `gpu.wait` returns after the signaled value with no readback; (4) suite green.
+
+### Gap 12 — op-83 record/replay
+
+> *Size: MEDIUM | Phase: A (parallel with Gap 11)*
+
+Extend the direct-effect interception seam to opset-83: recording captures each
+hostcall's result row (witness or refusal, including readback/read payload bytes);
+replay substitutes results without touching Metal after verifying (actor, binding,
+args-hash) — exactly the op-82 discipline. Sessions/allocs/generations/event-values are
+deterministic given call order, so the log is complete.
+
+*Pass criteria*: (1) a recorded GPU slice replays bit-identically with the Metal jets
+compiled out (or on a 943 no-device machine); (2) divergence (edited args) aborts;
+(3) live suite unaffected.
+
+### Gap 13 — the raster floor (the ABI-break stroke)
+
+> *Size: LARGE | Phase: B — one stroke while tests are the only caller, same rationale
+> as Gaps 2+3*
+
+- **`pass-desc` carrier** replacing the bare target arg on `gpu.command-graph`:
+  `pass-desc (color-attachments depth-attachment ds-state k)`; each color attachment
+  `(target load-op store-op clear-bgra8)`; depth attachment `(target load-op store-op
+  clear-depth)`. MRT + depth + store ops; clear step (kind 2) retired to
+  reserved-refused.
+- **`raster-state` carrier** as `pipeline-request` field 3: topology, cull, MSAA
+  sample-count, color formats + writemasks, depth format, optional embedded blend
+  (on Metal blend IS pipeline state — a legitimate divergence from the blog's separate
+  blend object). Pipeline cache key = sha(lib ‖ stride ‖ mode ‖ raster-hash) — CB10's
+  second relation, again.
+- **`depth-stencil-state` carrier** → cached `MTLDepthStencilState`, referenced from
+  pass-desc (per-pass granularity, per Aaltonen: "configure once per render pass").
+- **Per-stage roots**: graph takes `(vx-root, px-root)` heap-pointer-or-0 records;
+  fragment root at buffer(0), dheap stays at buffer(1) both stages; passing the same
+  record twice reproduces today's shape.
+- **`draw-indexed` step** (kind 5): a0 = index-window heap-pointer record, a1 =
+  index-count, a2 = instance-count, a3 = index-format {1 u16, 2 u32}; bounds =
+  count×size ≤ window, alignment 2/4.
+- **Texture formats + private textures**: format arg on `gpu.target`/`gpu.texture-2d`
+  drawn from the GF1.4-anchored set (R8, RGBA8, BGRA8, RGBA16F, D32);
+  `MTLStorageModePrivate` sampled textures uploaded via the Gap-11 copy-to-texture
+  step (replaces sync `replaceRegion` for the private path); placed `:onHeap` where
+  the format allows, `useHeap` covers residency.
+- **Depth hazard class**: access-class 4 (depth-stencil) joins the hazard-fact
+  vocabulary (the blog's `HAZARD_DEPTH_STENCIL`).
+
+*Pass criteria*: (1) a depth-tested indexed two-target scene renders with correct
+occlusion and per-target writemasks (pixel-asserted on both targets + depth readback);
+(2) same artifact under two raster states → two cached pipelines (cold/cold/hit);
+(3) `DONT_CARE` store on a transient depth target leaves color correct; (4) old
+clear-step graphs refuse 952; (5) suite green.
+
+### Gap 14 — value specialization constants
+
+> *Size: SMALL | Phase: C*
+
+`constants` carrier (bytes-bar + declared layout ref) on `pipeline-request` field 4,
+lowered to `MTLFunctionConstantValues`; cache key gains sha(constants-bytes). Dead-code
+elimination replaces PSO permutations: one artifact + N constant sets = N pipelines by
+content, zero shader-source variants. Embedded-address constants explicitly refused
+(951) with the determinism rationale — root-embedded `gpu.device-address` remains the
+pointer path.
+
+*Pass criteria*: (1) one artifact, two constant sets → two pipelines, each witnessed
+cold then hit; (2) a constant-branched kernel produces the constant-selected bytes;
+(3) address-bearing constants refuse; (4) suite green.
+
+### Gap 15 — GPU-driven completions (consumer-gated mechanics)
+
+> *Size: MEDIUM | Phase: C*
+
+- `draw-indexed-indirect` (kind 6): args window validated like dispatch-indirect
+  (stale 950 / bounds-alignment 948), lowered to
+  `drawIndexedPrimitives:indirectBuffer:` — symmetric with Gap 10.
+- **GPU-written descriptor heap fixture**: a compute step writes a `MTLResourceID`
+  into the dheap argument buffer (it is already plain GPU memory), consumed by a
+  waiting render graph under a declared descriptors-class fact — the blog's
+  `HAZARD_DESCRIPTORS` exercised end-to-end.
+- **Meshlet pipeline + `draw-meshlets` step** (kind 10): Metal object+mesh functions
+  (type-selected, one entry each), meshlet data as raw complement windows — no new
+  binding surface, per the blog.
+
+*Pass criteria*: (1) admissibility-stage-written indexed-indirect args draw exactly the
+admitted primitives; (2) the GPU-minted descriptor samples correctly and an undeclared
+descriptors hazard is constructible/refused per CB9; (3) a meshlet scene matches its
+vertex-pipeline twin pixel-for-pixel; (4) suite green.
+
+### Gap 16 — deferred ledger (design notes with named triggers)
+
+- **ICB-based MDI** (indirect shader selection + per-draw roots) — trigger: the
+  Projection Engine's first GPU-driven scene walk.
+- **Multi-queue / async compute** — per-queue `MTLSharedEvent` timelines + cross-queue
+  wait-values (the plain-set monotonicity hazard above) — trigger: frame overlap in the
+  present arm (CSP-MED.2 frame-rate federation).
+- **Placement-heap complements** — alloc = literal (offset,length) in the arena,
+  `MTLHeapTypePlacement`; full no_api interval-table fidelity — trigger: the first
+  allocator-pressure consumer or the MoltenVK port (where suballocation is mandatory).
+- **Embedded-address spec constants** — trigger: a measured indirection cost on the
+  root-pointer path plus an SSH10.2 ReDispatchOnly replay classification for the
+  affected pipelines.
+- **Mips/3D/cube/arrays, buffer memory scopes** — trigger: a consumer byte-tag class
+  that names them (Foundry mip-atlases, MoltenVK).
+- **Present/surface arm** — remains the PNW10 lane, out of scope here.
+
+**Build order**: **17 first** (the main-line port — Gap 12's `er_io_hook` seam only
+exists on main) → 11 ∥ 12 → 13 (the stroke) → 14 → 15. 16 never blocks.
+
+**Exit criterion (the proof the no-API floor is done)**: one fixture drives a
+depth-tested, indexed, multi-target scene whose textures are private+placed, whose
+pipeline variants come from value spec-constants (no shader-source permutations), with
+a compute admissibility stage GPU-writing the indexed-indirect args and a GPU-minted
+descriptor — recorded live on Metal hardware, then **replayed bit-identically on a
+machine with no GPU** through the Gap-12 log. When that passes, Aaltonen's prototype
+surface exists as admitted mechanics + Foil carriers, and the Rex policy layer has no
+jet left to ask for.
+
+---
+
 ## Out of Scope (tracked, not forgotten)
 
 - Store hardening: root revisions/CAS, watch-poll, write-batch witnesses (PLR12 lane)
 - Present/surface arm: CAMetalLayer, swapchain images, surface generation rows (PNW10)
 - MoltenVK/Vulkan target (no_api clone is the reference when it starts)
 - ByteCarrierAdmit/BoundaryAdmit proper — carriers here converge toward TAB's field set, but admission lands with the Rex policy layer
-- Readback/blit payload kinds beyond enum reservation (draw-indexed reserved pending a mesh consumer; dispatch-indirect → Slice 2 Gap 10)
+- ~~Readback/blit payload kinds beyond enum reservation~~ → Slice 3 Gap 11 (copy steps) and Gap 13 (draw-indexed); dispatch-indirect landed in Slice 2 Gap 10
