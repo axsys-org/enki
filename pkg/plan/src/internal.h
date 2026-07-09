@@ -34,6 +34,19 @@ extern const size_t pl_nops;
 /* Returns descriptor index, or -1 if there is no matching primop. */
 int pl_op_lookup(uint64_t opset, pl_val name, uint32_t argc);
 
+/* Does the nat spell this C string, byte for byte? (op.c) */
+bool pl_nat_name_eq(pl_val v, const char* s);
+
+/* op 83 (hostcall.c): one descriptor view over the static table and the
+ * registered host-call bindings; idx >= pl_nops addresses the registry.
+ * pl_op_lookup_all extends pl_op_lookup with the opset-83 search. */
+const pl_opdesc* pl_op_desc(uint32_t idx);
+int pl_op_lookup_all(uint64_t opset, pl_val name, uint32_t argc);
+
+/* op 66 Rex notation-subset reader/printer (rex.c). */
+pl_val pl_op_parse_rex(pl_thread* t, size_t ab);
+pl_val pl_op_print_rex(pl_thread* t, size_t ab);
+
 /* op 82 (rplan) bodies, in rplan.c; arg conventions as pl_opdesc. */
 pl_val pl_op82_input(pl_thread* t, size_t ab);
 pl_val pl_op82_output(pl_thread* t, size_t ab);

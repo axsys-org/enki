@@ -803,6 +803,11 @@ const pl_opdesc pl_ops[] = {
     OP66(ax_s4('B', 'i', 't', 's'), 1, 0b1, false, op_bits),
     OP66(ax_s5('B', 'y', 't', 'e', 's'), 1, 0b1, false, op_bytes),
 
+    OP66(ax_s8('P', 'a', 'r', 's', 'e', 'R', 'e', 'x'), 1, 0b1, false,
+         pl_op_parse_rex),
+    OP66(ax_s8('P', 'r', 'i', 'n', 't', 'R', 'e', 'x'), 1, 0b1, true,
+         pl_op_print_rex),
+
     OP66(ax_s5('U', 'n', 'p', 'i', 'n'), 1, 0b1, false, op_unpin),
     OP66(ax_s3('S', 'e', 'q'), 2, 0b01, false, op_seq),
     OP66(ax_s4('S', 'e', 'q', '2'), 3, 0b011, false, op_seq2),
@@ -884,7 +889,7 @@ const pl_opdesc pl_ops[] = {
 
 const size_t pl_nops = sizeof(pl_ops) / sizeof(pl_ops[0]);
 
-static bool nat_name_eq(pl_val v, const char* s) {
+bool pl_nat_name_eq(pl_val v, const char* s) {
   if (!pl_is_nat(v))
     return false;
   size_t n = strlen(s);
@@ -902,7 +907,7 @@ int pl_op_lookup(uint64_t opset, pl_val name, uint32_t argc) {
     const pl_opdesc* d = &pl_ops[i];
     if (d->opset != opset || d->argc != argc)
       continue;
-    if (d->name_c != NULL ? nat_name_eq(name, d->name_c)
+    if (d->name_c != NULL ? pl_nat_name_eq(name, d->name_c)
                           : (pl_is_nat63(name) && d->name == name))
       return (int)i;
   }

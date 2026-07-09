@@ -1,0 +1,181 @@
+; no-api carrier records (ShrineGFX Gap 1).
+;
+; A carrier record is an UNDER-APPLIED pinned law: the constructor is
+; plain application, the record kind is the law name, the fields are the
+; app arguments (Ix i rec / pl_app_args[i] from C), and the trailing
+; never-supplied arg keeps the closure in WHNF as data.  Convention: the
+; law body is nat 1 (a reference to the first field) so that wisp- and
+; C-constructed records of the same kind hash to the same pin.
+;
+; Field tables (0-based Ix):
+;
+;   memory-arena       scope capacity generation-policy
+;   heap-pointer       alloc offset length byte-tag generation
+;                      (alloc = allocation slot in the session's arena —
+;                       one arena per session for now; a sub-window of an
+;                       allocation is the same record with a narrowed
+;                       offset/length, no new allocation)
+;   descriptor-heap    count stride-class
+;   descriptor-window  heap index stride-class generation
+;   root-segment       bar byte-tag
+;   root-layout        stride count segments mode
+;                      (mode: 1 buffer-bound root | 2 inline root —
+;                       setBytes <= 4 KiB, the push-constant lowering;
+;                       the pipeline cache key includes the layout, so
+;                       one artifact under two layouts is two pipelines:
+;                       CB10's second relation, witnessed separately)
+;   hazard-fact        before-stage after-stage access-class
+;   command-step       kind a0 a1 a2 a3
+;   command-graph      steps count hazards wait-value
+;                      (wait-value > 0 = wait the session timeline event
+;                       at that value before executing — the split-barrier
+;                       consumer half; the producer half is the signal
+;                       value every graph witness already carries.
+;                       Declared inter-graph hazards lower to these pairs;
+;                       absent facts leave submission order free.)
+;   artifact           bar language
+;   pipeline-request   artifact layout
+;   gfx-request        artifact layout width height graph
+;   pair               head tail            (lists; nil = 0)
+;
+; command-step kinds: 1 draw {vertex-count instance-count} | 2 clear
+; {bgra8} | 3 dispatch {groups-x groups-y groups-z threads-x} |
+; 4 dispatch-indirect {alloc offset generation threads-x} — the grid
+; comes from 12 admitted bytes at the complement window, typically
+; GPU-written by a prior admissibility stage (the GPU feeding itself);
+; native validates the window and points Metal at it, never reads it.
+; hazard-fact follows the no_api (Stage, Stage, Hazard) triple: stage
+; masks {1 vertex, 2 fragment, 4 compute}, access classes {0 buffers,
+; 1 draw-arguments, 2 color-buffer, 3 descriptors}.  Native lowering of
+; a declared hazard between steps: render graphs split the pass (TBDR
+; barrier); compute graphs emit a real buffer memory barrier inside a
+; concurrent-dispatch encoder.  Absent facts = no barrier, never a
+; conservative wait (SHRINEGFX-PLAN.md Gap 5).
+
+; ── B-op wrappers ──────────────────────────────────────────────────────
+
+(#bind Ix
+  (#pin (#law "Ix" (Ix i r) ((#pin "B") ("Ix" i r)))))
+
+(#bind Bytes
+  (#pin (#law "Bytes" (Bytes x) ((#pin "B") ("Bytes" x)))))
+
+(#bind Trunc
+  (#pin (#law "Trunc" (Trunc w x) ((#pin "B") ("Trunc" w x)))))
+
+(#bind Lsh
+  (#pin (#law "Lsh" (Lsh x s) ((#pin "B") ("Lsh" x s)))))
+
+(#bind Add
+  (#pin (#law "Add" (Add a b) ((#pin "B") ("Add" a b)))))
+
+(#bind Mul
+  (#pin (#law "Mul" (Mul a b) ((#pin "B") ("Mul" a b)))))
+
+(#bind Dec
+  (#pin (#law "Dec" (Dec a) ((#pin "B") ("Dec" a)))))
+
+(#bind Ifz
+  (#pin (#law "Ifz" (Ifz c t e) ((#pin "B") ("Ifz" c t e)))))
+
+(#bind Trace
+  (#pin (#law "Trace" (Trace v k) ((#pin "B") ("Trace" v k)))))
+
+; ── Record constructors ────────────────────────────────────────────────
+
+(#bind memory-arena
+  (#pin (#law "memory-arena"
+    (memory-arena scope capacity generation-policy k) scope)))
+
+(#bind heap-pointer
+  (#pin (#law "heap-pointer"
+    (heap-pointer arena offset length byte-tag generation k) arena)))
+
+(#bind descriptor-window
+  (#pin (#law "descriptor-window"
+    (descriptor-window heap index stride-class generation k) heap)))
+
+(#bind root-segment
+  (#pin (#law "root-segment" (root-segment bar byte-tag k) bar)))
+
+(#bind root-layout
+  (#pin (#law "root-layout"
+    (root-layout stride count segments mode k) stride)))
+
+(#bind hazard-fact
+  (#pin (#law "hazard-fact"
+    (hazard-fact before-stage after-stage access-class k) before-stage)))
+
+(#bind command-step
+  (#pin (#law "command-step" (command-step kind a0 a1 a2 a3 k) kind)))
+
+(#bind command-graph
+  (#pin (#law "command-graph"
+    (command-graph steps count hazards wait-value k) steps)))
+
+(#bind artifact
+  (#pin (#law "artifact" (artifact bar language k) bar)))
+
+(#bind pipeline-request
+  (#pin (#law "pipeline-request" (pipeline-request art layout k) art)))
+
+(#bind gfx-request
+  (#pin (#law "gfx-request"
+    (gfx-request art layout width height graph k) art)))
+
+(#bind pair
+  (#pin (#law "pair" (pair head tail k) head)))
+
+; ── Bars ───────────────────────────────────────────────────────────────
+;
+; bar = payload bytes + a 0x01 top byte (the op-82 convention).  bar-data
+; strips the top byte; bar-weld concatenates two bars into one bar.
+
+(#bind bar
+  (#pin (#law "bar" (bar bytes)
+    (Add bytes (Lsh 1 (Mul 8 (Bytes bytes)))))))
+
+(#bind bar-len
+  (#pin (#law "bar-len" (bar-len b) (Dec (Bytes b)))))
+
+(#bind bar-data
+  (#pin (#law "bar-data" (bar-data b)
+    (Trunc (Mul 8 (bar-len b)) b))))
+
+(#bind bar-weld
+  (#pin (#law "bar-weld" (bar-weld a b)
+    (bar (Add (bar-data a)
+              (Lsh (bar-data b) (Mul 8 (bar-len a))))))))
+
+; ── Root instantiation (Gap 3 law) ─────────────────────────────────────
+;
+; Walk a pair-list of root-segments in declared order and weld their
+; bars into the root payload bar.  This is the materialization law: the
+; root bytes are assembled substrate-side; native binds them blindly.
+
+(#bind instantiate-root
+  (#pin (#law "instantiate-root" (instantiate-root segments)
+    (Ifz segments
+      (bar 0)
+      (bar-weld (Ix 0 (Ix 0 segments))
+                (instantiate-root (Ix 1 segments)))))))
+
+; ── Smoke ──────────────────────────────────────────────────────────────
+
+(#bind main
+  (#pin (#law "main" (main args)
+    arena(memory-arena 1 65536 0)
+    ptr(heap-pointer 1 0 32 7 1)
+    ; two segments welded in declared order must be byte-identical to
+    ; the hand-packed whole (the Gap 3 law fixture)
+    segs(pair (root-segment (bar "roo") 7)
+              (pair (root-segment (bar "t!") 7) 0))
+    layout(root-layout 32 1 segs 1)
+    fact(hazard-fact 2 2 2)
+    step(command-step 1 6 1 0 0)
+    graph(command-graph (pair step 0) 1 (pair fact 0) 0)
+    req(gfx-request (artifact (bar "msl") 1) layout 64 64 graph)
+    (Trace (Ix 1 arena)
+      (Trace (Ix 4 ptr)
+        (Trace (bar-data (instantiate-root segs))
+          (Trace req 0)))))))

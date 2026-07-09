@@ -401,7 +401,9 @@ ret:
     pl_val name = t->vstack[listbase];
     if (opset == 82 && !t->rplan_f)
       pl_raise_msg(t, "Not in RPLAN Mode");
-    int idx = pl_op_lookup(opset, name, argc);
+    if (opset == 83 && !t->hostcall_f)
+      pl_raise_msg(t, "Not in HOSTCALL Mode");
+    int idx = pl_op_lookup_all(opset, name, argc);
     if (idx < 0)
       pl_raise_msgf(t, "no primop %llu (argc %u)", (unsigned long long)opset,
                     argc);
@@ -462,7 +464,7 @@ oparg_next:
   /* fr is the F_OPARG frame on top of the stack */
   fr = &t->fstack[t->fsp - 1];
   {
-    const pl_opdesc* d = &pl_ops[fr->op];
+    const pl_opdesc* d = pl_op_desc(fr->op);
     while (fr->k < fr->argc && ((d->strict_mask >> fr->k) & 1u) == 0)
       fr->k++;
     if (fr->k < fr->argc) {
@@ -481,7 +483,7 @@ oparg_next:
 op_body:
   fr = &t->fstack[t->fsp - 1];
   {
-    const pl_opdesc* d = &pl_ops[fr->op];
+    const pl_opdesc* d = pl_op_desc(fr->op);
     size_t argbase = fr->argbase;
     t->fsp--; /* pop before the body so its frames take this slot */
     pl_val r = d->body(t, argbase);

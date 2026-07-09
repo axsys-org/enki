@@ -1,0 +1,179 @@
+; foil-msl emitter laws (ShrineGFX Slice 2, Gap 7).
+;
+; CB6's steady-state emitter class in miniature: Foil/PLAN values write
+; exact backend bytes through the lawful byte leg (bar-weld).  The laws
+; below compute the R(3,1,1) geometric ANTIPRODUCT table — metric
+; (-1, 1, 1, 1, 0) over the 32 basis blades, e0 = time, e4 = projective
+; — and weld the one mode-uniform table-walker MSL kernel from text
+; fragments plus the emitted table constants.  One kernel body for
+; every active-component subset (ACL5: a relativistic quaternion's 8
+; slots, a dual quaternion's 12, a full motor's 16 are subsets of the
+; same 32-slot carrier; never a per-subalgebra closed form).
+;
+; The antiproduct is the adjoint composition (ACL4.2):
+;   a antiwedge-product b = lcomp(gp(rcomp a, rcomp b))
+; with rcomp/lcomp the shift legs and gp the L-mode work.  Basis blades
+; are 5-bit sets; signs come from merge-inversion parity plus the
+; metric contraction (-1 on e0, annihilation on e4).
+;
+; Run:  build/debug/bin/wisp foil/shrine psa-emitter main
+; Output (the pure-digit lines, in order): sign-table checksum,
+; index-table checksum, the emitted MSL artifact as a bar nat.
+
+; ── B-op wrappers ──────────────────────────────────────────────────────
+
+(#bind Add (#pin (#law "Add" (Add a b) ((#pin "B") ("Add" a b)))))
+(#bind Sub (#pin (#law "Sub" (Sub a b) ((#pin "B") ("Sub" a b)))))
+(#bind Mul (#pin (#law "Mul" (Mul a b) ((#pin "B") ("Mul" a b)))))
+(#bind Div (#pin (#law "Div" (Div a b) ((#pin "B") ("Div" a b)))))
+(#bind Mod (#pin (#law "Mod" (Mod a b) ((#pin "B") ("Mod" a b)))))
+(#bind Rsh (#pin (#law "Rsh" (Rsh a b) ((#pin "B") ("Rsh" a b)))))
+(#bind Lsh (#pin (#law "Lsh" (Lsh a b) ((#pin "B") ("Lsh" a b)))))
+(#bind Dec (#pin (#law "Dec" (Dec a) ((#pin "B") ("Dec" a)))))
+(#bind Bytes (#pin (#law "Bytes" (Bytes x) ((#pin "B") ("Bytes" x)))))
+(#bind Trunc (#pin (#law "Trunc" (Trunc w x) ((#pin "B") ("Trunc" w x)))))
+(#bind Ifz (#pin (#law "Ifz" (Ifz c t e) ((#pin "B") ("Ifz" c t e)))))
+(#bind Trace (#pin (#law "Trace" (Trace v k) ((#pin "B") ("Trace" v k)))))
+
+; ── Bars (op-82 convention; local copies — modules are self-contained) ─
+
+(#bind bar
+  (#pin (#law "bar" (bar bytes)
+    (Add bytes (Lsh 1 (Mul 8 (Bytes bytes)))))))
+
+(#bind bar-len
+  (#pin (#law "bar-len" (bar-len b) (Dec (Bytes b)))))
+
+(#bind bar-data
+  (#pin (#law "bar-data" (bar-data b)
+    (Trunc (Mul 8 (bar-len b)) b))))
+
+(#bind bar-weld
+  (#pin (#law "bar-weld" (bar-weld a b)
+    (bar (Add (bar-data a)
+              (Lsh (bar-data b) (Mul 8 (bar-len a))))))))
+
+; ── Blade-set arithmetic (5-bit sets, indices 0..31) ───────────────────
+
+(#bind bit (#pin (#law "bit" (bit i n) (Mod (Rsh n i) 2))))
+
+(#bind pc
+  (#pin (#law "pc" (pc n)
+    (Ifz n 0 (Add (Mod n 2) (pc (Div n 2)))))))
+
+(#bind x5
+  (#pin (#law "x5" (x5 a b)
+    (Ifz (Add a b) 0
+      (Add (Mod (Add (Mod a 2) (Mod b 2)) 2)
+           (Mul 2 (x5 (Div a 2) (Div b 2))))))))
+
+; merge inversions: pairs (i in a, j in b) with i > j — the reorder
+; sign of the geometric product of canonical basis blades
+(#bind inv-go
+  (#pin (#law "inv-go" (inv-go a b j)
+    (Ifz (Sub 5 j) 0
+      (Add (Mul (bit j b) (pc (Rsh a (Add j 1))))
+           (inv-go a b (Add j 1)))))))
+
+(#bind inv (#pin (#law "inv" (inv a b) (inv-go a b 0))))
+
+(#bind comp (#pin (#law "comp" (comp a) (Sub 31 a))))
+(#bind par (#pin (#law "par" (par n) (Mod n 2))))
+
+; geometric product sign under metric (-1,1,1,1,0), encoded
+; 0 = annihilated (e4 contraction), 1 = +1, 2 = -1
+(#bind gp-sgn
+  (#pin (#law "gp-sgn" (gp-sgn a b)
+    (Ifz (Mul (bit 4 a) (bit 4 b))
+      (Ifz (par (Add (inv a b) (Mul (bit 0 a) (bit 0 b)))) 1 2)
+      0))))
+
+; right/left complement sign parities (0 = plus, 1 = minus):
+; e_A wedge rcomp(e_A) = +antiscalar; lcomp(e_A) wedge e_A = +antiscalar
+(#bind rsgn (#pin (#law "rsgn" (rsgn a) (par (inv a (comp a))))))
+(#bind lsgn (#pin (#law "lsgn" (lsgn a) (par (inv (comp a) a)))))
+
+; antiproduct entry: sign 0/1/2 and result blade index
+(#bind ap-sgn
+  (#pin (#law "ap-sgn" (ap-sgn a b)
+    g(gp-sgn (comp a) (comp b))
+    (Ifz g 0
+      (Ifz (par (Add (Add (Sub g 1) (Add (rsgn a) (rsgn b)))
+                     (lsgn (x5 a b))))
+        1 2)))))
+
+(#bind ap-idx (#pin (#law "ap-idx" (ap-idx a b) (comp (x5 a b)))))
+
+; flat table index k = 32*i + j
+(#bind sgn-k (#pin (#law "sgn-k" (sgn-k k) (ap-sgn (Div k 32) (Mod k 32)))))
+(#bind idx-k (#pin (#law "idx-k" (idx-k k) (ap-idx (Div k 32) (Mod k 32)))))
+
+; antireverse sign per slot (1 = plus, 2 = minus): antigrade ag = 5 -
+; grade; sign = (-1)^(ag(ag-1)/2)
+(#bind ar-sgn
+  (#pin (#law "ar-sgn" (ar-sgn i)
+    ag(Sub 5 (pc i))
+    (Ifz (par (Div (Mul ag (Dec ag)) 2)) 1 2))))
+
+; checksum over f(k), k in [0, n): sum (k+1)*f(k) — cross-checked
+; against the independent C reference table
+(#bind cs-go
+  (#pin (#law "cs-go" (cs-go f n k)
+    (Ifz (Sub n k) 0
+      (Add (Mul (Add k 1) (f k)) (cs-go f n (Add k 1)))))))
+
+; ── Decimal text ───────────────────────────────────────────────────────
+
+(#bind ch (#pin (#law "ch" (ch d) (bar (Add 48 d)))))
+
+(#bind digits
+  (#pin (#law "digits" (digits n)
+    (Ifz (Div n 10) (ch (Mod n 10))
+      (bar-weld (digits (Div n 10)) (ch (Mod n 10)))))))
+
+(#bind sgn-str
+  (#pin (#law "sgn-str" (sgn-str s)
+    (Ifz s (bar "0") (Ifz (Dec s) (bar "1") (bar "-1"))))))
+
+(#bind ar-str
+  (#pin (#law "ar-str" (ar-str s) (Ifz (Dec s) (bar "1") (bar "-1")))))
+
+(#bind sgn-entry (#pin (#law "sgn-entry" (sgn-entry k) (sgn-str (sgn-k k)))))
+(#bind idx-entry (#pin (#law "idx-entry" (idx-entry k) (digits (idx-k k)))))
+(#bind ar-entry (#pin (#law "ar-entry" (ar-entry k) (ar-str (ar-sgn k)))))
+
+; comma-joined array body over f(k), k in [i, n)
+(#bind arr-go
+  (#pin (#law "arr-go" (arr-go f n i)
+    (Ifz (Sub n (Add i 1)) (f i)
+      (bar-weld (f i)
+                (bar-weld (bar ",") (arr-go f n (Add i 1))))))))
+
+; ── The emitted artifact ───────────────────────────────────────────────
+;
+; One mode-uniform table-walker kernel.  Root = {m_addr, x_addr,
+; out_addr, count}; rows are 32-float multivectors; the sandwich
+; M antiproduct X antiproduct antireverse(M) is two table walks.
+
+(#bind msl
+  (#pin (#law "msl" (msl x)
+    (bar-weld (bar "#include <metal_stdlib>")
+    (bar-weld (bar 10)
+    (bar-weld (bar "using namespace metal; struct Root { ulong m_addr; ulong x_addr; ulong out_addr; uint count; }; constant int AP_IDX[1024] = { ")
+    (bar-weld (arr-go idx-entry 1024 0)
+    (bar-weld (bar " }; constant int AP_SGN[1024] = { ")
+    (bar-weld (arr-go sgn-entry 1024 0)
+    (bar-weld (bar " }; constant int AR_SGN[32] = { ")
+    (bar-weld (arr-go ar-entry 32 0)
+    (bar-weld (bar " }; static void antiprod(thread float* r, thread const float* a, thread const float* b) { for (int i = 0; i < 32; i++) r[i] = 0.0f; for (int i = 0; i < 32; i++) for (int j = 0; j < 32; j++) { int s = AP_SGN[i * 32 + j]; if (s != 0) r[AP_IDX[i * 32 + j]] += float(s) * a[i] * b[j]; } } ")
+              (bar "kernel void shrine_psa_sandwich(uint tid [[thread_position_in_grid]], const device Root* d [[buffer(0)]]) { if (tid >= d->count) return; const device float* m = (const device float*)(d->m_addr); const device float* x = (const device float*)(d->x_addr) + tid * 32; device float* out = (device float*)(d->out_addr) + tid * 32; float mr[32]; float xr[32]; float tmp[32]; float res[32]; float mrev[32]; for (int i = 0; i < 32; i++) { mr[i] = m[i]; xr[i] = x[i]; mrev[i] = float(AR_SGN[i]) * m[i]; } antiprod(tmp, mr, xr); antiprod(res, tmp, mrev); for (int i = 0; i < 32; i++) out[i] = res[i]; }")))))))))))))
+
+; ── Entry ──────────────────────────────────────────────────────────────
+
+; checksums are traced as cs*256+2 so the low byte is unprintable and
+; the canonical printer always chooses decimal form
+(#bind main
+  (#pin (#law "main" (main args)
+    (Trace (Add (Mul (cs-go sgn-k 1024 0) 256) 2)
+      (Trace (Add (Mul (cs-go idx-k 1024 0) 256) 2)
+        (Trace (msl 0) 0))))))
