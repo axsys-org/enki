@@ -44,6 +44,14 @@
 ; comes from 12 admitted bytes at the complement window, typically
 ; GPU-written by a prior admissibility stage (the GPU feeding itself);
 ; native validates the window and points Metal at it, never reads it.
+; 5/6 (draw-indexed, draw-indexed-indirect) are reserved (Gap 13/15).
+; Blit graphs (pipeline 0, Gap 11) carry only copy kinds: 7 copy
+; {src-ptr dst-ptr} | 8 copy-to-texture {src-ptr texture w h} |
+; 9 copy-from-texture {texture dst-ptr w h}.  A copy destination is
+; consumed and re-minted like gpu.write: its generation bumps at
+; encode (appended to the witness in step order) and the new bytes
+; become visible at this graph's signal value.  Copies are
+; encoder-ordered, so a blit graph carries no hazard facts.
 ; hazard-fact follows the no_api (Stage, Stage, Hazard) triple: stage
 ; masks {1 vertex, 2 fragment, 4 compute}, access classes {0 buffers,
 ; 1 draw-arguments, 2 color-buffer, 3 descriptors}.  Native lowering of

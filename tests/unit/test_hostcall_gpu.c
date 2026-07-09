@@ -1619,6 +1619,239 @@ Test(hostcall, gfx_cross_pass_raw_pixel_divergence) {
   test_rt_free(&rt);
 }
 
+/*
+ * Gap 11: the data-path completions.  gpu.write is consume-and-mint —
+ * a pointer complement is a linear residual, so the write waits the
+ * session timeline (the Producer-side dual of gpu.read), memcpys, and
+ * bumps the generation: every prior complement over the allocation is
+ * stale (950).  gpu.wait waits a signaled value without reading bytes
+ * (the frames-in-flight primitive).  The blit graph (pipeline 0)
+ * carries copy steps — buffer→buffer and buffer↔texture — behind the
+ * same carrier/wait-value/signal discipline; destination generations
+ * are minted at encode and appended to the witness in step order.
+ */
+Test(hostcall, gfx_write_copy_wait_data_path) {
+  cr_assert(pl_host_gpu_metal_register());
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  t->hostcall_f = true;
+
+  pl_catch c;
+  pl_catch_init(t, &c);
+  if (setjmp(c.jb) != 0) {
+    pl_catch_unwind(t, &c);
+    cr_assert_fail("raise during data-path slice: %s",
+                   t->exn_msg != NULL ? t->exn_msg : "PLAN exception");
+  }
+
+  size_t args = t->vsp;
+  pl_vpush(t, 0);
+  pl_val r = hostcall(t, "gpu.session-open", args);
+  if (refusal_kind(r, "gpu.session-open") == 943) {
+    cr_log_warn("no metal device; data-path slice skipped");
+    test_rt_free(&rt);
+    return;
+  }
+  uint64_t session = witness_payload_u64(t, r, "gpu.session-open", 0);
+
+  args = t->vsp;
+  pl_vpush(t, session);
+  {
+    size_t f = t->vsp;
+    pl_vpush(t, 1);
+    pl_vpush(t, 65536);
+    pl_vpush(t, 0);
+    pl_vpush(t, record(t, "memory-arena", f));
+  }
+  (void)witness_payload_u64(t, hostcall(t, "gpu.arena", args), "gpu.arena", 0);
+
+  uint64_t gen_a = 0;
+  uint64_t a = alloc_bytes(t, session, "ABCDEFGH", 8, &gen_a);
+
+  /* a write that does not fill the window refuses */
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, pointer_record(t, a, 0, 8, gen_a));
+  pl_vpush(t, bar_nat(t, (const uint8_t*)"xy", 2));
+  cr_assert_eq(refusal_kind(hostcall(t, "gpu.write", args), "gpu.write"), 948u);
+
+  /* the linear write: consume the complement, mint the successor */
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, pointer_record(t, a, 0, 8, gen_a));
+  pl_vpush(t, bar_nat(t, (const uint8_t*)"abcdefgh", 8));
+  pl_val ww = hostcall(t, "gpu.write", args);
+  cr_assert_eq(witness_payload_u64(t, ww, "gpu.write", 0), a);
+  uint64_t gen_a2 = witness_payload_u64(t, ww, "gpu.write", 1);
+  cr_assert_eq(gen_a2, gen_a + 1);
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, pointer_record(t, a, 0, 8, gen_a)); /* the consumed residual */
+  cr_assert_eq(refusal_kind(hostcall(t, "gpu.read", args), "gpu.read"), 950u);
+  uint8_t got[16];
+  read_bytes(t, session, a, 8, gen_a2, got);
+  cr_assert_eq(memcmp(got, "abcdefgh", 8), 0);
+
+  /* blit graph: one buffer→buffer copy, A → B */
+  uint8_t zeros[16] = {0};
+  uint64_t gen_b = 0;
+  uint64_t b = alloc_bytes(t, session, zeros, 8, &gen_b);
+  size_t gbase = t->vsp;
+  pl_vpush(t, 0); /* steps list */
+  {
+    size_t f = t->vsp;
+    pl_vpush(t, 7); /* kind: copy */
+    pl_vpush(t, pointer_record(t, a, 0, 8, gen_a2));
+    pl_vpush(t, pointer_record(t, b, 0, 8, gen_b));
+    pl_vpush(t, 0);
+    pl_vpush(t, 0);
+    pl_val step = record(t, "command-step", f);
+    pl_vpush(t, step);
+    pl_vpush(t, t->vstack[gbase]);
+    t->vstack[gbase] = record(t, "pair", f);
+  }
+  {
+    size_t f = t->vsp;
+    pl_vpush(t, t->vstack[gbase]);
+    pl_vpush(t, 1);
+    pl_vpush(t, 0);
+    pl_vpush(t, 0);
+    t->vstack[gbase] = record(t, "command-graph", f);
+  }
+  args = t->vsp;
+  pl_vpush(t, t->vstack[gbase]);
+  pl_vpush(t, session);
+  pl_vpush(t, 0); /* pipeline 0: blit */
+  pl_vpush(t, 0);
+  pl_vpush(t, 0);
+  pl_vpush(t, 0);
+  pl_val bw = hostcall(t, "gpu.command-graph", args);
+  cr_assert_eq(witness_payload_u64(t, bw, "gpu.command-graph", 0), 1u);
+  uint64_t copy_event = witness_payload_u64(t, bw, "gpu.command-graph", 2);
+  uint64_t gen_b2 = witness_payload_u64(t, bw, "gpu.command-graph", 3);
+  cr_assert_eq(gen_b2, gen_b + 1);
+  t->vsp = gbase;
+
+  /* gpu.wait: the copy's signal value, no readback */
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, copy_event);
+  cr_assert_eq(
+      witness_payload_u64(t, hostcall(t, "gpu.wait", args), "gpu.wait", 0),
+      copy_event);
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, copy_event + 100); /* never signaled */
+  cr_assert_eq(refusal_kind(hostcall(t, "gpu.wait", args), "gpu.wait"), 948u);
+  read_bytes(t, session, b, 8, gen_b2, got);
+  cr_assert_eq(memcmp(got, "abcdefgh", 8), 0);
+
+  /* buffer→texture→buffer round trip in one blit graph */
+  uint8_t texsrc[16];
+  for (int i = 0; i < 16; i++)
+    texsrc[i] = (uint8_t)(0x40 + i);
+  uint64_t gen_c = 0, gen_d = 0;
+  uint64_t cbuf = alloc_bytes(t, session, texsrc, 16, &gen_c);
+  uint64_t dbuf = alloc_bytes(t, session, zeros, 16, &gen_d);
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, 2);
+  pl_vpush(t, 2);
+  pl_vpush(t, bar_nat(t, zeros, 16));
+  uint64_t tex = witness_payload_u64(t, hostcall(t, "gpu.texture-2d", args),
+                                     "gpu.texture-2d", 0);
+  gbase = t->vsp;
+  pl_vpush(t, 0); /* steps, built back to front: [to-texture, from-texture] */
+  {
+    size_t f = t->vsp;
+    pl_vpush(t, 9); /* kind: copy-from-texture */
+    pl_vpush(t, tex);
+    pl_vpush(t, pointer_record(t, dbuf, 0, 16, gen_d));
+    pl_vpush(t, 2);
+    pl_vpush(t, 2);
+    pl_val step = record(t, "command-step", f);
+    pl_vpush(t, step);
+    pl_vpush(t, t->vstack[gbase]);
+    t->vstack[gbase] = record(t, "pair", f);
+  }
+  {
+    size_t f = t->vsp;
+    pl_vpush(t, 8); /* kind: copy-to-texture */
+    pl_vpush(t, pointer_record(t, cbuf, 0, 16, gen_c));
+    pl_vpush(t, tex);
+    pl_vpush(t, 2);
+    pl_vpush(t, 2);
+    pl_val step = record(t, "command-step", f);
+    pl_vpush(t, step);
+    pl_vpush(t, t->vstack[gbase]);
+    t->vstack[gbase] = record(t, "pair", f);
+  }
+  {
+    size_t f = t->vsp;
+    pl_vpush(t, t->vstack[gbase]);
+    pl_vpush(t, 2);
+    pl_vpush(t, 0);
+    pl_vpush(t, 0);
+    t->vstack[gbase] = record(t, "command-graph", f);
+  }
+  args = t->vsp;
+  pl_vpush(t, t->vstack[gbase]);
+  pl_vpush(t, session);
+  pl_vpush(t, 0);
+  pl_vpush(t, 0);
+  pl_vpush(t, 0);
+  pl_vpush(t, 0);
+  pl_val tw = hostcall(t, "gpu.command-graph", args);
+  cr_assert_eq(witness_payload_u64(t, tw, "gpu.command-graph", 0), 2u);
+  uint64_t gen_d2 = witness_payload_u64(t, tw, "gpu.command-graph", 3);
+  cr_assert_eq(gen_d2, gen_d + 1);
+  t->vsp = gbase;
+  read_bytes(t, session, dbuf, 16, gen_d2, got);
+  cr_assert_eq(memcmp(got, texsrc, 16), 0, "texture round trip lost the bytes");
+
+  /* a draw step in a blit graph refuses */
+  gbase = t->vsp;
+  pl_vpush(t, 0);
+  {
+    size_t f = t->vsp;
+    pl_vpush(t, 1); /* kind: draw */
+    pl_vpush(t, 6);
+    pl_vpush(t, 1);
+    pl_vpush(t, 0);
+    pl_vpush(t, 0);
+    pl_val step = record(t, "command-step", f);
+    pl_vpush(t, step);
+    pl_vpush(t, t->vstack[gbase]);
+    t->vstack[gbase] = record(t, "pair", f);
+  }
+  {
+    size_t f = t->vsp;
+    pl_vpush(t, t->vstack[gbase]);
+    pl_vpush(t, 1);
+    pl_vpush(t, 0);
+    pl_vpush(t, 0);
+    t->vstack[gbase] = record(t, "command-graph", f);
+  }
+  args = t->vsp;
+  pl_vpush(t, t->vstack[gbase]);
+  pl_vpush(t, session);
+  pl_vpush(t, 0);
+  pl_vpush(t, 0);
+  pl_vpush(t, 0);
+  pl_vpush(t, 0);
+  cr_assert_eq(
+      refusal_kind(hostcall(t, "gpu.command-graph", args), "gpu.command-graph"),
+      952u);
+  t->vsp = gbase;
+
+  args = t->vsp;
+  pl_vpush(t, session);
+  cr_assert_not_null(result_row(hostcall(t, "gpu.session-close", args),
+                                "witness", "gpu.session-close"));
+  pl_catch_pop(t, &c);
+  test_rt_free(&rt);
+}
+
 /* pipeline-request record: artifact(bar, msl) + root-layout(stride,
  * count, segments, mode). */
 static pl_val pipeline_request(pl_thread* t, pl_val msl_bar, uint64_t stride,

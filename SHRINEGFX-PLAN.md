@@ -501,6 +501,14 @@ green with the host layer.
 ### Gap 11 — sync & data-path completeness
 
 > *Size: SMALL–MEDIUM | Phase: A*
+> **Status: ✅ DONE (2026-07-09, on op83-port)** — `gm_wait`/`gm_write` + the blit
+> graph (`gm_blit_graph`: pipeline 0 selects copy-only encoding, ≤32 steps, no hazard
+> facts — copies are encoder-ordered; destination generations minted at encode and
+> appended to the witness in step order).  Fixture
+> `gfx_write_copy_wait_data_path`: short write → 948; linear write → old complement
+> 950, new gen reads the new bytes; buffer→buffer copy + gpu.wait on its signal;
+> buffer→texture→buffer round trip byte-identical; never-signaled wait → 948; draw
+> step in a blit graph → 952.  14/14 hostcall+gpu fixtures green.
 
 - `gpu.wait` (session, value): CPU-side wait on the session timeline without reading
   bytes (timeout → 947). Unblocks frames-in-flight patterns.

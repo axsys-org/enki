@@ -58,12 +58,16 @@ enum {
   GM_OBJ_TEXTURE,
 };
 
-/* Command-step payload kinds (carrier convention). */
+/* Command-step payload kinds (carrier convention).  5 (draw-indexed)
+ * and 6 (draw-indexed-indirect) are reserved for Slice 3 Gap 13/15. */
 enum {
   GM_STEP_DRAW = 1,
   GM_STEP_CLEAR = 2,
   GM_STEP_DISPATCH = 3,
   GM_STEP_DISPATCH_INDIRECT = 4,
+  GM_STEP_COPY = 7,              /* {src-ptr dst-ptr 0 0} buffer→buffer */
+  GM_STEP_COPY_TO_TEXTURE = 8,   /* {src-ptr texture w h} */
+  GM_STEP_COPY_FROM_TEXTURE = 9, /* {texture dst-ptr w h} */
 };
 
 /* Refusal kinds, continuing the no-api backend's 9xx space. */
@@ -581,6 +585,82 @@ static pl_val gm_read(pl_thread* t, size_t ab) {
   }
 }
 
+/* CPU-side wait on the session timeline without reading bytes (Gap
+ * 11): the frames-in-flight primitive.  Waiting a value the session
+ * never signaled is a caller bug, refused up front. */
+static pl_val gm_wait(pl_thread* t, size_t ab) {
+  gm_session* s = gm_session_at(ARG(0));
+  if (s == NULL)
+    return pl_hostcall_refusal(t, "gpu.wait", GM_REFUSAL_BAD_SESSION,
+                               "unknown session");
+  uint64_t value = pl_nat_u64_clamp(pl_nat_coerce(ARG(1)));
+  if (value > s->event_value)
+    return pl_hostcall_refusal(t, "gpu.wait", GM_REFUSAL_BOUNDS,
+                               "wait value was never signaled");
+  @autoreleasepool {
+    if (value > 0) {
+      id<MTLSharedEvent> event = (__bridge id<MTLSharedEvent>)s->event_ref;
+      if (![event waitUntilSignaledValue:value timeoutMS:5000])
+        return pl_hostcall_refusal(t, "gpu.wait", GM_REFUSAL_ENCODE,
+                                   "submission event timeout");
+    }
+    size_t base = t->vsp;
+    pl_vpush(t, (pl_val)value);
+    return pl_hostcall_witness(t, "gpu.wait", base);
+  }
+}
+
+/* Write admitted bytes into a live allocation window (Gap 11).  A
+ * pointer complement is a linear residual (ACL6.2): the write consumes
+ * it and mints the successor — wait the session timeline (the
+ * Producer-side dual of gpu.read: the write happens-after all
+ * submitted GPU work), memcpy, bump the generation.  Every prior
+ * complement over the allocation goes stale (950 on reuse).
+ * Frames-in-flight is a pattern (N allocations round-robin), never
+ * native cleverness. */
+static pl_val gm_write(pl_thread* t, size_t ab) {
+  gm_session* s = gm_session_at(ARG(0));
+  if (s == NULL)
+    return pl_hostcall_refusal(t, "gpu.write", GM_REFUSAL_BAD_SESSION,
+                               "unknown session");
+  ARG(1) = pl_nf(t, ARG(1));
+  pl_val* f = gm_record(ARG(1), "heap-pointer", 5);
+  if (f == NULL)
+    return pl_hostcall_refusal(t, "gpu.write", GM_REFUSAL_CARRIER_SHAPE,
+                               "expected heap-pointer record");
+  uint64_t refusal = 0;
+  size_t offset = 0, length = 0;
+  id<MTLBuffer> buffer = gm_pointer(s, f, &offset, &length, &refusal);
+  if (buffer == nil)
+    return pl_hostcall_refusal(t, "gpu.write", refusal, "pointer rejected");
+  size_t n = 0;
+  uint8_t* bytes = gm_bar_bytes(pl_nat_coerce(ARG(2)), &n);
+  if (bytes == NULL || n != length) {
+    free(bytes);
+    return pl_hostcall_refusal(t, "gpu.write", GM_REFUSAL_BOUNDS,
+                               "write bytes do not fill the window");
+  }
+  @autoreleasepool {
+    if (s->event_value > 0) {
+      id<MTLSharedEvent> event = (__bridge id<MTLSharedEvent>)s->event_ref;
+      if (![event waitUntilSignaledValue:s->event_value timeoutMS:5000]) {
+        free(bytes);
+        return pl_hostcall_refusal(t, "gpu.write", GM_REFUSAL_ENCODE,
+                                   "submission event timeout");
+      }
+    }
+    memcpy((uint8_t*)[buffer contents] + offset, bytes, n);
+    free(bytes);
+    uint64_t idx = pl_nat_u64_clamp(pl_nat_coerce(f[0]));
+    gm_alloc* a = &s->allocs[idx - 1];
+    a->generation += 1; /* consume the residual, mint the successor */
+    size_t base = t->vsp;
+    pl_vpush(t, (pl_val)idx);
+    pl_vpush(t, (pl_val)a->generation);
+    return pl_hostcall_witness(t, "gpu.write", base);
+  }
+}
+
 /* ── Artifacts and pipelines (Gap 6 cache) ─────────────────────────────── */
 
 static pl_val gm_library(pl_thread* t, size_t ab) {
@@ -1026,6 +1106,187 @@ static id<MTLRenderCommandEncoder> gm_open_pass(
  * in the root layout and the artifact, never here.  Declared hazard
  * facts lower to pass splits between draw steps; the witness carries
  * (steps-executed, splits, event-value). */
+/* A blit graph (Gap 11): pipeline 0 selects copy-only encoding — the
+ * lawful byte-movement legs (buffer→buffer, buffer↔texture) behind the
+ * same graph carrier, wait-value, and signal discipline.  A copy
+ * destination is consumed and re-minted like gpu.write: its slot
+ * generation bumps at encode, appended to the witness in step order,
+ * and visibility of the new bytes is ordered by this graph's signal
+ * value.  Copies within one blit encoder are hardware-ordered, so a
+ * blit graph carries no hazard facts. */
+#define GM_BLIT_MAX_STEPS 32
+
+static bool gm_is_zero(pl_val v) {
+  return pl_is_nat(v) && pl_nat_is_zero(pl_nat_coerce(v));
+}
+
+static pl_val gm_blit_graph(pl_thread* t, size_t ab, gm_session* s,
+                            pl_val* graph) {
+  if (!gm_is_zero(ARG(3)) || !gm_is_zero(ARG(4)) || !gm_is_zero(ARG(5)))
+    return pl_hostcall_refusal(t, "gpu.command-graph", GM_REFUSAL_GRAPH_SHAPE,
+                               "blit graph takes no target, root or heap");
+  if (!gm_is_zero(graph[2]))
+    return pl_hostcall_refusal(t, "gpu.command-graph", GM_REFUSAL_GRAPH_SHAPE,
+                               "blit copies are encoder-ordered; no facts");
+  @autoreleasepool {
+    uint64_t declared = pl_nat_u64_clamp(pl_nat_coerce(graph[1]));
+    uint64_t kinds[GM_BLIT_MAX_STEPS];
+    id<MTLBuffer> srcs[GM_BLIT_MAX_STEPS] = {nil};
+    id<MTLBuffer> dsts[GM_BLIT_MAX_STEPS] = {nil};
+    id<MTLTexture> texs[GM_BLIT_MAX_STEPS] = {nil};
+    size_t srcoff[GM_BLIT_MAX_STEPS], dstoff[GM_BLIT_MAX_STEPS];
+    size_t lens[GM_BLIT_MAX_STEPS];
+    uint64_t ws[GM_BLIT_MAX_STEPS], hs[GM_BLIT_MAX_STEPS];
+    uint64_t bump[GM_BLIT_MAX_STEPS] = {0};
+    uint64_t walked = 0;
+    pl_val cursor = graph[0];
+    while (!gm_is_zero(cursor)) {
+      pl_val* cell = gm_record(cursor, "pair", 2);
+      if (cell == NULL)
+        return pl_hostcall_refusal(t, "gpu.command-graph",
+                                   GM_REFUSAL_GRAPH_SHAPE,
+                                   "steps must be a pair list");
+      pl_val* step = gm_record(cell[0], "command-step", 5);
+      if (step == NULL)
+        return pl_hostcall_refusal(t, "gpu.command-graph",
+                                   GM_REFUSAL_GRAPH_SHAPE,
+                                   "expected command-step record");
+      if (walked >= GM_BLIT_MAX_STEPS)
+        return pl_hostcall_refusal(t, "gpu.command-graph",
+                                   GM_REFUSAL_GRAPH_SHAPE,
+                                   "blit graph exceeds 32 steps");
+      uint64_t kind = pl_nat_u64_clamp(pl_nat_coerce(step[0]));
+      kinds[walked] = kind;
+      uint64_t rk = 0;
+      if (kind == GM_STEP_COPY) {
+        pl_val* sp = gm_record(step[1], "heap-pointer", 5);
+        pl_val* dp = gm_record(step[2], "heap-pointer", 5);
+        if (sp == NULL || dp == NULL)
+          return pl_hostcall_refusal(t, "gpu.command-graph",
+                                     GM_REFUSAL_CARRIER_SHAPE,
+                                     "copy takes two heap-pointer records");
+        srcs[walked] = gm_pointer(s, sp, &srcoff[walked], &lens[walked], &rk);
+        if (srcs[walked] == nil)
+          return pl_hostcall_refusal(t, "gpu.command-graph", rk,
+                                     "copy source rejected");
+        size_t dlen = 0;
+        dsts[walked] = gm_pointer(s, dp, &dstoff[walked], &dlen, &rk);
+        if (dsts[walked] == nil)
+          return pl_hostcall_refusal(t, "gpu.command-graph", rk,
+                                     "copy destination rejected");
+        if (dlen != lens[walked])
+          return pl_hostcall_refusal(t, "gpu.command-graph", GM_REFUSAL_BOUNDS,
+                                     "copy window lengths differ");
+        bump[walked] = pl_nat_u64_clamp(pl_nat_coerce(dp[0]));
+      } else if (kind == GM_STEP_COPY_TO_TEXTURE ||
+                 kind == GM_STEP_COPY_FROM_TEXTURE) {
+        bool to_tex = kind == GM_STEP_COPY_TO_TEXTURE;
+        pl_val* pp = gm_record(step[to_tex ? 1 : 2], "heap-pointer", 5);
+        if (pp == NULL)
+          return pl_hostcall_refusal(t, "gpu.command-graph",
+                                     GM_REFUSAL_CARRIER_SHAPE,
+                                     "texture copy takes a heap-pointer");
+        texs[walked] =
+            gm_object_v(s, step[to_tex ? 2 : 1], GM_OBJ_TEXTURE);
+        if (texs[walked] == nil)
+          return pl_hostcall_refusal(t, "gpu.command-graph",
+                                     GM_REFUSAL_BAD_HANDLE, "unknown texture");
+        id<MTLBuffer> b;
+        if (to_tex) {
+          b = gm_pointer(s, pp, &srcoff[walked], &lens[walked], &rk);
+          srcs[walked] = b;
+        } else {
+          b = gm_pointer(s, pp, &dstoff[walked], &lens[walked], &rk);
+          dsts[walked] = b;
+          bump[walked] = pl_nat_u64_clamp(pl_nat_coerce(pp[0]));
+        }
+        if (b == nil)
+          return pl_hostcall_refusal(t, "gpu.command-graph", rk,
+                                     "texture copy window rejected");
+        ws[walked] = pl_nat_u64_clamp(pl_nat_coerce(step[3]));
+        hs[walked] = pl_nat_u64_clamp(pl_nat_coerce(step[4]));
+        if (ws[walked] == 0 || hs[walked] == 0 ||
+            lens[walked] != (size_t)(ws[walked] * hs[walked] * 4))
+          return pl_hostcall_refusal(t, "gpu.command-graph", GM_REFUSAL_BOUNDS,
+                                     "texture copy window is not w*h*4");
+      } else {
+        return pl_hostcall_refusal(t, "gpu.command-graph",
+                                   GM_REFUSAL_GRAPH_SHAPE,
+                                   "blit graph steps must be copies");
+      }
+      walked++;
+      cursor = cell[1];
+    }
+    if (walked != declared)
+      return pl_hostcall_refusal(t, "gpu.command-graph",
+                                 GM_REFUSAL_GRAPH_SHAPE,
+                                 "step count does not match graph row");
+
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)s->queue_ref;
+    id<MTLCommandBuffer> commands = [queue commandBuffer];
+    if (commands == nil)
+      return pl_hostcall_refusal(t, "gpu.command-graph", GM_REFUSAL_ENCODE,
+                                 "command buffer unavailable");
+    uint64_t wait_value = pl_nat_u64_clamp(pl_nat_coerce(graph[3]));
+    if (wait_value > 0) {
+      id<MTLSharedEvent> event = (__bridge id<MTLSharedEvent>)s->event_ref;
+      [commands encodeWaitForEvent:event value:wait_value];
+    }
+    id<MTLBlitCommandEncoder> blit = [commands blitCommandEncoder];
+    if (blit == nil)
+      return pl_hostcall_refusal(t, "gpu.command-graph", GM_REFUSAL_ENCODE,
+                                 "encoder unavailable");
+    for (uint64_t i = 0; i < walked; i++) {
+      if (kinds[i] == GM_STEP_COPY) {
+        [blit copyFromBuffer:srcs[i]
+                sourceOffset:(NSUInteger)srcoff[i]
+                    toBuffer:dsts[i]
+           destinationOffset:(NSUInteger)dstoff[i]
+                        size:(NSUInteger)lens[i]];
+      } else if (kinds[i] == GM_STEP_COPY_TO_TEXTURE) {
+        [blit copyFromBuffer:srcs[i]
+                   sourceOffset:(NSUInteger)srcoff[i]
+              sourceBytesPerRow:(NSUInteger)(ws[i] * 4)
+            sourceBytesPerImage:(NSUInteger)(ws[i] * hs[i] * 4)
+                     sourceSize:MTLSizeMake((NSUInteger)ws[i],
+                                            (NSUInteger)hs[i], 1)
+                      toTexture:texs[i]
+               destinationSlice:0
+               destinationLevel:0
+              destinationOrigin:MTLOriginMake(0, 0, 0)];
+      } else {
+        [blit copyFromTexture:texs[i]
+                        sourceSlice:0
+                        sourceLevel:0
+                       sourceOrigin:MTLOriginMake(0, 0, 0)
+                         sourceSize:MTLSizeMake((NSUInteger)ws[i],
+                                                (NSUInteger)hs[i], 1)
+                           toBuffer:dsts[i]
+                  destinationOffset:(NSUInteger)dstoff[i]
+             destinationBytesPerRow:(NSUInteger)(ws[i] * 4)
+           destinationBytesPerImage:(NSUInteger)(ws[i] * hs[i] * 4)];
+      }
+    }
+    [blit endEncoding];
+    id<MTLSharedEvent> event = (__bridge id<MTLSharedEvent>)s->event_ref;
+    s->event_value += 1;
+    [commands encodeSignalEvent:event value:s->event_value];
+    [commands commit];
+    size_t base = t->vsp;
+    pl_vpush(t, (pl_val)walked);
+    pl_vpush(t, 0); /* nothing lowered: copies are encoder-ordered */
+    pl_vpush(t, (pl_val)s->event_value);
+    for (uint64_t i = 0; i < walked; i++) {
+      if (bump[i] != 0) {
+        gm_alloc* a = &s->allocs[bump[i] - 1];
+        a->generation += 1; /* consume the destination, mint the successor */
+        pl_vpush(t, (pl_val)a->generation);
+      }
+    }
+    return pl_hostcall_witness(t, "gpu.command-graph", base);
+  }
+}
+
 static pl_val gm_command_graph(pl_thread* t, size_t ab) {
   ARG(0) = pl_nf(t, ARG(0));
   gm_session* s = gm_session_at(ARG(1));
@@ -1037,6 +1298,9 @@ static pl_val gm_command_graph(pl_thread* t, size_t ab) {
     return pl_hostcall_refusal(t, "gpu.command-graph",
                                GM_REFUSAL_CARRIER_SHAPE,
                                "expected command-graph record");
+  /* pipeline 0 selects the blit graph: copy steps only (Gap 11) */
+  if (gm_is_zero(ARG(2)))
+    return gm_blit_graph(t, ab, s, graph);
   ARG(4) = pl_nf(t, ARG(4));
   pl_val* root = gm_record(ARG(4), "heap-pointer", 5);
   if (root == NULL)
@@ -1379,6 +1643,8 @@ bool pl_host_gpu_metal_register(void) {
   ok = ok &&
        pl_hostcall_register("gpu.device-address", 2, 0b11, gm_device_address);
   ok = ok && pl_hostcall_register("gpu.read", 2, 0b11, gm_read);
+  ok = ok && pl_hostcall_register("gpu.wait", 2, 0b11, gm_wait);
+  ok = ok && pl_hostcall_register("gpu.write", 3, 0b111, gm_write);
   ok = ok && pl_hostcall_register("gpu.library", 2, 0b11, gm_library);
   ok = ok && pl_hostcall_register("gpu.pipeline-render", 2, 0b11,
                                   gm_pipeline_render);
