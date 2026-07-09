@@ -64,7 +64,11 @@ struct er_actor {
 
 /* ── Event log ─────────────────────────────────────────────────────────── */
 
-typedef enum { ER_EV_IO = 1, ER_EV_INJECT = 2 } er_ev_kind;
+typedef enum {
+  ER_EV_IO = 1,
+  ER_EV_INJECT = 2,
+  ER_EV_HOSTCALL = 3, /* op-83 result row, flattened (Gap 12) */
+} er_ev_kind;
 
 typedef struct er_event {
   uint8_t kind;
@@ -935,18 +939,161 @@ static const er_event* er_replay_next(er_scheduler* sys) {
   return &sys->play->ev[sys->cursor++];
 }
 
+/* ── op-83 host calls in the log (Slice 3 Gap 12) ──────────────────────── */
+
+static void er_buf_u64(uint8_t** buf, uint64_t v) {
+  for (int b = 0; b < 8; b++)
+    ax_arrpush(*buf, (uint8_t)(v >> (8 * b)));
+}
+
 /*
- * The pl_io_hook: every direct op-82 effect of every actor on
- * a recording or replaying system funnels through here.  Record mode
- * performs the effect and appends (actor, op, args-hash, result);
- * replay mode verifies the site against the next record and substitutes
- * the logged result without any syscall.
+ * Structural content hash of a forced host-call argument.  Op-83 args
+ * carry Foil carrier records (apps of laws over nats), so the op-82
+ * nat-only hash is not enough: nats hash by bytes, pins by their
+ * content hash, apps and laws by shape recursion.  Anything else (a
+ * thunk can't appear: the caller normalized) is a marker.
+ */
+static void er_hash_val(uint8_t** buf, pl_val v) {
+  if (pl_is_nat(v)) {
+    ax_arrpush(*buf, 'n');
+    uint64_t n = pl_nat_byte_len(v);
+    er_buf_u64(buf, n);
+    for (uint64_t j = 0; j < n; j++)
+      ax_arrpush(*buf, pl_nat_byte_at(v, j));
+    return;
+  }
+  if (pl_tag(v) == PL_TAG_PIN) {
+    ax_arrpush(*buf, 'p');
+    const uint8_t* h = pl_pin_hash(v);
+    for (int j = 0; j < 32; j++)
+      ax_arrpush(*buf, h[j]);
+    return;
+  }
+  pl_cell* p;
+  if ((p = pl_as(PL_TAG_APP, v)) != NULL) {
+    ax_arrpush(*buf, 'a');
+    uint32_t n = pl_app_n(p);
+    er_buf_u64(buf, n);
+    er_hash_val(buf, pl_app_head(p));
+    for (uint32_t j = 0; j < n; j++)
+      er_hash_val(buf, pl_app_args(p)[j]);
+    return;
+  }
+  if ((p = pl_as(PL_TAG_LAW, v)) != NULL) {
+    ax_arrpush(*buf, 'l');
+    er_buf_u64(buf, pl_law_arity(p));
+    er_hash_val(buf, pl_law_name(p));
+    er_hash_val(buf, pl_law_body(p));
+    return;
+  }
+  ax_arrpush(*buf, 'x');
+}
+
+static uint64_t er_data_u64(const uint8_t** d, const uint8_t* end) {
+  ax_assume(*d + 8 <= end, "er_log: corrupt host-call record");
+  uint64_t v = 0;
+  for (int b = 0; b < 8; b++)
+    v |= (uint64_t)(*d)[b] << (8 * b);
+  *d += 8;
+  return v;
+}
+
+/*
+ * The op-83 leg of the hook.  Host-call results are inert head-0 rows
+ * of nats — (0 "witness"|"refusal" binding payload…) — so a record is
+ * the flattened row: [name-len name] [n] then n length-prefixed nat
+ * elements; replay rebuilds the app verbatim, and no jet body runs
+ * (recorded GPU work replays on machines with no Metal device at
+ * all).  Binding names exceed the 7-byte mote, so the name rides in
+ * data and e.op stays 0.  Handles, generations and event values are
+ * deterministic given call order, so the log is complete.
+ */
+static bool er_hostcall_hook(pl_thread* t, er_scheduler* sys, er_actor* a,
+                             uint32_t op, size_t ab, pl_val* out) {
+  uint32_t argc = pl_io_argc(op);
+  for (uint32_t i = 0; i < argc; i++)
+    t->vstack[ab + i] = pl_nf(t, t->vstack[ab + i]);
+  uint8_t hash[32];
+  uint8_t* hb = NULL;
+  for (uint32_t i = 0; i < argc; i++)
+    er_hash_val(&hb, t->vstack[ab + i]);
+  ax_sha256(hb, (size_t)ax_arrlen(hb), hash);
+  ax_arrfree(hb);
+  const char* name = pl_io_name(op);
+  size_t name_n = strlen(name);
+
+  if (sys->mode == ER_MODE_RECORD) {
+    pl_val r = pl_io_run(t, op, ab);
+    pl_cell* row = pl_as(PL_TAG_APP, r);
+    ax_assume(row != NULL && pl_app_head(row) == 0,
+              "er_log: host-call results are head-0 rows");
+    uint32_t n = pl_app_n(row);
+    uint8_t* buf = NULL;
+    er_buf_u64(&buf, (uint64_t)name_n);
+    for (size_t j = 0; j < name_n; j++)
+      ax_arrpush(buf, (uint8_t)name[j]);
+    er_buf_u64(&buf, n);
+    for (uint32_t j = 0; j < n; j++) {
+      pl_val el = pl_app_args(row)[j];
+      ax_assume(pl_is_nat(el), "er_log: host-call row elements are nats");
+      uint64_t len = pl_nat_byte_len(el);
+      er_buf_u64(&buf, len);
+      for (uint64_t k = 0; k < len; k++)
+        ax_arrpush(buf, pl_nat_byte_at(el, k));
+    }
+    er_event e = {.kind = ER_EV_HOSTCALL, .actor = a->id, .op = 0};
+    memcpy(e.args_hash, hash, 32);
+    e.data_n = (uint64_t)ax_arrlen(buf);
+    e.data = malloc(e.data_n ? (size_t)e.data_n : 1);
+    ax_assume(e.data != NULL, "oom");
+    memcpy(e.data, buf, (size_t)e.data_n);
+    ax_arrfree(buf);
+    ax_arrpush(sys->rec->ev, e);
+    *out = r;
+    return true;
+  }
+
+  const er_event* e = er_replay_next(sys);
+  ax_assume(e->kind == ER_EV_HOSTCALL && e->actor == a->id &&
+                memcmp(e->args_hash, hash, 32) == 0,
+            "er_log: replay divergence at a host call");
+  const uint8_t* d = e->data;
+  const uint8_t* end = e->data + e->data_n;
+  uint64_t ln = er_data_u64(&d, end);
+  ax_assume(ln == name_n && d + ln <= end && memcmp(d, name, name_n) == 0,
+            "er_log: replay divergence at a host-call binding");
+  d += ln;
+  uint64_t n = er_data_u64(&d, end);
+  size_t base = t->vsp;
+  for (uint64_t j = 0; j < n; j++) {
+    uint64_t len = er_data_u64(&d, end);
+    ax_assume(d + len <= end, "er_log: corrupt host-call record");
+    pl_vpush(t, len == 0 ? 0 : pl_nat_from_bytes(t, d, (size_t)len));
+    d += len;
+  }
+  pl_gc_reserve(t, PL_APP_CELLS((uint32_t)n));
+  PL_GC_FORBID(t);
+  pl_val row = pl_mk_app_from(t, 0, (uint32_t)n, &t->vstack[base]);
+  PL_GC_ALLOW(t);
+  t->vsp = base;
+  *out = row;
+  return true;
+}
+
+/*
+ * The pl_io_hook: every direct op-82 effect and op-83 host call of
+ * every actor on a recording or replaying system funnels through here.
+ * Record mode performs the effect and appends (actor, op, args-hash,
+ * result); replay mode verifies the site against the next record and
+ * substitutes the logged result without any syscall.
  */
 static bool er_io_hook(pl_thread* t, uint32_t op, size_t ab, pl_val* out) {
   er_actor* a = t->host;
   if (a == NULL || a->sys->mode == ER_MODE_LIVE)
     return false;
   er_scheduler* sys = a->sys;
+  if (pl_io_opset(op) == 83)
+    return er_hostcall_hook(t, sys, a, op, ab, out);
   uint8_t hash[32];
   er_args_hash(t, op, ab, hash);
   uint64_t name = er_mote(pl_io_name(op));

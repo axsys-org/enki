@@ -97,9 +97,11 @@ void pl_set_io_hook(pl_io_hook hook);
 
 /* Run the real handler of direct op `op` (hooks only). */
 pl_val pl_io_run(pl_thread* t, uint32_t op, size_t argbase);
-/* Stable identity for the log: the op's name and arg count. */
+/* Stable identity for the log: the op's name, arg count and opset
+ * (82 = direct rplan effects, 83 = host-call bindings). */
 const char* pl_io_name(uint32_t op);
 uint32_t pl_io_argc(uint32_t op);
+uint64_t pl_io_opset(uint32_t op);
 
 /* ── Errors ────────────────────────────────────────────────────────────── */
 

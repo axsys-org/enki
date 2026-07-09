@@ -1,9 +1,11 @@
 #include <criterion/criterion.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "test_plan.h"
 
+#include "enki/actor.h"
 #include "plan/bytecode.h"
 #include "plan/hostcall.h"
 
@@ -213,6 +215,38 @@ Test(hostcall, bytecode_bakes_hostcall_index) {
   cr_assert_eq(code->ops[4], 0u);
   cr_assert_eq(code->ops[0], (pl_op_t)OP_TAILCALL);
   test_rt_free(&rt);
+}
+
+/*
+ * Gap 12: a divergent replay aborts.  The recording holds one test.nop
+ * call; the replay calls a different binding at the same site — the
+ * (actor, binding, args-hash) verification trips ax_assume, never a
+ * silent wrong answer.  Needs no Metal device: rows are rows.
+ */
+Test(hostcall, hostcall_replay_divergence_aborts, .signal = SIGABRT) {
+  cr_assert(pl_hostcall_register("test.nop", 1, 0b1, nop_body));
+  cr_assert(pl_hostcall_register("test.nop2", 1, 0b1, nop_body));
+  test_rt rt = test_rt_new();
+  rt.t->hostcall_f = true;
+  er_log* log = er_log_new();
+  er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
+  (void)er_scheduler_adopt(sys, rt.t);
+  er_scheduler_record(sys, log);
+  size_t args = rt.t->vsp;
+  pl_vpush(rt.t, 0);
+  cr_assert_not_null(
+      result_row(hostcall(rt.t, "test.nop", args), "witness", "test.nop"));
+  cr_assert_eq(er_log_events(log), 1u);
+
+  test_rt rt2 = test_rt_new();
+  rt2.t->hostcall_f = true;
+  er_scheduler* sys2 = er_scheduler_new(rt2.store, (er_config){0});
+  (void)er_scheduler_adopt(sys2, rt2.t);
+  er_scheduler_replay(sys2, log);
+  args = rt2.t->vsp;
+  pl_vpush(rt2.t, 0);
+  (void)hostcall(rt2.t, "test.nop2", args); /* binding divergence: abort */
+  cr_assert_fail("divergent replay did not abort");
 }
 
 /* ── The gfx vertical slice ────────────────────────────────────────────── */
@@ -1849,6 +1883,111 @@ Test(hostcall, gfx_write_copy_wait_data_path) {
   cr_assert_not_null(result_row(hostcall(t, "gpu.session-close", args),
                                 "witness", "gpu.session-close"));
   pl_catch_pop(t, &c);
+  test_rt_free(&rt);
+}
+
+/*
+ * Gap 12: op-83 record/replay through the er_io_hook seam.  Recording
+ * runs the jets live and logs each result row; replay substitutes the
+ * logged rows without touching Metal.  The substitution proof: the
+ * recorded session is CLOSED live at the end of the recording, so a
+ * live re-run of gpu.read would refuse 941 (unknown session) — the
+ * replay instead returns the recorded bytes, on a fresh runtime where
+ * none of these handles exist natively.
+ */
+Test(hostcall, gfx_hostcall_record_replay_substitutes) {
+  cr_assert(pl_host_gpu_metal_register());
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  t->hostcall_f = true;
+
+  pl_catch c;
+  pl_catch_init(t, &c);
+  if (setjmp(c.jb) != 0) {
+    pl_catch_unwind(t, &c);
+    cr_assert_fail("raise during record/replay slice: %s",
+                   t->exn_msg != NULL ? t->exn_msg : "PLAN exception");
+  }
+
+  er_log* log = er_log_new();
+  er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
+  (void)er_scheduler_adopt(sys, t);
+  er_scheduler_record(sys, log);
+
+  size_t args = t->vsp;
+  pl_vpush(t, 0);
+  pl_val r = hostcall(t, "gpu.session-open", args);
+  if (refusal_kind(r, "gpu.session-open") == 943) {
+    cr_log_warn("no metal device; record/replay slice skipped");
+    pl_set_io_hook(NULL);
+    er_scheduler_free(sys);
+    er_log_free(log);
+    test_rt_free(&rt);
+    return;
+  }
+  uint64_t session = witness_payload_u64(t, r, "gpu.session-open", 0);
+  args = t->vsp;
+  pl_vpush(t, session);
+  {
+    size_t f = t->vsp;
+    pl_vpush(t, 1);
+    pl_vpush(t, 65536);
+    pl_vpush(t, 0);
+    pl_vpush(t, record(t, "memory-arena", f));
+  }
+  (void)witness_payload_u64(t, hostcall(t, "gpu.arena", args), "gpu.arena", 0);
+  uint64_t gen = 0;
+  uint64_t idx = alloc_bytes(t, session, "REPLAYME", 8, &gen);
+  uint8_t got[8];
+  read_bytes(t, session, idx, 8, gen, got);
+  cr_assert_eq(memcmp(got, "REPLAYME", 8), 0);
+  args = t->vsp;
+  pl_vpush(t, session);
+  cr_assert_not_null(result_row(hostcall(t, "gpu.session-close", args),
+                                "witness", "gpu.session-close"));
+  cr_assert_eq(er_log_events(log), 5u);
+
+  /* replay the first four calls on a fresh runtime */
+  test_rt rt2 = test_rt_new();
+  pl_thread* t2 = rt2.t;
+  t2->hostcall_f = true;
+  er_scheduler* sys2 = er_scheduler_new(rt2.store, (er_config){0});
+  (void)er_scheduler_adopt(sys2, t2);
+  er_scheduler_replay(sys2, log);
+
+  args = t2->vsp;
+  pl_vpush(t2, 0);
+  cr_assert_eq(witness_payload_u64(t2, hostcall(t2, "gpu.session-open", args),
+                                   "gpu.session-open", 0),
+               session);
+  args = t2->vsp;
+  pl_vpush(t2, session);
+  {
+    size_t f = t2->vsp;
+    pl_vpush(t2, 1);
+    pl_vpush(t2, 65536);
+    pl_vpush(t2, 0);
+    pl_vpush(t2, record(t2, "memory-arena", f));
+  }
+  (void)witness_payload_u64(t2, hostcall(t2, "gpu.arena", args), "gpu.arena",
+                            0);
+  uint64_t gen2 = 0;
+  uint64_t idx2 = alloc_bytes(t2, session, "REPLAYME", 8, &gen2);
+  cr_assert_eq(idx2, idx);
+  cr_assert_eq(gen2, gen);
+  /* the session is closed and this runtime never opened one: a live
+   * read would refuse — the recorded bytes come back instead */
+  uint8_t got2[8];
+  read_bytes(t2, session, idx, 8, gen, got2);
+  cr_assert_eq(memcmp(got2, "REPLAYME", 8), 0);
+  cr_assert_eq(er_scheduler_log_cursor(sys2), 4u);
+
+  pl_set_io_hook(NULL);
+  er_scheduler_free(sys2);
+  er_scheduler_free(sys);
+  er_log_free(log);
+  pl_catch_pop(t, &c);
+  test_rt_free(&rt2);
   test_rt_free(&rt);
 }
 

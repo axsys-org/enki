@@ -100,6 +100,10 @@ uint32_t pl_io_argc(uint32_t op) {
   return pl_op_desc(op)->argc;
 }
 
+uint64_t pl_io_opset(uint32_t op) {
+  return pl_op_desc(op)->opset;
+}
+
 /* ── KAL: non-forcing law-body operand interpretation ──────────────────── */
 
 /*
@@ -1200,8 +1204,9 @@ op_body:
     t->fsp--;          /* pop before the body so its frames take this slot */
     t->centry_depth++; /* op bodies are C-entry regions */
     pl_val r;
-    /* direct op-82 effects route through the record/replay seam */
-    if (!(d->opset == 82 && !d->coord && pl_io != NULL &&
+    /* direct op-82 effects and op-83 host calls route through the
+     * record/replay seam */
+    if (!((d->opset == 82 || d->opset == 83) && !d->coord && pl_io != NULL &&
           pl_io(t, opi, argbase, &r)))
       r = d->body(t, argbase);
     t->centry_depth--;

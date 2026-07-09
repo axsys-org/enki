@@ -526,6 +526,21 @@ back the new bytes; (2) a graph copy lands byte-identical data (buffer and textu
 ### Gap 12 — op-83 record/replay
 
 > *Size: MEDIUM | Phase: A (parallel with Gap 11)*
+> **Status: ✅ DONE (2026-07-09, on op83-port)** — the op_body seam widened to
+> `(opset 82 | 83) && !coord`; `pl_io_opset` joins the public log-identity surface;
+> `er_hostcall_hook` (actor.c) records each host call as `ER_EV_HOSTCALL` — args
+> content-hashed structurally (nats by bytes, pins by content hash, apps/laws by shape
+> recursion, post-`pl_nf`), result stored as the flattened head-0 row (binding name +
+> n length-prefixed nat elements, since bindings exceed the 7-byte mote) — and replays
+> by rebuilding the row verbatim, **no jet body runs**.  Fixtures:
+> `gfx_hostcall_record_replay_substitutes` (records open→arena→alloc→read→close, then
+> replays the first four on a fresh runtime — the session was closed live, so a live
+> read would refuse 941; the recorded bytes come back instead; cursor == 4) and
+> `hostcall_replay_divergence_aborts` (`.signal = SIGABRT`: a divergent binding at the
+> same site trips the (actor, binding, args-hash) verification — deviceless).  16/16
+> fixtures; full suite + layering + format green.  Baseline audit same day: every
+> main-diff hunk intentional, PL_NO_BYTECODE differential 13/13, GC_STRESS 13/13 +
+> 28/28.
 
 Extend the direct-effect interception seam to opset-83: recording captures each
 hostcall's result row (witness or refusal, including readback/read payload bytes);
