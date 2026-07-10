@@ -610,6 +610,16 @@ clear-step graphs refuse 952; (5) suite green.
 ### Gap 14 — value specialization constants
 
 > *Size: SMALL | Phase: C*
+> **Status: ✅ DONE (2026-07-09, on op83-port)** — `pipeline-request` 4-field variant
+> carries a pair-list of `fn-constant (kind {1 u32, 2 f32-bits}, value)` records with
+> sequential `[[function_constant(N)]]` ids (the no_api-validated shape: sequential-id
+> typed values, portable 1:1 to Vulkan spec constants); constants hash into the
+> pipeline cache key; both jets specialize (the Vulkan reference silently drops compute
+> constants — we do not); address-bearing constants are structurally impossible
+> (values cap at u32; kind 3+ refuses 951; <= 32 constants).  Fixture
+> `gfx_spec_constants_specialize_pipeline`: two constant sets = two cold pipelines with
+> divergent kernel output (2+tid vs 200+tid), re-created set hits the cache, malformed
+> kind refuses.  19/19 fixtures green.
 
 `constants` carrier (bytes-bar + declared layout ref) on `pipeline-request` field 4,
 lowered to `MTLFunctionConstantValues`; cache key gains sha(constants-bytes). Dead-code

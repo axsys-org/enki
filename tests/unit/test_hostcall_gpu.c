@@ -2294,6 +2294,236 @@ Test(hostcall, gfx_indexed_draw_through_complement) {
   test_rt_free(&rt);
 }
 
+/* One kernel, two function constants: [[function_constant(0)]] selects
+ * the branch, [[function_constant(1)]] scales.  The root is the usual
+ * device-address-chased {out_addr, count} struct. */
+static const char gfx_spec_msl[] =
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "constant uint mode [[function_constant(0)]];\n"
+    "constant float scale [[function_constant(1)]];\n"
+    "struct Root { ulong out_addr; uint count; };\n"
+    "kernel void shrine_specialize(uint tid [[thread_position_in_grid]],\n"
+    "                              const device Root* d [[buffer(0)]]) {\n"
+    "  if (tid >= d->count) return;\n"
+    "  device float* out = (device float*)(d->out_addr);\n"
+    "  out[tid] = (mode == 2 ? 100.0f : 1.0f) * scale + float(tid);\n"
+    "}\n";
+
+/* Gap 14 pipeline-request: artifact + root-layout(stride, buffer mode)
+ * + no raster-state + a two-entry fn-constant pair-list (built back to
+ * front; ids are sequential by list position, so the front entry is
+ * [[function_constant(0)]] and the second [[function_constant(1)]]). */
+static pl_val pipeline_request_constants(pl_thread* t, pl_val msl_bar,
+                                         uint64_t stride, uint64_t mode_kind,
+                                         uint64_t mode_value,
+                                         uint64_t scale_kind,
+                                         uint64_t scale_bits) {
+  size_t base = t->vsp;
+  pl_vpush(t, msl_bar); /* root the bar */
+  pl_vpush(t, 0);       /* constants list at base+1 */
+  {
+    size_t f = t->vsp;
+    pl_vpush(t, scale_kind);
+    pl_vpush(t, scale_bits);
+    pl_val c = record(t, "fn-constant", f);
+    pl_vpush(t, c);
+    pl_vpush(t, t->vstack[base + 1]);
+    t->vstack[base + 1] = record(t, "pair", f);
+  }
+  {
+    size_t f = t->vsp;
+    pl_vpush(t, mode_kind);
+    pl_vpush(t, mode_value);
+    pl_val c = record(t, "fn-constant", f);
+    pl_vpush(t, c);
+    pl_vpush(t, t->vstack[base + 1]);
+    t->vstack[base + 1] = record(t, "pair", f);
+  }
+  size_t f = t->vsp;
+  pl_vpush(t, t->vstack[base]);
+  pl_vpush(t, 1); /* language: msl */
+  pl_val art = record(t, "artifact", f);
+  pl_vpush(t, art); /* base+2 */
+  f = t->vsp;
+  pl_vpush(t, stride);
+  pl_vpush(t, 1); /* count */
+  pl_vpush(t, 0); /* segments */
+  pl_vpush(t, 1); /* mode: buffer */
+  pl_val layout = record(t, "root-layout", f);
+  pl_vpush(t, layout); /* base+3 */
+  f = t->vsp;
+  pl_vpush(t, t->vstack[base + 2]);
+  pl_vpush(t, t->vstack[base + 3]);
+  pl_vpush(t, 0); /* raster-state */
+  pl_vpush(t, t->vstack[base + 1]);
+  pl_val req = record(t, "pipeline-request", f);
+  t->vsp = base;
+  return req;
+}
+
+/*
+ * Gap 14: value specialization.  Function constants ride the
+ * pipeline-request as a fn-constant pair-list; they join the pipeline
+ * cache key, so one artifact under two constant sets is two pipelines
+ * (each cold), the same set again is a cache hit, and the specialized
+ * values demonstrably reach the kernel.  A malformed constant kind
+ * refuses as carrier shape before any Metal object exists.
+ */
+Test(hostcall, gfx_spec_constants_specialize_pipeline) {
+  cr_assert(pl_host_gpu_metal_register());
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  t->hostcall_f = true;
+
+  pl_catch c;
+  pl_catch_init(t, &c);
+  if (setjmp(c.jb) != 0) {
+    pl_catch_unwind(t, &c);
+    cr_assert_fail("raise during specialization slice: %s",
+                   t->exn_msg != NULL ? t->exn_msg : "PLAN exception");
+  }
+
+  size_t args = t->vsp;
+  pl_vpush(t, 0);
+  pl_val r = hostcall(t, "gpu.session-open", args);
+  if (refusal_kind(r, "gpu.session-open") == 943) {
+    cr_log_warn("no metal device; specialization slice skipped");
+    test_rt_free(&rt);
+    return;
+  }
+  uint64_t session = witness_payload_u64(t, r, "gpu.session-open", 0);
+
+  args = t->vsp;
+  pl_vpush(t, session);
+  {
+    size_t f = t->vsp;
+    pl_vpush(t, 1);
+    pl_vpush(t, 65536);
+    pl_vpush(t, 0);
+    pl_vpush(t, record(t, "memory-arena", f));
+  }
+  (void)witness_payload_u64(t, hostcall(t, "gpu.arena", args), "gpu.arena", 0);
+
+  pl_val msl =
+      bar_nat(t, (const uint8_t*)gfx_spec_msl, sizeof(gfx_spec_msl) - 1);
+  size_t keep = t->vsp;
+  pl_vpush(t, msl); /* root across calls */
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, t->vstack[keep]);
+  (void)witness_payload_u64(t, hostcall(t, "gpu.library", args), "gpu.library",
+                            0);
+
+  /* set A (mode 1, scale 2.0f): cold pipeline through the 4-field
+   * request */
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, pipeline_request_constants(t, t->vstack[keep], 16, 1, 1, 2,
+                                         0x40000000u));
+  pl_val aw = hostcall(t, "gpu.pipeline-compute", args);
+  uint64_t pipe_a = witness_payload_u64(t, aw, "gpu.pipeline-compute", 0);
+  cr_assert_eq(witness_payload_u64(t, aw, "gpu.pipeline-compute", 1), 0u);
+
+  /* out rows + the {out_addr, count} root the kernel chases */
+  enum { LANES = 4 };
+  uint8_t zeros[LANES * 4] = {0};
+  uint64_t out_gen = 0;
+  uint64_t out_idx = alloc_bytes(t, session, zeros, sizeof(zeros), &out_gen);
+  uint64_t out_addr = dev_addr(t, session, out_idx, sizeof(zeros), out_gen);
+  cr_assert_neq(out_addr, 0u);
+  uint8_t root[16] = {0};
+  memcpy(root + 0, &out_addr, 8);
+  uint32_t count = LANES;
+  memcpy(root + 8, &count, 4);
+  uint64_t root_gen = 0;
+  uint64_t root_idx = alloc_bytes(t, session, root, sizeof(root), &root_gen);
+
+  args = t->vsp;
+  pl_vpush(t, graph_compute_record(t, 1, 1, 1, LANES, 1, 0, 0));
+  pl_vpush(t, session);
+  pl_vpush(t, pipe_a);
+  pl_vpush(t, 0); /* compute graph takes no target */
+  pl_vpush(t, pointer_record(t, root_idx, 0, sizeof(root), root_gen));
+  pl_vpush(t, 0);
+  cr_assert_eq(witness_payload_u64(t, hostcall(t, "gpu.command-graph", args),
+                                   "gpu.command-graph", 0),
+               1u);
+
+  float got[LANES];
+  read_bytes(t, session, out_idx, sizeof(zeros), out_gen, got);
+  for (int i = 0; i < LANES; i++) {
+    float diff = got[i] - (2.0f + (float)i);
+    if (diff < 0.0f)
+      diff = -diff;
+    cr_assert(diff < 1e-6f, "set A lane %d: got %f", i, (double)got[i]);
+  }
+
+  /* set B (mode 2, same scale): a DIFFERENT key — cold again, and the
+   * specialized branch lands 200 + tid in fresh rows */
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, pipeline_request_constants(t, t->vstack[keep], 16, 1, 2, 2,
+                                         0x40000000u));
+  pl_val bw = hostcall(t, "gpu.pipeline-compute", args);
+  uint64_t pipe_b = witness_payload_u64(t, bw, "gpu.pipeline-compute", 0);
+  cr_assert_eq(witness_payload_u64(t, bw, "gpu.pipeline-compute", 1), 0u);
+  cr_assert_neq(pipe_b, pipe_a);
+
+  uint64_t out2_gen = 0;
+  uint64_t out2_idx = alloc_bytes(t, session, zeros, sizeof(zeros), &out2_gen);
+  uint64_t out2_addr = dev_addr(t, session, out2_idx, sizeof(zeros), out2_gen);
+  uint8_t root2[16] = {0};
+  memcpy(root2 + 0, &out2_addr, 8);
+  memcpy(root2 + 8, &count, 4);
+  uint64_t root2_gen = 0;
+  uint64_t root2_idx =
+      alloc_bytes(t, session, root2, sizeof(root2), &root2_gen);
+
+  args = t->vsp;
+  pl_vpush(t, graph_compute_record(t, 1, 1, 1, LANES, 1, 0, 0));
+  pl_vpush(t, session);
+  pl_vpush(t, pipe_b);
+  pl_vpush(t, 0);
+  pl_vpush(t, pointer_record(t, root2_idx, 0, sizeof(root2), root2_gen));
+  pl_vpush(t, 0);
+  cr_assert_eq(witness_payload_u64(t, hostcall(t, "gpu.command-graph", args),
+                                   "gpu.command-graph", 0),
+               1u);
+
+  read_bytes(t, session, out2_idx, sizeof(zeros), out2_gen, got);
+  for (int i = 0; i < LANES; i++) {
+    float diff = got[i] - (200.0f + (float)i);
+    if (diff < 0.0f)
+      diff = -diff;
+    cr_assert(diff < 1e-6f, "set B lane %d: got %f", i, (double)got[i]);
+  }
+
+  /* set A again: the cache key matches — a hit */
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, pipeline_request_constants(t, t->vstack[keep], 16, 1, 1, 2,
+                                         0x40000000u));
+  pl_val aw2 = hostcall(t, "gpu.pipeline-compute", args);
+  cr_assert_eq(witness_payload_u64(t, aw2, "gpu.pipeline-compute", 1), 1u);
+
+  /* a malformed fn-constant kind refuses as carrier shape */
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, pipeline_request_constants(t, t->vstack[keep], 16, 3, 1, 2,
+                                         0x40000000u));
+  cr_assert_eq(refusal_kind(hostcall(t, "gpu.pipeline-compute", args),
+                            "gpu.pipeline-compute"),
+               951u);
+
+  args = t->vsp;
+  pl_vpush(t, session);
+  cr_assert_not_null(result_row(hostcall(t, "gpu.session-close", args),
+                                "witness", "gpu.session-close"));
+  pl_catch_pop(t, &c);
+  test_rt_free(&rt);
+}
+
 /*
  * Gap 12: op-83 record/replay through the er_io_hook seam.  Recording
  * runs the jets live and logs each result row; replay substitutes the

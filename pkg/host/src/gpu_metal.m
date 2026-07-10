@@ -233,13 +233,22 @@ static uint8_t* gm_bar_bytes(pl_val v, size_t* out_n);
  * declared root layout; NULL = carrier shape refusal. */
 static uint8_t* gm_pipeline_source(pl_thread* t, size_t ab, size_t* out_n,
                                    uint64_t* out_stride, uint64_t* out_mode,
-                                   uint64_t* out_dformat) {
+                                   uint64_t* out_dformat, pl_val* out_consts) {
   ARG(1) = pl_nf(t, ARG(1));
   pl_val src = ARG(1);
   *out_stride = 0;
   *out_mode = GM_ROOT_BUFFER;
   *out_dformat = 0;
-  pl_val* req = gm_record(src, "pipeline-request", 3);
+  *out_consts = 0;
+  /* field 4 (Gap 14): value specialization constants — a pair-list of
+   * fn-constant (kind {1 u32, 2 f32-bits}, value) records, sequential
+   * ids by list position; dead code the constants kill never becomes
+   * a shader-source permutation */
+  pl_val* req = gm_record(src, "pipeline-request", 4);
+  if (req != NULL && !gm_is_zero(req[3]))
+    *out_consts = req[3];
+  if (req == NULL)
+    req = gm_record(src, "pipeline-request", 3);
   pl_val* rast = NULL;
   if (req != NULL) {
     /* field 3 (Gap 13): raster-state (depth-format, reserved) — the
@@ -277,13 +286,63 @@ static uint8_t* gm_pipeline_source(pl_thread* t, size_t ab, size_t* out_n,
  * witnessed separately from the library. */
 static void gm_pipeline_key(const uint8_t lib_key[32], uint64_t stride,
                             uint64_t mode, uint64_t dformat,
-                            uint8_t out_key[32]) {
-  uint8_t seed[56];
+                            const uint8_t chash[32], uint8_t out_key[32]) {
+  uint8_t seed[88];
   memcpy(seed, lib_key, 32);
   memcpy(seed + 32, &stride, 8);
   memcpy(seed + 40, &mode, 8);
   memcpy(seed + 48, &dformat, 8);
+  memcpy(seed + 56, chash, 32);
   ax_sha256(seed, sizeof(seed), out_key);
+}
+
+/* Walk the fn-constant list: hash (kind, value) pairs into chash for
+ * the pipeline key, and (when building) fill MTLFunctionConstantValues
+ * with sequential ids.  Returns false on a malformed list or an
+ * out-of-range value. */
+static bool gm_constants_walk(pl_val list, uint8_t chash[32],
+                              MTLFunctionConstantValues* fill) {
+  uint8_t buf[32 * 9]; /* <= 32 constants (documented cap) */
+  size_t buf_n = 0;
+  pl_val cursor = list;
+  NSUInteger id_next = 0;
+  bool ok = true;
+  while (ok && !gm_is_zero(cursor)) {
+    if (id_next >= 32) {
+      ok = false;
+      break;
+    }
+    pl_val* cell = gm_record(cursor, "pair", 2);
+    pl_val* c = cell != NULL ? gm_record(cell[0], "fn-constant", 2) : NULL;
+    if (c == NULL) {
+      ok = false;
+      break;
+    }
+    uint64_t kind = pl_nat_u64_clamp(pl_nat_coerce(c[0]));
+    uint64_t value = pl_nat_u64_clamp(pl_nat_coerce(c[1]));
+    if ((kind != 1 && kind != 2) || value > UINT32_MAX) {
+      ok = false;
+      break;
+    }
+    buf[buf_n++] = (uint8_t)kind;
+    for (int b = 0; b < 8; b++)
+      buf[buf_n++] = (uint8_t)(value >> (8 * b));
+    if (fill != nil) {
+      uint32_t v32 = (uint32_t)value;
+      if (kind == 1) {
+        [fill setConstantValue:&v32 type:MTLDataTypeUInt atIndex:id_next];
+      } else {
+        float f;
+        memcpy(&f, &v32, 4);
+        [fill setConstantValue:&f type:MTLDataTypeFloat atIndex:id_next];
+      }
+    }
+    id_next++;
+    cursor = cell[1];
+  }
+  if (ok)
+    ax_sha256(buf, buf_n, chash);
+  return ok;
 }
 
 static gm_dheap* gm_dheap_at(gm_session* s, pl_val v) {
@@ -754,10 +813,16 @@ static pl_val gm_library(pl_thread* t, size_t ab) {
  * unique vertex and unique fragment function, selected by type, never
  * by name (names are labels, not authority). */
 static id<MTLFunction> gm_unique_function(id<MTLLibrary> library,
-                                          MTLFunctionType type) {
+                                          MTLFunctionType type,
+                                          MTLFunctionConstantValues* constants) {
   id<MTLFunction> found = nil;
   for (NSString* name in [library functionNames]) {
-    id<MTLFunction> fn = [library newFunctionWithName:name];
+    id<MTLFunction> fn =
+        constants != nil
+            ? [library newFunctionWithName:name
+                       constantValues:constants
+                                error:nil]
+            : [library newFunctionWithName:name];
     if (fn == nil || fn.functionType != type)
       continue;
     if (found != nil)
@@ -774,7 +839,9 @@ static pl_val gm_pipeline_render(pl_thread* t, size_t ab) {
                                GM_REFUSAL_BAD_SESSION, "unknown session");
   size_t n = 0;
   uint64_t stride = 0, mode = 0, dformat = 0;
-  uint8_t* bytes = gm_pipeline_source(t, ab, &n, &stride, &mode, &dformat);
+  pl_val consts = 0;
+  uint8_t* bytes =
+      gm_pipeline_source(t, ab, &n, &stride, &mode, &dformat, &consts);
   if (bytes == NULL)
     return pl_hostcall_refusal(t, "gpu.pipeline-render",
                                GM_REFUSAL_CARRIER_SHAPE,
@@ -784,9 +851,14 @@ static pl_val gm_pipeline_render(pl_thread* t, size_t ab) {
     return pl_hostcall_refusal(t, "gpu.pipeline-render", GM_REFUSAL_BOUNDS,
                                "empty source artifact");
   }
-  uint8_t lib_key[32], key[32];
+  uint8_t lib_key[32], key[32], chash[32] = {0};
   ax_sha256(bytes, n, lib_key);
-  gm_pipeline_key(lib_key, stride, mode, dformat, key);
+  if (consts != 0 && !gm_constants_walk(consts, chash, nil)) {
+    free(bytes);
+    return pl_hostcall_refusal(t, "gpu.pipeline-render", GM_REFUSAL_CARRIER_SHAPE,
+                               "malformed fn-constant list");
+  }
+  gm_pipeline_key(lib_key, stride, mode, dformat, chash, key);
   free(bytes);
   @autoreleasepool {
     uint32_t hits = 0;
@@ -803,12 +875,17 @@ static pl_val gm_pipeline_render(pl_thread* t, size_t ab) {
                                    GM_REFUSAL_BAD_HANDLE,
                                    "artifact has no compiled library");
       id<MTLLibrary> library = (__bridge id<MTLLibrary>)lib_hit->object_ref;
+      MTLFunctionConstantValues* constants = nil;
+      if (consts != 0) {
+        constants = [MTLFunctionConstantValues new];
+        (void)gm_constants_walk(consts, chash, constants);
+      }
       MTLRenderPipelineDescriptor* descriptor =
           [[MTLRenderPipelineDescriptor alloc] init];
       descriptor.vertexFunction =
-          gm_unique_function(library, MTLFunctionTypeVertex);
+          gm_unique_function(library, MTLFunctionTypeVertex, constants);
       descriptor.fragmentFunction =
-          gm_unique_function(library, MTLFunctionTypeFragment);
+          gm_unique_function(library, MTLFunctionTypeFragment, constants);
       descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
       if (dformat == GM_FORMAT_D32)
         descriptor.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
@@ -851,7 +928,9 @@ static pl_val gm_pipeline_compute(pl_thread* t, size_t ab) {
                                GM_REFUSAL_BAD_SESSION, "unknown session");
   size_t n = 0;
   uint64_t stride = 0, mode = 0, dformat = 0;
-  uint8_t* bytes = gm_pipeline_source(t, ab, &n, &stride, &mode, &dformat);
+  pl_val consts = 0;
+  uint8_t* bytes =
+      gm_pipeline_source(t, ab, &n, &stride, &mode, &dformat, &consts);
   if (bytes == NULL)
     return pl_hostcall_refusal(t, "gpu.pipeline-compute",
                                GM_REFUSAL_CARRIER_SHAPE,
@@ -861,9 +940,14 @@ static pl_val gm_pipeline_compute(pl_thread* t, size_t ab) {
     return pl_hostcall_refusal(t, "gpu.pipeline-compute", GM_REFUSAL_BOUNDS,
                                "empty source artifact");
   }
-  uint8_t lib_key[32], key[32];
+  uint8_t lib_key[32], key[32], chash[32] = {0};
   ax_sha256(bytes, n, lib_key);
-  gm_pipeline_key(lib_key, stride, mode, dformat, key);
+  if (consts != 0 && !gm_constants_walk(consts, chash, nil)) {
+    free(bytes);
+    return pl_hostcall_refusal(t, "gpu.pipeline-compute", GM_REFUSAL_CARRIER_SHAPE,
+                               "malformed fn-constant list");
+  }
+  gm_pipeline_key(lib_key, stride, mode, dformat, chash, key);
   free(bytes);
   @autoreleasepool {
     uint32_t hits = 0;
@@ -880,8 +964,13 @@ static pl_val gm_pipeline_compute(pl_thread* t, size_t ab) {
                                    GM_REFUSAL_BAD_HANDLE,
                                    "artifact has no compiled library");
       id<MTLLibrary> library = (__bridge id<MTLLibrary>)lib_hit->object_ref;
+      MTLFunctionConstantValues* constants = nil;
+      if (consts != 0) {
+        constants = [MTLFunctionConstantValues new];
+        (void)gm_constants_walk(consts, chash, constants);
+      }
       id<MTLFunction> kernel =
-          gm_unique_function(library, MTLFunctionTypeKernel);
+          gm_unique_function(library, MTLFunctionTypeKernel, constants);
       if (kernel == nil)
         return pl_hostcall_refusal(t, "gpu.pipeline-compute",
                                    GM_REFUSAL_PIPELINE,
