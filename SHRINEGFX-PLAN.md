@@ -696,6 +696,34 @@ jet left to ask for.
 
 ---
 
+## Slice 4 — the present/surface arm (pre-Rex mechanics)
+
+> *Specs: PNW10 (the present arm hangs off the Web root), GF16 (window chrome deferred
+> here), enki-main `host.h` platform-surface-frame / present-witness carriers (the
+> consumer contract the witness fields mirror), no_api swapchain.jai (mistakes
+> catalogued: host-stall-before-present, resize-recreates-everything — both avoided)*
+> **Status: 🟡 GAP 18 LANDED (2026-07-10)**
+
+### Gap 18 — surface + drawable mechanics
+
+`gpu.surface-open/-resize` (headless CAMetalLayer — drawables vend without a window,
+so the whole path tests offscreen; the embedder-injected layer is the later EnkiBridge
+seam), `gpu.acquire`, `gpu.present` (blit source→drawable per the enki-main/no_api
+model — render targets stay decoupled from the surface format; presentDrawable +
+session-event signal; **the only wait remains the timeline**).  Linear discipline
+throughout: the surface config is consumed by resize (generation bump; stale acquire
+→ 950) and a drawable is a one-shot residual (second present → 950).  Witness fields
+mirror enki-main's carriers: acquire = (drawable, surface-gen, w, h); present =
+(surface, drawable, gen, event-value).  Fixture
+`gfx_present_blits_and_consumes_drawable`: full live flow incl. resize/stale/extent
+refusals; 947 skip guard for drawable-less CI.  21/21 fixtures.
+
+**Remaining**: frame-loop pacing fixture (N frames in flight via gpu.wait), present
+record/replay assertion (the op-83 hook already covers it), embedder-injected layer
+seam, per-observer dirty (needs ACS/bytemaps — the Rex-era lane).
+
+---
+
 ## Out of Scope (tracked, not forgotten)
 
 - Store hardening: root revisions/CAS, watch-poll, write-batch witnesses (PLR12 lane)

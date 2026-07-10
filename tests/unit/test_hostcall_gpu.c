@@ -3768,4 +3768,197 @@ Test(hostcall, gfx_no_api_floor_exit_criterion) {
   test_rt_free(&rt);
 }
 
+/*
+ * The present/surface arm: gpu.surface-open vends a headless
+ * CAMetalLayer surface, gpu.acquire vends a one-shot drawable at the
+ * surface's live generation, and gpu.present blits an admitted render
+ * target into it, presents, and signals the session timeline.  The
+ * surface config is linear — resize consumes it and mints the next
+ * generation, so a stale-generation acquire refuses (950); the
+ * drawable is a one-shot residual — present consumes it, so a second
+ * present refuses the same way; a source/drawable extent mismatch is
+ * bounds (948).  A headless CI host may vend no drawables at all: the
+ * present arm skips on the acquire ENCODE refusal (947).
+ */
+Test(hostcall, gfx_present_blits_and_consumes_drawable) {
+  cr_assert(pl_host_gpu_metal_register());
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  t->hostcall_f = true;
+
+  pl_catch c;
+  pl_catch_init(t, &c);
+  if (setjmp(c.jb) != 0) {
+    pl_catch_unwind(t, &c);
+    cr_assert_fail("raise during present slice: %s",
+                   t->exn_msg != NULL ? t->exn_msg : "PLAN exception");
+  }
+
+  size_t args = t->vsp;
+  pl_vpush(t, 0);
+  pl_val r = hostcall(t, "gpu.session-open", args);
+  if (refusal_kind(r, "gpu.session-open") == 943) {
+    cr_log_warn("no metal device; present slice skipped");
+    test_rt_free(&rt);
+    return;
+  }
+  uint64_t session = witness_payload_u64(t, r, "gpu.session-open", 0);
+
+  args = t->vsp;
+  pl_vpush(t, session);
+  {
+    size_t f = t->vsp;
+    pl_vpush(t, 1);     /* scope: session */
+    pl_vpush(t, 65536); /* capacity */
+    pl_vpush(t, 0);     /* generation-policy: bump-on-free */
+    pl_vpush(t, record(t, "memory-arena", f));
+  }
+  (void)witness_payload_u64(t, hostcall(t, "gpu.arena", args), "gpu.arena", 0);
+
+  /* the surface: a headless CAMetalLayer at the slice extent */
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, GFX_W);
+  pl_vpush(t, GFX_H);
+  pl_val sw = hostcall(t, "gpu.surface-open", args);
+  uint64_t s1 = witness_payload_u64(t, sw, "gpu.surface-open", 0);
+  uint64_t g1 = witness_payload_u64(t, sw, "gpu.surface-open", 1);
+  cr_assert_eq(witness_payload_u64(t, sw, "gpu.surface-open", 2),
+               (uint64_t)GFX_W);
+  cr_assert_eq(witness_payload_u64(t, sw, "gpu.surface-open", 3),
+               (uint64_t)GFX_H);
+
+  /* the orange frame: the slice artifact drawn once into a target */
+  pl_val msl = bar_nat(t, (const uint8_t*)gfx_msl, sizeof(gfx_msl) - 1);
+  size_t keep = t->vsp;
+  pl_vpush(t, msl); /* root across calls */
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, t->vstack[keep]);
+  (void)witness_payload_u64(t, hostcall(t, "gpu.library", args), "gpu.library",
+                            0);
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, t->vstack[keep]);
+  uint64_t pipeline = witness_payload_u64(
+      t, hostcall(t, "gpu.pipeline-render", args), "gpu.pipeline-render", 0);
+
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, GFX_W);
+  pl_vpush(t, GFX_H);
+  pl_vpush(t, 1); /* bgra8 */
+  uint64_t target =
+      witness_payload_u64(t, hostcall(t, "gpu.target", args), "gpu.target", 0);
+
+  /* root payload: one row, box {.25 .25 .5 .5}, color {1 .5 0 1} */
+  float payload[8] = {0.25f, 0.25f, 0.5f, 0.5f, 1.0f, 0.5f, 0.0f, 1.0f};
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, bar_nat(t, (const uint8_t*)payload, sizeof(payload)));
+  pl_val alloc_w = hostcall(t, "gpu.alloc", args);
+  uint64_t alloc_idx = witness_payload_u64(t, alloc_w, "gpu.alloc", 0);
+  uint64_t alloc_len = witness_payload_u64(t, alloc_w, "gpu.alloc", 2);
+  uint64_t alloc_gen = witness_payload_u64(t, alloc_w, "gpu.alloc", 3);
+
+  args = t->vsp;
+  pl_vpush(t, graph_record(t, 6, 1, 1, 0, 0));
+  pl_vpush(t, session);
+  pl_vpush(t, pipeline);
+  pl_vpush(t, pass_desc(t, target, 0xff000000u));
+  pl_vpush(t, pointer_record(t, alloc_idx, 0, alloc_len, alloc_gen));
+  pl_vpush(t, 0); /* no descriptor heap */
+  (void)witness_payload_u64(t, hostcall(t, "gpu.command-graph", args),
+                            "gpu.command-graph", 0);
+
+  /* acquire a one-shot drawable at the live generation.  A headless
+   * host may vend none: skip the present arm on 947 (ENCODE). */
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, s1);
+  pl_vpush(t, g1);
+  pl_val aw = hostcall(t, "gpu.acquire", args);
+  if (refusal_kind(aw, "gpu.acquire") == 947) {
+    cr_log_warn("no drawable vended; present arm skipped");
+    args = t->vsp;
+    pl_vpush(t, session);
+    (void)hostcall(t, "gpu.session-close", args);
+    pl_catch_pop(t, &c);
+    test_rt_free(&rt);
+    return;
+  }
+  uint64_t d1 = witness_payload_u64(t, aw, "gpu.acquire", 0);
+  cr_assert_eq(witness_payload_u64(t, aw, "gpu.acquire", 1), g1);
+  cr_assert_eq(witness_payload_u64(t, aw, "gpu.acquire", 2), (uint64_t)GFX_W);
+  cr_assert_eq(witness_payload_u64(t, aw, "gpu.acquire", 3), (uint64_t)GFX_H);
+
+  /* present blits the target into the drawable and signals */
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, d1);
+  pl_vpush(t, target);
+  pl_val pw = hostcall(t, "gpu.present", args);
+  cr_assert_eq(witness_payload_u64(t, pw, "gpu.present", 0), s1);
+  cr_assert_eq(witness_payload_u64(t, pw, "gpu.present", 1), d1);
+  cr_assert_eq(witness_payload_u64(t, pw, "gpu.present", 2), g1);
+  uint64_t present_event = witness_payload_u64(t, pw, "gpu.present", 3);
+  cr_assert_gt(present_event, 0u);
+
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, present_event);
+  cr_assert_eq(
+      witness_payload_u64(t, hostcall(t, "gpu.wait", args), "gpu.wait", 0),
+      present_event);
+
+  /* the drawable is consumed: a second present refuses (950) */
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, d1);
+  pl_vpush(t, target);
+  cr_assert_eq(refusal_kind(hostcall(t, "gpu.present", args), "gpu.present"),
+               950u);
+
+  /* resize consumes the surface config: the generation bumps, the old
+   * generation is stale (950), and the fresh drawable's extent no
+   * longer matches the 64x64 source (948) */
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, s1);
+  pl_vpush(t, GFX_W / 2);
+  pl_vpush(t, GFX_H / 2);
+  pl_val rw = hostcall(t, "gpu.surface-resize", args);
+  uint64_t g2 = witness_payload_u64(t, rw, "gpu.surface-resize", 1);
+  cr_assert_eq(g2, g1 + 1);
+
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, s1);
+  pl_vpush(t, g1);
+  cr_assert_eq(refusal_kind(hostcall(t, "gpu.acquire", args), "gpu.acquire"),
+               950u);
+
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, s1);
+  pl_vpush(t, g2);
+  uint64_t d2 = witness_payload_u64(t, hostcall(t, "gpu.acquire", args),
+                                    "gpu.acquire", 0);
+
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, d2);
+  pl_vpush(t, target);
+  cr_assert_eq(refusal_kind(hostcall(t, "gpu.present", args), "gpu.present"),
+               948u);
+
+  args = t->vsp;
+  pl_vpush(t, session);
+  cr_assert_not_null(result_row(hostcall(t, "gpu.session-close", args),
+                                "witness", "gpu.session-close"));
+
+  pl_catch_pop(t, &c);
+  test_rt_free(&rt);
+}
+
 #endif /* PL_HOST_GPU_METAL */

@@ -2,6 +2,7 @@
 
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#import <QuartzCore/CAMetalLayer.h>
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -102,6 +103,21 @@ typedef struct gm_dheap {
   uint32_t texture_count;
 } gm_dheap;
 
+#define GM_SURFACES 2
+#define GM_DRAWABLES 4
+
+typedef struct gm_surface {
+  const void* layer_ref; /* CFBridgingRetain'd CAMetalLayer; NULL = free */
+  uint32_t generation;   /* bumps on resize: the surface config is linear */
+  uint64_t w, h;
+} gm_surface;
+
+typedef struct gm_drawable {
+  const void* drawable_ref; /* CFBridgingRetain'd CAMetalDrawable; one-shot */
+  uint32_t surface;         /* owning surface slot + 1 */
+  uint32_t generation;      /* surface generation at acquire */
+} gm_drawable;
+
 typedef struct gm_session {
   bool used;
   const void* device_ref; /* CFBridgingRetain'd id<MTLDevice> */
@@ -119,6 +135,8 @@ typedef struct gm_session {
   uint8_t object_kinds[GM_OBJECTS];
   uint8_t object_modes[GM_OBJECTS]; /* pipelines: root lowering mode */
   uint32_t object_count;
+  gm_surface surfaces[GM_SURFACES];
+  gm_drawable drawables[GM_DRAWABLES];
 } gm_session;
 
 /* Root lowering modes (root-layout carrier, field 3). */
@@ -2022,6 +2040,179 @@ static pl_val gm_readback(pl_thread* t, size_t ab) {
 
 /* ── Registration ──────────────────────────────────────────────────────── */
 
+/* ── The present/surface arm (pre-Rex mechanics) ───────────────────────── */
+
+/* A headless CAMetalLayer: drawables vend without a window, so the
+ * whole present path is testable offscreen; the embedder-injected
+ * layer (EnkiBridge) is a later seam.  The surface config is linear —
+ * resize consumes it and mints the next generation; drawables are
+ * one-shot residuals — present consumes them.  Witness fields mirror
+ * enki-main's platform-surface-frame / present-witness carriers. */
+static pl_val gm_surface_open(pl_thread* t, size_t ab) {
+  gm_session* s = gm_session_at(ARG(0));
+  if (s == NULL)
+    return pl_hostcall_refusal(t, "gpu.surface-open", GM_REFUSAL_BAD_SESSION,
+                               "unknown session");
+  uint64_t w = pl_nat_u64_clamp(pl_nat_coerce(ARG(1)));
+  uint64_t h = pl_nat_u64_clamp(pl_nat_coerce(ARG(2)));
+  if (w == 0 || h == 0 || w > GM_MAX_EXTENT || h > GM_MAX_EXTENT)
+    return pl_hostcall_refusal(t, "gpu.surface-open", GM_REFUSAL_BOUNDS,
+                               "surface extent out of range");
+  @autoreleasepool {
+    uint32_t slot = 0;
+    while (slot < GM_SURFACES && s->surfaces[slot].layer_ref != NULL)
+      slot++;
+    if (slot == GM_SURFACES)
+      return pl_hostcall_refusal(t, "gpu.surface-open", GM_REFUSAL_CAPACITY,
+                                 "surface table full");
+    CAMetalLayer* layer = [CAMetalLayer layer];
+    layer.device = (__bridge id<MTLDevice>)s->device_ref;
+    layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+    layer.framebufferOnly = NO; /* present is a blit into the drawable */
+    layer.drawableSize = CGSizeMake((CGFloat)w, (CGFloat)h);
+    s->surfaces[slot].layer_ref = CFBridgingRetain(layer);
+    s->surfaces[slot].generation += 1;
+    s->surfaces[slot].w = w;
+    s->surfaces[slot].h = h;
+    size_t base = t->vsp;
+    pl_vpush(t, (pl_val)(slot + 1));
+    pl_vpush(t, (pl_val)s->surfaces[slot].generation);
+    pl_vpush(t, (pl_val)w);
+    pl_vpush(t, (pl_val)h);
+    return pl_hostcall_witness(t, "gpu.surface-open", base);
+  }
+}
+
+static pl_val gm_surface_resize(pl_thread* t, size_t ab) {
+  gm_session* s = gm_session_at(ARG(0));
+  if (s == NULL)
+    return pl_hostcall_refusal(t, "gpu.surface-resize", GM_REFUSAL_BAD_SESSION,
+                               "unknown session");
+  uint64_t idx = pl_nat_u64_clamp(pl_nat_coerce(ARG(1)));
+  uint64_t w = pl_nat_u64_clamp(pl_nat_coerce(ARG(2)));
+  uint64_t h = pl_nat_u64_clamp(pl_nat_coerce(ARG(3)));
+  if (idx == 0 || idx > GM_SURFACES ||
+      s->surfaces[idx - 1].layer_ref == NULL)
+    return pl_hostcall_refusal(t, "gpu.surface-resize", GM_REFUSAL_BAD_HANDLE,
+                               "unknown surface");
+  if (w == 0 || h == 0 || w > GM_MAX_EXTENT || h > GM_MAX_EXTENT)
+    return pl_hostcall_refusal(t, "gpu.surface-resize", GM_REFUSAL_BOUNDS,
+                               "surface extent out of range");
+  @autoreleasepool {
+    gm_surface* sf = &s->surfaces[idx - 1];
+    CAMetalLayer* layer = (__bridge CAMetalLayer*)sf->layer_ref;
+    layer.drawableSize = CGSizeMake((CGFloat)w, (CGFloat)h);
+    sf->generation += 1; /* consume the old surface config */
+    sf->w = w;
+    sf->h = h;
+    size_t base = t->vsp;
+    pl_vpush(t, (pl_val)idx);
+    pl_vpush(t, (pl_val)sf->generation);
+    pl_vpush(t, (pl_val)w);
+    pl_vpush(t, (pl_val)h);
+    return pl_hostcall_witness(t, "gpu.surface-resize", base);
+  }
+}
+
+static pl_val gm_acquire(pl_thread* t, size_t ab) {
+  gm_session* s = gm_session_at(ARG(0));
+  if (s == NULL)
+    return pl_hostcall_refusal(t, "gpu.acquire", GM_REFUSAL_BAD_SESSION,
+                               "unknown session");
+  uint64_t idx = pl_nat_u64_clamp(pl_nat_coerce(ARG(1)));
+  uint64_t gen = pl_nat_u64_clamp(pl_nat_coerce(ARG(2)));
+  if (idx == 0 || idx > GM_SURFACES ||
+      s->surfaces[idx - 1].layer_ref == NULL)
+    return pl_hostcall_refusal(t, "gpu.acquire", GM_REFUSAL_BAD_HANDLE,
+                               "unknown surface");
+  gm_surface* sf = &s->surfaces[idx - 1];
+  if (gen != sf->generation)
+    return pl_hostcall_refusal(t, "gpu.acquire", GM_REFUSAL_STALE_GENERATION,
+                               "surface was resized");
+  @autoreleasepool {
+    uint32_t slot = 0;
+    while (slot < GM_DRAWABLES && s->drawables[slot].drawable_ref != NULL)
+      slot++;
+    if (slot == GM_DRAWABLES)
+      return pl_hostcall_refusal(t, "gpu.acquire", GM_REFUSAL_CAPACITY,
+                                 "drawable table full");
+    CAMetalLayer* layer = (__bridge CAMetalLayer*)sf->layer_ref;
+    id<CAMetalDrawable> drawable = [layer nextDrawable];
+    if (drawable == nil)
+      return pl_hostcall_refusal(t, "gpu.acquire", GM_REFUSAL_ENCODE,
+                                 "no drawable available");
+    s->drawables[slot].drawable_ref = CFBridgingRetain(drawable);
+    s->drawables[slot].surface = (uint32_t)idx;
+    s->drawables[slot].generation = sf->generation;
+    size_t base = t->vsp;
+    pl_vpush(t, (pl_val)(slot + 1));
+    pl_vpush(t, (pl_val)sf->generation);
+    pl_vpush(t, (pl_val)sf->w);
+    pl_vpush(t, (pl_val)sf->h);
+    return pl_hostcall_witness(t, "gpu.acquire", base);
+  }
+}
+
+/* Present: blit the admitted source texture into the drawable (the
+ * enki-main/no_api model — render targets stay decoupled from the
+ * surface format) and consume the drawable.  The only wait remains
+ * the session timeline. */
+static pl_val gm_present(pl_thread* t, size_t ab) {
+  gm_session* s = gm_session_at(ARG(0));
+  if (s == NULL)
+    return pl_hostcall_refusal(t, "gpu.present", GM_REFUSAL_BAD_SESSION,
+                               "unknown session");
+  uint64_t didx = pl_nat_u64_clamp(pl_nat_coerce(ARG(1)));
+  if (didx == 0 || didx > GM_DRAWABLES ||
+      s->drawables[didx - 1].drawable_ref == NULL)
+    return pl_hostcall_refusal(t, "gpu.present", GM_REFUSAL_STALE_GENERATION,
+                               "drawable is spent or unknown");
+  @autoreleasepool {
+    id<MTLTexture> source = gm_object_v(s, ARG(2), GM_OBJ_TEXTURE);
+    if (source == nil)
+      return pl_hostcall_refusal(t, "gpu.present", GM_REFUSAL_BAD_HANDLE,
+                                 "unknown source texture");
+    gm_drawable* d = &s->drawables[didx - 1];
+    id<CAMetalDrawable> drawable =
+        (__bridge id<CAMetalDrawable>)d->drawable_ref;
+    id<MTLTexture> dst = drawable.texture;
+    if ([source width] != [dst width] || [source height] != [dst height])
+      return pl_hostcall_refusal(t, "gpu.present", GM_REFUSAL_BOUNDS,
+                                 "source extent differs from drawable");
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)s->queue_ref;
+    id<MTLCommandBuffer> commands = [queue commandBuffer];
+    id<MTLBlitCommandEncoder> blit = [commands blitCommandEncoder];
+    if (commands == nil || blit == nil)
+      return pl_hostcall_refusal(t, "gpu.present", GM_REFUSAL_ENCODE,
+                                 "encoder unavailable");
+    [blit copyFromTexture:source
+              sourceSlice:0
+              sourceLevel:0
+             sourceOrigin:MTLOriginMake(0, 0, 0)
+               sourceSize:MTLSizeMake([source width], [source height], 1)
+                toTexture:dst
+         destinationSlice:0
+         destinationLevel:0
+        destinationOrigin:MTLOriginMake(0, 0, 0)];
+    [blit endEncoding];
+    [commands presentDrawable:drawable];
+    id<MTLSharedEvent> event = (__bridge id<MTLSharedEvent>)s->event_ref;
+    s->event_value += 1;
+    [commands encodeSignalEvent:event value:s->event_value];
+    [commands commit];
+    uint32_t sidx = d->surface;
+    uint32_t sgen = d->generation;
+    CFRelease(d->drawable_ref); /* the one-shot residual is consumed */
+    d->drawable_ref = NULL;
+    size_t base = t->vsp;
+    pl_vpush(t, (pl_val)sidx);
+    pl_vpush(t, (pl_val)didx);
+    pl_vpush(t, (pl_val)sgen);
+    pl_vpush(t, (pl_val)s->event_value);
+    return pl_hostcall_witness(t, "gpu.present", base);
+  }
+}
+
 bool pl_host_gpu_metal_register(void) {
   bool ok = true;
   ok = ok && pl_hostcall_register("gpu.session-open", 1, 0b1, gm_session_open);
@@ -2047,6 +2238,11 @@ bool pl_host_gpu_metal_register(void) {
   ok = ok && pl_hostcall_register("gpu.command-graph", 6, 0b111111,
                                   gm_command_graph);
   ok = ok && pl_hostcall_register("gpu.readback", 4, 0b1111, gm_readback);
+  ok = ok && pl_hostcall_register("gpu.surface-open", 3, 0b111, gm_surface_open);
+  ok = ok &&
+       pl_hostcall_register("gpu.surface-resize", 4, 0b1111, gm_surface_resize);
+  ok = ok && pl_hostcall_register("gpu.acquire", 3, 0b111, gm_acquire);
+  ok = ok && pl_hostcall_register("gpu.present", 3, 0b111, gm_present);
   ok = ok &&
        pl_hostcall_register("gpu.session-close", 1, 0b1, gm_session_close);
   return ok;
