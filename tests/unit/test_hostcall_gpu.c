@@ -218,6 +218,141 @@ Test(hostcall, bytecode_bakes_hostcall_index) {
   test_rt_free(&rt);
 }
 
+/* ── Independent R(3,1,1) antiproduct reference ────────────────────── */
+
+static int psa_pc(int n) {
+  int c = 0;
+  while (n) {
+    c += n & 1;
+    n >>= 1;
+  }
+  return c;
+}
+
+static int psa_inv(int a, int b) {
+  int s = 0;
+  for (int j = 0; j < 5; j++)
+    if ((b >> j) & 1)
+      s += psa_pc(a >> (j + 1));
+  return s;
+}
+
+/* geometric product sign under metric (-1,1,1,1,0); 0 = annihilated */
+static int psa_gp_sgn(int a, int b) {
+  if (((a & b) >> 4) & 1)
+    return 0;
+  return ((psa_inv(a, b) + ((a & b) & 1)) & 1) ? -1 : 1;
+}
+
+static void psa_ap(int a, int b, int* sgn, int* idx) {
+  *idx = 31 - (a ^ b);
+  int gs = psa_gp_sgn(31 - a, 31 - b);
+  if (gs == 0) {
+    *sgn = 0;
+    return;
+  }
+  int tot = (gs < 0 ? 1 : 0) + (psa_inv(a, 31 - a) & 1) +
+            (psa_inv(b, 31 - b) & 1) + (psa_inv(31 - (a ^ b), a ^ b) & 1);
+  *sgn = (tot & 1) ? -1 : 1;
+}
+
+static int psa_ar_sgn(int i) {
+  int ag = 5 - psa_pc(i);
+  return ((ag * (ag - 1) / 2) & 1) ? -1 : 1;
+}
+
+/*
+ * Gap 19: the foil kernel-IR audit tier.  foil/shrine/kernel-ir.plan
+ * generates the motor-sandwich kernel as predicated-atom IR and
+ * interprets it by law over zigzag-encoded signed integers, tracing one
+ * per-row output checksum (cs*256+2).  This test only VERIFIES: it
+ * execs wisp and matches both checksums against an independent C
+ * derivation of the same signed-integer sandwich — small-integer
+ * vectors, exact by construction, no floats.  Needs no Metal device:
+ * the interpreter is pure law.
+ */
+Test(hostcall, kernel_ir_interpreter_matches_c_reference) {
+  const char* bin = getenv("ENKI_WISP_BIN");
+  if (bin == NULL || bin[0] == '\0')
+    cr_skip("ENKI_WISP_BIN not set; kernel-ir wisp fixture skipped");
+  char cmd[512];
+  (void)snprintf(cmd, sizeof(cmd), "%s foil/shrine kernel-ir main 2>&1", bin);
+  FILE* p = popen(cmd, "r");
+  cr_assert_not_null(p, "failed to exec %s", cmd);
+  enum { OUT_CAP = 65536 };
+  char* out = malloc(OUT_CAP);
+  cr_assert_not_null(out);
+  size_t got = fread(out, 1, OUT_CAP - 1, p);
+  out[got] = '\0';
+  int st = pclose(p);
+  cr_assert_eq(st, 0, "kernel-ir run exited %d", st);
+
+  /* the pure-digit lines, in trace order: cs_row0*256+2, cs_row1*256+2 */
+  char* digit_lines[8] = {0};
+  int nd = 0;
+  for (char* line = strtok(out, "\n"); line != NULL;
+       line = strtok(NULL, "\n")) {
+    size_t len = strlen(line);
+    if (len == 0)
+      continue;
+    bool digits = true;
+    for (size_t i = 0; i < len; i++)
+      if (line[i] < '0' || line[i] > '9')
+        digits = false;
+    if (digits && nd < 8)
+      digit_lines[nd++] = line;
+  }
+  cr_assert_geq(nd, 2, "expected 2 numeric trace lines, got %d", nd);
+  /* main returns 0 which may print as a final "0" line — take the two
+   * substantive ones in order */
+  if (nd > 2 && strcmp(digit_lines[nd - 1], "0") == 0)
+    nd--;
+  uint64_t wisp_cs[2];
+  for (int r = 0; r < 2; r++) {
+    uint64_t v = strtoull(digit_lines[nd - 2 + r], NULL, 10);
+    cr_assert_eq(v % 256, 2u, "row %d trace lacks the *256+2 wrap", r);
+    wisp_cs[r] = v / 256;
+  }
+
+  /* independent C reference: the signed-integer motor sandwich per
+   * thread over the module's fixed small-integer vectors */
+  int64_t m[32], x[2][32], mrev[32];
+  for (int i = 0; i < 32; i++)
+    m[i] = ((7 * i) % 11) - 5;
+  for (int j = 0; j < 32; j++) {
+    x[0][j] = ((3 * j) % 7) - 3;
+    x[1][j] = ((5 * j) % 9) - 4;
+    mrev[j] = psa_ar_sgn(j) * m[j];
+  }
+  for (int row = 0; row < 2; row++) {
+    int64_t tmp[32] = {0}, ref[32] = {0};
+    for (int i = 0; i < 32; i++)
+      for (int j = 0; j < 32; j++) {
+        int s, idx;
+        psa_ap(i, j, &s, &idx);
+        if (s != 0)
+          tmp[idx] += (int64_t)s * m[i] * x[row][j];
+      }
+    for (int i = 0; i < 32; i++)
+      for (int j = 0; j < 32; j++) {
+        int s, idx;
+        psa_ap(i, j, &s, &idx);
+        if (s != 0)
+          ref[idx] += (int64_t)s * tmp[i] * mrev[j];
+      }
+    uint64_t cs = 0;
+    for (int k = 0; k < 32; k++) {
+      int64_t v = ref[k];
+      uint64_t zz = v >= 0 ? (uint64_t)(2 * v) : (uint64_t)(2 * (-v) - 1);
+      cs += (uint64_t)(k + 1) * zz;
+    }
+    cr_assert_eq(wisp_cs[row], cs,
+                 "row %d: interpreter checksum %llu != C reference %llu", row,
+                 (unsigned long long)wisp_cs[row], (unsigned long long)cs);
+  }
+  free(out);
+}
+
 /*
  * Gap 12: a divergent replay aborts.  The recording holds one test.nop
  * call; the replay calls a different binding at the same site — the
@@ -3033,48 +3168,8 @@ Test(hostcall, gfx_indirect_dispatch_admits_on_device) {
  * table-walker.  The C side never authors the artifact.
  */
 
-/* ── Independent R(3,1,1) antiproduct reference ────────────────────── */
-
-static int psa_pc(int n) {
-  int c = 0;
-  while (n) {
-    c += n & 1;
-    n >>= 1;
-  }
-  return c;
-}
-
-static int psa_inv(int a, int b) {
-  int s = 0;
-  for (int j = 0; j < 5; j++)
-    if ((b >> j) & 1)
-      s += psa_pc(a >> (j + 1));
-  return s;
-}
-
-/* geometric product sign under metric (-1,1,1,1,0); 0 = annihilated */
-static int psa_gp_sgn(int a, int b) {
-  if (((a & b) >> 4) & 1)
-    return 0;
-  return ((psa_inv(a, b) + ((a & b) & 1)) & 1) ? -1 : 1;
-}
-
-static void psa_ap(int a, int b, int* sgn, int* idx) {
-  *idx = 31 - (a ^ b);
-  int gs = psa_gp_sgn(31 - a, 31 - b);
-  if (gs == 0) {
-    *sgn = 0;
-    return;
-  }
-  int tot = (gs < 0 ? 1 : 0) + (psa_inv(a, 31 - a) & 1) +
-            (psa_inv(b, 31 - b) & 1) + (psa_inv(31 - (a ^ b), a ^ b) & 1);
-  *sgn = (tot & 1) ? -1 : 1;
-}
-
-static int psa_ar_sgn(int i) {
-  int ag = 5 - psa_pc(i);
-  return ((ag * (ag - 1) / 2) & 1) ? -1 : 1;
-}
+/* (the integer R(3,1,1) table reference — psa_ap, psa_ar_sgn — lives
+ * above the Metal guard; the kernel-ir audit test shares it) */
 
 static void psa_antiprod(float* r, const float* a, const float* b) {
   for (int i = 0; i < 32; i++)
