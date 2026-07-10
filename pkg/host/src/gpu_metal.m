@@ -148,8 +148,36 @@ enum {
 /* Texture formats (Gap 13, GF1.4-anchored; the rest land with 13b). */
 enum {
   GM_FORMAT_BGRA8 = 1,
+  GM_FORMAT_RGBA8 = 2,
+  GM_FORMAT_R8 = 3,
+  GM_FORMAT_RGBA16F = 4,
   GM_FORMAT_D32 = 5,
 };
+
+/* Sampled-texture lowering per format (Gap 13 polish). */
+static bool gm_format_sampled(uint64_t f, MTLPixelFormat* out_pf,
+                              uint64_t* out_bpp) {
+  switch (f) {
+  case GM_FORMAT_BGRA8:
+    *out_pf = MTLPixelFormatBGRA8Unorm;
+    *out_bpp = 4;
+    return true;
+  case GM_FORMAT_RGBA8:
+    *out_pf = MTLPixelFormatRGBA8Unorm;
+    *out_bpp = 4;
+    return true;
+  case GM_FORMAT_R8:
+    *out_pf = MTLPixelFormatR8Unorm;
+    *out_bpp = 1;
+    return true;
+  case GM_FORMAT_RGBA16F:
+    *out_pf = MTLPixelFormatRGBA16Float;
+    *out_bpp = 8;
+    return true;
+  default:
+    return false;
+  }
+}
 
 static gm_session gm_sessions[GM_SESSIONS];
 
@@ -253,7 +281,7 @@ static uint8_t* gm_bar_bytes(pl_val v, size_t* out_n);
 static uint8_t* gm_pipeline_source(pl_thread* t, size_t ab, size_t* out_n,
                                    uint64_t* out_stride, uint64_t* out_mode,
                                    uint64_t* out_dformat, pl_val* out_consts,
-                                   uint64_t* out_ncolors) {
+                                   uint64_t* out_ncolors, uint64_t* out_wmask) {
   ARG(1) = pl_nf(t, ARG(1));
   pl_val src = ARG(1);
   *out_stride = 0;
@@ -261,6 +289,7 @@ static uint8_t* gm_pipeline_source(pl_thread* t, size_t ab, size_t* out_n,
   *out_dformat = 0;
   *out_consts = 0;
   *out_ncolors = 1;
+  *out_wmask = 0;
   /* field 4 (Gap 14): value specialization constants — a pair-list of
    * fn-constant (kind {1 u32, 2 f32-bits}, value) records, sequential
    * ids by list position; dead code the constants kill never becomes
@@ -275,7 +304,11 @@ static uint8_t* gm_pipeline_source(pl_thread* t, size_t ab, size_t* out_n,
     /* field 3 (Gap 13): raster-state (depth-format, reserved) — the
      * pipeline realizes the artifact under this raster policy */
     if (!gm_is_zero(req[2])) {
-      rast = gm_record(req[2], "raster-state", 2);
+      rast = gm_record(req[2], "raster-state", 4);
+      if (rast != NULL)
+        *out_wmask = pl_nat_u64_clamp(pl_nat_coerce(rast[2]));
+      else
+        rast = gm_record(req[2], "raster-state", 2);
       if (rast == NULL)
         return NULL;
       *out_dformat = pl_nat_u64_clamp(pl_nat_coerce(rast[0]));
@@ -866,9 +899,9 @@ static pl_val gm_pipeline_render(pl_thread* t, size_t ab) {
   size_t n = 0;
   uint64_t stride = 0, mode = 0, dformat = 0;
   pl_val consts = 0;
-  uint64_t ncolors = 1;
+  uint64_t ncolors = 1, wmask = 0;
   uint8_t* bytes = gm_pipeline_source(t, ab, &n, &stride, &mode, &dformat,
-                                      &consts, &ncolors);
+                                      &consts, &ncolors, &wmask);
   if (bytes == NULL)
     return pl_hostcall_refusal(t, "gpu.pipeline-render",
                                GM_REFUSAL_CARRIER_SHAPE,
@@ -885,7 +918,8 @@ static pl_val gm_pipeline_render(pl_thread* t, size_t ab) {
     return pl_hostcall_refusal(t, "gpu.pipeline-render", GM_REFUSAL_CARRIER_SHAPE,
                                "malformed fn-constant list");
   }
-  gm_pipeline_key(lib_key, stride, mode, dformat | (ncolors << 32), chash, key);
+  gm_pipeline_key(lib_key, stride, mode,
+                  dformat | (ncolors << 32) | (wmask << 40), chash, key);
   free(bytes);
   @autoreleasepool {
     uint32_t hits = 0;
@@ -913,8 +947,13 @@ static pl_val gm_pipeline_render(pl_thread* t, size_t ab) {
           gm_unique_function(library, MTLFunctionTypeVertex, constants);
       descriptor.fragmentFunction =
           gm_unique_function(library, MTLFunctionTypeFragment, constants);
-      for (uint64_t ci = 0; ci < ncolors; ci++)
+      for (uint64_t ci = 0; ci < ncolors; ci++) {
         descriptor.colorAttachments[ci].pixelFormat = MTLPixelFormatBGRA8Unorm;
+        /* 4 bits per target, low nibble = target 0; 0 = full RGBA */
+        uint64_t wm = (wmask >> (4 * ci)) & 0xF;
+        descriptor.colorAttachments[ci].writeMask =
+            wm == 0 ? MTLColorWriteMaskAll : (MTLColorWriteMask)wm;
+      }
       if (dformat == GM_FORMAT_D32)
         descriptor.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
       if (descriptor.vertexFunction == nil ||
@@ -957,9 +996,9 @@ static pl_val gm_pipeline_compute(pl_thread* t, size_t ab) {
   size_t n = 0;
   uint64_t stride = 0, mode = 0, dformat = 0;
   pl_val consts = 0;
-  uint64_t ncolors = 1;
+  uint64_t ncolors = 1, wmask = 0;
   uint8_t* bytes = gm_pipeline_source(t, ab, &n, &stride, &mode, &dformat,
-                                      &consts, &ncolors);
+                                      &consts, &ncolors, &wmask);
   if (bytes == NULL)
     return pl_hostcall_refusal(t, "gpu.pipeline-compute",
                                GM_REFUSAL_CARRIER_SHAPE,
@@ -976,7 +1015,8 @@ static pl_val gm_pipeline_compute(pl_thread* t, size_t ab) {
     return pl_hostcall_refusal(t, "gpu.pipeline-compute", GM_REFUSAL_CARRIER_SHAPE,
                                "malformed fn-constant list");
   }
-  gm_pipeline_key(lib_key, stride, mode, dformat | (ncolors << 32), chash, key);
+  gm_pipeline_key(lib_key, stride, mode,
+                  dformat | (ncolors << 32) | (wmask << 40), chash, key);
   free(bytes);
   @autoreleasepool {
     uint32_t hits = 0;
@@ -1068,7 +1108,8 @@ static pl_val gm_target(pl_thread* t, size_t ab) {
   }
 }
 
-/* Sampled 2D texture from admitted BGRA8 bytes. */
+/* Sampled 2D texture from admitted bytes; format field selects the
+ * GF1.4-anchored set (bgra8|rgba8|r8|rgba16f). */
 static pl_val gm_texture_2d(pl_thread* t, size_t ab) {
   gm_session* s = gm_session_at(ARG(0));
   if (s == NULL)
@@ -1076,19 +1117,25 @@ static pl_val gm_texture_2d(pl_thread* t, size_t ab) {
                                "unknown session");
   uint64_t w = pl_nat_u64_clamp(pl_nat_coerce(ARG(1)));
   uint64_t h = pl_nat_u64_clamp(pl_nat_coerce(ARG(2)));
+  uint64_t format = pl_nat_u64_clamp(pl_nat_coerce(ARG(4)));
+  MTLPixelFormat pf;
+  uint64_t bpp;
   if (w == 0 || h == 0 || w > GM_MAX_EXTENT || h > GM_MAX_EXTENT)
     return pl_hostcall_refusal(t, "gpu.texture-2d", GM_REFUSAL_BOUNDS,
                                "texture extent out of range");
+  if (!gm_format_sampled(format, &pf, &bpp))
+    return pl_hostcall_refusal(t, "gpu.texture-2d", GM_REFUSAL_CARRIER_SHAPE,
+                               "unknown sampled format");
   size_t n = 0;
   uint8_t* bytes = gm_bar_bytes(pl_nat_coerce(ARG(3)), &n);
-  if (bytes == NULL || n != (size_t)(w * h * 4)) {
+  if (bytes == NULL || n != (size_t)(w * h * bpp)) {
     free(bytes);
     return pl_hostcall_refusal(t, "gpu.texture-2d", GM_REFUSAL_BOUNDS,
-                               "pixel payload is not w*h*4 bytes");
+                               "pixel payload is not w*h*bpp bytes");
   }
   @autoreleasepool {
     MTLTextureDescriptor* descriptor = [MTLTextureDescriptor
-        texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+        texture2DDescriptorWithPixelFormat:pf
                                      width:(NSUInteger)w
                                     height:(NSUInteger)h
                                  mipmapped:NO];
@@ -1104,7 +1151,7 @@ static pl_val gm_texture_2d(pl_thread* t, size_t ab) {
     [texture replaceRegion:MTLRegionMake2D(0, 0, (NSUInteger)w, (NSUInteger)h)
                mipmapLevel:0
                  withBytes:bytes
-               bytesPerRow:(NSUInteger)(w * 4)];
+               bytesPerRow:(NSUInteger)(w * bpp)];
     free(bytes);
     uint64_t handle = gm_intern(s, texture, GM_OBJ_TEXTURE);
     if (handle == 0)
@@ -2230,7 +2277,7 @@ bool pl_host_gpu_metal_register(void) {
   ok = ok && pl_hostcall_register("gpu.pipeline-compute", 2, 0b11,
                                   gm_pipeline_compute);
   ok = ok && pl_hostcall_register("gpu.target", 4, 0b1111, gm_target);
-  ok = ok && pl_hostcall_register("gpu.texture-2d", 4, 0b1111, gm_texture_2d);
+  ok = ok && pl_hostcall_register("gpu.texture-2d", 5, 0b11111, gm_texture_2d);
   ok = ok && pl_hostcall_register("gpu.descriptor-heap", 2, 0b11,
                                   gm_descriptor_heap);
   ok = ok && pl_hostcall_register("gpu.descriptor-write", 4, 0b1111,

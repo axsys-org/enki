@@ -684,6 +684,7 @@ Test(hostcall, gfx_textured_draw_samples_descriptor_heap) {
   pl_vpush(t, 2);
   pl_vpush(t, 2);
   pl_vpush(t, bar_nat(t, texels, sizeof(texels)));
+  pl_vpush(t, 1); /* bgra8 */
   uint64_t texture = witness_payload_u64(t, hostcall(t, "gpu.texture-2d", args),
                                          "gpu.texture-2d", 0);
 
@@ -1810,6 +1811,7 @@ Test(hostcall, gfx_write_copy_wait_data_path) {
   pl_vpush(t, 2);
   pl_vpush(t, 2);
   pl_vpush(t, bar_nat(t, zeros, 16));
+  pl_vpush(t, 1); /* bgra8 */
   uint64_t tex = witness_payload_u64(t, hostcall(t, "gpu.texture-2d", args),
                                      "gpu.texture-2d", 0);
   gbase = t->vsp;
@@ -4139,6 +4141,7 @@ Test(hostcall, gfx_visual_dump) {
     pl_vpush(t, 2);
     pl_vpush(t, 2);
     pl_vpush(t, bar_nat(t, texels, sizeof(texels)));
+    pl_vpush(t, 1); /* bgra8 */
     uint64_t texture = witness_payload_u64(
         t, hostcall(t, "gpu.texture-2d", args), "gpu.texture-2d", 0);
 
@@ -4258,6 +4261,882 @@ Test(hostcall, gfx_visual_dump) {
     uint64_t sig = witness_payload_u64(
         t, hostcall(t, "gpu.command-graph", args), "gpu.command-graph", 2);
     dump_frame(t, session, color, DUMP_W, DUMP_H, sig, dir, "depth.ppm");
+  }
+
+  args = t->vsp;
+  pl_vpush(t, session);
+  cr_assert_not_null(result_row(hostcall(t, "gpu.session-close", args),
+                                "witness", "gpu.session-close"));
+  pl_catch_pop(t, &c);
+  test_rt_free(&rt);
+}
+
+/*
+ * Aaltonen's frames-in-flight pattern over the admitted mechanics:
+ * FRAMES_IN_FLIGHT root allocations cycled round-robin, each frame
+ * pacing on the present event from two frames back before rewriting
+ * its slot — the per-frame consume-and-mint bump IS the bump-allocator
+ * pattern — then drawing, acquiring, presenting.  The loop is recorded
+ * live through the er_io_hook seam and replayed on a fresh runtime:
+ * the recorded session was closed live and the replay runtime never
+ * opened a layer, so identical present witnesses prove the whole paced
+ * loop — waits, writes, acquires, presents — replays with no drawable
+ * and no GPU.
+ */
+Test(hostcall, gfx_frame_loop_paces_and_replays) {
+  enum { FRAMES_IN_FLIGHT = 2, FRAME_COUNT = 6 };
+  cr_assert(pl_host_gpu_metal_register());
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  t->hostcall_f = true;
+
+  pl_catch c;
+  pl_catch_init(t, &c);
+  if (setjmp(c.jb) != 0) {
+    pl_catch_unwind(t, &c);
+    cr_assert_fail("raise during frame-loop slice: %s",
+                   t->exn_msg != NULL ? t->exn_msg : "PLAN exception");
+  }
+
+  er_log* log = er_log_new();
+  er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
+  (void)er_scheduler_adopt(sys, t);
+  er_scheduler_record(sys, log);
+
+  /* ── Phase 1: record the paced loop live ── */
+  size_t args = t->vsp;
+  pl_vpush(t, 0);
+  pl_val r = hostcall(t, "gpu.session-open", args);
+  if (refusal_kind(r, "gpu.session-open") == 943) {
+    cr_log_warn("no metal device; frame-loop slice skipped");
+    pl_set_io_hook(NULL);
+    er_scheduler_free(sys);
+    er_log_free(log);
+    pl_catch_pop(t, &c);
+    test_rt_free(&rt);
+    return;
+  }
+  uint64_t session = witness_payload_u64(t, r, "gpu.session-open", 0);
+
+  args = t->vsp;
+  pl_vpush(t, session);
+  {
+    size_t f = t->vsp;
+    pl_vpush(t, 1);     /* scope: session */
+    pl_vpush(t, 65536); /* capacity */
+    pl_vpush(t, 0);     /* generation-policy: bump-on-free */
+    pl_vpush(t, record(t, "memory-arena", f));
+  }
+  (void)witness_payload_u64(t, hostcall(t, "gpu.arena", args), "gpu.arena", 0);
+
+  pl_val msl = bar_nat(t, (const uint8_t*)gfx_msl, sizeof(gfx_msl) - 1);
+  size_t keep = t->vsp;
+  pl_vpush(t, msl); /* root across calls */
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, t->vstack[keep]);
+  (void)witness_payload_u64(t, hostcall(t, "gpu.library", args), "gpu.library",
+                            0);
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, t->vstack[keep]);
+  uint64_t pipeline = witness_payload_u64(
+      t, hostcall(t, "gpu.pipeline-render", args), "gpu.pipeline-render", 0);
+
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, GFX_W);
+  pl_vpush(t, GFX_H);
+  pl_vpush(t, 1); /* bgra8 */
+  uint64_t target =
+      witness_payload_u64(t, hostcall(t, "gpu.target", args), "gpu.target", 0);
+
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, GFX_W);
+  pl_vpush(t, GFX_H);
+  pl_val sw = hostcall(t, "gpu.surface-open", args);
+  uint64_t s1 = witness_payload_u64(t, sw, "gpu.surface-open", 0);
+  uint64_t g1 = witness_payload_u64(t, sw, "gpu.surface-open", 1);
+  cr_assert_eq(witness_payload_u64(t, sw, "gpu.surface-open", 2),
+               (uint64_t)GFX_W);
+  cr_assert_eq(witness_payload_u64(t, sw, "gpu.surface-open", 3),
+               (uint64_t)GFX_H);
+
+  /* the ring: FRAMES_IN_FLIGHT root allocations, one slice row each */
+  float payload0[8] = {0.25f, 0.25f, 0.5f, 0.5f, 1.0f, 0.5f, 0.0f, 1.0f};
+  uint64_t root_idx[FRAMES_IN_FLIGHT];
+  uint64_t root_gen0[FRAMES_IN_FLIGHT]; /* as minted by gpu.alloc */
+  uint64_t root_gen[FRAMES_IN_FLIGHT];  /* live, bumped per write */
+  for (int slot = 0; slot < FRAMES_IN_FLIGHT; slot++) {
+    root_idx[slot] =
+        alloc_bytes(t, session, payload0, sizeof(payload0), &root_gen0[slot]);
+    root_gen[slot] = root_gen0[slot];
+  }
+
+  uint64_t write_gen[FRAME_COUNT];
+  uint64_t drawable[FRAME_COUNT];
+  uint64_t present_event[FRAME_COUNT];
+  for (int i = 0; i < FRAME_COUNT; i++) {
+    int slot = i % FRAMES_IN_FLIGHT;
+
+    /* the pacing wait: frame i blocks on frame i-2's present event
+     * before rewriting that frame's root slot */
+    if (i >= FRAMES_IN_FLIGHT) {
+      args = t->vsp;
+      pl_vpush(t, session);
+      pl_vpush(t, present_event[i - FRAMES_IN_FLIGHT]);
+      cr_assert_eq(
+          witness_payload_u64(t, hostcall(t, "gpu.wait", args), "gpu.wait", 0),
+          present_event[i - FRAMES_IN_FLIGHT]);
+    }
+
+    /* rewrite the slot with the per-frame payload: consume the live
+     * generation, mint the successor (the bump-allocator pattern) */
+    float payload[8];
+    memcpy(payload, payload0, sizeof(payload));
+    payload[5] = 0.125f * (float)i; /* vary the color G lane */
+    args = t->vsp;
+    pl_vpush(t, session);
+    pl_vpush(t, pointer_record(t, root_idx[slot], 0, sizeof(payload),
+                               root_gen[slot]));
+    pl_vpush(t, bar_nat(t, (const uint8_t*)payload, sizeof(payload)));
+    pl_val ww = hostcall(t, "gpu.write", args);
+    cr_assert_eq(witness_payload_u64(t, ww, "gpu.write", 0), root_idx[slot]);
+    write_gen[i] = witness_payload_u64(t, ww, "gpu.write", 1);
+    cr_assert_eq(write_gen[i], root_gen[slot] + 1);
+    root_gen[slot] = write_gen[i];
+
+    /* draw the frame from the freshly minted generation */
+    args = t->vsp;
+    pl_vpush(t, graph_record(t, 6, 1, 1, 0, 0));
+    pl_vpush(t, session);
+    pl_vpush(t, pipeline);
+    pl_vpush(t, pass_desc(t, target, 0xff000000u));
+    pl_vpush(t, pointer_record(t, root_idx[slot], 0, sizeof(payload),
+                               root_gen[slot]));
+    pl_vpush(t, 0); /* no descriptor heap */
+    (void)witness_payload_u64(t, hostcall(t, "gpu.command-graph", args),
+                              "gpu.command-graph", 0);
+
+    /* acquire + present.  A headless host may vend no drawable: skip
+     * on the FIRST 947 only — after one success every later frame must
+     * acquire, because the pacing waits keep the in-flight count at
+     * FRAMES_IN_FLIGHT, under the layer's drawable pool. */
+    args = t->vsp;
+    pl_vpush(t, session);
+    pl_vpush(t, s1);
+    pl_vpush(t, g1);
+    pl_val aw = hostcall(t, "gpu.acquire", args);
+    if (i == 0 && refusal_kind(aw, "gpu.acquire") == 947) {
+      cr_log_warn("no drawable vended; frame-loop slice skipped");
+      args = t->vsp;
+      pl_vpush(t, session);
+      (void)hostcall(t, "gpu.session-close", args);
+      pl_set_io_hook(NULL);
+      er_scheduler_free(sys);
+      er_log_free(log);
+      pl_catch_pop(t, &c);
+      test_rt_free(&rt);
+      return;
+    }
+    drawable[i] = witness_payload_u64(t, aw, "gpu.acquire", 0);
+    cr_assert_eq(witness_payload_u64(t, aw, "gpu.acquire", 1), g1);
+
+    args = t->vsp;
+    pl_vpush(t, session);
+    pl_vpush(t, drawable[i]);
+    pl_vpush(t, target);
+    pl_val pw = hostcall(t, "gpu.present", args);
+    cr_assert_eq(witness_payload_u64(t, pw, "gpu.present", 0), s1);
+    cr_assert_eq(witness_payload_u64(t, pw, "gpu.present", 1), drawable[i]);
+    cr_assert_eq(witness_payload_u64(t, pw, "gpu.present", 2), g1);
+    present_event[i] = witness_payload_u64(t, pw, "gpu.present", 3);
+    if (i > 0)
+      cr_assert_gt(present_event[i], present_event[i - 1]);
+    else
+      cr_assert_gt(present_event[i], 0u);
+  }
+
+  args = t->vsp;
+  pl_vpush(t, session);
+  cr_assert_not_null(result_row(hostcall(t, "gpu.session-close", args),
+                                "witness", "gpu.session-close"));
+  size_t events = er_log_events(log);
+
+  /* ── Phase 2: replay the loop on a fresh runtime, no GPU ── */
+  test_rt rt2 = test_rt_new();
+  pl_thread* t2 = rt2.t;
+  t2->hostcall_f = true;
+  er_scheduler* sys2 = er_scheduler_new(rt2.store, (er_config){0});
+  (void)er_scheduler_adopt(sys2, t2);
+  er_scheduler_replay(sys2, log);
+
+  args = t2->vsp;
+  pl_vpush(t2, 0);
+  cr_assert_eq(witness_payload_u64(t2, hostcall(t2, "gpu.session-open", args),
+                                   "gpu.session-open", 0),
+               session);
+  args = t2->vsp;
+  pl_vpush(t2, session);
+  {
+    size_t f = t2->vsp;
+    pl_vpush(t2, 1);
+    pl_vpush(t2, 65536);
+    pl_vpush(t2, 0);
+    pl_vpush(t2, record(t2, "memory-arena", f));
+  }
+  (void)witness_payload_u64(t2, hostcall(t2, "gpu.arena", args), "gpu.arena",
+                            0);
+
+  pl_val msl2 = bar_nat(t2, (const uint8_t*)gfx_msl, sizeof(gfx_msl) - 1);
+  size_t keep2 = t2->vsp;
+  pl_vpush(t2, msl2); /* root across calls */
+  args = t2->vsp;
+  pl_vpush(t2, session);
+  pl_vpush(t2, t2->vstack[keep2]);
+  (void)witness_payload_u64(t2, hostcall(t2, "gpu.library", args),
+                            "gpu.library", 0);
+  args = t2->vsp;
+  pl_vpush(t2, session);
+  pl_vpush(t2, t2->vstack[keep2]);
+  cr_assert_eq(witness_payload_u64(t2,
+                                   hostcall(t2, "gpu.pipeline-render", args),
+                                   "gpu.pipeline-render", 0),
+               pipeline);
+
+  args = t2->vsp;
+  pl_vpush(t2, session);
+  pl_vpush(t2, GFX_W);
+  pl_vpush(t2, GFX_H);
+  pl_vpush(t2, 1);
+  cr_assert_eq(witness_payload_u64(t2, hostcall(t2, "gpu.target", args),
+                                   "gpu.target", 0),
+               target);
+
+  args = t2->vsp;
+  pl_vpush(t2, session);
+  pl_vpush(t2, GFX_W);
+  pl_vpush(t2, GFX_H);
+  pl_val sw2 = hostcall(t2, "gpu.surface-open", args);
+  cr_assert_eq(witness_payload_u64(t2, sw2, "gpu.surface-open", 0), s1);
+  cr_assert_eq(witness_payload_u64(t2, sw2, "gpu.surface-open", 1), g1);
+
+  uint64_t regen[FRAMES_IN_FLIGHT];
+  for (int slot = 0; slot < FRAMES_IN_FLIGHT; slot++) {
+    uint64_t g = 0;
+    cr_assert_eq(alloc_bytes(t2, session, payload0, sizeof(payload0), &g),
+                 root_idx[slot]);
+    cr_assert_eq(g, root_gen0[slot]);
+    regen[slot] = g;
+  }
+
+  /* the frame loop again, witness for witness — this runtime holds no
+   * session, no surface, no drawable, yet every present answers */
+  for (int i = 0; i < FRAME_COUNT; i++) {
+    int slot = i % FRAMES_IN_FLIGHT;
+    if (i >= FRAMES_IN_FLIGHT) {
+      args = t2->vsp;
+      pl_vpush(t2, session);
+      pl_vpush(t2, present_event[i - FRAMES_IN_FLIGHT]);
+      cr_assert_eq(witness_payload_u64(t2, hostcall(t2, "gpu.wait", args),
+                                       "gpu.wait", 0),
+                   present_event[i - FRAMES_IN_FLIGHT]);
+    }
+
+    float payload[8];
+    memcpy(payload, payload0, sizeof(payload));
+    payload[5] = 0.125f * (float)i;
+    args = t2->vsp;
+    pl_vpush(t2, session);
+    pl_vpush(t2, pointer_record(t2, root_idx[slot], 0, sizeof(payload),
+                                regen[slot]));
+    pl_vpush(t2, bar_nat(t2, (const uint8_t*)payload, sizeof(payload)));
+    pl_val ww2 = hostcall(t2, "gpu.write", args);
+    cr_assert_eq(witness_payload_u64(t2, ww2, "gpu.write", 0), root_idx[slot]);
+    cr_assert_eq(witness_payload_u64(t2, ww2, "gpu.write", 1), write_gen[i]);
+    regen[slot] = write_gen[i];
+
+    args = t2->vsp;
+    pl_vpush(t2, graph_record(t2, 6, 1, 1, 0, 0));
+    pl_vpush(t2, session);
+    pl_vpush(t2, pipeline);
+    pl_vpush(t2, pass_desc(t2, target, 0xff000000u));
+    pl_vpush(t2, pointer_record(t2, root_idx[slot], 0, sizeof(payload),
+                                regen[slot]));
+    pl_vpush(t2, 0);
+    (void)witness_payload_u64(t2, hostcall(t2, "gpu.command-graph", args),
+                              "gpu.command-graph", 0);
+
+    args = t2->vsp;
+    pl_vpush(t2, session);
+    pl_vpush(t2, s1);
+    pl_vpush(t2, g1);
+    pl_val aw2 = hostcall(t2, "gpu.acquire", args);
+    cr_assert_eq(witness_payload_u64(t2, aw2, "gpu.acquire", 0), drawable[i]);
+    cr_assert_eq(witness_payload_u64(t2, aw2, "gpu.acquire", 1), g1);
+
+    args = t2->vsp;
+    pl_vpush(t2, session);
+    pl_vpush(t2, drawable[i]);
+    pl_vpush(t2, target);
+    pl_val pw2 = hostcall(t2, "gpu.present", args);
+    cr_assert_eq(witness_payload_u64(t2, pw2, "gpu.present", 0), s1);
+    cr_assert_eq(witness_payload_u64(t2, pw2, "gpu.present", 1), drawable[i]);
+    cr_assert_eq(witness_payload_u64(t2, pw2, "gpu.present", 2), g1);
+    cr_assert_eq(witness_payload_u64(t2, pw2, "gpu.present", 3),
+                 present_event[i]);
+  }
+
+  /* every recorded event but the live session-close was consumed */
+  cr_assert_eq(er_scheduler_log_cursor(sys2), events - 1);
+
+  pl_set_io_hook(NULL);
+  er_scheduler_free(sys2);
+  er_scheduler_free(sys);
+  er_log_free(log);
+  pl_catch_pop(t, &c);
+  test_rt_free(&rt2);
+  test_rt_free(&rt);
+}
+
+/* pipeline_request_raster2 with the writemask leg: the 4-field
+ * raster-state (depth-format, color-count, writemask-nibbles,
+ * reserved).  The mask is 4 bits per color target, low nibble =
+ * target 0, Metal bit order (Alpha=1, Blue=2, Green=4, Red=8);
+ * nibble 0 means full RGBA.  The mask joins the pipeline cache key. */
+static pl_val pipeline_request_raster4(pl_thread* t, pl_val msl_bar,
+                                       uint64_t stride, uint64_t depth_format,
+                                       uint64_t color_count, uint64_t wmask) {
+  size_t base = t->vsp;
+  pl_vpush(t, msl_bar); /* root the bar */
+  size_t f = t->vsp;
+  pl_vpush(t, t->vstack[base]);
+  pl_vpush(t, 1); /* language: msl */
+  pl_val art = record(t, "artifact", f);
+  pl_vpush(t, art); /* base+1 */
+  f = t->vsp;
+  pl_vpush(t, stride);
+  pl_vpush(t, 1); /* count */
+  pl_vpush(t, 0); /* segments */
+  pl_vpush(t, 1); /* mode: buffer */
+  pl_val layout = record(t, "root-layout", f);
+  pl_vpush(t, layout); /* base+2 */
+  f = t->vsp;
+  pl_vpush(t, depth_format);
+  pl_vpush(t, color_count);
+  pl_vpush(t, wmask);
+  pl_vpush(t, 0); /* reserved */
+  pl_val rast = record(t, "raster-state", f);
+  pl_vpush(t, rast); /* base+3 */
+  f = t->vsp;
+  pl_vpush(t, t->vstack[base + 1]);
+  pl_vpush(t, t->vstack[base + 2]);
+  pl_vpush(t, t->vstack[base + 3]);
+  pl_val req = record(t, "pipeline-request", f);
+  t->vsp = base;
+  return req;
+}
+
+/* pass-desc with TWO color attachments and no depth leg; the colors
+ * pair-list is built back to front, so color(0) heads the list. */
+static pl_val pass_desc_mrt(pl_thread* t, uint64_t target0, uint64_t target1,
+                            uint64_t clear_bgra8) {
+  size_t base = t->vsp;
+  pl_vpush(t, 0); /* colors list at base, built back to front */
+  for (int i = 0; i < 2; i++) {
+    size_t f = t->vsp;
+    pl_vpush(t, i == 0 ? target1 : target0);
+    pl_vpush(t, 1); /* load: clear */
+    pl_vpush(t, 1); /* store: store */
+    pl_vpush(t, clear_bgra8);
+    pl_val ca = record(t, "color-attachment", f);
+    pl_vpush(t, ca);
+    pl_vpush(t, t->vstack[base]);
+    t->vstack[base] = record(t, "pair", f);
+  }
+  size_t f = t->vsp;
+  pl_vpush(t, t->vstack[base]);
+  pl_vpush(t, 0); /* no depth attachment */
+  pl_vpush(t, 0); /* no ds-state */
+  pl_val pd = record(t, "pass-desc", f);
+  t->vsp = base;
+  return pd;
+}
+
+/*
+ * Format-parameterized sampled textures + the color write mask.  The
+ * R8 leg uploads a 2x2 single-channel diagonal (format 3, 1 byte/px)
+ * and samples it full-screen through the descriptor heap: r8 sampling
+ * yields (r, 0, 0, 1), so the quadrants land red/black/black/red.  A
+ * payload sized for 4 bytes/px refuses bounds (948); an unknown
+ * format refuses as carrier shape (951).  The writemask leg drives
+ * the exit-criterion MRT fragment under the 4-field raster-state: a
+ * full-mask control shows color(1) receives the channel-swapped twin
+ * (red quad -> blue), then a green-only mask on target 1 suppresses
+ * that write — blue has zero green, so the pixel stays the clear
+ * black.  The cache leg proves the mask joined the pipeline key: the
+ * same artifact+layout under wmask 0 and wmask 0x40 are both cold,
+ * and re-requesting the second is a hit.
+ */
+Test(hostcall, gfx_r8_texture_and_writemask) {
+  cr_assert(pl_host_gpu_metal_register());
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  t->hostcall_f = true;
+
+  pl_catch c;
+  pl_catch_init(t, &c);
+  if (setjmp(c.jb) != 0) {
+    pl_catch_unwind(t, &c);
+    cr_assert_fail("raise during r8/writemask slice: %s",
+                   t->exn_msg != NULL ? t->exn_msg : "PLAN exception");
+  }
+
+  size_t args = t->vsp;
+  pl_vpush(t, 0);
+  pl_val r = hostcall(t, "gpu.session-open", args);
+  if (refusal_kind(r, "gpu.session-open") == 943) {
+    cr_log_warn("no metal device; r8/writemask slice skipped");
+    test_rt_free(&rt);
+    return;
+  }
+  uint64_t session = witness_payload_u64(t, r, "gpu.session-open", 0);
+
+  args = t->vsp;
+  pl_vpush(t, session);
+  {
+    size_t f = t->vsp;
+    pl_vpush(t, 1);
+    pl_vpush(t, 65536);
+    pl_vpush(t, 0);
+    pl_vpush(t, record(t, "memory-arena", f));
+  }
+  (void)witness_payload_u64(t, hostcall(t, "gpu.arena", args), "gpu.arena", 0);
+
+  /* ── R8 leg ── */
+
+  /* 2x2 R8 diagonal: row 0 {255, 0}, row 1 {0, 255} — 1 byte/px */
+  static const uint8_t r8_texels[4] = {255, 0, 0, 255};
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, 2);
+  pl_vpush(t, 2);
+  pl_vpush(t, bar_nat(t, r8_texels, sizeof(r8_texels)));
+  pl_vpush(t, 3); /* r8 */
+  uint64_t r8_tex = witness_payload_u64(t, hostcall(t, "gpu.texture-2d", args),
+                                        "gpu.texture-2d", 0);
+
+  /* a payload sized w*h*4 for the 1-byte/px format refuses bounds */
+  static const uint8_t wrong[16] = {0};
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, 2);
+  pl_vpush(t, 2);
+  pl_vpush(t, bar_nat(t, wrong, sizeof(wrong)));
+  pl_vpush(t, 3); /* r8 */
+  cr_assert_eq(
+      refusal_kind(hostcall(t, "gpu.texture-2d", args), "gpu.texture-2d"),
+      948u);
+
+  /* an unknown format refuses as carrier shape */
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, 2);
+  pl_vpush(t, 2);
+  pl_vpush(t, bar_nat(t, r8_texels, sizeof(r8_texels)));
+  pl_vpush(t, 9);
+  cr_assert_eq(
+      refusal_kind(hostcall(t, "gpu.texture-2d", args), "gpu.texture-2d"),
+      951u);
+
+  args = t->vsp;
+  pl_vpush(t, session);
+  {
+    size_t f = t->vsp;
+    pl_vpush(t, 1); /* count */
+    pl_vpush(t, 1); /* stride-class: sampled */
+    pl_vpush(t, record(t, "descriptor-heap", f));
+  }
+  uint64_t dheap = witness_payload_u64(
+      t, hostcall(t, "gpu.descriptor-heap", args), "gpu.descriptor-heap", 0);
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, dheap);
+  pl_vpush(t, window_record(t, dheap, 0, 1));
+  pl_vpush(t, r8_tex);
+  (void)witness_payload_u64(t, hostcall(t, "gpu.descriptor-write", args),
+                            "gpu.descriptor-write", 0);
+
+  pl_val msl = bar_nat(t, (const uint8_t*)gfx_textured_msl,
+                       sizeof(gfx_textured_msl) - 1);
+  size_t keep = t->vsp;
+  pl_vpush(t, msl); /* root across calls */
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, t->vstack[keep]);
+  (void)witness_payload_u64(t, hostcall(t, "gpu.library", args), "gpu.library",
+                            0);
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, t->vstack[keep]);
+  uint64_t sampler_pipe = witness_payload_u64(
+      t, hostcall(t, "gpu.pipeline-render", args), "gpu.pipeline-render", 0);
+
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, GFX_W);
+  pl_vpush(t, GFX_H);
+  pl_vpush(t, 1); /* bgra8 */
+  uint64_t r8_target =
+      witness_payload_u64(t, hostcall(t, "gpu.target", args), "gpu.target", 0);
+
+  /* full-target quad; color field unused by the textured artifact */
+  float payload[8] = {0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+  uint64_t root_gen = 0;
+  uint64_t root_idx =
+      alloc_bytes(t, session, payload, sizeof(payload), &root_gen);
+
+  args = t->vsp;
+  pl_vpush(t, graph_record(t, 6, 1, 1, 0, 0));
+  pl_vpush(t, session);
+  pl_vpush(t, sampler_pipe);
+  pl_vpush(t, pass_desc(t, r8_target, 0xff000000u));
+  pl_vpush(t, pointer_record(t, root_idx, 0, sizeof(payload), root_gen));
+  pl_vpush(t, dheap);
+  (void)witness_payload_u64(t, hostcall(t, "gpu.command-graph", args),
+                            "gpu.command-graph", 0);
+
+  /* quadrant centers: r8 sampling yields (r, 0, 0, 1) */
+  static const struct {
+    uint64_t x, y;
+    uint64_t bgra;
+  } probes[4] = {
+      {GFX_W / 4, GFX_H / 4, 0xffff0000u},         /* 255 -> red */
+      {3 * GFX_W / 4, GFX_H / 4, 0xff000000u},     /* 0 -> black */
+      {GFX_W / 4, 3 * GFX_H / 4, 0xff000000u},     /* 0 -> black */
+      {3 * GFX_W / 4, 3 * GFX_H / 4, 0xffff0000u}, /* 255 -> red */
+  };
+  for (int i = 0; i < 4; i++) {
+    uint64_t pixel =
+        readback_pixel(t, session, r8_target, probes[i].x, probes[i].y);
+    cr_assert_eq(pixel, probes[i].bgra, "r8 quadrant %d: got %08llx", i,
+                 (unsigned long long)pixel);
+  }
+
+  /* ── Writemask + cache leg ── */
+
+  t->vstack[keep] = bar_nat(t, (const uint8_t*)gfx_exit_mrt_msl,
+                            sizeof(gfx_exit_mrt_msl) - 1);
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, t->vstack[keep]);
+  (void)witness_payload_u64(t, hostcall(t, "gpu.library", args), "gpu.library",
+                            0);
+
+  /* full-mask control: cold */
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, pipeline_request_raster4(t, t->vstack[keep], 32, 0, 2, 0));
+  pl_val fw = hostcall(t, "gpu.pipeline-render", args);
+  uint64_t full_pipe = witness_payload_u64(t, fw, "gpu.pipeline-render", 0);
+  cr_assert_eq(witness_payload_u64(t, fw, "gpu.pipeline-render", 1), 0u);
+
+  /* target 0 full (nibble 0), target 1 green-only (0x4): a DIFFERENT
+   * key — cold again, so the mask demonstrably joined the key */
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, pipeline_request_raster4(t, t->vstack[keep], 32, 0, 2, 0x4 << 4));
+  pl_val mw = hostcall(t, "gpu.pipeline-render", args);
+  uint64_t mask_pipe = witness_payload_u64(t, mw, "gpu.pipeline-render", 0);
+  cr_assert_eq(witness_payload_u64(t, mw, "gpu.pipeline-render", 1), 0u);
+
+  /* the same masked request again: a hit */
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, pipeline_request_raster4(t, t->vstack[keep], 32, 0, 2, 0x4 << 4));
+  pl_val mw2 = hostcall(t, "gpu.pipeline-render", args);
+  cr_assert_eq(witness_payload_u64(t, mw2, "gpu.pipeline-render", 1), 1u);
+
+  /* four bgra8 attachments: a control pair and a masked pair */
+  uint64_t targets[4];
+  for (int i = 0; i < 4; i++) {
+    args = t->vsp;
+    pl_vpush(t, session);
+    pl_vpush(t, GFX_W);
+    pl_vpush(t, GFX_H);
+    pl_vpush(t, 1); /* bgra8 */
+    targets[i] = witness_payload_u64(t, hostcall(t, "gpu.target", args),
+                                     "gpu.target", 0);
+  }
+
+  /* one RED quad; the MRT fragment writes color(0) = red and
+   * color(1) = the channel-swapped twin (blue) */
+  float red_quad[8] = {0.25f, 0.25f, 0.5f, 0.5f, 1.0f, 0.0f, 0.0f, 1.0f};
+  uint64_t red_gen = 0;
+  uint64_t red_idx =
+      alloc_bytes(t, session, red_quad, sizeof(red_quad), &red_gen);
+
+  /* control: full mask on both targets */
+  args = t->vsp;
+  pl_vpush(t, graph_record(t, 6, 1, 1, 0, 0));
+  pl_vpush(t, session);
+  pl_vpush(t, full_pipe);
+  pl_vpush(t, pass_desc_mrt(t, targets[0], targets[1], 0xff000000u));
+  pl_vpush(t, pointer_record(t, red_idx, 0, sizeof(red_quad), red_gen));
+  pl_vpush(t, 0);
+  (void)witness_payload_u64(t, hostcall(t, "gpu.command-graph", args),
+                            "gpu.command-graph", 0);
+  cr_assert_eq(readback_pixel(t, session, targets[0], GFX_W / 2, GFX_H / 2),
+               0xffff0000u); /* color(0): red */
+  cr_assert_eq(readback_pixel(t, session, targets[1], GFX_W / 2, GFX_H / 2),
+               0xff0000ffu); /* color(1): swapped red = blue */
+
+  /* masked: green-only on target 1 — the swapped twin is blue, its
+   * green channel is zero, so the write lands nothing: the pixel
+   * stays the clear black although the control just proved the
+   * fragment produces blue there */
+  args = t->vsp;
+  pl_vpush(t, graph_record(t, 6, 1, 1, 0, 0));
+  pl_vpush(t, session);
+  pl_vpush(t, mask_pipe);
+  pl_vpush(t, pass_desc_mrt(t, targets[2], targets[3], 0xff000000u));
+  pl_vpush(t, pointer_record(t, red_idx, 0, sizeof(red_quad), red_gen));
+  pl_vpush(t, 0);
+  (void)witness_payload_u64(t, hostcall(t, "gpu.command-graph", args),
+                            "gpu.command-graph", 0);
+  cr_assert_eq(readback_pixel(t, session, targets[2], GFX_W / 2, GFX_H / 2),
+               0xffff0000u); /* target 0 nibble 0 = full RGBA: red */
+  uint64_t masked =
+      readback_pixel(t, session, targets[3], GFX_W / 2, GFX_H / 2);
+  cr_assert_eq(masked, 0xff000000u,
+               "green-only mask: target 1 center %08llx, want clear black",
+               (unsigned long long)masked);
+  cr_assert_eq(readback_pixel(t, session, targets[3], 1, 1), 0xff000000u);
+
+  args = t->vsp;
+  pl_vpush(t, session);
+  cr_assert_not_null(result_row(hostcall(t, "gpu.session-close", args),
+                                "witness", "gpu.session-close"));
+  pl_catch_pop(t, &c);
+  test_rt_free(&rt);
+}
+
+/*
+ * A GPU-written descriptor: descriptors are bytes in an admitted
+ * buffer, so a kernel can mint one on device.  The descriptor heap is
+ * bound at COMPUTE buffer index 2 (the gm_command_graph compute path);
+ * the kernel copies heap[0] — the host-written quadrant-texture
+ * descriptor — into heap[1], which the host never wrote.  A render
+ * graph waits the compute signal (the Gap 8 consumer half) and
+ * samples heap[1] full-screen: the quadrant pixels arriving through
+ * index 1 prove the sampled descriptor was GPU-minted bytes, not a
+ * host binding call.
+ */
+static const char gfx_heap_copy_msl[] =
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "kernel void shrine_heap_copy(uint tid [[thread_position_in_grid]],\n"
+    "                             const device ulong* root [[buffer(0)]],\n"
+    "                             device ulong* heap [[buffer(2)]]) {\n"
+    "  (void)root;\n"
+    "  if (tid != 0) return;\n"
+    "  heap[1] = heap[0];\n"
+    "}\n";
+
+/* gfx_textured_msl reading heap index 1 instead of 0. */
+static const char gfx_textured1_msl[] =
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "struct Row { float4 box; float4 color; };\n"
+    "struct DHeap { texture2d<float> tex; };\n"
+    "struct VOut { float4 pos [[position]]; float2 uv; };\n"
+    "vertex VOut shrine_vertex(uint vid [[vertex_id]],\n"
+    "                          uint iid [[instance_id]],\n"
+    "                          const device Row* rows [[buffer(0)]]) {\n"
+    "  Row r = rows[iid];\n"
+    "  float2 c[6] = {\n"
+    "      float2(r.box.x, r.box.y),\n"
+    "      float2(r.box.x + r.box.z, r.box.y),\n"
+    "      float2(r.box.x, r.box.y + r.box.w),\n"
+    "      float2(r.box.x + r.box.z, r.box.y),\n"
+    "      float2(r.box.x + r.box.z, r.box.y + r.box.w),\n"
+    "      float2(r.box.x, r.box.y + r.box.w),\n"
+    "  };\n"
+    "  float2 p = c[vid];\n"
+    "  VOut o;\n"
+    "  o.pos = float4(p.x * 2.0 - 1.0, 1.0 - p.y * 2.0, 0.0, 1.0);\n"
+    "  o.uv = (p - r.box.xy) / r.box.zw;\n"
+    "  return o;\n"
+    "}\n"
+    "fragment float4 shrine_fragment(VOut in [[stage_in]],\n"
+    "                                const device DHeap* heap [[buffer(1)]]) "
+    "{\n"
+    "  constexpr sampler s(filter::nearest);\n"
+    "  return heap[1].tex.sample(s, in.uv);\n"
+    "}\n";
+
+Test(hostcall, gfx_gpu_written_descriptor) {
+  cr_assert(pl_host_gpu_metal_register());
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  t->hostcall_f = true;
+
+  pl_catch c;
+  pl_catch_init(t, &c);
+  if (setjmp(c.jb) != 0) {
+    pl_catch_unwind(t, &c);
+    cr_assert_fail("raise during gpu-descriptor slice: %s",
+                   t->exn_msg != NULL ? t->exn_msg : "PLAN exception");
+  }
+
+  size_t args = t->vsp;
+  pl_vpush(t, 0);
+  pl_val r = hostcall(t, "gpu.session-open", args);
+  if (refusal_kind(r, "gpu.session-open") == 943) {
+    cr_log_warn("no metal device; gpu-descriptor slice skipped");
+    test_rt_free(&rt);
+    return;
+  }
+  uint64_t session = witness_payload_u64(t, r, "gpu.session-open", 0);
+
+  args = t->vsp;
+  pl_vpush(t, session);
+  {
+    size_t f = t->vsp;
+    pl_vpush(t, 1);
+    pl_vpush(t, 65536);
+    pl_vpush(t, 0);
+    pl_vpush(t, record(t, "memory-arena", f));
+  }
+  (void)witness_payload_u64(t, hostcall(t, "gpu.arena", args), "gpu.arena", 0);
+
+  /* 2x2 BGRA8 quadrants: TL red, TR green, BL blue, BR white */
+  static const uint8_t texels[16] = {
+      0,   0, 255, 255, 0,   255, 0,   255, /* row 0: red, green */
+      255, 0, 0,   255, 255, 255, 255, 255, /* row 1: blue, white */
+  };
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, 2);
+  pl_vpush(t, 2);
+  pl_vpush(t, bar_nat(t, texels, sizeof(texels)));
+  pl_vpush(t, 1); /* bgra8 */
+  uint64_t texture = witness_payload_u64(t, hostcall(t, "gpu.texture-2d", args),
+                                         "gpu.texture-2d", 0);
+
+  /* two descriptor slots: the host writes index 0 only — index 1
+   * stays the zeroed bytes until the kernel mints it */
+  args = t->vsp;
+  pl_vpush(t, session);
+  {
+    size_t f = t->vsp;
+    pl_vpush(t, 2); /* count */
+    pl_vpush(t, 1); /* stride-class: sampled */
+    pl_vpush(t, record(t, "descriptor-heap", f));
+  }
+  uint64_t dheap = witness_payload_u64(
+      t, hostcall(t, "gpu.descriptor-heap", args), "gpu.descriptor-heap", 0);
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, dheap);
+  pl_vpush(t, window_record(t, dheap, 0, 1));
+  pl_vpush(t, texture);
+  (void)witness_payload_u64(t, hostcall(t, "gpu.descriptor-write", args),
+                            "gpu.descriptor-write", 0);
+
+  /* the copier kernel; its root is unused but the root discipline
+   * still demands an admitted window */
+  pl_val msl = bar_nat(t, (const uint8_t*)gfx_heap_copy_msl,
+                       sizeof(gfx_heap_copy_msl) - 1);
+  size_t keep = t->vsp;
+  pl_vpush(t, msl); /* root across calls */
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, t->vstack[keep]);
+  (void)witness_payload_u64(t, hostcall(t, "gpu.library", args), "gpu.library",
+                            0);
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, t->vstack[keep]);
+  uint64_t kernel = witness_payload_u64(
+      t, hostcall(t, "gpu.pipeline-compute", args), "gpu.pipeline-compute", 0);
+
+  uint8_t croot[8] = {0};
+  uint64_t croot_gen = 0;
+  uint64_t croot_idx =
+      alloc_bytes(t, session, croot, sizeof(croot), &croot_gen);
+
+  /* one {1,1,1,1} dispatch with the descriptor heap bound: the kernel
+   * writes heap[1] = heap[0] on device */
+  args = t->vsp;
+  pl_vpush(t, graph_compute_record(t, 1, 1, 1, 1, 1, 0, 0));
+  pl_vpush(t, session);
+  pl_vpush(t, kernel);
+  pl_vpush(t, 0); /* compute graph takes no target */
+  pl_vpush(t, pointer_record(t, croot_idx, 0, sizeof(croot), croot_gen));
+  pl_vpush(t, dheap);
+  pl_val cw = hostcall(t, "gpu.command-graph", args);
+  cr_assert_eq(witness_payload_u64(t, cw, "gpu.command-graph", 0), 1u);
+  uint64_t sig_copy = witness_payload_u64(t, cw, "gpu.command-graph", 2);
+
+  /* the heap[1] sampler */
+  t->vstack[keep] = bar_nat(t, (const uint8_t*)gfx_textured1_msl,
+                            sizeof(gfx_textured1_msl) - 1);
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, t->vstack[keep]);
+  (void)witness_payload_u64(t, hostcall(t, "gpu.library", args), "gpu.library",
+                            0);
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, t->vstack[keep]);
+  uint64_t pipeline = witness_payload_u64(
+      t, hostcall(t, "gpu.pipeline-render", args), "gpu.pipeline-render", 0);
+
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, GFX_W);
+  pl_vpush(t, GFX_H);
+  pl_vpush(t, 1); /* bgra8 */
+  uint64_t target =
+      witness_payload_u64(t, hostcall(t, "gpu.target", args), "gpu.target", 0);
+
+  /* full-target quad; color field unused by the textured artifact */
+  float payload[8] = {0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+  uint64_t root_gen = 0;
+  uint64_t root_idx =
+      alloc_bytes(t, session, payload, sizeof(payload), &root_gen);
+
+  /* the render waits the copy's signal value: heap[1] holds the
+   * GPU-minted descriptor before any fragment reads it */
+  args = t->vsp;
+  pl_vpush(t, graph_record(t, 6, 1, 1, 0, sig_copy));
+  pl_vpush(t, session);
+  pl_vpush(t, pipeline);
+  pl_vpush(t, pass_desc(t, target, 0xff000000u));
+  pl_vpush(t, pointer_record(t, root_idx, 0, sizeof(payload), root_gen));
+  pl_vpush(t, dheap);
+  pl_val dw = hostcall(t, "gpu.command-graph", args);
+  cr_assert_eq(witness_payload_u64(t, dw, "gpu.command-graph", 0), 1u);
+  cr_assert_gt(witness_payload_u64(t, dw, "gpu.command-graph", 2), sig_copy);
+
+  /* quadrant centers sampled through the descriptor the GPU wrote */
+  static const struct {
+    uint64_t x, y;
+    uint64_t bgra;
+  } probes[4] = {
+      {GFX_W / 4, GFX_H / 4, 0xffff0000u},         /* red */
+      {3 * GFX_W / 4, GFX_H / 4, 0xff00ff00u},     /* green */
+      {GFX_W / 4, 3 * GFX_H / 4, 0xff0000ffu},     /* blue */
+      {3 * GFX_W / 4, 3 * GFX_H / 4, 0xffffffffu}, /* white */
+  };
+  for (int i = 0; i < 4; i++) {
+    uint64_t pixel =
+        readback_pixel(t, session, target, probes[i].x, probes[i].y);
+    cr_assert_eq(pixel, probes[i].bgra,
+                 "gpu-descriptor quadrant %d: got %08llx", i,
+                 (unsigned long long)pixel);
   }
 
   args = t->vsp;

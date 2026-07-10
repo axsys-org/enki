@@ -571,9 +571,12 @@ compiled out (or on a 943 no-device machine); (2) divergence (edited args) abort
 > store DONT-CARE with correct color; raster-state pipeline carries Depth32Float) and
 > **draw-indexed landed** (kind 5 `{index-ptr icount instances u16|u32}`, window validated
 > via gm_pointer with 948/952 refusal legs — `gfx_indexed_draw_through_complement`).
-> 18/18 fixtures.  **Remaining (phase 3)**: formats R8/RGBA8/RGBA16F, per-target
-> writemasks, private/placed textures, cull/topology/MSAA/blend in raster-state,
-> two-raster-states cache fixture.
+> 18/18 fixtures.  **Phase 3 (2026-07-10)**: sampled formats {bgra8, rgba8, r8,
+> rgba16f} on gpu.texture-2d (w*h*bpp validated); per-target writemasks (raster-state
+> 4-field variant, nibble per target in Metal bit order, joins the pipeline key —
+> control-vs-masked pixel proof); two-raster-states cache fixture (cold/cold/hit).
+> **Still deferred**: cull/topology/MSAA/blend raster fields, private/placed textures
+> (with the MoltenVK lane).
 
 - **`pass-desc` carrier** replacing the bare target arg on `gpu.command-graph`:
   `pass-desc (color-attachments depth-attachment ds-state k)`; each color attachment
@@ -639,8 +642,11 @@ cold then hit; (2) a constant-branched kernel produces the constant-selected byt
 > args pointer complements, 20-byte 4-aligned window, u16|u32) lowered to
 > `drawIndexedPrimitives:indirectBuffer:`; exercised by the exit-criterion fixture with
 > **GPU-written args** (a constants-specialized compute stage writes indexCount/
-> instanceCount on device).  Remaining: GPU-written descriptor fixture (adopt the
-> no_api set0-sampled/set1-storage split), meshlets.
+> instanceCount on device).  **GPU-written descriptors landed 2026-07-10**
+> (`gfx_gpu_written_descriptor`: a compute kernel copies heap[0]→heap[1] in the
+> argument buffer; a render waiting its signal samples through the slot the host
+> never wrote).  Remaining: the no_api set0/set1 two-heap split as a refinement,
+> meshlets (consumer-gated).
 
 - `draw-indexed-indirect` (kind 6): args window validated like dispatch-indirect
   (stale 950 / bounds-alignment 948), lowered to
@@ -718,9 +724,11 @@ mirror enki-main's carriers: acquire = (drawable, surface-gen, w, h); present =
 `gfx_present_blits_and_consumes_drawable`: full live flow incl. resize/stale/extent
 refusals; 947 skip guard for drawable-less CI.  21/21 fixtures.
 
-**Remaining**: frame-loop pacing fixture (N frames in flight via gpu.wait), present
-record/replay assertion (the op-83 hook already covers it), embedder-injected layer
-seam, per-observer dirty (needs ACS/bytemaps — the Rex-era lane).
+**Pacing + replay landed 2026-07-10** (`gfx_frame_loop_paces_and_replays`: six frames,
+two in flight via gpu.wait, per-frame roots via gpu.write consume-and-mint — the
+bump-allocator pattern — recorded live, then the whole paced loop **replayed on a fresh
+runtime with no drawable and no GPU**, every witness identical).  Remaining:
+embedder-injected layer seam, per-observer dirty (ACS/bytemaps — the Rex-era lane).
 
 ---
 
