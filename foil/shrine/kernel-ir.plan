@@ -302,3 +302,164 @@
     out(Ix 2 done)
     (Trace (Add (Mul (cksum-go out 0 0) 256) 2)
       (Trace (Add (Mul (cksum-go out 32 0) 256) 2) 0)))))
+
+; ── Gap 20: the foil-msl lowering law ──────────────────────────────────
+; The same IR, lowered to MSL text: buffers chased from root device
+; addresses (b[tid*stride + idx]), registers as float locals, value
+; consts decoded from zigzag to signed literals.  One kernel object,
+; three tiers: interpreted above, lowered here, C-referenced in the
+; fixture.
+
+(#bind Bytes (#pin (#law "Bytes" (Bytes x) ((#pin "B") ("Bytes" x)))))
+(#bind Trunc (#pin (#law "Trunc" (Trunc w x) ((#pin "B") ("Trunc" w x)))))
+(#bind Lsh (#pin (#law "Lsh" (Lsh a b) ((#pin "B") ("Lsh" a b)))))
+
+(#bind bar
+  (#pin (#law "bar" (bar bytes)
+    (Add bytes (Lsh 1 (Mul 8 (Bytes bytes)))))))
+
+(#bind bar-len
+  (#pin (#law "bar-len" (bar-len b) (Dec (Bytes b)))))
+
+(#bind bar-data
+  (#pin (#law "bar-data" (bar-data b)
+    (Trunc (Mul 8 (bar-len b)) b))))
+
+(#bind bar-weld
+  (#pin (#law "bar-weld" (bar-weld a b)
+    (bar (Add (bar-data a)
+              (Lsh (bar-data b) (Mul 8 (bar-len a))))))))
+
+(#bind ch (#pin (#law "ch" (ch d) (bar (Add 48 d)))))
+
+(#bind digits
+  (#pin (#law "digits" (digits n)
+    (Ifz (Div n 10) (ch (Mod n 10))
+      (bar-weld (digits (Div n 10)) (ch (Mod n 10)))))))
+
+; zigzag value const -> "N.0f" | "-N.0f"
+(#bind fnum
+  (#pin (#law "fnum" (fnum z)
+    m(digits (zz-mag z))
+    (Ifz (zz-sgn z)
+      (bar-weld m (bar ".0f"))
+      (bar-weld (bar "-") (bar-weld m (bar ".0f")))))))
+
+; value ref -> text
+(#bind vtext
+  (#pin (#law "vtext" (vtext r)
+    k(Mod r 4) v(Div r 4)
+    (Ifz k (fnum v)
+      (Ifz (Sub k 1)
+        (bar-weld (bar "r") (digits v))
+        (bar "((float)tid)"))))))
+
+; index ref -> text (raw, not zigzag)
+(#bind itext
+  (#pin (#law "itext" (itext r)
+    k(Mod r 4) v(Div r 4)
+    (Ifz k (digits v)
+      (Ifz (Sub k 1)
+        (bar-weld (bar "(uint)r") (digits v))
+        (bar "tid"))))))
+
+; buffer access text: b{slot}[tid*{stride}u + {idx}]
+(#bind btext
+  (#pin (#law "btext" (btext ir a b)
+    bslot(Div a 4)
+    stride(Ix bslot (Ix 2 ir))
+    pre(bar-weld (bar "b") (bar-weld (digits bslot) (bar "[")))
+    idx(itext b)
+    (Ifz stride
+      (bar-weld pre (bar-weld idx (bar "]")))
+      (bar-weld pre
+        (bar-weld (bar "tid*")
+          (bar-weld (digits stride)
+            (bar-weld (bar "u + ") (bar-weld idx (bar "]"))))))))))
+
+(#bind rtext
+  (#pin (#law "rtext" (rtext d) (bar-weld (bar "r") (digits d)))))
+
+(#bind asn
+  (#pin (#law "asn" (asn d rhs)
+    (bar-weld (rtext d)
+      (bar-weld (bar " = ") (bar-weld rhs (bar ";
+")))))))
+
+(#bind binop
+  (#pin (#law "binop" (binop d a opc b)
+    (asn d (bar-weld (vtext a) (bar-weld opc (vtext b)))))))
+
+(#bind step-text
+  (#pin (#law "step-text" (step-text ir st)
+    kind(Ix 0 st) dest(Ix 1 st)
+    a(Ix 2 st) b(Ix 3 st) c(Ix 4 st)
+    (Ifz kind (asn dest (vtext a))
+      (Ifz (Sub kind 1)
+        (asn dest (btext ir a b))
+      (Ifz (Sub kind 2)
+        (bar-weld (btext ir a b)
+          (bar-weld (bar " = ") (bar-weld (vtext c) (bar ";
+"))))
+      (Ifz (Sub kind 3) (binop dest a (bar " + ") b)
+      (Ifz (Sub kind 4) (binop dest a (bar " * ") b)
+      (Ifz (Sub kind 5)
+        (asn dest (bar-weld (bar "-(") (bar-weld (vtext a) (bar ")"))))
+      (Ifz (Sub kind 6)
+        (asn dest
+          (bar-weld (bar "(")
+            (bar-weld (vtext a)
+              (bar-weld (bar " >= ")
+                (bar-weld (vtext b) (bar ") ? 1.0f : 0.0f"))))))
+      (Ifz (Sub kind 7)
+        (asn dest
+          (bar-weld (bar "(")
+            (bar-weld (vtext a)
+              (bar-weld (bar " != 0.0f) ? ")
+                (bar-weld (vtext b)
+                  (bar-weld (bar " : ") (vtext c)))))))
+        (bar-weld (bar "if (")
+          (bar-weld (vtext a) (bar " != 0.0f) return;
+"))))))))))))))
+
+(#bind steps-go
+  (#pin (#law "steps-go" (steps-go ir i)
+    n(Ix 1 ir)
+    (Ifz (Sub n i) (bar "")
+      (bar-weld (step-text ir (Ix i (Ix 0 ir)))
+                (steps-go ir (Add i 1)))))))
+
+(#bind bufdecl-go
+  (#pin (#law "bufdecl-go" (bufdecl-go i)
+    (Ifz (Sub 4 i) (bar "")
+      (bar-weld (bar "device float* b")
+        (bar-weld (digits i)
+          (bar-weld (bar " = (device float*)(d->b")
+            (bar-weld (digits i)
+              (bar-weld (bar ");
+") (bufdecl-go (Add i 1)))))))))))
+
+(#bind regdecl-go
+  (#pin (#law "regdecl-go" (regdecl-go n i)
+    (Ifz (Sub n i) (bar "")
+      (bar-weld (bar "float r")
+        (bar-weld (digits i)
+          (bar-weld (bar " = 0.0f;
+") (regdecl-go n (Add i 1)))))))))
+
+(#bind lower-msl
+  (#pin (#law "lower-msl" (lower-msl ir)
+    (bar-weld (bar "#include <metal_stdlib>
+using namespace metal;
+struct Root { ulong b0; ulong b1; ulong b2; ulong b3; uint count; };
+kernel void shrine_kernel_ir(uint tid [[thread_position_in_grid]], const device Root* d [[buffer(0)]]) {
+if (tid >= d->count) return;
+")
+      (bar-weld (bufdecl-go 0)
+        (bar-weld (regdecl-go (Ix 3 ir) 0)
+          (bar-weld (steps-go ir 0) (bar "}
+"))))))))
+
+(#bind lower
+  (#pin (#law "lower" (lower args)
+    (Trace (lower-msl (sandwich-ir 0)) 0))))

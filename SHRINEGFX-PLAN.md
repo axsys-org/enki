@@ -794,6 +794,16 @@ no GPU needed).
 
 ### Gap 20 — the foil-msl lowering law + differential fixture
 
+> **Status: ✅ CORE DONE (2026-07-10)** — `lower-msl` in kernel-ir.plan walks the same
+> IR and welds a 109 KB unrolled MSL kernel (buffers chased from root device
+> addresses, registers as locals, zigzag consts as signed literals; 2.3s law run).
+> Fixture `gfx_kernel_ir_lowering_three_tier`: the law-lowered artifact compiles and
+> dispatches on Metal and its row checksums (302828, 486636) equal the PLAN
+> interpreter's and the C reference's EXACTLY — one kernel object, three agreeing
+> tiers.  26/26 fixtures.  Criterion 3 adjusted: `psa-emitter.plan`'s loop-form weld
+> stays as the production kernel; the IR lowering is the canonical path (the
+> string-paste residue is superseded, full replacement optional).
+
 A law lowers kernel-ir to MSL text (reusing the bar-weld machinery), emitting the same
 artifact shape the jets already consume; the artifact pins, compiles, and dispatches
 through the unchanged command graph.  *Pass criteria*: (1) lowered-artifact GPU output

@@ -5242,4 +5242,245 @@ Test(hostcall, gfx_gpu_written_descriptor) {
   test_rt_free(&rt);
 }
 
+/*
+ * Gap 20: one kernel object, three tiers.  foil/shrine/kernel-ir.plan
+ * holds ONE kernel-ir carrier; the "main" fn interprets it by law (the
+ * audit tier, matched against the C reference in
+ * kernel_ir_interpreter_matches_c_reference), and the "lower" fn lowers
+ * the SAME carrier to MSL text by law.  This test runs the law-lowered
+ * artifact on hardware over the same small-integer vectors (f32-exact
+ * by construction) and demands the same two row checksums — tier
+ * equality, no kernel with a second source of truth.
+ */
+
+/* decimal string -> little-endian bytes, 18 digits per pass over
+ * 64-bit limbs: the lowered artifact bar is ~263k digits, and the
+ * emitter test's byte-at-a-time decoder is quadratic — minutes at
+ * -O0 on a bar this size. */
+static size_t decimal_to_bytes_big(const char* dec, uint8_t* out, size_t cap) {
+  size_t dl = 0;
+  while (dec[dl] >= '0' && dec[dl] <= '9')
+    dl++;
+  size_t limb_cap = cap / 8 + 2;
+  uint64_t* limbs = calloc(limb_cap, 8);
+  if (limbs == NULL)
+    return 0;
+  size_t nl = 0, pos = 0;
+  while (pos < dl) {
+    size_t take = dl - pos;
+    if (take > 18)
+      take = 18;
+    uint64_t chunk = 0, mul = 1;
+    for (size_t i = 0; i < take; i++) {
+      chunk = chunk * 10 + (uint64_t)(dec[pos + i] - '0');
+      mul *= 10;
+    }
+    unsigned __int128 carry = chunk;
+    for (size_t i = 0; i < nl; i++) {
+      unsigned __int128 v = (unsigned __int128)limbs[i] * mul + carry;
+      limbs[i] = (uint64_t)v;
+      carry = v >> 64;
+    }
+    while (carry != 0 && nl < limb_cap) {
+      limbs[nl++] = (uint64_t)carry;
+      carry >>= 64;
+    }
+    pos += take;
+  }
+  size_t n = nl * 8;
+  while (n > 0 && (uint8_t)(limbs[(n - 1) / 8] >> (8 * ((n - 1) % 8))) == 0)
+    n--;
+  if (n > cap)
+    n = cap;
+  memset(out, 0, cap);
+  for (size_t i = 0; i < n; i++)
+    out[i] = (uint8_t)(limbs[i / 8] >> (8 * (i % 8)));
+  free(limbs);
+  return n;
+}
+
+Test(hostcall, gfx_kernel_ir_lowering_three_tier) {
+  cr_assert(pl_host_gpu_metal_register());
+
+  const char* bin = getenv("ENKI_WISP_BIN");
+  if (bin == NULL || bin[0] == '\0')
+    cr_skip("ENKI_WISP_BIN not set; kernel-ir lowering fixture skipped");
+  char cmd[512];
+  (void)snprintf(cmd, sizeof(cmd), "%s foil/shrine kernel-ir lower 2>&1", bin);
+  FILE* p = popen(cmd, "r");
+  cr_assert_not_null(p, "failed to exec %s", cmd);
+  enum { OUT_CAP = 1 << 19 }; /* the artifact bar alone is ~263k digits */
+  char* out = malloc(OUT_CAP);
+  cr_assert_not_null(out);
+  size_t got = fread(out, 1, OUT_CAP - 1, p);
+  out[got] = '\0';
+  int st = pclose(p);
+  cr_assert_eq(st, 0, "kernel-ir lower exited %d", st);
+
+  /* the one substantive pure-digit line is the MSL artifact bar */
+  char* digit_lines[8] = {0};
+  int nd = 0;
+  for (char* line = strtok(out, "\n"); line != NULL;
+       line = strtok(NULL, "\n")) {
+    size_t len = strlen(line);
+    if (len == 0)
+      continue;
+    bool digits = true;
+    for (size_t i = 0; i < len; i++)
+      if (line[i] < '0' || line[i] > '9')
+        digits = false;
+    if (digits && nd < 8)
+      digit_lines[nd++] = line;
+  }
+  cr_assert_geq(nd, 1, "expected the artifact trace line, got %d", nd);
+  /* lower returns 0 which may print as a final "0" line */
+  if (nd > 1 && strcmp(digit_lines[nd - 1], "0") == 0)
+    nd--;
+  char* artifact_line = digit_lines[nd - 1];
+
+  /* decode the law-lowered artifact (bar: payload + 0x01 terminator) */
+  enum { MSL_CAP = 262144 };
+  uint8_t* msl_bytes = malloc(MSL_CAP);
+  cr_assert_not_null(msl_bytes);
+  size_t msl_n = decimal_to_bytes_big(artifact_line, msl_bytes, MSL_CAP);
+  cr_assert_gt(msl_n, 100000);
+  cr_assert_eq(msl_bytes[msl_n - 1], 0x01, "missing bar terminator");
+  msl_n -= 1;
+  msl_bytes[msl_n] = '\0'; /* the terminator slot, so strstr works */
+  cr_assert_eq(memcmp(msl_bytes, "#include", 8), 0,
+               "artifact does not start with the include line");
+  cr_assert_not_null(strstr((const char*)msl_bytes, "shrine_kernel_ir"),
+                     "artifact lacks the shrine_kernel_ir entry point");
+
+  /* the third tier: run the law-lowered artifact on hardware */
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  t->hostcall_f = true;
+  pl_catch c;
+  pl_catch_init(t, &c);
+  if (setjmp(c.jb) != 0) {
+    pl_catch_unwind(t, &c);
+    cr_assert_fail("raise during lowering slice: %s",
+                   t->exn_msg != NULL ? t->exn_msg : "PLAN exception");
+  }
+
+  size_t args = t->vsp;
+  pl_vpush(t, 0);
+  pl_val r = hostcall(t, "gpu.session-open", args);
+  if (refusal_kind(r, "gpu.session-open") == 943) {
+    cr_log_warn("no metal device; lowering slice skipped");
+    free(out);
+    free(msl_bytes);
+    test_rt_free(&rt);
+    return;
+  }
+  uint64_t session = witness_payload_u64(t, r, "gpu.session-open", 0);
+
+  args = t->vsp;
+  pl_vpush(t, session);
+  {
+    size_t f = t->vsp;
+    pl_vpush(t, 1);
+    pl_vpush(t, 1048576);
+    pl_vpush(t, 0);
+    pl_vpush(t, record(t, "memory-arena", f));
+  }
+  (void)witness_payload_u64(t, hostcall(t, "gpu.arena", args), "gpu.arena", 0);
+
+  pl_val msl = bar_nat(t, msl_bytes, msl_n);
+  size_t keep = t->vsp;
+  pl_vpush(t, msl);
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, t->vstack[keep]);
+  (void)witness_payload_u64(t, hostcall(t, "gpu.library", args), "gpu.library",
+                            0);
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, t->vstack[keep]);
+  uint64_t kernel = witness_payload_u64(
+      t, hostcall(t, "gpu.pipeline-compute", args), "gpu.pipeline-compute", 0);
+
+  /* the interpreter's fixed small-integer vectors, as exact f32.
+   * Buffer slots per the IR: 0 = m (shared, 32) | 1 = x | 2 = out |
+   * 3 = scratch (per-thread stride 32, 64 each) */
+  float m[32], x[64];
+  for (int i = 0; i < 32; i++)
+    m[i] = (float)(((7 * i) % 11) - 5);
+  for (int j = 0; j < 32; j++) {
+    x[j] = (float)(((3 * j) % 7) - 3);
+    x[32 + j] = (float)(((5 * j) % 9) - 4);
+  }
+  float zeros[64] = {0};
+
+  uint64_t m_gen, x_gen, o_gen, s_gen;
+  uint64_t m_idx = alloc_bytes(t, session, m, sizeof(m), &m_gen);
+  uint64_t x_idx = alloc_bytes(t, session, x, sizeof(x), &x_gen);
+  uint64_t o_idx = alloc_bytes(t, session, zeros, sizeof(zeros), &o_gen);
+  uint64_t s_idx = alloc_bytes(t, session, zeros, sizeof(zeros), &s_gen);
+  uint64_t m_a = dev_addr(t, session, m_idx, sizeof(m), m_gen);
+  uint64_t x_a = dev_addr(t, session, x_idx, sizeof(x), x_gen);
+  uint64_t o_a = dev_addr(t, session, o_idx, sizeof(zeros), o_gen);
+  uint64_t s_a = dev_addr(t, session, s_idx, sizeof(zeros), s_gen);
+
+  /* Root { ulong b0..b3; uint count } — sizeof 40 under Metal's
+   * 8-byte struct alignment; pack 48 with a trailing pad to be safe */
+  uint8_t root[48] = {0};
+  uint32_t count = 2;
+  memcpy(root + 0, &m_a, 8);
+  memcpy(root + 8, &x_a, 8);
+  memcpy(root + 16, &o_a, 8);
+  memcpy(root + 24, &s_a, 8);
+  memcpy(root + 32, &count, 4);
+  uint64_t root_gen;
+  uint64_t root_idx = alloc_bytes(t, session, root, sizeof(root), &root_gen);
+
+  /* one dispatch, 1x1x1 threadgroups of width 2: tid 0..1 = the rows */
+  args = t->vsp;
+  pl_vpush(t, graph_compute_record(t, 1, 1, 1, 2, 1, 0, 0));
+  pl_vpush(t, session);
+  pl_vpush(t, kernel);
+  pl_vpush(t, 0);
+  pl_vpush(t, pointer_record(t, root_idx, 0, sizeof(root), root_gen));
+  pl_vpush(t, 0);
+  cr_assert_eq(witness_payload_u64(t, hostcall(t, "gpu.command-graph", args),
+                                   "gpu.command-graph", 0),
+               1u);
+
+  float gpu_out[64];
+  read_bytes(t, session, o_idx, sizeof(zeros), o_gen, gpu_out);
+
+  /* zigzag row checksums over the GPU floats: the vectors are chosen
+   * so every intermediate is f32-exact, so int64 conversion is lossless
+   * and the checksum is an integer identity across all three tiers */
+  uint64_t cs[2];
+  for (int row = 0; row < 2; row++) {
+    uint64_t acc = 0;
+    for (int k = 0; k < 32; k++) {
+      float f = gpu_out[row * 32 + k];
+      int64_t v = (int64_t)f;
+      cr_assert_eq((float)v, f, "out[%d] not integral: %f", row * 32 + k,
+                   (double)f);
+      uint64_t zz = v >= 0 ? (uint64_t)(2 * v) : (uint64_t)(2 * (-v) - 1);
+      acc += (uint64_t)(k + 1) * zz;
+    }
+    cs[row] = acc;
+  }
+  /* tier equality: the PLAN interpreter and the C reference produce
+   * exactly these (kernel_ir_interpreter_matches_c_reference) */
+  cr_assert_eq(cs[0], 302828u, "row 0 checksum %llu != 302828",
+               (unsigned long long)cs[0]);
+  cr_assert_eq(cs[1], 486636u, "row 1 checksum %llu != 486636",
+               (unsigned long long)cs[1]);
+
+  args = t->vsp;
+  pl_vpush(t, session);
+  cr_assert_not_null(result_row(hostcall(t, "gpu.session-close", args),
+                                "witness", "gpu.session-close"));
+  pl_catch_pop(t, &c);
+  free(out);
+  free(msl_bytes);
+  test_rt_free(&rt);
+}
+
 #endif /* PL_HOST_GPU_METAL */
