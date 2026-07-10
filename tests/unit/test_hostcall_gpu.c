@@ -1,5 +1,6 @@
 #include <criterion/criterion.h>
 #include <signal.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -3957,6 +3958,312 @@ Test(hostcall, gfx_present_blits_and_consumes_drawable) {
   cr_assert_not_null(result_row(hostcall(t, "gpu.session-close", args),
                                 "witness", "gpu.session-close"));
 
+  pl_catch_pop(t, &c);
+  test_rt_free(&rt);
+}
+
+/* ── The visual dump (opt-in) ──────────────────────────────────────────── */
+
+enum { DUMP_W = 256, DUMP_H = 256 };
+
+/* Binary PPM (P6): header, then per-pixel RGB pulled out of the BGRA
+ * byte order the bgra8 targets read back (bytes B, G, R, A). */
+static void dump_ppm(const char* path, const uint8_t* bgra, uint64_t w,
+                     uint64_t h) {
+  FILE* f = fopen(path, "wb");
+  cr_assert_not_null(f, "fopen %s failed", path);
+  (void)fprintf(f, "P6\n%llu %llu\n255\n", (unsigned long long)w,
+                (unsigned long long)h);
+  for (uint64_t i = 0; i < w * h; i++) {
+    const uint8_t rgb[3] = {bgra[i * 4 + 2], bgra[i * 4 + 1], bgra[i * 4]};
+    cr_assert_eq(fwrite(rgb, 1, 3, f), 3u);
+  }
+  cr_assert_eq(fclose(f), 0);
+}
+
+/* The admitted frame-extraction path: alloc a zeroed w*h*4 window, run
+ * a blit graph (pipeline 0) with one copy-from-texture step waiting the
+ * render's signal value — witness payload 3 is the window's minted
+ * generation — then gpu.read the bytes and write dir/name as P6. */
+static void dump_frame(pl_thread* t, uint64_t session, uint64_t target,
+                       uint64_t w, uint64_t h, uint64_t wait, const char* dir,
+                       const char* name) {
+  size_t len = (size_t)(w * h * 4);
+  uint8_t* bytes = calloc(1, len);
+  cr_assert_not_null(bytes);
+  uint64_t dst_gen = 0;
+  uint64_t dst_idx = alloc_bytes(t, session, bytes, len, &dst_gen);
+
+  size_t gbase = t->vsp;
+  pl_vpush(t, 0); /* steps list */
+  {
+    size_t f = t->vsp;
+    pl_vpush(t, 9); /* kind: copy-from-texture */
+    pl_vpush(t, target);
+    pl_vpush(t, pointer_record(t, dst_idx, 0, len, dst_gen));
+    pl_vpush(t, w);
+    pl_vpush(t, h);
+    pl_val step = record(t, "command-step", f);
+    pl_vpush(t, step);
+    pl_vpush(t, t->vstack[gbase]);
+    t->vstack[gbase] = record(t, "pair", f);
+  }
+  {
+    size_t f = t->vsp;
+    pl_vpush(t, t->vstack[gbase]);
+    pl_vpush(t, 1); /* step count */
+    pl_vpush(t, 0); /* hazards */
+    pl_vpush(t, wait);
+    t->vstack[gbase] = record(t, "command-graph", f);
+  }
+  size_t args = t->vsp;
+  pl_vpush(t, t->vstack[gbase]);
+  pl_vpush(t, session);
+  pl_vpush(t, 0); /* pipeline 0: blit */
+  pl_vpush(t, 0);
+  pl_vpush(t, 0);
+  pl_vpush(t, 0);
+  pl_val bw = hostcall(t, "gpu.command-graph", args);
+  cr_assert_eq(witness_payload_u64(t, bw, "gpu.command-graph", 0), 1u);
+  uint64_t dst_gen2 = witness_payload_u64(t, bw, "gpu.command-graph", 3);
+  cr_assert_eq(dst_gen2, dst_gen + 1);
+  t->vsp = gbase;
+
+  read_bytes(t, session, dst_idx, len, dst_gen2, bytes);
+  char path[512];
+  (void)snprintf(path, sizeof(path), "%s/%s", dir, name);
+  dump_ppm(path, bytes, w, h);
+  free(bytes);
+}
+
+/*
+ * The visual dump: opt-in (ENKI_GFX_DUMP=<dir>) — three landed scenes
+ * re-rendered at 256x256 and extracted through the admitted path (a
+ * blit-graph copy-from-texture into an arena window, then gpu.read)
+ * into binary PPMs: the slice quad, the sampled quadrant texture, and
+ * the depth-occlusion pair.  Pure observation for eyeballs; every
+ * behavioral assertion is already made at 64x64 by the fixtures above.
+ */
+Test(hostcall, gfx_visual_dump) {
+  const char* dir = getenv("ENKI_GFX_DUMP");
+  if (dir == NULL || dir[0] == '\0')
+    cr_skip("ENKI_GFX_DUMP not set; visual dump skipped");
+  cr_assert(pl_host_gpu_metal_register());
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  t->hostcall_f = true;
+
+  pl_catch c;
+  pl_catch_init(t, &c);
+  if (setjmp(c.jb) != 0) {
+    pl_catch_unwind(t, &c);
+    cr_assert_fail("raise during visual dump: %s",
+                   t->exn_msg != NULL ? t->exn_msg : "PLAN exception");
+  }
+
+  size_t args = t->vsp;
+  pl_vpush(t, 0);
+  pl_val r = hostcall(t, "gpu.session-open", args);
+  if (refusal_kind(r, "gpu.session-open") == 943) {
+    cr_log_warn("no metal device; visual dump skipped");
+    test_rt_free(&rt);
+    return;
+  }
+  uint64_t session = witness_payload_u64(t, r, "gpu.session-open", 0);
+
+  /* three 256 KiB dump windows plus root payloads: a roomier arena */
+  args = t->vsp;
+  pl_vpush(t, session);
+  {
+    size_t f = t->vsp;
+    pl_vpush(t, 1);       /* scope: session */
+    pl_vpush(t, 1 << 21); /* capacity */
+    pl_vpush(t, 0);       /* generation-policy: bump-on-free */
+    pl_vpush(t, record(t, "memory-arena", f));
+  }
+  (void)witness_payload_u64(t, hostcall(t, "gpu.arena", args), "gpu.arena", 0);
+
+  /* scene 1: the slice root payload shape — orange quad on black */
+  {
+    pl_val msl = bar_nat(t, (const uint8_t*)gfx_msl, sizeof(gfx_msl) - 1);
+    size_t keep = t->vsp;
+    pl_vpush(t, msl);
+    args = t->vsp;
+    pl_vpush(t, session);
+    pl_vpush(t, t->vstack[keep]);
+    (void)witness_payload_u64(t, hostcall(t, "gpu.library", args),
+                              "gpu.library", 0);
+    args = t->vsp;
+    pl_vpush(t, session);
+    pl_vpush(t, t->vstack[keep]);
+    uint64_t pipeline = witness_payload_u64(
+        t, hostcall(t, "gpu.pipeline-render", args), "gpu.pipeline-render", 0);
+    t->vsp = keep;
+
+    args = t->vsp;
+    pl_vpush(t, session);
+    pl_vpush(t, DUMP_W);
+    pl_vpush(t, DUMP_H);
+    pl_vpush(t, 1); /* bgra8 */
+    uint64_t target = witness_payload_u64(t, hostcall(t, "gpu.target", args),
+                                          "gpu.target", 0);
+
+    /* one row, box {.25 .25 .5 .5}, color {1 .5 0 1} */
+    float payload[8] = {0.25f, 0.25f, 0.5f, 0.5f, 1.0f, 0.5f, 0.0f, 1.0f};
+    uint64_t root_gen = 0;
+    uint64_t root_idx =
+        alloc_bytes(t, session, payload, sizeof(payload), &root_gen);
+
+    args = t->vsp;
+    pl_vpush(t, graph_record(t, 6, 1, 1, 0, 0));
+    pl_vpush(t, session);
+    pl_vpush(t, pipeline);
+    pl_vpush(t, pass_desc(t, target, 0xff000000u));
+    pl_vpush(t, pointer_record(t, root_idx, 0, sizeof(payload), root_gen));
+    pl_vpush(t, 0); /* no descriptor heap */
+    uint64_t sig = witness_payload_u64(
+        t, hostcall(t, "gpu.command-graph", args), "gpu.command-graph", 2);
+    dump_frame(t, session, target, DUMP_W, DUMP_H, sig, dir, "slice.ppm");
+  }
+
+  /* scene 2: the 2x2 quadrant texture sampled full-screen through the
+   * descriptor heap */
+  {
+    /* 2x2 BGRA8 quadrants: TL red, TR green, BL blue, BR white */
+    static const uint8_t texels[16] = {
+        0,   0, 255, 255, 0,   255, 0,   255, /* row 0: red, green */
+        255, 0, 0,   255, 255, 255, 255, 255, /* row 1: blue, white */
+    };
+    args = t->vsp;
+    pl_vpush(t, session);
+    pl_vpush(t, 2);
+    pl_vpush(t, 2);
+    pl_vpush(t, bar_nat(t, texels, sizeof(texels)));
+    uint64_t texture = witness_payload_u64(
+        t, hostcall(t, "gpu.texture-2d", args), "gpu.texture-2d", 0);
+
+    args = t->vsp;
+    pl_vpush(t, session);
+    {
+      size_t f = t->vsp;
+      pl_vpush(t, 1); /* count */
+      pl_vpush(t, 1); /* stride-class: sampled */
+      pl_vpush(t, record(t, "descriptor-heap", f));
+    }
+    uint64_t dheap = witness_payload_u64(
+        t, hostcall(t, "gpu.descriptor-heap", args), "gpu.descriptor-heap", 0);
+    args = t->vsp;
+    pl_vpush(t, session);
+    pl_vpush(t, dheap);
+    pl_vpush(t, window_record(t, dheap, 0, 1));
+    pl_vpush(t, texture);
+    (void)witness_payload_u64(t, hostcall(t, "gpu.descriptor-write", args),
+                              "gpu.descriptor-write", 0);
+
+    pl_val msl = bar_nat(t, (const uint8_t*)gfx_textured_msl,
+                         sizeof(gfx_textured_msl) - 1);
+    size_t keep = t->vsp;
+    pl_vpush(t, msl);
+    args = t->vsp;
+    pl_vpush(t, session);
+    pl_vpush(t, t->vstack[keep]);
+    (void)witness_payload_u64(t, hostcall(t, "gpu.library", args),
+                              "gpu.library", 0);
+    args = t->vsp;
+    pl_vpush(t, session);
+    pl_vpush(t, t->vstack[keep]);
+    uint64_t pipeline = witness_payload_u64(
+        t, hostcall(t, "gpu.pipeline-render", args), "gpu.pipeline-render", 0);
+    t->vsp = keep;
+
+    args = t->vsp;
+    pl_vpush(t, session);
+    pl_vpush(t, DUMP_W);
+    pl_vpush(t, DUMP_H);
+    pl_vpush(t, 1); /* bgra8 */
+    uint64_t target = witness_payload_u64(t, hostcall(t, "gpu.target", args),
+                                          "gpu.target", 0);
+
+    /* full-target quad; color field unused by the textured artifact */
+    float payload[8] = {0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    uint64_t root_gen = 0;
+    uint64_t root_idx =
+        alloc_bytes(t, session, payload, sizeof(payload), &root_gen);
+
+    args = t->vsp;
+    pl_vpush(t, graph_record(t, 6, 1, 1, 0, 0));
+    pl_vpush(t, session);
+    pl_vpush(t, pipeline);
+    pl_vpush(t, pass_desc(t, target, 0xff000000u));
+    pl_vpush(t, pointer_record(t, root_idx, 0, sizeof(payload), root_gen));
+    pl_vpush(t, dheap);
+    uint64_t sig = witness_payload_u64(
+        t, hostcall(t, "gpu.command-graph", args), "gpu.command-graph", 2);
+    dump_frame(t, session, target, DUMP_W, DUMP_H, sig, dir, "textured.ppm");
+  }
+
+  /* scene 3: depth occlusion — near blue beats far red under Less
+   * although red draws after it */
+  {
+    pl_val msl =
+        bar_nat(t, (const uint8_t*)gfx_depth_msl, sizeof(gfx_depth_msl) - 1);
+    size_t keep = t->vsp;
+    pl_vpush(t, msl);
+    args = t->vsp;
+    pl_vpush(t, session);
+    pl_vpush(t, t->vstack[keep]);
+    (void)witness_payload_u64(t, hostcall(t, "gpu.library", args),
+                              "gpu.library", 0);
+    args = t->vsp;
+    pl_vpush(t, session);
+    pl_vpush(t, pipeline_request_raster(t, t->vstack[keep], 32, 5));
+    uint64_t pipeline = witness_payload_u64(
+        t, hostcall(t, "gpu.pipeline-render", args), "gpu.pipeline-render", 0);
+    t->vsp = keep;
+
+    args = t->vsp;
+    pl_vpush(t, session);
+    pl_vpush(t, DUMP_W);
+    pl_vpush(t, DUMP_H);
+    pl_vpush(t, 1); /* bgra8 */
+    uint64_t color = witness_payload_u64(t, hostcall(t, "gpu.target", args),
+                                         "gpu.target", 0);
+    args = t->vsp;
+    pl_vpush(t, session);
+    pl_vpush(t, DUMP_W);
+    pl_vpush(t, DUMP_H);
+    pl_vpush(t, 5); /* d32 */
+    uint64_t depth = witness_payload_u64(t, hostcall(t, "gpu.target", args),
+                                         "gpu.target", 0);
+
+    /* row 0: near blue quad; row 1: far red quad — same footprint */
+    float payload[16] = {
+        0.25f, 0.25f, 0.5f, 0.2f, 0.0f, 0.0f, 1.0f, 1.0f, /* near blue */
+        0.25f, 0.25f, 0.5f, 0.8f, 1.0f, 0.0f, 0.0f, 1.0f, /* far red */
+    };
+    uint64_t root_gen = 0;
+    uint64_t root_idx =
+        alloc_bytes(t, session, payload, sizeof(payload), &root_gen);
+
+    /* one draw step, 2 instances; depth clears to 1.0f and stores
+     * DONT-CARE; ds-state Less + write */
+    args = t->vsp;
+    pl_vpush(t, graph_record(t, 6, 2, 1, 0, 0));
+    pl_vpush(t, session);
+    pl_vpush(t, pipeline);
+    pl_vpush(
+        t, pass_desc_depth(t, color, 0xff000000u, depth, 2, 0x3f800000u, 2, 1));
+    pl_vpush(t, pointer_record(t, root_idx, 0, sizeof(payload), root_gen));
+    pl_vpush(t, 0);
+    uint64_t sig = witness_payload_u64(
+        t, hostcall(t, "gpu.command-graph", args), "gpu.command-graph", 2);
+    dump_frame(t, session, color, DUMP_W, DUMP_H, sig, dir, "depth.ppm");
+  }
+
+  args = t->vsp;
+  pl_vpush(t, session);
+  cr_assert_not_null(result_row(hostcall(t, "gpu.session-close", args),
+                                "witness", "gpu.session-close"));
   pl_catch_pop(t, &c);
   test_rt_free(&rt);
 }
