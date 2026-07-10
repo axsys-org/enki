@@ -635,6 +635,12 @@ cold then hit; (2) a constant-branched kernel produces the constant-selected byt
 ### Gap 15 — GPU-driven completions (consumer-gated mechanics)
 
 > *Size: MEDIUM | Phase: C*
+> **Status: 🟡 CORE LANDED (2026-07-09)** — `draw-indexed-indirect` (kind 6: index +
+> args pointer complements, 20-byte 4-aligned window, u16|u32) lowered to
+> `drawIndexedPrimitives:indirectBuffer:`; exercised by the exit-criterion fixture with
+> **GPU-written args** (a constants-specialized compute stage writes indexCount/
+> instanceCount on device).  Remaining: GPU-written descriptor fixture (adopt the
+> no_api set0-sampled/set1-storage split), meshlets.
 
 - `draw-indexed-indirect` (kind 6): args window validated like dispatch-indirect
   (stale 950 / bounds-alignment 948), lowered to
@@ -672,7 +678,14 @@ vertex-pipeline twin pixel-for-pixel; (4) suite green.
 **Build order**: **17 first** (the main-line port — Gap 12's `er_io_hook` seam only
 exists on main) → 11 ∥ 12 → 13 (the stroke) → 14 → 15. 16 never blocks.
 
-**Exit criterion (the proof the no-API floor is done)**: one fixture drives a
+**Exit criterion — ✅ LANDED (2026-07-09, `gfx_no_api_floor_exit_criterion`)**: a
+constants-specialized compute admissibility stage GPU-writes the indexed-indirect args;
+an MRT (2 attachments) + depth (Less+write, DONT-CARE store) render draws through a u16
+index complement and the GPU-written args under a declared wait-value; four pixel
+readbacks prove occlusion and independent attachment writes — **recorded live on Metal,
+then replayed bit-identically on a fresh runtime whose session was closed live** (every
+witness handle/generation/signal + all pixels reproduced; 20 of 21 events consumed).
+Original statement: one fixture drives a
 depth-tested, indexed, multi-target scene whose textures are private+placed, whose
 pipeline variants come from value spec-constants (no shader-source permutations), with
 a compute admissibility stage GPU-writing the indexed-indirect args and a GPU-minted

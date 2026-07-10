@@ -65,7 +65,8 @@ enum {
   GM_STEP_CLEAR = 2,
   GM_STEP_DISPATCH = 3,
   GM_STEP_DISPATCH_INDIRECT = 4,
-  GM_STEP_DRAW_INDEXED = 5,      /* {index-ptr index-count instances u16|u32} */
+  GM_STEP_DRAW_INDEXED = 5,
+  GM_STEP_DRAW_INDEXED_INDIRECT = 6, /* {index-ptr args-ptr 0 u16|u32} */      /* {index-ptr index-count instances u16|u32} */
   GM_STEP_COPY = 7,              /* {src-ptr dst-ptr 0 0} buffer→buffer */
   GM_STEP_COPY_TO_TEXTURE = 8,   /* {src-ptr texture w h} */
   GM_STEP_COPY_FROM_TEXTURE = 9, /* {texture dst-ptr w h} */
@@ -233,13 +234,15 @@ static uint8_t* gm_bar_bytes(pl_val v, size_t* out_n);
  * declared root layout; NULL = carrier shape refusal. */
 static uint8_t* gm_pipeline_source(pl_thread* t, size_t ab, size_t* out_n,
                                    uint64_t* out_stride, uint64_t* out_mode,
-                                   uint64_t* out_dformat, pl_val* out_consts) {
+                                   uint64_t* out_dformat, pl_val* out_consts,
+                                   uint64_t* out_ncolors) {
   ARG(1) = pl_nf(t, ARG(1));
   pl_val src = ARG(1);
   *out_stride = 0;
   *out_mode = GM_ROOT_BUFFER;
   *out_dformat = 0;
   *out_consts = 0;
+  *out_ncolors = 1;
   /* field 4 (Gap 14): value specialization constants — a pair-list of
    * fn-constant (kind {1 u32, 2 f32-bits}, value) records, sequential
    * ids by list position; dead code the constants kill never becomes
@@ -259,6 +262,11 @@ static uint8_t* gm_pipeline_source(pl_thread* t, size_t ab, size_t* out_n,
         return NULL;
       *out_dformat = pl_nat_u64_clamp(pl_nat_coerce(rast[0]));
       if (*out_dformat != 0 && *out_dformat != GM_FORMAT_D32)
+        return NULL;
+      *out_ncolors = pl_nat_u64_clamp(pl_nat_coerce(rast[1]));
+      if (*out_ncolors == 0)
+        *out_ncolors = 1;
+      if (*out_ncolors > 4)
         return NULL;
     }
   } else {
@@ -840,8 +848,9 @@ static pl_val gm_pipeline_render(pl_thread* t, size_t ab) {
   size_t n = 0;
   uint64_t stride = 0, mode = 0, dformat = 0;
   pl_val consts = 0;
-  uint8_t* bytes =
-      gm_pipeline_source(t, ab, &n, &stride, &mode, &dformat, &consts);
+  uint64_t ncolors = 1;
+  uint8_t* bytes = gm_pipeline_source(t, ab, &n, &stride, &mode, &dformat,
+                                      &consts, &ncolors);
   if (bytes == NULL)
     return pl_hostcall_refusal(t, "gpu.pipeline-render",
                                GM_REFUSAL_CARRIER_SHAPE,
@@ -858,7 +867,7 @@ static pl_val gm_pipeline_render(pl_thread* t, size_t ab) {
     return pl_hostcall_refusal(t, "gpu.pipeline-render", GM_REFUSAL_CARRIER_SHAPE,
                                "malformed fn-constant list");
   }
-  gm_pipeline_key(lib_key, stride, mode, dformat, chash, key);
+  gm_pipeline_key(lib_key, stride, mode, dformat | (ncolors << 32), chash, key);
   free(bytes);
   @autoreleasepool {
     uint32_t hits = 0;
@@ -886,7 +895,8 @@ static pl_val gm_pipeline_render(pl_thread* t, size_t ab) {
           gm_unique_function(library, MTLFunctionTypeVertex, constants);
       descriptor.fragmentFunction =
           gm_unique_function(library, MTLFunctionTypeFragment, constants);
-      descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+      for (uint64_t ci = 0; ci < ncolors; ci++)
+        descriptor.colorAttachments[ci].pixelFormat = MTLPixelFormatBGRA8Unorm;
       if (dformat == GM_FORMAT_D32)
         descriptor.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
       if (descriptor.vertexFunction == nil ||
@@ -929,8 +939,9 @@ static pl_val gm_pipeline_compute(pl_thread* t, size_t ab) {
   size_t n = 0;
   uint64_t stride = 0, mode = 0, dformat = 0;
   pl_val consts = 0;
-  uint8_t* bytes =
-      gm_pipeline_source(t, ab, &n, &stride, &mode, &dformat, &consts);
+  uint64_t ncolors = 1;
+  uint8_t* bytes = gm_pipeline_source(t, ab, &n, &stride, &mode, &dformat,
+                                      &consts, &ncolors);
   if (bytes == NULL)
     return pl_hostcall_refusal(t, "gpu.pipeline-compute",
                                GM_REFUSAL_CARRIER_SHAPE,
@@ -947,7 +958,7 @@ static pl_val gm_pipeline_compute(pl_thread* t, size_t ab) {
     return pl_hostcall_refusal(t, "gpu.pipeline-compute", GM_REFUSAL_CARRIER_SHAPE,
                                "malformed fn-constant list");
   }
-  gm_pipeline_key(lib_key, stride, mode, dformat, chash, key);
+  gm_pipeline_key(lib_key, stride, mode, dformat | (ncolors << 32), chash, key);
   free(bytes);
   @autoreleasepool {
     uint32_t hits = 0;
@@ -1710,6 +1721,35 @@ static pl_val gm_command_graph(pl_thread* t, size_t ab) {
         return pl_hostcall_refusal(t, "gpu.command-graph",
                                    GM_REFUSAL_GRAPH_SHAPE,
                                    "clear step retired: use pass-desc load");
+      } else if (kind == GM_STEP_DRAW_INDEXED_INDIRECT) {
+        pl_val* ip = gm_record(step[1], "heap-pointer", 5);
+        pl_val* ap = gm_record(step[2], "heap-pointer", 5);
+        uint64_t ifmt = pl_nat_u64_clamp(pl_nat_coerce(step[4]));
+        if (ip == NULL || ap == NULL)
+          return pl_hostcall_refusal(t, "gpu.command-graph",
+                                     GM_REFUSAL_CARRIER_SHAPE,
+                                     "indexed-indirect takes two pointers");
+        if (ifmt != 1 && ifmt != 2)
+          return pl_hostcall_refusal(t, "gpu.command-graph",
+                                     GM_REFUSAL_GRAPH_SHAPE,
+                                     "indexed-indirect format rejected");
+        uint64_t irk = 0;
+        size_t off = 0, len = 0;
+        if (gm_pointer(s, ip, &off, &len, &irk) == nil)
+          return pl_hostcall_refusal(t, "gpu.command-graph", irk,
+                                     "index window rejected");
+        if ((off % (ifmt == 1 ? 2 : 4)) != 0)
+          return pl_hostcall_refusal(t, "gpu.command-graph",
+                                     GM_REFUSAL_BOUNDS,
+                                     "index window out of bounds");
+        if (gm_pointer(s, ap, &off, &len, &irk) == nil)
+          return pl_hostcall_refusal(t, "gpu.command-graph", irk,
+                                     "indirect args window rejected");
+        if ((off & 3) != 0 || len < 20)
+          return pl_hostcall_refusal(t, "gpu.command-graph",
+                                     GM_REFUSAL_BOUNDS,
+                                     "indirect args window out of bounds");
+        draws_total++;
       } else if (kind == GM_STEP_DRAW_INDEXED) {
         pl_val* ip = gm_record(step[1], "heap-pointer", 5);
         uint64_t icount = pl_nat_u64_clamp(pl_nat_coerce(step[2]));
@@ -1859,7 +1899,8 @@ static pl_val gm_command_graph(pl_thread* t, size_t ab) {
         pl_val* cell = gm_record(cursor, "pair", 2);
         pl_val* step = gm_record(cell[0], "command-step", 5);
         uint64_t kind = pl_nat_u64_clamp(pl_nat_coerce(step[0]));
-        if (kind == GM_STEP_DRAW || kind == GM_STEP_DRAW_INDEXED) {
+        if (kind == GM_STEP_DRAW || kind == GM_STEP_DRAW_INDEXED ||
+            kind == GM_STEP_DRAW_INDEXED_INDIRECT) {
           uint64_t vertices =
               kind == GM_STEP_DRAW
                   ? pl_nat_u64_clamp(pl_nat_coerce(step[1]))
@@ -1888,7 +1929,23 @@ static pl_val gm_command_graph(pl_thread* t, size_t ab) {
                                          GM_REFUSAL_ENCODE,
                                          "encoder unavailable");
           }
-          if (kind == GM_STEP_DRAW_INDEXED) {
+          if (kind == GM_STEP_DRAW_INDEXED_INDIRECT) {
+            pl_val* ip = gm_record(step[1], "heap-pointer", 5);
+            pl_val* ap = gm_record(step[2], "heap-pointer", 5);
+            uint64_t irk = 0;
+            size_t ioff = 0, ilen = 0, aoff = 0, alen = 0;
+            id<MTLBuffer> ibuf = gm_pointer(s, ip, &ioff, &ilen, &irk);
+            id<MTLBuffer> abuf = gm_pointer(s, ap, &aoff, &alen, &irk);
+            uint64_t ifmt = pl_nat_u64_clamp(pl_nat_coerce(step[4]));
+            [encoder
+                drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+                            indexType:ifmt == 1 ? MTLIndexTypeUInt16
+                                                : MTLIndexTypeUInt32
+                          indexBuffer:ibuf
+                    indexBufferOffset:(NSUInteger)ioff
+                       indirectBuffer:abuf
+                 indirectBufferOffset:(NSUInteger)aoff];
+          } else if (kind == GM_STEP_DRAW_INDEXED) {
             pl_val* ip = gm_record(step[1], "heap-pointer", 5);
             uint64_t irk = 0;
             size_t ioff = 0, ilen = 0;

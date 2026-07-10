@@ -3321,4 +3321,451 @@ Test(hostcall, gfx_foil_msl_emitter_law_artifact) {
   test_rt_free(&rt);
 }
 
+/* ── Slice 3 exit criterion ────────────────────────────────────────────── */
+
+/*
+ * The admissibility stage: a value-specialized kernel WRITES the
+ * indexed-indirect draw arguments on device — the GPU feeding the
+ * render graph.  mode == 2 admits both instances; scale (1.0f) lands
+ * indexStart 0.  The args window is the 20-byte
+ * MTLDrawIndexedPrimitivesIndirectArguments {indexCount, instanceCount,
+ * indexStart, baseVertex, baseInstance}; native validates the window
+ * and never reads a byte of it.
+ */
+static const char gfx_exit_admit_msl[] =
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "constant uint mode [[function_constant(0)]];\n"
+    "constant float scale [[function_constant(1)]];\n"
+    "struct Root { ulong args_addr; };\n"
+    "kernel void shrine_exit_admit(uint tid [[thread_position_in_grid]],\n"
+    "                              const device Root* d [[buffer(0)]]) {\n"
+    "  if (tid != 0) return;\n"
+    "  device uint* args = (device uint*)(d->args_addr);\n"
+    "  args[0] = 6u;                  /* indexCount */\n"
+    "  args[1] = mode == 2 ? 2u : 1u; /* instanceCount */\n"
+    "  args[2] = uint(scale) - 1u;    /* indexStart */\n"
+    "  args[3] = 0u;                  /* baseVertex */\n"
+    "  args[4] = 0u;                  /* baseInstance */\n"
+    "}\n";
+
+/*
+ * The MRT+depth render artifact: the depth-test Row shape (box =
+ * (x, y, size, z), box.w in clip z) with a two-output fragment —
+ * color(0) is the instance color, color(1) its channel-swapped twin,
+ * proving both attachments were written independently by one draw.
+ */
+static const char gfx_exit_mrt_msl[] =
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "struct Row { float4 box; float4 color; };\n"
+    "struct VOut { float4 pos [[position]]; float4 color; };\n"
+    "vertex VOut shrine_vertex(uint vid [[vertex_id]],\n"
+    "                          uint iid [[instance_id]],\n"
+    "                          const device Row* rows [[buffer(0)]]) {\n"
+    "  Row r = rows[iid];\n"
+    "  float2 c[6] = {\n"
+    "      float2(r.box.x, r.box.y),\n"
+    "      float2(r.box.x + r.box.z, r.box.y),\n"
+    "      float2(r.box.x, r.box.y + r.box.z),\n"
+    "      float2(r.box.x + r.box.z, r.box.y),\n"
+    "      float2(r.box.x + r.box.z, r.box.y + r.box.z),\n"
+    "      float2(r.box.x, r.box.y + r.box.z),\n"
+    "  };\n"
+    "  float2 p = c[vid];\n"
+    "  VOut o;\n"
+    "  o.pos = float4(p.x * 2.0 - 1.0, 1.0 - p.y * 2.0, r.box.w, 1.0);\n"
+    "  o.color = r.color;\n"
+    "  return o;\n"
+    "}\n"
+    "struct FOut { float4 a [[color(0)]]; float4 b [[color(1)]]; };\n"
+    "fragment FOut shrine_fragment(VOut in [[stage_in]]) {\n"
+    "  FOut o;\n"
+    "  o.a = in.color;\n"
+    "  o.b = float4(in.color.b, in.color.g, in.color.r, 1.0);\n"
+    "  return o;\n"
+    "}\n";
+
+/* pipeline_request_raster with the color-count leg: raster-state
+ * (depth-format, color-count) — color-count > 1 declares an MRT
+ * pipeline, every color attachment BGRA8. */
+static pl_val pipeline_request_raster2(pl_thread* t, pl_val msl_bar,
+                                       uint64_t stride, uint64_t depth_format,
+                                       uint64_t color_count) {
+  size_t base = t->vsp;
+  pl_vpush(t, msl_bar); /* root the bar */
+  size_t f = t->vsp;
+  pl_vpush(t, t->vstack[base]);
+  pl_vpush(t, 1); /* language: msl */
+  pl_val art = record(t, "artifact", f);
+  pl_vpush(t, art); /* base+1 */
+  f = t->vsp;
+  pl_vpush(t, stride);
+  pl_vpush(t, 1); /* count */
+  pl_vpush(t, 0); /* segments */
+  pl_vpush(t, 1); /* mode: buffer */
+  pl_val layout = record(t, "root-layout", f);
+  pl_vpush(t, layout); /* base+2 */
+  f = t->vsp;
+  pl_vpush(t, depth_format);
+  pl_vpush(t, color_count);
+  pl_val rast = record(t, "raster-state", f);
+  pl_vpush(t, rast); /* base+3 */
+  f = t->vsp;
+  pl_vpush(t, t->vstack[base + 1]);
+  pl_vpush(t, t->vstack[base + 2]);
+  pl_vpush(t, t->vstack[base + 3]);
+  pl_val req = record(t, "pipeline-request", f);
+  t->vsp = base;
+  return req;
+}
+
+/* pass_desc_depth with TWO color attachments: the colors pair-list is
+ * built back to front, so color(0) sits at the front of the list. */
+static pl_val pass_desc_mrt_depth(pl_thread* t, uint64_t target0,
+                                  uint64_t target1, uint64_t clear_bgra8,
+                                  uint64_t depth_target, uint64_t depth_store,
+                                  uint64_t clear_f32bits, uint64_t compare,
+                                  uint64_t write) {
+  size_t base = t->vsp;
+  pl_vpush(t, 0); /* colors list at base, built back to front */
+  for (int i = 0; i < 2; i++) {
+    size_t f = t->vsp;
+    pl_vpush(t, i == 0 ? target1 : target0);
+    pl_vpush(t, 1); /* load: clear */
+    pl_vpush(t, 1); /* store: store */
+    pl_vpush(t, clear_bgra8);
+    pl_val ca = record(t, "color-attachment", f);
+    pl_vpush(t, ca);
+    pl_vpush(t, t->vstack[base]);
+    t->vstack[base] = record(t, "pair", f);
+  }
+  {
+    size_t f = t->vsp;
+    pl_vpush(t, depth_target);
+    pl_vpush(t, 1); /* load: clear */
+    pl_vpush(t, depth_store);
+    pl_vpush(t, clear_f32bits);
+    pl_vpush(t, record(t, "depth-attachment", f)); /* base+1 */
+  }
+  {
+    size_t f = t->vsp;
+    pl_vpush(t, compare);
+    pl_vpush(t, write);
+    pl_vpush(t, record(t, "ds-state", f)); /* base+2 */
+  }
+  size_t f = t->vsp;
+  pl_vpush(t, t->vstack[base]);
+  pl_vpush(t, t->vstack[base + 1]);
+  pl_vpush(t, t->vstack[base + 2]);
+  pl_val pd = record(t, "pass-desc", f);
+  t->vsp = base;
+  return pd;
+}
+
+/* render graph with one draw-indexed-indirect step {index-window
+ * args-window 0 fmt} and a timeline wait on a prior graph's signal. */
+static pl_val graph_indexed_indirect_record(
+    pl_thread* t, uint64_t index_alloc, uint64_t index_len, uint64_t index_gen,
+    uint64_t args_alloc, uint64_t args_len, uint64_t args_gen, uint64_t format,
+    uint64_t wait) {
+  size_t base = t->vsp;
+  pl_vpush(t, 6); /* kind: draw-indexed-indirect */
+  pl_vpush(t, pointer_record(t, index_alloc, 0, index_len, index_gen));
+  pl_vpush(t, pointer_record(t, args_alloc, 0, args_len, args_gen));
+  pl_vpush(t, 0);
+  pl_vpush(t, format);
+  pl_val step = record(t, "command-step", base);
+  pl_vpush(t, step);
+  pl_vpush(t, 0);
+  pl_val steps = record(t, "pair", base);
+  pl_vpush(t, steps);
+  size_t gb = t->vsp;
+  pl_vpush(t, t->vstack[base]);
+  pl_vpush(t, 1); /* step count */
+  pl_vpush(t, 0); /* hazards */
+  pl_vpush(t, wait);
+  pl_val graph = record(t, "command-graph", gb);
+  t->vsp = base;
+  return graph;
+}
+
+/* gpu.readback wrapper: one pixel as u32le A<<24|R<<16|G<<8|B. */
+static uint64_t readback_pixel(pl_thread* t, uint64_t session, uint64_t target,
+                               uint64_t x, uint64_t y) {
+  size_t args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, target);
+  pl_vpush(t, x);
+  pl_vpush(t, y);
+  return witness_payload_u64(t, hostcall(t, "gpu.readback", args),
+                             "gpu.readback", 0);
+}
+
+/* Every witness the exit-criterion chain produces, in call order —
+ * captured live under recording, then again under replay, where each
+ * field must come back bit-identical from the log. */
+typedef struct {
+  uint64_t session;
+  uint64_t args_idx, args_gen, args_addr;
+  uint64_t admit_lib, admit_pipe;
+  uint64_t croot_idx, croot_gen;
+  uint64_t sig_admit;
+  uint64_t mrt_lib, mrt_pipe;
+  uint64_t color0, color1, depth;
+  uint64_t root_idx, root_gen;
+  uint64_t index_idx, index_gen;
+  uint64_t sig_draw;
+  uint64_t c0_center, c0_corner, c1_center, c1_corner;
+} gfx_exit_wit;
+
+/* The whole chain, every call but session-close: session + arena, the
+ * constants-specialized admissibility dispatch writing the draw args,
+ * the MRT+depth indexed-indirect render waiting its signal, and four
+ * pixel readbacks.  Returns false only when the live host has no
+ * Metal device. */
+static bool gfx_exit_chain(pl_thread* t, gfx_exit_wit* w) {
+  size_t args = t->vsp;
+  pl_vpush(t, 0);
+  pl_val r = hostcall(t, "gpu.session-open", args);
+  if (refusal_kind(r, "gpu.session-open") == 943)
+    return false;
+  w->session = witness_payload_u64(t, r, "gpu.session-open", 0);
+
+  args = t->vsp;
+  pl_vpush(t, w->session);
+  {
+    size_t f = t->vsp;
+    pl_vpush(t, 1);
+    pl_vpush(t, 65536);
+    pl_vpush(t, 0);
+    pl_vpush(t, record(t, "memory-arena", f));
+  }
+  (void)witness_payload_u64(t, hostcall(t, "gpu.arena", args), "gpu.arena", 0);
+
+  /* the args window the admissibility stage will fill on device */
+  uint8_t arg_zeros[20] = {0};
+  w->args_gen = 0;
+  w->args_idx =
+      alloc_bytes(t, w->session, arg_zeros, sizeof(arg_zeros), &w->args_gen);
+  w->args_addr =
+      dev_addr(t, w->session, w->args_idx, sizeof(arg_zeros), w->args_gen);
+
+  /* the specialized kernel: mode 2 (u32) admits two instances */
+  {
+    pl_val msl = bar_nat(t, (const uint8_t*)gfx_exit_admit_msl,
+                         sizeof(gfx_exit_admit_msl) - 1);
+    size_t keep = t->vsp;
+    pl_vpush(t, msl);
+    args = t->vsp;
+    pl_vpush(t, w->session);
+    pl_vpush(t, t->vstack[keep]);
+    w->admit_lib = witness_payload_u64(t, hostcall(t, "gpu.library", args),
+                                       "gpu.library", 0);
+    args = t->vsp;
+    pl_vpush(t, w->session);
+    pl_vpush(t, pipeline_request_constants(t, t->vstack[keep], 8, 1, 2, 2,
+                                           0x3f800000u));
+    w->admit_pipe =
+        witness_payload_u64(t, hostcall(t, "gpu.pipeline-compute", args),
+                            "gpu.pipeline-compute", 0);
+    t->vsp = keep;
+  }
+  uint8_t croot[8];
+  memcpy(croot, &w->args_addr, 8);
+  w->croot_gen = 0;
+  w->croot_idx =
+      alloc_bytes(t, w->session, croot, sizeof(croot), &w->croot_gen);
+  args = t->vsp;
+  pl_vpush(t, graph_compute_record(t, 1, 1, 1, 1, 1, 0, 0));
+  pl_vpush(t, w->session);
+  pl_vpush(t, w->admit_pipe);
+  pl_vpush(t, 0);
+  pl_vpush(t, pointer_record(t, w->croot_idx, 0, sizeof(croot), w->croot_gen));
+  pl_vpush(t, 0);
+  w->sig_admit = witness_payload_u64(t, hostcall(t, "gpu.command-graph", args),
+                                     "gpu.command-graph", 2);
+
+  /* the MRT pipeline under raster-state (d32, 2 colors) */
+  {
+    pl_val msl = bar_nat(t, (const uint8_t*)gfx_exit_mrt_msl,
+                         sizeof(gfx_exit_mrt_msl) - 1);
+    size_t keep = t->vsp;
+    pl_vpush(t, msl);
+    args = t->vsp;
+    pl_vpush(t, w->session);
+    pl_vpush(t, t->vstack[keep]);
+    w->mrt_lib = witness_payload_u64(t, hostcall(t, "gpu.library", args),
+                                     "gpu.library", 0);
+    args = t->vsp;
+    pl_vpush(t, w->session);
+    pl_vpush(t, pipeline_request_raster2(t, t->vstack[keep], 32, 5, 2));
+    w->mrt_pipe = witness_payload_u64(
+        t, hostcall(t, "gpu.pipeline-render", args), "gpu.pipeline-render", 0);
+    t->vsp = keep;
+  }
+  args = t->vsp;
+  pl_vpush(t, w->session);
+  pl_vpush(t, GFX_W);
+  pl_vpush(t, GFX_H);
+  pl_vpush(t, 1); /* bgra8 */
+  w->color0 =
+      witness_payload_u64(t, hostcall(t, "gpu.target", args), "gpu.target", 0);
+  args = t->vsp;
+  pl_vpush(t, w->session);
+  pl_vpush(t, GFX_W);
+  pl_vpush(t, GFX_H);
+  pl_vpush(t, 1); /* bgra8 */
+  w->color1 =
+      witness_payload_u64(t, hostcall(t, "gpu.target", args), "gpu.target", 0);
+  args = t->vsp;
+  pl_vpush(t, w->session);
+  pl_vpush(t, GFX_W);
+  pl_vpush(t, GFX_H);
+  pl_vpush(t, 5); /* d32 */
+  w->depth =
+      witness_payload_u64(t, hostcall(t, "gpu.target", args), "gpu.target", 0);
+
+  /* row 0: near blue quad; row 1: far red quad — same footprint, so
+   * Less+write occludes red although the GPU-admitted instanceCount
+   * draws it after blue */
+  float payload[16] = {
+      0.25f, 0.25f, 0.5f, 0.2f, 0.0f, 0.0f, 1.0f, 1.0f, /* near blue */
+      0.25f, 0.25f, 0.5f, 0.8f, 1.0f, 0.0f, 0.0f, 1.0f, /* far red */
+  };
+  w->root_gen = 0;
+  w->root_idx =
+      alloc_bytes(t, w->session, payload, sizeof(payload), &w->root_gen);
+  static const uint8_t indices[12] = {0, 0, 1, 0, 2, 0, 3, 0, 4, 0, 5, 0};
+  w->index_gen = 0;
+  w->index_idx =
+      alloc_bytes(t, w->session, indices, sizeof(indices), &w->index_gen);
+
+  /* one kind-6 step consuming the index window and the GPU-written
+   * args window, waiting the admissibility signal */
+  args = t->vsp;
+  pl_vpush(t, graph_indexed_indirect_record(
+                  t, w->index_idx, sizeof(indices), w->index_gen, w->args_idx,
+                  sizeof(arg_zeros), w->args_gen, 1, w->sig_admit));
+  pl_vpush(t, w->session);
+  pl_vpush(t, w->mrt_pipe);
+  pl_vpush(t, pass_desc_mrt_depth(t, w->color0, w->color1, 0xff000000u,
+                                  w->depth, 2, 0x3f800000u, 2, 1));
+  pl_vpush(t, pointer_record(t, w->root_idx, 0, sizeof(payload), w->root_gen));
+  pl_vpush(t, 0);
+  pl_val dw = hostcall(t, "gpu.command-graph", args);
+  cr_assert_eq(witness_payload_u64(t, dw, "gpu.command-graph", 0), 1u);
+  w->sig_draw = witness_payload_u64(t, dw, "gpu.command-graph", 2);
+
+  w->c0_center = readback_pixel(t, w->session, w->color0, GFX_W / 2, GFX_H / 2);
+  w->c0_corner = readback_pixel(t, w->session, w->color0, 1, 1);
+  w->c1_center = readback_pixel(t, w->session, w->color1, GFX_W / 2, GFX_H / 2);
+  w->c1_corner = readback_pixel(t, w->session, w->color1, 1, 1);
+  return true;
+}
+
+/*
+ * The Slice 3 exit criterion, composed from every landed mechanism: a
+ * value-specialized compute stage writes the draw-indexed-indirect
+ * arguments on device (instanceCount 2 under mode == 2); a render
+ * graph waits its signal and draws indexed geometry indirectly into
+ * TWO color attachments under a d32 Less+write depth test; both
+ * attachments read back occlusion-correct pixels.  The whole chain is
+ * RECORDED on Metal hardware, the session closed live, then REPLAYED
+ * on a fresh runtime where none of the handles exist — a live re-run
+ * would refuse 941 at the first gpu.arena — so bit-identical witnesses
+ * and pixels prove pure substitution: recorded once, replayed with no
+ * GPU work.
+ */
+Test(hostcall, gfx_no_api_floor_exit_criterion) {
+  cr_assert(pl_host_gpu_metal_register());
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  t->hostcall_f = true;
+
+  pl_catch c;
+  pl_catch_init(t, &c);
+  if (setjmp(c.jb) != 0) {
+    pl_catch_unwind(t, &c);
+    cr_assert_fail("raise during exit-criterion slice: %s",
+                   t->exn_msg != NULL ? t->exn_msg : "PLAN exception");
+  }
+
+  er_log* log = er_log_new();
+  er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
+  (void)er_scheduler_adopt(sys, t);
+  er_scheduler_record(sys, log);
+
+  gfx_exit_wit live;
+  memset(&live, 0, sizeof live);
+  if (!gfx_exit_chain(t, &live)) {
+    cr_log_warn("no metal device; exit-criterion slice skipped");
+    pl_set_io_hook(NULL);
+    er_scheduler_free(sys);
+    er_log_free(log);
+    test_rt_free(&rt);
+    return;
+  }
+
+  /* the recorded pixels: occlusion under the GPU-admitted second
+   * instance on color(0), the channel-swapped twin on color(1) */
+  cr_assert_eq(live.c0_center, 0xff0000ffu); /* near blue won */
+  cr_assert_eq(live.c0_corner, 0xff000000u); /* clear */
+  cr_assert_eq(live.c1_center, 0xffff0000u); /* swapped blue = red */
+  cr_assert_eq(live.c1_corner, 0xff000000u);
+  cr_assert_gt(live.sig_draw, live.sig_admit);
+
+  size_t args = t->vsp;
+  pl_vpush(t, live.session);
+  cr_assert_not_null(result_row(hostcall(t, "gpu.session-close", args),
+                                "witness", "gpu.session-close"));
+  uint64_t events = er_log_events(log);
+
+  /* replay every call but the close on a fresh runtime: the closed
+   * session and absent handles make live execution impossible, so the
+   * identical rows below are the log substituting for Metal */
+  test_rt rt2 = test_rt_new();
+  pl_thread* t2 = rt2.t;
+  t2->hostcall_f = true;
+  er_scheduler* sys2 = er_scheduler_new(rt2.store, (er_config){0});
+  (void)er_scheduler_adopt(sys2, t2);
+  er_scheduler_replay(sys2, log);
+
+  gfx_exit_wit rep;
+  memset(&rep, 0, sizeof rep);
+  cr_assert(gfx_exit_chain(t2, &rep));
+  cr_assert_eq(rep.session, live.session);
+  cr_assert_eq(rep.args_idx, live.args_idx);
+  cr_assert_eq(rep.args_gen, live.args_gen);
+  cr_assert_eq(rep.args_addr, live.args_addr);
+  cr_assert_eq(rep.admit_lib, live.admit_lib);
+  cr_assert_eq(rep.admit_pipe, live.admit_pipe);
+  cr_assert_eq(rep.croot_idx, live.croot_idx);
+  cr_assert_eq(rep.croot_gen, live.croot_gen);
+  cr_assert_eq(rep.sig_admit, live.sig_admit);
+  cr_assert_eq(rep.mrt_lib, live.mrt_lib);
+  cr_assert_eq(rep.mrt_pipe, live.mrt_pipe);
+  cr_assert_eq(rep.color0, live.color0);
+  cr_assert_eq(rep.color1, live.color1);
+  cr_assert_eq(rep.depth, live.depth);
+  cr_assert_eq(rep.root_idx, live.root_idx);
+  cr_assert_eq(rep.root_gen, live.root_gen);
+  cr_assert_eq(rep.index_idx, live.index_idx);
+  cr_assert_eq(rep.index_gen, live.index_gen);
+  cr_assert_eq(rep.sig_draw, live.sig_draw);
+  cr_assert_eq(rep.c0_center, live.c0_center);
+  cr_assert_eq(rep.c0_corner, live.c0_corner);
+  cr_assert_eq(rep.c1_center, live.c1_center);
+  cr_assert_eq(rep.c1_corner, live.c1_corner);
+  cr_assert_eq(er_scheduler_log_cursor(sys2), events - 1);
+
+  pl_set_io_hook(NULL);
+  er_scheduler_free(sys2);
+  er_scheduler_free(sys);
+  er_log_free(log);
+  pl_catch_pop(t, &c);
+  test_rt_free(&rt2);
+  test_rt_free(&rt);
+}
+
 #endif /* PL_HOST_GPU_METAL */
