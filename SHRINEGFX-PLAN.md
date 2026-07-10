@@ -732,6 +732,83 @@ embedder-injected layer seam, per-observer dirty (ACS/bytemaps — the Rex-era l
 
 ---
 
+## Slice 5 — the Foil kernel IR (Rex IR as the backend compiler)
+
+> *Specs: NE.8d.1 (the step-IR atom set: `return-if buffer-load compare-ge
+> store-select` — deliberately tiny, straight-line, predicated), NE8 `@transform`
+> (`:ir`, `ir-kind`, `execution-view`, `instruction-queue` roles), CB6 (emitter classes
+> `foil-msl/spirv/wgsl` = compilers from Foil IR to target bytes, implemented as laws;
+> `slang-*` = the sealed-host-emitter alternative), PLR9 (Futamura staging: the emitter
+> is the first projection — specialize the IR's interpreter to a kernel, get a compiled
+> kernel), SSH Phase F.5 (the audit tier: the substrate interprets its own kernels),
+> ACL7.2 (emission is the ↓L_C shift)*
+> **Status: 🔲 PLANNED (2026-07-10)**
+
+**Thesis**: the plan's headline chain — `Foil/Rex IR → exact backend artifact bytes →
+root pointer command graph` — gets its middle made real.  `psa-emitter.plan` is the
+embryo: the kernel's *substance* (the antiproduct tables) is already computed by law
+and only the final syntax is target-specific string paste.  Slice 5 promotes the
+kernel itself to a carrier — one authored kernel in Foil IR, N lowering laws, no
+second source of truth.  "Backend" becomes a compiler from the substrate's own IR;
+the vendor boundary stays at backend source/IR (MSL/SPIR-V/WGSL — never hardware ISA).
+
+**The three-tier execution story** (one kernel, three lowerings, differential for free):
+PLAN-interpreted (audit/bootstrap — SSH F.5), CPU-native (`host-reference` — CI without
+GPUs, determinism ground truth), GPU (per-target emission laws).
+
+**Design decisions settled up front**:
+- **The atom set stays tiny and predicated** — straight-line, no general control flow
+  (`return-if` is the only exit; selection over branching).  This is NE.8d.1's
+  deliberate shape: Blelloch-scan-shaped kernels, table-walks, admissibility
+  predicates.  General shading (derivative-taking, texture filtering interplay) is NOT
+  the target — graphics-as-consumer keeps `foil-msl` welds and, later, `slang-*`.
+- **References by index, never by name** — buffers/constants addressed by root-slot
+  and constant-id (occurrence-axis discipline); the lowering law assigns target names.
+- **Slang is the sealed alternative, not the spine**: `slang-*` (`body_kind
+  sealed-host-emitter`, NE.8d.1) for consumer-scale shader libraries — its outputs are
+  content-addressed artifacts like any other; its internals are not laws.  Its
+  C++/host target can also seed `host-reference` walkers where autodiff/generics pay.
+- **First kernel = the PSA sandwich** — its table-walk shape *is* the atom set, and
+  the CPU walker + GPU artifact already exist as the differential oracle.
+
+### Gap 19 — the kernel-ir carrier + PLAN reference interpreter
+
+`kernel-ir` record family in `foil/shrine/`: a pair-list of step records over the atom
+set (`buffer-load {root-slot, index-expr}`, `store-select`, `compare-ge`, `return-if`,
+plus the arithmetic atoms the PSA walk needs), constants by id, thread-id as a
+distinguished input.  A PLAN law interprets the IR directly (the audit tier): given
+root bytes + thread count, produce output bytes.  *Pass criteria*: (1) the PSA
+sandwich expressed as kernel-ir; (2) the interpreter's output matches the existing CPU
+walker at 1e-6 over the exit-criterion fixture's rows; (3) suite green (wisp-level,
+no GPU needed).
+
+### Gap 20 — the foil-msl lowering law + differential fixture
+
+A law lowers kernel-ir to MSL text (reusing the bar-weld machinery), emitting the same
+artifact shape the jets already consume; the artifact pins, compiles, and dispatches
+through the unchanged command graph.  *Pass criteria*: (1) lowered-artifact GPU output
+== IR-interpreted output == CPU walker (the three-tier differential, one fixture);
+(2) the lowered artifact is content-addressed and cache-hits on re-emission;
+(3) `psa-emitter.plan`'s hand-welded kernel replaced by the lowering of its IR form —
+the string-paste residue closed; (4) suite green.
+
+### Gap 21 — follow-on lowerings (deferred ledger, named triggers)
+
+- `host-reference` C lowering or direct host interpretation — trigger: Linux/CI lane
+  or the host-reference backend package.
+- `foil-spirv` — trigger: the MoltenVK target.
+- `foil-wgsl` — trigger: the PNW/WebGPU lane (note: WebGPU lacks BDA pointers — the
+  root-slot indirection in the IR is what makes this lowering possible at all).
+- `slang-*` sealed emitter registration — trigger: the Rex policy layer's
+  `@active` emitter selection + the first consumer-scale shader library.
+
+**Build order**: 19 → 20; 21 never blocks.  **Relationship to the Rex policy layer**:
+kernel-ir is what `@transform :ir` rows point at — this slice is arguably that plan's
+first chapter, landed early because every piece is expressible pre-`.rex` (records +
+laws + one fixture).
+
+---
+
 ## Out of Scope (tracked, not forgotten)
 
 - Store hardening: root revisions/CAS, watch-poll, write-batch witnesses (PLR12 lane)
