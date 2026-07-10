@@ -809,6 +809,39 @@ laws + one fixture).
 
 ---
 
+## Rex policy layer — seed notes (scoping deposits for the next plan)
+
+> *Specs: PCA5 (`@compose :kind cassette-chain`, legs by index with per-leg
+> optic-family/complement-merge/witness-merge), PSA3.2 (optic-family taxonomy:
+> biparser and fold are distinct couplings, not sandwich reductions), PLR
+> (exact-printing with complements), NE4/AS (the `@active` catalog), NWG.15 (the
+> acceptance gate every slice must fill)*
+
+- **Biparser chains are the boundary-leg dual of the motor bet** (recorded
+  2026-07-10).  PSA unifies both one level up: a motor is the cassette whose backward
+  leg is algebraically free (antireverse); a biparser is the cassette whose backward
+  leg is complement-funded (information recovery).  Same `@compose` chain algebra,
+  same coend complement-merge, same admission gate — one leg family (L-mode compute)
+  has the universal table-walker implementation (Slice 5's bet); the boundary
+  families (parse/print, codecs, wire envelopes) are declared as cassette-chains,
+  never reduced to sandwiches.
+- **First cassette-chain instance: the K0 exact-print upgrade.**  `rex.c`'s
+  ParseRex/PrintRex are today the split halves of a biparser with no complement
+  (print∘parse yields canonical form, not byte identity).  The policy layer's first
+  chain: `parse-rex` forward leg + a whitespace/comment **complement** + `print-rex`
+  backward leg, with `print(parse(src), complement) == src` byte-exact as the law
+  fixture (PLR's exact-printing demand).  Two hand-rolled biparsers already in the
+  tree become instances retroactively: Gap 12's record/replay flatten/rebuild pair
+  and the pin canonize/parse round trip.
+- **Other deposits already made**: `@active gpu-backend` / emitter selection resolves
+  before dispatch (never a PLAN-program branch); `slang-*` registers as
+  `body_kind sealed-host-emitter`; kernel-ir is the `@transform :ir` target;
+  the metric discrepancy needs an `algebra-metric-bridge` row (PSA1.1 R(4,1)
+  `(+,+,+,+,0)` vs the emitter's R(3,1,1) `(−1,1,1,1,0)` — CMS.10 forbids
+  admission by name similarity).
+
+---
+
 ## Out of Scope (tracked, not forgotten)
 
 - Store hardening: root revisions/CAS, watch-poll, write-batch witnesses (PLR12 lane)
