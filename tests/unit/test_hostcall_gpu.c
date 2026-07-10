@@ -1903,6 +1903,397 @@ Test(hostcall, gfx_write_copy_wait_data_path) {
   test_rt_free(&rt);
 }
 
+/* ── Gap 13 phase 2 helpers ────────────────────────────────────────────── */
+
+/*
+ * The depth artifact: box = (x, y, size, z) — box.z is both extents,
+ * box.w lands in clip z — so occlusion is decided by the depth test,
+ * never by draw order.
+ */
+static const char gfx_depth_msl[] =
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "struct Row { float4 box; float4 color; };\n"
+    "struct VOut { float4 pos [[position]]; float4 color; };\n"
+    "vertex VOut shrine_vertex(uint vid [[vertex_id]],\n"
+    "                          uint iid [[instance_id]],\n"
+    "                          const device Row* rows [[buffer(0)]]) {\n"
+    "  Row r = rows[iid];\n"
+    "  float2 c[6] = {\n"
+    "      float2(r.box.x, r.box.y),\n"
+    "      float2(r.box.x + r.box.z, r.box.y),\n"
+    "      float2(r.box.x, r.box.y + r.box.z),\n"
+    "      float2(r.box.x + r.box.z, r.box.y),\n"
+    "      float2(r.box.x + r.box.z, r.box.y + r.box.z),\n"
+    "      float2(r.box.x, r.box.y + r.box.z),\n"
+    "  };\n"
+    "  float2 p = c[vid];\n"
+    "  VOut o;\n"
+    "  o.pos = float4(p.x * 2.0 - 1.0, 1.0 - p.y * 2.0, r.box.w, 1.0);\n"
+    "  o.color = r.color;\n"
+    "  return o;\n"
+    "}\n"
+    "fragment float4 shrine_fragment(VOut in [[stage_in]]) {\n"
+    "  return in.color;\n"
+    "}\n";
+
+/* pipeline-request with a raster-state leg: artifact(bar, msl) +
+ * root-layout(stride, 1, 0, buffer) + raster-state(depth-format, 0) —
+ * the realized PSO carries the declared depth format. */
+static pl_val pipeline_request_raster(pl_thread* t, pl_val msl_bar,
+                                      uint64_t stride, uint64_t depth_format) {
+  size_t base = t->vsp;
+  pl_vpush(t, msl_bar); /* root the bar */
+  size_t f = t->vsp;
+  pl_vpush(t, t->vstack[base]);
+  pl_vpush(t, 1); /* language: msl */
+  pl_val art = record(t, "artifact", f);
+  pl_vpush(t, art); /* base+1 */
+  f = t->vsp;
+  pl_vpush(t, stride);
+  pl_vpush(t, 1); /* count */
+  pl_vpush(t, 0); /* segments */
+  pl_vpush(t, 1); /* mode: buffer */
+  pl_val layout = record(t, "root-layout", f);
+  pl_vpush(t, layout); /* base+2 */
+  f = t->vsp;
+  pl_vpush(t, depth_format);
+  pl_vpush(t, 0); /* reserved */
+  pl_val rast = record(t, "raster-state", f);
+  pl_vpush(t, rast); /* base+3 */
+  f = t->vsp;
+  pl_vpush(t, t->vstack[base + 1]);
+  pl_vpush(t, t->vstack[base + 2]);
+  pl_vpush(t, t->vstack[base + 3]);
+  pl_val req = record(t, "pipeline-request", f);
+  t->vsp = base;
+  return req;
+}
+
+/* pass-desc with a depth leg: one color attachment (clear + store), a
+ * depth attachment (clear to clear_f32bits, declared store op), and a
+ * ds-state (compare, write). */
+static pl_val pass_desc_depth(pl_thread* t, uint64_t target,
+                              uint64_t clear_bgra8, uint64_t depth_target,
+                              uint64_t depth_store, uint64_t clear_f32bits,
+                              uint64_t compare, uint64_t write) {
+  size_t base = t->vsp;
+  {
+    size_t f = t->vsp;
+    pl_vpush(t, target);
+    pl_vpush(t, 1); /* load: clear */
+    pl_vpush(t, 1); /* store: store */
+    pl_vpush(t, clear_bgra8);
+    pl_val ca = record(t, "color-attachment", f);
+    pl_vpush(t, ca);
+    pl_vpush(t, 0);
+    pl_vpush(t, record(t, "pair", f)); /* colors list at base */
+  }
+  {
+    size_t f = t->vsp;
+    pl_vpush(t, depth_target);
+    pl_vpush(t, 1); /* load: clear */
+    pl_vpush(t, depth_store);
+    pl_vpush(t, clear_f32bits);
+    pl_vpush(t, record(t, "depth-attachment", f)); /* base+1 */
+  }
+  {
+    size_t f = t->vsp;
+    pl_vpush(t, compare);
+    pl_vpush(t, write);
+    pl_vpush(t, record(t, "ds-state", f)); /* base+2 */
+  }
+  size_t f = t->vsp;
+  pl_vpush(t, t->vstack[base]);
+  pl_vpush(t, t->vstack[base + 1]);
+  pl_vpush(t, t->vstack[base + 2]);
+  pl_val pd = record(t, "pass-desc", f);
+  t->vsp = base;
+  return pd;
+}
+
+/*
+ * Gap 13 phase 2: the depth leg.  Two overlapping quads in ONE draw
+ * step — instance 0 near (z 0.2) blue, instance 1 far (z 0.8) red —
+ * under a Less/write ds-state against a cleared d32 attachment: the
+ * far red draws after the near blue and the depth test rejects it
+ * where they overlap.  The depth store op is DONT-CARE — occlusion
+ * needs the test during the pass, never the stored bytes — so the
+ * correct color pixels prove the criterion without reading depth back.
+ */
+Test(hostcall, gfx_depth_occludes_and_dont_care_store) {
+  cr_assert(pl_host_gpu_metal_register());
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  t->hostcall_f = true;
+
+  pl_catch c;
+  pl_catch_init(t, &c);
+  if (setjmp(c.jb) != 0) {
+    pl_catch_unwind(t, &c);
+    cr_assert_fail("raise during depth slice: %s",
+                   t->exn_msg != NULL ? t->exn_msg : "PLAN exception");
+  }
+
+  size_t args = t->vsp;
+  pl_vpush(t, 0);
+  pl_val r = hostcall(t, "gpu.session-open", args);
+  if (refusal_kind(r, "gpu.session-open") == 943) {
+    cr_log_warn("no metal device; depth slice skipped");
+    test_rt_free(&rt);
+    return;
+  }
+  uint64_t session = witness_payload_u64(t, r, "gpu.session-open", 0);
+
+  args = t->vsp;
+  pl_vpush(t, session);
+  {
+    size_t f = t->vsp;
+    pl_vpush(t, 1);
+    pl_vpush(t, 65536);
+    pl_vpush(t, 0);
+    pl_vpush(t, record(t, "memory-arena", f));
+  }
+  (void)witness_payload_u64(t, hostcall(t, "gpu.arena", args), "gpu.arena", 0);
+
+  /* library from the bare bar; the pipeline realizes the same artifact
+   * under a raster-state carrying Depth32Float */
+  pl_val msl =
+      bar_nat(t, (const uint8_t*)gfx_depth_msl, sizeof(gfx_depth_msl) - 1);
+  size_t keep = t->vsp;
+  pl_vpush(t, msl);
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, t->vstack[keep]);
+  (void)witness_payload_u64(t, hostcall(t, "gpu.library", args), "gpu.library",
+                            0);
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, pipeline_request_raster(t, t->vstack[keep], 32, 5));
+  uint64_t pipeline = witness_payload_u64(
+      t, hostcall(t, "gpu.pipeline-render", args), "gpu.pipeline-render", 0);
+
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, GFX_W);
+  pl_vpush(t, GFX_H);
+  pl_vpush(t, 1); /* bgra8 */
+  uint64_t color =
+      witness_payload_u64(t, hostcall(t, "gpu.target", args), "gpu.target", 0);
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, GFX_W);
+  pl_vpush(t, GFX_H);
+  pl_vpush(t, 5); /* d32 */
+  uint64_t depth =
+      witness_payload_u64(t, hostcall(t, "gpu.target", args), "gpu.target", 0);
+
+  /* row 0: near blue quad; row 1: far red quad — same footprint */
+  float payload[16] = {
+      0.25f, 0.25f, 0.5f, 0.2f, 0.0f, 0.0f, 1.0f, 1.0f, /* near blue */
+      0.25f, 0.25f, 0.5f, 0.8f, 1.0f, 0.0f, 0.0f, 1.0f, /* far red */
+  };
+  uint64_t root_gen = 0;
+  uint64_t root_idx =
+      alloc_bytes(t, session, payload, sizeof(payload), &root_gen);
+
+  /* one draw step, 2 instances; depth clears to 1.0f and stores
+   * DONT-CARE; ds-state Less + write */
+  args = t->vsp;
+  pl_vpush(t, graph_record(t, 6, 2, 1, 0, 0));
+  pl_vpush(t, session);
+  pl_vpush(t, pipeline);
+  pl_vpush(t,
+           pass_desc_depth(t, color, 0xff000000u, depth, 2, 0x3f800000u, 2, 1));
+  pl_vpush(t, pointer_record(t, root_idx, 0, sizeof(payload), root_gen));
+  pl_vpush(t, 0);
+  cr_assert_eq(witness_payload_u64(t, hostcall(t, "gpu.command-graph", args),
+                                   "gpu.command-graph", 0),
+               1u);
+
+  /* center: blue won although red drew after it */
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, color);
+  pl_vpush(t, GFX_W / 2);
+  pl_vpush(t, GFX_H / 2);
+  cr_assert_eq(witness_payload_u64(t, hostcall(t, "gpu.readback", args),
+                                   "gpu.readback", 0),
+               0xff0000ffu);
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, color);
+  pl_vpush(t, 1);
+  pl_vpush(t, 1);
+  cr_assert_eq(witness_payload_u64(t, hostcall(t, "gpu.readback", args),
+                                   "gpu.readback", 0),
+               0xff000000u);
+
+  args = t->vsp;
+  pl_vpush(t, session);
+  cr_assert_not_null(result_row(hostcall(t, "gpu.session-close", args),
+                                "witness", "gpu.session-close"));
+  pl_catch_pop(t, &c);
+  test_rt_free(&rt);
+}
+
+/* render graph with one draw-indexed step {index-window icount insts
+ * fmt}; the index window is (alloc, 0, len, gen). */
+static pl_val graph_indexed_record(pl_thread* t, uint64_t alloc, uint64_t len,
+                                   uint64_t gen, uint64_t icount,
+                                   uint64_t instances, uint64_t format) {
+  size_t base = t->vsp;
+  pl_vpush(t, 5); /* kind: draw-indexed */
+  pl_vpush(t, pointer_record(t, alloc, 0, len, gen));
+  pl_vpush(t, icount);
+  pl_vpush(t, instances);
+  pl_vpush(t, format);
+  pl_val step = record(t, "command-step", base);
+  pl_vpush(t, step);
+  pl_vpush(t, 0);
+  pl_val steps = record(t, "pair", base);
+  pl_vpush(t, steps);
+  size_t gb = t->vsp;
+  pl_vpush(t, t->vstack[base]);
+  pl_vpush(t, 1); /* step count */
+  pl_vpush(t, 0); /* hazards */
+  pl_vpush(t, 0); /* wait */
+  pl_val graph = record(t, "command-graph", gb);
+  t->vsp = base;
+  return graph;
+}
+
+/*
+ * Gap 13 phase 2: indexed geometry through the complement discipline.
+ * The index buffer is an arena allocation named by a heap-pointer
+ * record inside the step — native validates the window (liveness,
+ * generation, format arithmetic) and points Metal at it; it never
+ * reads an index.  A window too small for the declared count refuses
+ * with bounds; an unknown index format refuses as graph shape.
+ */
+Test(hostcall, gfx_indexed_draw_through_complement) {
+  cr_assert(pl_host_gpu_metal_register());
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  t->hostcall_f = true;
+
+  pl_catch c;
+  pl_catch_init(t, &c);
+  if (setjmp(c.jb) != 0) {
+    pl_catch_unwind(t, &c);
+    cr_assert_fail("raise during indexed slice: %s",
+                   t->exn_msg != NULL ? t->exn_msg : "PLAN exception");
+  }
+
+  size_t args = t->vsp;
+  pl_vpush(t, 0);
+  pl_val r = hostcall(t, "gpu.session-open", args);
+  if (refusal_kind(r, "gpu.session-open") == 943) {
+    cr_log_warn("no metal device; indexed slice skipped");
+    test_rt_free(&rt);
+    return;
+  }
+  uint64_t session = witness_payload_u64(t, r, "gpu.session-open", 0);
+
+  args = t->vsp;
+  pl_vpush(t, session);
+  {
+    size_t f = t->vsp;
+    pl_vpush(t, 1);
+    pl_vpush(t, 65536);
+    pl_vpush(t, 0);
+    pl_vpush(t, record(t, "memory-arena", f));
+  }
+  (void)witness_payload_u64(t, hostcall(t, "gpu.arena", args), "gpu.arena", 0);
+
+  pl_val msl = bar_nat(t, (const uint8_t*)gfx_msl, sizeof(gfx_msl) - 1);
+  size_t keep = t->vsp;
+  pl_vpush(t, msl);
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, t->vstack[keep]);
+  (void)witness_payload_u64(t, hostcall(t, "gpu.library", args), "gpu.library",
+                            0);
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, t->vstack[keep]);
+  uint64_t pipeline = witness_payload_u64(
+      t, hostcall(t, "gpu.pipeline-render", args), "gpu.pipeline-render", 0);
+
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, GFX_W);
+  pl_vpush(t, GFX_H);
+  pl_vpush(t, 1); /* bgra8 */
+  uint64_t target =
+      witness_payload_u64(t, hostcall(t, "gpu.target", args), "gpu.target", 0);
+
+  /* one full-target red row; six u16le indices walking the quad's own
+   * vertex order */
+  float payload[8] = {0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 1.0f};
+  uint64_t root_gen = 0;
+  uint64_t root_idx =
+      alloc_bytes(t, session, payload, sizeof(payload), &root_gen);
+  static const uint8_t indices[12] = {0, 0, 1, 0, 2, 0, 3, 0, 4, 0, 5, 0};
+  uint64_t index_gen = 0;
+  uint64_t index_idx =
+      alloc_bytes(t, session, indices, sizeof(indices), &index_gen);
+
+  args = t->vsp;
+  pl_vpush(t, graph_indexed_record(t, index_idx, sizeof(indices), index_gen, 6,
+                                   1, 1));
+  pl_vpush(t, session);
+  pl_vpush(t, pipeline);
+  pl_vpush(t, pass_desc(t, target, 0xff000000u));
+  pl_vpush(t, pointer_record(t, root_idx, 0, sizeof(payload), root_gen));
+  pl_vpush(t, 0);
+  cr_assert_eq(witness_payload_u64(t, hostcall(t, "gpu.command-graph", args),
+                                   "gpu.command-graph", 0),
+               1u);
+
+  args = t->vsp;
+  pl_vpush(t, session);
+  pl_vpush(t, target);
+  pl_vpush(t, GFX_W / 2);
+  pl_vpush(t, GFX_H / 2);
+  cr_assert_eq(witness_payload_u64(t, hostcall(t, "gpu.readback", args),
+                                   "gpu.readback", 0),
+               0xffff0000u);
+
+  /* an index window too small for the count refuses with bounds
+   * (6 u16 = 12 bytes > the declared 4) */
+  args = t->vsp;
+  pl_vpush(t, graph_indexed_record(t, index_idx, 4, index_gen, 6, 1, 1));
+  pl_vpush(t, session);
+  pl_vpush(t, pipeline);
+  pl_vpush(t, pass_desc(t, target, 0xff000000u));
+  pl_vpush(t, pointer_record(t, root_idx, 0, sizeof(payload), root_gen));
+  pl_vpush(t, 0);
+  cr_assert_eq(
+      refusal_kind(hostcall(t, "gpu.command-graph", args), "gpu.command-graph"),
+      948u);
+
+  /* an unknown index format refuses as graph shape */
+  args = t->vsp;
+  pl_vpush(t, graph_indexed_record(t, index_idx, sizeof(indices), index_gen, 6,
+                                   1, 3));
+  pl_vpush(t, session);
+  pl_vpush(t, pipeline);
+  pl_vpush(t, pass_desc(t, target, 0xff000000u));
+  pl_vpush(t, pointer_record(t, root_idx, 0, sizeof(payload), root_gen));
+  pl_vpush(t, 0);
+  cr_assert_eq(
+      refusal_kind(hostcall(t, "gpu.command-graph", args), "gpu.command-graph"),
+      952u);
+
+  args = t->vsp;
+  pl_vpush(t, session);
+  cr_assert_not_null(result_row(hostcall(t, "gpu.session-close", args),
+                                "witness", "gpu.session-close"));
+  pl_catch_pop(t, &c);
+  test_rt_free(&rt);
+}
+
 /*
  * Gap 12: op-83 record/replay through the er_io_hook seam.  Recording
  * runs the jets live and logs each result row; replay substitutes the

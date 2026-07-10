@@ -566,10 +566,14 @@ compiled out (or on a 943 no-device machine); (2) divergence (edited args) abort
 > fragment buffer 0; `gpu.target` gained the format field {1 bgra8, 5 d32};
 > `pipeline-request` field 3 `raster-state (depth-format, reserved)` joins the pipeline
 > cache key.  All 13 render call sites migrated; 16/16 fixtures green.
-> **Remaining (phase 2)**: the depth-occlusion + DONT_CARE fixtures, `draw-indexed`
-> (kind 5), remaining formats (R8/RGBA8/RGBA16F on targets and sampled textures),
-> per-target writemasks, private/placed textures, cull/topology/MSAA/blend in
-> raster-state, two-raster-states cache fixture.
+> **Phase 2 (2026-07-09)**: depth occlusion landed (`gfx_depth_occludes_and_dont_care_store`:
+> near-blue-then-far-red two-instance draw under ds-state Less+write — blue wins; depth
+> store DONT-CARE with correct color; raster-state pipeline carries Depth32Float) and
+> **draw-indexed landed** (kind 5 `{index-ptr icount instances u16|u32}`, window validated
+> via gm_pointer with 948/952 refusal legs — `gfx_indexed_draw_through_complement`).
+> 18/18 fixtures.  **Remaining (phase 3)**: formats R8/RGBA8/RGBA16F, per-target
+> writemasks, private/placed textures, cull/topology/MSAA/blend in raster-state,
+> two-raster-states cache fixture.
 
 - **`pass-desc` carrier** replacing the bare target arg on `gpu.command-graph`:
   `pass-desc (color-attachments depth-attachment ds-state k)`; each color attachment

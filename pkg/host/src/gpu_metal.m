@@ -65,6 +65,7 @@ enum {
   GM_STEP_CLEAR = 2,
   GM_STEP_DISPATCH = 3,
   GM_STEP_DISPATCH_INDIRECT = 4,
+  GM_STEP_DRAW_INDEXED = 5,      /* {index-ptr index-count instances u16|u32} */
   GM_STEP_COPY = 7,              /* {src-ptr dst-ptr 0 0} buffer→buffer */
   GM_STEP_COPY_TO_TEXTURE = 8,   /* {src-ptr texture w h} */
   GM_STEP_COPY_FROM_TEXTURE = 9, /* {texture dst-ptr w h} */
@@ -1620,6 +1621,30 @@ static pl_val gm_command_graph(pl_thread* t, size_t ab) {
         return pl_hostcall_refusal(t, "gpu.command-graph",
                                    GM_REFUSAL_GRAPH_SHAPE,
                                    "clear step retired: use pass-desc load");
+      } else if (kind == GM_STEP_DRAW_INDEXED) {
+        pl_val* ip = gm_record(step[1], "heap-pointer", 5);
+        uint64_t icount = pl_nat_u64_clamp(pl_nat_coerce(step[2]));
+        uint64_t insts = pl_nat_u64_clamp(pl_nat_coerce(step[3]));
+        uint64_t ifmt = pl_nat_u64_clamp(pl_nat_coerce(step[4]));
+        if (ip == NULL)
+          return pl_hostcall_refusal(t, "gpu.command-graph",
+                                     GM_REFUSAL_CARRIER_SHAPE,
+                                     "indexed draw takes an index pointer");
+        if (icount == 0 || insts == 0 || (ifmt != 1 && ifmt != 2))
+          return pl_hostcall_refusal(t, "gpu.command-graph",
+                                     GM_REFUSAL_GRAPH_SHAPE,
+                                     "indexed draw shape rejected");
+        uint64_t irk = 0;
+        size_t ioff = 0, ilen = 0;
+        if (gm_pointer(s, ip, &ioff, &ilen, &irk) == nil)
+          return pl_hostcall_refusal(t, "gpu.command-graph", irk,
+                                     "index window rejected");
+        uint64_t isz = ifmt == 1 ? 2 : 4;
+        if ((ioff % isz) != 0 || icount * isz > ilen)
+          return pl_hostcall_refusal(t, "gpu.command-graph",
+                                     GM_REFUSAL_BOUNDS,
+                                     "index window out of bounds");
+        draws_total++;
       } else if (kind != GM_STEP_DRAW) {
         return pl_hostcall_refusal(t, "gpu.command-graph",
                                    GM_REFUSAL_GRAPH_SHAPE,
@@ -1745,10 +1770,16 @@ static pl_val gm_command_graph(pl_thread* t, size_t ab) {
         pl_val* cell = gm_record(cursor, "pair", 2);
         pl_val* step = gm_record(cell[0], "command-step", 5);
         uint64_t kind = pl_nat_u64_clamp(pl_nat_coerce(step[0]));
-        if (kind == GM_STEP_DRAW) {
-          uint64_t vertices = pl_nat_u64_clamp(pl_nat_coerce(step[1]));
-          uint64_t instances = pl_nat_u64_clamp(pl_nat_coerce(step[2]));
-          if (vertices == 0 || instances == 0) {
+        if (kind == GM_STEP_DRAW || kind == GM_STEP_DRAW_INDEXED) {
+          uint64_t vertices =
+              kind == GM_STEP_DRAW
+                  ? pl_nat_u64_clamp(pl_nat_coerce(step[1]))
+                  : 1;
+          uint64_t instances =
+              kind == GM_STEP_DRAW
+                  ? pl_nat_u64_clamp(pl_nat_coerce(step[2]))
+                  : 1;
+          if (kind == GM_STEP_DRAW && (vertices == 0 || instances == 0)) {
             [encoder endEncoding];
             return pl_hostcall_refusal(t, "gpu.command-graph",
                                        GM_REFUSAL_GRAPH_SHAPE,
@@ -1768,10 +1799,28 @@ static pl_val gm_command_graph(pl_thread* t, size_t ab) {
                                          GM_REFUSAL_ENCODE,
                                          "encoder unavailable");
           }
-          [encoder drawPrimitives:MTLPrimitiveTypeTriangle
-                      vertexStart:0
-                      vertexCount:(NSUInteger)vertices
-                    instanceCount:(NSUInteger)instances];
+          if (kind == GM_STEP_DRAW_INDEXED) {
+            pl_val* ip = gm_record(step[1], "heap-pointer", 5);
+            uint64_t irk = 0;
+            size_t ioff = 0, ilen = 0;
+            id<MTLBuffer> ibuf = gm_pointer(s, ip, &ioff, &ilen, &irk);
+            uint64_t ifmt = pl_nat_u64_clamp(pl_nat_coerce(step[4]));
+            [encoder
+                drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+                           indexCount:(NSUInteger)pl_nat_u64_clamp(
+                                          pl_nat_coerce(step[2]))
+                            indexType:ifmt == 1 ? MTLIndexTypeUInt16
+                                                : MTLIndexTypeUInt32
+                          indexBuffer:ibuf
+                    indexBufferOffset:(NSUInteger)ioff
+                        instanceCount:(NSUInteger)pl_nat_u64_clamp(
+                                          pl_nat_coerce(step[3]))];
+          } else {
+            [encoder drawPrimitives:MTLPrimitiveTypeTriangle
+                        vertexStart:0
+                        vertexCount:(NSUInteger)vertices
+                      instanceCount:(NSUInteger)instances];
+          }
           draws++;
         }
         executed++;
