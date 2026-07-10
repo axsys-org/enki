@@ -80,7 +80,7 @@
         in
           import ./nix/mkenki.nix {
             inherit lib stdenv src;
-            inherit (pkgs) gnumake pkg-config criterion gmp lmdb openssl binutils;
+            inherit (pkgs) gnumake pkg-config criterion curl gmp lmdb openssl binutils;
             inherit (selected) compiler cc;
           };
 
@@ -152,6 +152,9 @@
             // lib.optionalAttrs (kind == "unit-tests") {
               ENKI_REAVER_SRC_DIR = "${wispPackage}/share/enki/reaver/src";
               ENKI_REAVER_PLAN_DIR = "${wispPackage}/share/enki/reaver/src/plan";
+              # the HTTP tests talk to a loopback mock server; the darwin
+              # sandbox blocks even localhost without this
+              __darwinAllowLocalNetworking = true;
             });
 
         mkCheck = kind: buildType: mkCheckArgs kind buildType "" "";
@@ -213,11 +216,13 @@
           ENKI_REAVER_PLAN_DIR = "${wispPackage}/share/enki/reaver/src/plan";
           buildInputs = [
             pkgs.criterion
+            pkgs.curl
             pkgs.gmp
             pkgs.lmdb
             pkgs.openssl
             wispPackage
           ];
+          __darwinAllowLocalNetworking = true;
 
           dontConfigure = true;
           buildPhase = ''
@@ -251,6 +256,7 @@
 
           buildInputs = [
             pkgs.criterion
+            pkgs.curl
             pkgs.gmp
             pkgs.lmdb
             pkgs.openssl
@@ -368,6 +374,7 @@
               pkgs.bear
               pkgs.gnumake
               pkgs.criterion
+              pkgs.curl
               pkgs.gmp
               pkgs.lmdb
               pkgs.openssl

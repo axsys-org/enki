@@ -6,8 +6,18 @@
  * private heap; an actor's whole life is one deep normalization of
  * (fn 0).  The single-OS-thread deterministic executor drives actors in
  * FIFO run-queue order with a fixed fuel quantum and services the
- * coordination effects (op 82 Spawn/Send/SendCaps/Recv/CloseHandle)
- * that pl_thread_run parks as PL_RUN_BLOCKED requests.
+ * coordination effects (op 82 Spawn/Send/SendCaps/Recv/CloseHandle and
+ * op 83 Fetch) that pl_thread_run parks as PL_RUN_BLOCKED requests.
+ *
+ * HTTP (op 83 Fetch, src/http.c): a libcurl-backed req/res effect.
+ * The caller parks while the transfer runs on a scheduler-owned multi
+ * handle; other actors keep executing, and the run loops block in
+ * curl_multi_poll only when the run queue is empty.  The Result value
+ * is (0 [status urlBar headersRow bodyBar]) or (1 errCode); see
+ * src/http.c for the request/config ABI and the error taxonomy.
+ * Caveat: transfers accept all curl content encodings, so the body
+ * arrives decoded while Content-Length/Content-Encoding response
+ * headers still describe the wire form.
  *
  * Messaging: payloads cross actors only as store-resident
  * values — the sender pins at send, the mailbox holds store addresses,
@@ -36,6 +46,9 @@ typedef struct er_config {
   uint64_t quantum;        /* fuel per slice (>= 2); 0 = default */
   size_t heap_cells;       /* per-actor semispace cells; 0 = default (8192) */
   const char* file_root_c; /* spawned actors' ReadFile jail (may be NULL) */
+  /* HTTP driver (op 83 Fetch) */
+  long http_max_total_connections;  /* CURLM connection cap; 0 = curl default */
+  uint64_t http_connect_default_ms; /* connectMs None default; 0 = 10000 */
 } er_config;
 
 er_scheduler* er_scheduler_new(pl_store* store, er_config cfg);
@@ -106,6 +119,9 @@ er_drive_status er_mt_executor_drive(er_mt_executor* ex, er_actor* root);
  */
 void er_scheduler_inject(er_scheduler* sys, er_actor* to, pl_val payload);
 
+/* Live HTTP transfers (op 83 Fetch) registered on this scheduler. */
+size_t er_http_inflight_count(const er_scheduler* sys);
+
 er_actor_status er_actor_state(const er_actor* a);
 uint64_t er_actor_id(const er_actor* a);
 /* Creation-ordered lookup (spawn order defines ids); NULL if unknown. */
@@ -118,9 +134,19 @@ pl_val er_actor_result(er_actor* a);
  * ── Event log & replay ─────────────────────────────────────────────────────
  *
  * The log records exactly the external inputs: every direct (unix)
- * effect's result as (actor, op name, args hash, result-nat bytes), and
- * every host injection, in occurrence order.  Internal events — actor
- * messages, yields, scheduling — are reproducible and never logged.
+ * effect's result as (actor, op name, args hash, result-nat bytes),
+ * every host injection, and every HTTP fetch result, in occurrence
+ * order.  Internal events — actor messages, yields, scheduling — are
+ * reproducible and never logged.
+ *
+ * HTTP fetches are the one source of completion-order nondeterminism,
+ * so recording constrains when they resume: a completion deposits only
+ * when the run queue is empty, exactly one per empty-queue point, with
+ * its event appended immediately before the deposit (validation
+ * failures deposit at their service point instead).  Replay reaches
+ * the same empty-queue points in the same order and consumes one event
+ * per point — no curl handle is ever created and the network is never
+ * touched; validation is not re-run.
  *
  * Recording: attach with er_scheduler_record before running; direct
  * effects execute live and their results are appended.

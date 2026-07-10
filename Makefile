@@ -105,7 +105,7 @@ APP_BINS := $(patsubst $(APP_DIR)/%.c,$(BUILD_DIR)/bin/%,$(APP_SRCS))
 
 CPPFLAGS_ALL := $(BASE_CPPFLAGS) $(CPPFLAGS)
 CFLAGS_ALL := $(BASE_CFLAGS) $(WARN_CFLAGS) $(BUILD_CFLAGS_$(BUILD_TYPE)) $(CFLAGS)
-LDFLAGS_ALL := $(BUILD_LDFLAGS_$(BUILD_TYPE)) $(LDFLAGS) -pthread -L/opt/homebrew/lib -lgmp -llmdb -lcrypto
+LDFLAGS_ALL := $(BUILD_LDFLAGS_$(BUILD_TYPE)) $(LDFLAGS) -pthread -L/opt/homebrew/lib -lgmp -llmdb -lcrypto -lcurl
 
 ifeq ($(PROFILE),tracy)
 CPPFLAGS_ALL += -I/opt/homebrew/opt/tracy/include/tracy
@@ -172,7 +172,8 @@ TIDY_FILES_ABS := $(addprefix $(CURDIR)/,$(TIDY_FILES))
 FORMAT_FILES := $(HEADERS) $(AXSYS_SRCS) $(PLAN_SRCS) $(ENKI_SRCS) $(APP_SRCS) \
 	$(UNIT_SRCS) $(TSAN_UNIT_SRCS) $(PROPERTY_SRCS) $(FUZZ_SRCS) \
 	$(VENDOR_THEFT_DIR)/theft.h $(VENDOR_THEFT_DIR)/theft.c \
-	tests/support/fff.h tests/support/test_plan.h
+	tests/support/fff.h tests/support/test_plan.h \
+	tests/support/test_http_server.h
 
 CRITERION_CFLAGS := $(shell pkg-config --cflags criterion 2>/dev/null)
 CRITERION_LIBS := $(shell pkg-config --libs criterion 2>/dev/null)

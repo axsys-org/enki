@@ -7,6 +7,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "actor_internal.h"
 #include "axsys/assume.h"
 #include "axsys/ds.h"
 #include "axsys/sha256.h"
@@ -38,75 +39,7 @@
 #define ER_DEFAULT_QUANTUM    4096
 #define ER_DEFAULT_HEAP_CELLS 8192 /* 64 KiB per semispace */
 
-typedef struct er_msg {
-  pl_val payload; /* nat63 or store-resident — terminal for every GC */
-  struct er_msg* next;
-  uint32_t ncaps;
-  er_actor* caps[]; /* actor refs, translated at send */
-} er_msg;
-
-struct er_actor {
-  er_scheduler* sys;
-  uint64_t id; /* creation order; deterministic tie-break key */
-  pl_heap* heap;
-  pl_thread* t;
-  er_actor_status status;
-  bool started;
-  bool adopted;      /* embedder-owned thread/heap; never HALTED, never freed */
-  er_msg* mbox_head; /* arrival-order FIFO (matches reaver's Chan) */
-  er_msg* mbox_tail;
-  er_actor** handle_v; /* dense handle table; NULL = closed; [0] = self */
-  size_t handle_n;     /* next handle to mint (never reused) */
-  size_t handle_cap;
-  er_actor* qnext;
-  er_actor* all_next;
-};
-
-/* ── Event log ─────────────────────────────────────────────────────────── */
-
-typedef enum { ER_EV_IO = 1, ER_EV_INJECT = 2 } er_ev_kind;
-
-typedef struct er_event {
-  uint8_t kind;
-  uint64_t actor;        /* er_actor id */
-  uint64_t op;           /* IO: effect-name mote; INJECT: 0 */
-  uint8_t args_hash[32]; /* IO: SHA-256 of the forced args */
-  uint8_t* data;         /* IO: result nat bytes; INJECT: payload encoding */
-  uint64_t data_n;
-} er_event;
-
-struct er_log {
-  uint64_t quantum; /* header: replay must use the same quantum */
-  er_event* ev;     /* stb_ds array */
-};
-
-typedef enum { ER_MODE_LIVE = 0, ER_MODE_RECORD, ER_MODE_REPLAY } er_mode;
-
-struct er_scheduler {
-  pl_store* store;
-  er_config cfg;
-  pthread_mutex_t mu;
-  pthread_cond_t cv;
-  er_actor* qhead; /* run queue */
-  er_actor* qtail;
-  er_actor* all_head; /* every actor, creation order */
-  er_actor* all_tail;
-  uint64_t next_id;
-  er_mode mode;
-  er_log* rec;        /* RECORD sink */
-  const er_log* play; /* REPLAY source */
-  size_t cursor;      /* next replay event */
-};
-
-struct er_mt_executor {
-  er_scheduler* sys;
-  er_actor* root;
-  uint32_t workers;
-  pthread_t* thread_v;
-  size_t active;
-  bool stopping;
-  er_run_reason reason;
-};
+/* Struct definitions live in actor_internal.h, shared with http.c. */
 
 /* ── Construction ──────────────────────────────────────────────────────── */
 
@@ -176,6 +109,7 @@ er_actor* er_scheduler_adopt(er_scheduler* sys, pl_thread* t) {
 void er_scheduler_free(er_scheduler* sys) {
   if (sys == NULL)
     return;
+  er_http_teardown(sys); /* before the actors: transfers reference them */
   for (er_actor* a = sys->all_head; a != NULL;) {
     er_actor* next = a->all_next;
     for (er_msg* m = a->mbox_head; m != NULL;) {
@@ -232,7 +166,7 @@ static bool er_trace(void) {
   return on;
 }
 
-static void er_enqueue(er_actor* a) {
+void er_enqueue(er_actor* a) {
   if (er_trace())
     fprintf(stderr, "[trace] enqueue actor=%llu\n", (unsigned long long)a->id);
   a->qnext = NULL;
@@ -400,7 +334,8 @@ static void er_deliver(er_actor* to, pl_val payload, uint32_t ncaps,
   else
     to->mbox_head = m;
   to->mbox_tail = m;
-  if (to->status == ER_ACTOR_BLOCKED)
+  /* an http-parked actor is not waiting on Recv; its mail just queues */
+  if (to->status == ER_ACTOR_BLOCKED && to->http == NULL)
     er_recv_ready(to);
 }
 
@@ -452,7 +387,7 @@ static void er_crash(er_actor* a) {
 
 /* Service-detected crash (no PLAN raise happened): leave a message in
  * the thread's exn slot so embedders report something useful. */
-static void er_crash_msg(er_actor* a, const char* msg) {
+void er_crash_msg(er_actor* a, const char* msg) {
   a->t->exn = 0;
   a->t->exn_msg = msg;
   er_crash(a);
@@ -594,6 +529,11 @@ static void er_service(er_scheduler* sys, er_actor* a) {
     return;
   }
 
+  if (er_op_is(name, "Fetch")) {
+    er_http_service(sys, a, argc, args);
+    return;
+  }
+
   if (er_op_is(name, "CloseHandle")) {
     ax_assume(argc == 1, "CloseHandle arity");
     pl_val h = args[0];
@@ -637,8 +577,11 @@ static void er_step(er_scheduler* sys, er_actor* a, pl_run_status s) {
 
 er_run_reason er_scheduler_run(er_scheduler* sys) {
   for (;;) {
+    er_http_pump(sys);
     er_actor* a = er_dequeue(sys);
     if (a == NULL) {
+      if (er_http_idle(sys))
+        continue; /* an http completion made someone runnable */
       for (er_actor* it = sys->all_head; it != NULL; it = it->all_next)
         if (it->status == ER_ACTOR_BLOCKED)
           return ER_RUN_QUIESCENT;
@@ -671,7 +614,9 @@ static void* er_mt_worker(void* arg) {
       a = ex->root == NULL ? er_dequeue(sys) : er_dequeue_spawned(sys);
       if (a != NULL)
         break;
-      if (ex->root == NULL && ex->active == 0) {
+      if (er_http_mt_pump(sys))
+        continue; /* pumped the CURLM: completions may have enqueued */
+      if (ex->root == NULL && ex->active == 0 && !er_http_outstanding(sys)) {
         ex->reason = er_run_reason_locked(sys);
         ex->stopping = true;
         pthread_cond_broadcast(&sys->cv);
@@ -690,7 +635,8 @@ static void* er_mt_worker(void* arg) {
     pthread_mutex_lock(&sys->mu);
     er_step(sys, a, s);
     ex->active--;
-    if (ex->root == NULL && sys->qhead == NULL && ex->active == 0) {
+    if (ex->root == NULL && sys->qhead == NULL && ex->active == 0 &&
+        !er_http_outstanding(sys)) {
       ex->reason = er_run_reason_locked(sys);
       ex->stopping = true;
       pthread_cond_broadcast(&sys->cv);
@@ -760,8 +706,11 @@ er_drive_status er_scheduler_drive(er_scheduler* sys, er_actor* root) {
   root->status = ER_ACTOR_RUNNABLE;
   er_enqueue(root);
   for (;;) {
+    er_http_pump(sys);
     er_actor* a = er_dequeue(sys);
     if (a == NULL) {
+      if (er_http_idle(sys))
+        continue; /* an http completion made someone runnable */
       /* root is parked on Recv and nothing runnable can ever wake it */
       er_root_unwind(root);
       return ER_DRIVE_DEADLOCK;
@@ -845,7 +794,7 @@ er_drive_status er_mt_executor_drive(er_mt_executor* ex, er_actor* root) {
     }
 
     if (root->status == ER_ACTOR_BLOCKED && sys->qhead == NULL &&
-        ex->active == 0) {
+        ex->active == 0 && !er_http_outstanding(sys)) {
       er_root_unwind(root);
       out = ER_DRIVE_DEADLOCK;
       ex->stopping = true;
@@ -886,7 +835,7 @@ size_t er_log_events(const er_log* log) {
 }
 
 /* Effect names are <= 8 bytes; pack them as a mote like ax_s*. */
-static uint64_t er_mote(const char* s) {
+uint64_t er_mote(const char* s) {
   uint64_t v = 0;
   for (int i = 0; s[i] != '\0'; i++) {
     ax_assume(i < 8, "er_log: effect name too long");
@@ -928,7 +877,7 @@ static uint8_t* er_nat_bytes(pl_val v, uint64_t* out_n) {
   return b;
 }
 
-static const er_event* er_replay_next(er_scheduler* sys) {
+const er_event* er_replay_next(er_scheduler* sys) {
   ax_assume(sys->cursor < er_log_events(sys->play),
             "er_log: replay ran past the end of the recording");
   return &sys->play->ev[sys->cursor++];
@@ -982,6 +931,8 @@ void er_scheduler_replay(er_scheduler* sys, const er_log* log) {
   ax_assume(sys->mode == ER_MODE_LIVE, "er_scheduler_replay: mode already set");
   ax_assume(log->quantum == sys->cfg.quantum,
             "er_scheduler_replay: quantum differs from the recording");
+  ax_assume(sys->curlm == NULL && sys->http_inflight_n == 0,
+            "er_scheduler_replay: live http transfers exist");
   sys->mode = ER_MODE_REPLAY;
   sys->play = log;
   sys->cursor = 0;

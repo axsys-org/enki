@@ -5,6 +5,7 @@
   gnumake,
   pkg-config,
   criterion,
+  curl,
   gmp,
   lmdb,
   openssl,
@@ -34,6 +35,7 @@ stdenv.mkDerivation {
 
   buildInputs = [
     criterion
+    curl
     gmp
     lmdb
     openssl

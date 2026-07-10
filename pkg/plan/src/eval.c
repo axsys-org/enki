@@ -421,7 +421,7 @@ eval_thke: {
      * F_OPENT, no lookup; enter the strict-arg driver directly */
     uint32_t idx = (uint32_t)args[0];
     assert(idx < pl_nops);
-    if (pl_ops[idx].opset == 82 && !t->rplan_f)
+    if (pl_ops[idx].opset >= 82 && !t->rplan_f)
       pl_raise_msg(t, "Not in RPLAN Mode"); /* the F_OPENT gate */
     size_t listbase = t->vsp;
     for (uint32_t i = 0; i < argc; i++)
@@ -608,7 +608,7 @@ x_tail: {
   }
   if (bane == PL_BAN_PRIM_KNOWN) {
     assert(idx < pl_nops);
-    if (pl_ops[idx].opset == 82 && !t->rplan_f)
+    if (pl_ops[idx].opset >= 82 && !t->rplan_f)
       pl_raise_msg(t, "Not in RPLAN Mode");
     pl_vpush(t, 0); /* room for the name slot when g == tbase */
     memmove(&t->vstack[tbase + 1], &t->vstack[g],
@@ -931,7 +931,7 @@ ret_opent: {
   }
   argc = (uint32_t)(t->vsp - listbase - 1);
   pl_val name = t->vstack[listbase];
-  if (opset == 82 && !t->rplan_f)
+  if (opset >= 82 && !t->rplan_f)
     pl_raise_msg(t, "Not in RPLAN Mode");
   int idx = pl_op_lookup(opset, name, argc);
   if (idx < 0)

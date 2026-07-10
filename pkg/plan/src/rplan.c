@@ -589,3 +589,12 @@ pl_val pl_op82_close_handle(pl_thread* t, size_t ab) {
   rp_want_nat(t, ARG(0));
   return rp_request(t, ab, 1);
 }
+
+/* ── op 83: HTTP driver ────────────────────────────────────────────────── */
+
+pl_val pl_op83_fetch(pl_thread* t, size_t ab) {
+  /* req and cfg are deep-normalized by the machine before the body runs;
+   * all shape/URL validation happens at service time in pkg/enki (libcurl
+   * stays out of the plan layer). */
+  return rp_request(t, ab, 2);
+}
