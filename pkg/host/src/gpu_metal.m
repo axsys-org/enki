@@ -125,6 +125,12 @@ enum {
   GM_ROOT_INLINE = 2, /* root bytes inlined via setBytes (<= 4 KiB) */
 };
 
+/* Texture formats (Gap 13, GF1.4-anchored; the rest land with 13b). */
+enum {
+  GM_FORMAT_BGRA8 = 1,
+  GM_FORMAT_D32 = 5,
+};
+
 static gm_session gm_sessions[GM_SESSIONS];
 
 /* Pin-keyed library/pipeline cache (Gap 6): keyed by sha-256 of the
@@ -162,6 +168,10 @@ static bool gm_nat_is(pl_val v, const char* s) {
  * exactly nfields supplied fields.  The caller must have normalized v
  * (pl_nf) so fields are values, not thunks.  Returns the field array or
  * NULL on shape mismatch. */
+static bool gm_is_zero(pl_val v) {
+  return pl_is_nat(v) && pl_nat_is_zero(pl_nat_coerce(v));
+}
+
 static pl_val* gm_record(pl_val v, const char* kind_c, uint32_t nfields) {
   pl_cell* p = pl_as(PL_TAG_APP, v);
   if (p == NULL || pl_app_n(p) != nfields)
@@ -221,12 +231,29 @@ static uint8_t* gm_bar_bytes(pl_val v, size_t* out_n);
  * record (artifact, root-layout).  Resolves the artifact bytes and the
  * declared root layout; NULL = carrier shape refusal. */
 static uint8_t* gm_pipeline_source(pl_thread* t, size_t ab, size_t* out_n,
-                                   uint64_t* out_stride, uint64_t* out_mode) {
+                                   uint64_t* out_stride, uint64_t* out_mode,
+                                   uint64_t* out_dformat) {
   ARG(1) = pl_nf(t, ARG(1));
   pl_val src = ARG(1);
   *out_stride = 0;
   *out_mode = GM_ROOT_BUFFER;
-  pl_val* req = gm_record(src, "pipeline-request", 2);
+  *out_dformat = 0;
+  pl_val* req = gm_record(src, "pipeline-request", 3);
+  pl_val* rast = NULL;
+  if (req != NULL) {
+    /* field 3 (Gap 13): raster-state (depth-format, reserved) — the
+     * pipeline realizes the artifact under this raster policy */
+    if (!gm_is_zero(req[2])) {
+      rast = gm_record(req[2], "raster-state", 2);
+      if (rast == NULL)
+        return NULL;
+      *out_dformat = pl_nat_u64_clamp(pl_nat_coerce(rast[0]));
+      if (*out_dformat != 0 && *out_dformat != GM_FORMAT_D32)
+        return NULL;
+    }
+  } else {
+    req = gm_record(src, "pipeline-request", 2);
+  }
   if (req != NULL) {
     pl_val* art = gm_record(req[0], "artifact", 2);
     pl_val* layout = gm_record(req[1], "root-layout", 4);
@@ -243,15 +270,18 @@ static uint8_t* gm_pipeline_source(pl_thread* t, size_t ab, size_t* out_n,
   return gm_bar_bytes(pl_nat_coerce(src), out_n);
 }
 
-/* Pipeline cache key: sha of (artifact content address || layout).
- * One artifact under two root layouts is two pipelines — the CB10
- * second relation, keyed and witnessed separately from the library. */
+/* Pipeline cache key: sha of (artifact content address || layout ||
+ * raster policy).  One artifact under two root layouts or raster
+ * states is two pipelines — the CB10 second relation, keyed and
+ * witnessed separately from the library. */
 static void gm_pipeline_key(const uint8_t lib_key[32], uint64_t stride,
-                            uint64_t mode, uint8_t out_key[32]) {
-  uint8_t seed[48];
+                            uint64_t mode, uint64_t dformat,
+                            uint8_t out_key[32]) {
+  uint8_t seed[56];
   memcpy(seed, lib_key, 32);
   memcpy(seed + 32, &stride, 8);
   memcpy(seed + 40, &mode, 8);
+  memcpy(seed + 48, &dformat, 8);
   ax_sha256(seed, sizeof(seed), out_key);
 }
 
@@ -742,8 +772,8 @@ static pl_val gm_pipeline_render(pl_thread* t, size_t ab) {
     return pl_hostcall_refusal(t, "gpu.pipeline-render",
                                GM_REFUSAL_BAD_SESSION, "unknown session");
   size_t n = 0;
-  uint64_t stride = 0, mode = 0;
-  uint8_t* bytes = gm_pipeline_source(t, ab, &n, &stride, &mode);
+  uint64_t stride = 0, mode = 0, dformat = 0;
+  uint8_t* bytes = gm_pipeline_source(t, ab, &n, &stride, &mode, &dformat);
   if (bytes == NULL)
     return pl_hostcall_refusal(t, "gpu.pipeline-render",
                                GM_REFUSAL_CARRIER_SHAPE,
@@ -755,7 +785,7 @@ static pl_val gm_pipeline_render(pl_thread* t, size_t ab) {
   }
   uint8_t lib_key[32], key[32];
   ax_sha256(bytes, n, lib_key);
-  gm_pipeline_key(lib_key, stride, mode, key);
+  gm_pipeline_key(lib_key, stride, mode, dformat, key);
   free(bytes);
   @autoreleasepool {
     uint32_t hits = 0;
@@ -779,6 +809,8 @@ static pl_val gm_pipeline_render(pl_thread* t, size_t ab) {
       descriptor.fragmentFunction =
           gm_unique_function(library, MTLFunctionTypeFragment);
       descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+      if (dformat == GM_FORMAT_D32)
+        descriptor.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
       if (descriptor.vertexFunction == nil ||
           descriptor.fragmentFunction == nil)
         return pl_hostcall_refusal(
@@ -817,8 +849,8 @@ static pl_val gm_pipeline_compute(pl_thread* t, size_t ab) {
     return pl_hostcall_refusal(t, "gpu.pipeline-compute",
                                GM_REFUSAL_BAD_SESSION, "unknown session");
   size_t n = 0;
-  uint64_t stride = 0, mode = 0;
-  uint8_t* bytes = gm_pipeline_source(t, ab, &n, &stride, &mode);
+  uint64_t stride = 0, mode = 0, dformat = 0;
+  uint8_t* bytes = gm_pipeline_source(t, ab, &n, &stride, &mode, &dformat);
   if (bytes == NULL)
     return pl_hostcall_refusal(t, "gpu.pipeline-compute",
                                GM_REFUSAL_CARRIER_SHAPE,
@@ -830,7 +862,7 @@ static pl_val gm_pipeline_compute(pl_thread* t, size_t ab) {
   }
   uint8_t lib_key[32], key[32];
   ax_sha256(bytes, n, lib_key);
-  gm_pipeline_key(lib_key, stride, mode, key);
+  gm_pipeline_key(lib_key, stride, mode, dformat, key);
   free(bytes);
   @autoreleasepool {
     uint32_t hits = 0;
@@ -885,12 +917,18 @@ static pl_val gm_target(pl_thread* t, size_t ab) {
                                "unknown session");
   uint64_t w = pl_nat_u64_clamp(pl_nat_coerce(ARG(1)));
   uint64_t h = pl_nat_u64_clamp(pl_nat_coerce(ARG(2)));
+  uint64_t format = pl_nat_u64_clamp(pl_nat_coerce(ARG(3)));
   if (w == 0 || h == 0 || w > GM_MAX_EXTENT || h > GM_MAX_EXTENT)
     return pl_hostcall_refusal(t, "gpu.target", GM_REFUSAL_BOUNDS,
                                "target extent out of range");
+  if (format != GM_FORMAT_BGRA8 && format != GM_FORMAT_D32)
+    return pl_hostcall_refusal(t, "gpu.target", GM_REFUSAL_CARRIER_SHAPE,
+                               "unknown target format");
   @autoreleasepool {
     MTLTextureDescriptor* descriptor = [MTLTextureDescriptor
-        texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+        texture2DDescriptorWithPixelFormat:format == GM_FORMAT_D32
+                                               ? MTLPixelFormatDepth32Float
+                                               : MTLPixelFormatBGRA8Unorm
                                      width:(NSUInteger)w
                                     height:(NSUInteger)h
                                  mipmapped:NO];
@@ -1052,35 +1090,114 @@ static pl_val gm_descriptor_write(pl_thread* t, size_t ab) {
   }
 }
 
-/* ── Generic command graph (Gap 3 + Gap 5 lowering) ────────────────────── */
+/* ── Generic command graph (Gap 3 + Gap 5 + Gap 13 lowering) ───────────── */
+
+/* The parsed pass-desc carrier (Gap 13): declared color attachments,
+ * an optional depth attachment, and an optional depth-stencil state.
+ * Load/store ops apply to the FIRST/FINAL pass of a split chain;
+ * intermediate passes forced to Load/Store keep contents across the
+ * TBDR barrier. */
+#define GM_PASS_MAX_COLORS 4
+
+typedef struct gm_pass {
+  const void* colors[GM_PASS_MAX_COLORS]; /* unretained MTLTexture */
+  MTLLoadAction cload[GM_PASS_MAX_COLORS];
+  MTLStoreAction cstore[GM_PASS_MAX_COLORS];
+  MTLClearColor cclear[GM_PASS_MAX_COLORS];
+  uint32_t ncolors;
+  const void* depth; /* unretained MTLTexture; NULL = none */
+  MTLLoadAction dload;
+  MTLStoreAction dstore;
+  double dclear;
+  const void* ds; /* unretained MTLDepthStencilState; NULL = none */
+} gm_pass;
+
+/* ds-state (compare 1-8 → MTLCompareFunction 0-7, write 0|1), cached
+ * process-wide like the pipeline caches. */
+static CFTypeRef gm_ds_cache[16];
+
+static const void* gm_ds_state(id<MTLDevice> device, uint64_t compare,
+                               uint64_t write) {
+  if (compare < 1 || compare > 8 || write > 1)
+    return NULL;
+  size_t key = (size_t)(compare - 1) * 2 + (size_t)write;
+  if (gm_ds_cache[key] == NULL) {
+    MTLDepthStencilDescriptor* d = [MTLDepthStencilDescriptor new];
+    d.depthCompareFunction = (MTLCompareFunction)(compare - 1);
+    d.depthWriteEnabled = write != 0;
+    id<MTLDepthStencilState> ds = [device newDepthStencilStateWithDescriptor:d];
+    if (ds == nil)
+      return NULL;
+    gm_ds_cache[key] = CFBridgingRetain(ds);
+  }
+  return gm_ds_cache[key];
+}
+
+static MTLLoadAction gm_load_op(uint64_t op) {
+  return op == 1   ? MTLLoadActionClear
+         : op == 3 ? MTLLoadActionDontCare
+                   : MTLLoadActionLoad;
+}
+
+static MTLStoreAction gm_store_op(uint64_t op) {
+  return op == 2 ? MTLStoreActionDontCare : MTLStoreActionStore;
+}
+
+static MTLClearColor gm_clear_color(uint64_t bgra) {
+  return MTLClearColorMake((double)((bgra >> 16) & 0xff) / 255.0,
+                           (double)((bgra >> 8) & 0xff) / 255.0,
+                           (double)(bgra & 0xff) / 255.0,
+                           (double)((bgra >> 24) & 0xff) / 255.0);
+}
 
 /* (Re)open a render pass with the graph's standing bindings: pipeline,
- * root payload at vertex 0, descriptor heap at fragment 1 with its
- * written textures made resident. */
+ * per-stage roots (vertex root at vertex 0, optional fragment root at
+ * fragment 0), descriptor heap at fragment 1 with its written textures
+ * made resident. */
 static id<MTLRenderCommandEncoder> gm_open_pass(
-    id<MTLCommandBuffer> commands, id<MTLTexture> target, MTLLoadAction load,
-    MTLClearColor clear, id<MTLRenderPipelineState> pipeline,
-    id<MTLBuffer> root, NSUInteger root_offset, NSUInteger root_length,
-    uint8_t root_mode, gm_session* s, gm_dheap* dh) {
+    id<MTLCommandBuffer> commands, const gm_pass* p, bool first, bool final,
+    id<MTLRenderPipelineState> pipeline, id<MTLBuffer> vx_root,
+    NSUInteger vx_offset, NSUInteger vx_length, id<MTLBuffer> px_root,
+    NSUInteger px_offset, NSUInteger px_length, uint8_t root_mode,
+    gm_session* s, gm_dheap* dh) {
   MTLRenderPassDescriptor* pass =
       [MTLRenderPassDescriptor renderPassDescriptor];
-  pass.colorAttachments[0].texture = target;
-  pass.colorAttachments[0].loadAction = load;
-  pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-  pass.colorAttachments[0].clearColor = clear;
+  for (uint32_t i = 0; i < p->ncolors; i++) {
+    pass.colorAttachments[i].texture = (__bridge id<MTLTexture>)p->colors[i];
+    pass.colorAttachments[i].loadAction =
+        first ? p->cload[i] : MTLLoadActionLoad;
+    pass.colorAttachments[i].storeAction =
+        final ? p->cstore[i] : MTLStoreActionStore;
+    pass.colorAttachments[i].clearColor = p->cclear[i];
+  }
+  if (p->depth != NULL) {
+    pass.depthAttachment.texture = (__bridge id<MTLTexture>)p->depth;
+    pass.depthAttachment.loadAction = first ? p->dload : MTLLoadActionLoad;
+    pass.depthAttachment.storeAction =
+        final ? p->dstore : MTLStoreActionStore;
+    pass.depthAttachment.clearDepth = p->dclear;
+  }
   id<MTLRenderCommandEncoder> encoder =
       [commands renderCommandEncoderWithDescriptor:pass];
   if (encoder == nil)
     return nil;
   [encoder setRenderPipelineState:pipeline];
+  if (p->ds != NULL)
+    [encoder setDepthStencilState:(__bridge id<MTLDepthStencilState>)p->ds];
   if (root_mode == GM_ROOT_INLINE) {
     /* the push-constant lowering: root bytes snapshot from the admitted
-     * complement window at encode time */
-    [encoder setVertexBytes:(const uint8_t*)[root contents] + root_offset
-                     length:root_length
+     * complement windows at encode time */
+    [encoder setVertexBytes:(const uint8_t*)[vx_root contents] + vx_offset
+                     length:vx_length
                     atIndex:0];
+    if (px_root != nil)
+      [encoder setFragmentBytes:(const uint8_t*)[px_root contents] + px_offset
+                         length:px_length
+                        atIndex:0];
   } else {
-    [encoder setVertexBuffer:root offset:root_offset atIndex:0];
+    [encoder setVertexBuffer:vx_root offset:vx_offset atIndex:0];
+    if (px_root != nil)
+      [encoder setFragmentBuffer:px_root offset:px_offset atIndex:0];
   }
   /* every arena allocation is resident: root payloads may carry device
    * addresses into sibling allocations that native never inspects */
@@ -1101,6 +1218,63 @@ static id<MTLRenderCommandEncoder> gm_open_pass(
   return encoder;
 }
 
+/* Parse the pass-desc carrier (colors pair-list, depth-or-0, ds-or-0)
+ * against the session's object table.  Returns a 9xx refusal kind, or
+ * 0 on success. */
+static uint64_t gm_parse_pass(gm_session* s, pl_val desc, gm_pass* p) {
+  memset(p, 0, sizeof *p);
+  pl_val* f = gm_record(desc, "pass-desc", 3);
+  if (f == NULL)
+    return GM_REFUSAL_CARRIER_SHAPE;
+  pl_val cursor = f[0];
+  while (!gm_is_zero(cursor)) {
+    pl_val* cell = gm_record(cursor, "pair", 2);
+    if (cell == NULL)
+      return GM_REFUSAL_GRAPH_SHAPE;
+    pl_val* ca = gm_record(cell[0], "color-attachment", 4);
+    if (ca == NULL || p->ncolors >= GM_PASS_MAX_COLORS)
+      return GM_REFUSAL_GRAPH_SHAPE;
+    id<MTLTexture> tex = gm_object_v(s, ca[0], GM_OBJ_TEXTURE);
+    if (tex == nil)
+      return GM_REFUSAL_BAD_HANDLE;
+    p->colors[p->ncolors] = (__bridge void*)tex;
+    p->cload[p->ncolors] = gm_load_op(pl_nat_u64_clamp(pl_nat_coerce(ca[1])));
+    p->cstore[p->ncolors] = gm_store_op(pl_nat_u64_clamp(pl_nat_coerce(ca[2])));
+    p->cclear[p->ncolors] =
+        gm_clear_color(pl_nat_u64_clamp(pl_nat_coerce(ca[3])));
+    p->ncolors++;
+    cursor = cell[1];
+  }
+  if (p->ncolors == 0)
+    return GM_REFUSAL_GRAPH_SHAPE;
+  if (!gm_is_zero(f[1])) {
+    pl_val* da = gm_record(f[1], "depth-attachment", 4);
+    if (da == NULL)
+      return GM_REFUSAL_CARRIER_SHAPE;
+    id<MTLTexture> tex = gm_object_v(s, da[0], GM_OBJ_TEXTURE);
+    if (tex == nil)
+      return GM_REFUSAL_BAD_HANDLE;
+    p->depth = (__bridge void*)tex;
+    p->dload = gm_load_op(pl_nat_u64_clamp(pl_nat_coerce(da[1])));
+    p->dstore = gm_store_op(pl_nat_u64_clamp(pl_nat_coerce(da[2])));
+    uint32_t bits = (uint32_t)pl_nat_u64_clamp(pl_nat_coerce(da[3]));
+    float clearf;
+    memcpy(&clearf, &bits, 4);
+    p->dclear = (double)clearf;
+  }
+  if (!gm_is_zero(f[2])) {
+    pl_val* ds = gm_record(f[2], "ds-state", 2);
+    if (ds == NULL)
+      return GM_REFUSAL_CARRIER_SHAPE;
+    id<MTLDevice> device = (__bridge id<MTLDevice>)s->device_ref;
+    p->ds = gm_ds_state(device, pl_nat_u64_clamp(pl_nat_coerce(ds[0])),
+                        pl_nat_u64_clamp(pl_nat_coerce(ds[1])));
+    if (p->ds == NULL)
+      return GM_REFUSAL_CARRIER_SHAPE;
+  }
+  return 0;
+}
+
 /* Walk a pair-list of command-step records, validating shape.  Native
  * reads only the step kind and its generic args — payload meaning lives
  * in the root layout and the artifact, never here.  Declared hazard
@@ -1115,10 +1289,6 @@ static id<MTLRenderCommandEncoder> gm_open_pass(
  * value.  Copies within one blit encoder are hardware-ordered, so a
  * blit graph carries no hazard facts. */
 #define GM_BLIT_MAX_STEPS 32
-
-static bool gm_is_zero(pl_val v) {
-  return pl_is_nat(v) && pl_nat_is_zero(pl_nat_coerce(v));
-}
 
 static pl_val gm_blit_graph(pl_thread* t, size_t ab, gm_session* s,
                             pl_val* graph) {
@@ -1301,8 +1471,20 @@ static pl_val gm_command_graph(pl_thread* t, size_t ab) {
   /* pipeline 0 selects the blit graph: copy steps only (Gap 11) */
   if (gm_is_zero(ARG(2)))
     return gm_blit_graph(t, ab, s, graph);
+  /* per-stage roots (Gap 13): a bare heap-pointer serves the vertex
+   * (or compute) stage as before; a pair(vx, px-or-0) splits the
+   * stages, the fragment root binding at fragment buffer 0 */
   ARG(4) = pl_nf(t, ARG(4));
   pl_val* root = gm_record(ARG(4), "heap-pointer", 5);
+  pl_val* px = NULL;
+  if (root == NULL) {
+    pl_val* pair = gm_record(ARG(4), "pair", 2);
+    if (pair != NULL) {
+      root = gm_record(pair[0], "heap-pointer", 5);
+      if (!gm_is_zero(pair[1]))
+        px = gm_record(pair[1], "heap-pointer", 5);
+    }
+  }
   if (root == NULL)
     return pl_hostcall_refusal(t, "gpu.command-graph",
                                GM_REFUSAL_CARRIER_SHAPE,
@@ -1323,17 +1505,18 @@ static pl_val gm_command_graph(pl_thread* t, size_t ab) {
     if (pipeline == nil && kernel == nil)
       return pl_hostcall_refusal(t, "gpu.command-graph", GM_REFUSAL_BAD_HANDLE,
                                  "unknown pipeline");
-    id<MTLTexture> target = nil;
+    gm_pass pass;
+    memset(&pass, 0, sizeof pass);
     if (kernel != nil) {
-      if (!(pl_is_nat(ARG(3)) && pl_nat_is_zero(pl_nat_coerce(ARG(3)))))
+      if (!gm_is_zero(ARG(3)) || px != NULL)
         return pl_hostcall_refusal(t, "gpu.command-graph",
                                    GM_REFUSAL_GRAPH_SHAPE,
-                                   "compute graph takes no target");
+                                   "compute graph takes no pass or px root");
     } else {
-      target = gm_object_v(s, ARG(3), GM_OBJ_TEXTURE);
-      if (target == nil)
-        return pl_hostcall_refusal(t, "gpu.command-graph",
-                                   GM_REFUSAL_BAD_HANDLE, "unknown target");
+      uint64_t prk = gm_parse_pass(s, ARG(3), &pass);
+      if (prk != 0)
+        return pl_hostcall_refusal(t, "gpu.command-graph", prk,
+                                   "pass-desc rejected");
     }
     uint64_t refusal = 0;
     size_t root_offset = 0, root_length = 0;
@@ -1342,14 +1525,21 @@ static pl_val gm_command_graph(pl_thread* t, size_t ab) {
     if (root_buffer == nil)
       return pl_hostcall_refusal(t, "gpu.command-graph", refusal,
                                  "root pointer rejected");
+    size_t px_offset = 0, px_length = 0;
+    id<MTLBuffer> px_buffer = nil;
+    if (px != NULL) {
+      px_buffer = gm_pointer(s, px, &px_offset, &px_length, &refusal);
+      if (px_buffer == nil)
+        return pl_hostcall_refusal(t, "gpu.command-graph", refusal,
+                                   "fragment root pointer rejected");
+    }
     uint8_t root_mode = s->object_modes[pl_nat_u64_clamp(ARG(2)) - 1];
-    if (root_mode == GM_ROOT_INLINE && root_length > 4096)
+    if (root_mode == GM_ROOT_INLINE &&
+        (root_length > 4096 || px_length > 4096))
       return pl_hostcall_refusal(t, "gpu.command-graph", GM_REFUSAL_BOUNDS,
                                  "inline root exceeds 4 KiB");
 
     uint64_t declared = pl_nat_u64_clamp(pl_nat_coerce(graph[1]));
-    MTLClearColor clear = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
-    MTLLoadAction load = MTLLoadActionLoad;
 
     /* declared hazard facts: validate shape, count them.  Each fact is
      * the no_api (Stage, Stage, Hazard) triple; on TBDR the lowering
@@ -1366,9 +1556,8 @@ static pl_val gm_command_graph(pl_thread* t, size_t ab) {
       cursor = cell[1];
     }
 
-    /* first pass: validate every step record and find the leading
-     * clear before anything encodes */
-    uint64_t walked = 0;
+    /* first pass: validate every step record before anything encodes */
+    uint64_t walked = 0, draws_total = 0;
     cursor = graph[0];
     while (!(pl_is_nat(cursor) && pl_nat_is_zero(pl_nat_coerce(cursor)))) {
       pl_val* cell = gm_record(cursor, "pair", 2);
@@ -1427,20 +1616,16 @@ static pl_val gm_command_graph(pl_thread* t, size_t ab) {
                                      "compute graph steps must be dispatch");
         }
       } else if (kind == GM_STEP_CLEAR) {
-        if (walked != 0)
-          return pl_hostcall_refusal(t, "gpu.command-graph",
-                                     GM_REFUSAL_GRAPH_SHAPE,
-                                     "clear must be the first step");
-        uint64_t bgra = pl_nat_u64_clamp(pl_nat_coerce(step[1]));
-        clear = MTLClearColorMake((double)((bgra >> 16) & 0xff) / 255.0,
-                                  (double)((bgra >> 8) & 0xff) / 255.0,
-                                  (double)(bgra & 0xff) / 255.0,
-                                  (double)((bgra >> 24) & 0xff) / 255.0);
-        load = MTLLoadActionClear;
+        /* retired (Gap 13): clear rides the pass-desc load action */
+        return pl_hostcall_refusal(t, "gpu.command-graph",
+                                   GM_REFUSAL_GRAPH_SHAPE,
+                                   "clear step retired: use pass-desc load");
       } else if (kind != GM_STEP_DRAW) {
         return pl_hostcall_refusal(t, "gpu.command-graph",
                                    GM_REFUSAL_GRAPH_SHAPE,
                                    "unsupported step kind");
+      } else {
+        draws_total++;
       }
       walked++;
       cursor = cell[1];
@@ -1449,6 +1634,12 @@ static pl_val gm_command_graph(pl_thread* t, size_t ab) {
       return pl_hostcall_refusal(t, "gpu.command-graph",
                                  GM_REFUSAL_GRAPH_SHAPE,
                                  "step count does not match graph row");
+    /* hazard facts split between every pair of consecutive draws, so
+     * the pass count is fixed up front: the final pass gets the
+     * declared store ops, intermediates are forced to Load/Store */
+    uint64_t total_splits =
+        (kernel == nil && hazards > 0 && draws_total > 1) ? draws_total - 1
+                                                          : 0;
 
     id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)s->queue_ref;
     id<MTLCommandBuffer> commands = [queue commandBuffer];
@@ -1541,10 +1732,10 @@ static pl_val gm_command_graph(pl_thread* t, size_t ab) {
       }
       [compute endEncoding];
     } else {
-      id<MTLRenderCommandEncoder> encoder =
-          gm_open_pass(commands, target, load, clear, pipeline, root_buffer,
-                       (NSUInteger)root_offset, (NSUInteger)root_length,
-                       root_mode, s, dh);
+      id<MTLRenderCommandEncoder> encoder = gm_open_pass(
+          commands, &pass, true, total_splits == 0, pipeline, root_buffer,
+          (NSUInteger)root_offset, (NSUInteger)root_length, px_buffer,
+          (NSUInteger)px_offset, (NSUInteger)px_length, root_mode, s, dh);
       if (encoder == nil)
         return pl_hostcall_refusal(t, "gpu.command-graph", GM_REFUSAL_ENCODE,
                                    "encoder unavailable");
@@ -1565,15 +1756,17 @@ static pl_val gm_command_graph(pl_thread* t, size_t ab) {
           }
           if (draws > 0 && hazards > 0) {
             [encoder endEncoding];
-            encoder = gm_open_pass(commands, target, MTLLoadActionLoad, clear,
-                                   pipeline, root_buffer,
-                                   (NSUInteger)root_offset,
-                                   (NSUInteger)root_length, root_mode, s, dh);
+            lowered++;
+            encoder = gm_open_pass(commands, &pass, false,
+                                   lowered == total_splits, pipeline,
+                                   root_buffer, (NSUInteger)root_offset,
+                                   (NSUInteger)root_length, px_buffer,
+                                   (NSUInteger)px_offset,
+                                   (NSUInteger)px_length, root_mode, s, dh);
             if (encoder == nil)
               return pl_hostcall_refusal(t, "gpu.command-graph",
                                          GM_REFUSAL_ENCODE,
                                          "encoder unavailable");
-            lowered++;
           }
           [encoder drawPrimitives:MTLPrimitiveTypeTriangle
                       vertexStart:0
@@ -1650,7 +1843,7 @@ bool pl_host_gpu_metal_register(void) {
                                   gm_pipeline_render);
   ok = ok && pl_hostcall_register("gpu.pipeline-compute", 2, 0b11,
                                   gm_pipeline_compute);
-  ok = ok && pl_hostcall_register("gpu.target", 3, 0b111, gm_target);
+  ok = ok && pl_hostcall_register("gpu.target", 4, 0b1111, gm_target);
   ok = ok && pl_hostcall_register("gpu.texture-2d", 4, 0b1111, gm_texture_2d);
   ok = ok && pl_hostcall_register("gpu.descriptor-heap", 2, 0b11,
                                   gm_descriptor_heap);

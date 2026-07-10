@@ -556,6 +556,20 @@ compiled out (or on a 943 no-device machine); (2) divergence (edited args) abort
 
 > *Size: LARGE | Phase: B — one stroke while tests are the only caller, same rationale
 > as Gaps 2+3*
+> **Status: 🟡 PHASE 1 LANDED (2026-07-09, on op83-port)** — the pass/root/depth
+> machinery: `pass-desc` carrier (MRT-capable color attachments with load/store ops +
+> clear values, optional depth attachment with f32-bits clear, optional cached
+> `ds-state`) replaces the bare target; **the clear step is retired** (952; clear rides
+> the pass-desc load action, and steps-executed counts dropped accordingly); split
+> chains force Load/Store on intermediates and honor declared ops on first/final;
+> per-stage roots land as bare-pointer-or-`pair(vx, px)` with the fragment root at
+> fragment buffer 0; `gpu.target` gained the format field {1 bgra8, 5 d32};
+> `pipeline-request` field 3 `raster-state (depth-format, reserved)` joins the pipeline
+> cache key.  All 13 render call sites migrated; 16/16 fixtures green.
+> **Remaining (phase 2)**: the depth-occlusion + DONT_CARE fixtures, `draw-indexed`
+> (kind 5), remaining formats (R8/RGBA8/RGBA16F on targets and sampled textures),
+> per-target writemasks, private/placed textures, cull/topology/MSAA/blend in
+> raster-state, two-raster-states cache fixture.
 
 - **`pass-desc` carrier** replacing the bare target arg on `gpu.command-graph`:
   `pass-desc (color-attachments depth-attachment ds-state k)`; each color attachment

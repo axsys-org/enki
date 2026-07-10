@@ -38,8 +38,23 @@
 ;   gfx-request        artifact layout width height graph
 ;   pair               head tail            (lists; nil = 0)
 ;
+; Gap 13 pass carriers: a render graph's ARG(3) is a pass-desc record
+; (color-attachments pair-list, depth-attachment-or-0, ds-state-or-0);
+; color-attachment = (target load-op store-op clear-bgra8) and
+; depth-attachment = (target load-op store-op clear-f32bits) with
+; load-op {1 clear, 2 load, 3 dont-care} and store-op {1 store,
+; 2 dont-care}; ds-state = (compare 1-8, write 0|1).  Load/store ops
+; apply to the first/final pass of a split chain; intermediates are
+; forced Load/Store across the TBDR barrier.  gpu.target gained a
+; format field {1 bgra8, 5 d32}; pipeline-request may carry a third
+; field raster-state = (depth-format, reserved) which joins the
+; pipeline cache key (CB10's second relation).  Roots may be a bare
+; heap-pointer (all stages) or pair(vx, px-or-0) for per-stage roots
+; (fragment root at fragment buffer 0).
+;
 ; command-step kinds: 1 draw {vertex-count instance-count} | 2 clear
-; {bgra8} | 3 dispatch {groups-x groups-y groups-z threads-x} |
+; RETIRED (clear rides the pass-desc load action; refuses 952) |
+; 3 dispatch {groups-x groups-y groups-z threads-x} |
 ; 4 dispatch-indirect {alloc offset generation threads-x} — the grid
 ; comes from 12 admitted bytes at the complement window, typically
 ; GPU-written by a prior admissibility stage (the GPU feeding itself);

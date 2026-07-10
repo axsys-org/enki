@@ -330,11 +330,10 @@ static pl_val pointer_record(pl_thread* t, uint64_t alloc, uint64_t offset,
   return record(t, "heap-pointer", base);
 }
 
-/* command-graph record: clear(bgra8) + `draws` draw steps, with
- * `hazards` declared hazard-fact rows (fragment->fragment color-buffer
- * triples) attached to the graph and an optional timeline wait-value. */
-static pl_val graph_record(pl_thread* t, uint64_t clear_bgra8,
-                           uint64_t vertices, uint64_t instances,
+/* command-graph record: `draws` draw steps, with `hazards` declared
+ * hazard-fact rows (fragment->fragment color-buffer triples) attached
+ * to the graph and an optional timeline wait-value. */
+static pl_val graph_record(pl_thread* t, uint64_t vertices, uint64_t instances,
                            uint64_t draws, uint64_t hazards, uint64_t wait) {
   size_t base = t->vsp;
   pl_vpush(t, 0); /* steps list, built back to front */
@@ -347,18 +346,6 @@ static pl_val graph_record(pl_thread* t, uint64_t clear_bgra8,
     pl_vpush(t, 0);
     pl_val draw = record(t, "command-step", sb);
     pl_vpush(t, draw);
-    pl_vpush(t, t->vstack[base]);
-    t->vstack[base] = record(t, "pair", sb);
-  }
-  {
-    size_t sb = t->vsp;
-    pl_vpush(t, 2); /* kind: clear */
-    pl_vpush(t, clear_bgra8);
-    pl_vpush(t, 0);
-    pl_vpush(t, 0);
-    pl_vpush(t, 0);
-    pl_val clear = record(t, "command-step", sb);
-    pl_vpush(t, clear);
     pl_vpush(t, t->vstack[base]);
     t->vstack[base] = record(t, "pair", sb);
   }
@@ -375,12 +362,37 @@ static pl_val graph_record(pl_thread* t, uint64_t clear_bgra8,
   }
   size_t gb = t->vsp;
   pl_vpush(t, t->vstack[base]);
-  pl_vpush(t, draws + 1); /* step count incl clear */
+  pl_vpush(t, draws); /* step count */
   pl_vpush(t, t->vstack[base + 1]);
   pl_vpush(t, wait);
   pl_val graph = record(t, "command-graph", gb);
   t->vsp = base;
   return graph;
+}
+
+/* pass-desc (Gap 13): one color attachment with a clear load, store,
+ * and no depth — the migrated shape of the old clear-step graphs. */
+static pl_val pass_desc(pl_thread* t, uint64_t target, uint64_t clear_bgra8) {
+  size_t base = t->vsp;
+  {
+    size_t f = t->vsp;
+    pl_vpush(t, target);
+    pl_vpush(t, 1); /* load: clear */
+    pl_vpush(t, 1); /* store: store */
+    pl_vpush(t, clear_bgra8);
+    pl_val ca = record(t, "color-attachment", f);
+    pl_vpush(t, ca);
+    pl_vpush(t, 0);
+    pl_vpush(t, record(t, "pair", f));
+  }
+  {
+    size_t f = t->vsp - 1;
+    pl_vpush(t, 0); /* no depth attachment */
+    pl_vpush(t, 0); /* no ds-state */
+    pl_val pd = record(t, "pass-desc", f);
+    t->vsp = base;
+    return pd;
+  }
 }
 
 Test(hostcall, gfx_slice_renders_and_reads_back) {
@@ -477,19 +489,20 @@ Test(hostcall, gfx_slice_renders_and_reads_back) {
   pl_vpush(t, session);
   pl_vpush(t, w);
   pl_vpush(t, h);
+  pl_vpush(t, 1); /* bgra8 */
   uint64_t target =
       witness_payload_u64(t, hostcall(t, "gpu.target", args), "gpu.target", 0);
 
   /* the generic command graph: clear(opaque black) then draw */
   args = t->vsp;
-  pl_vpush(t, graph_record(t, 0xff000000u, 6, instances, 1, 0, 0));
+  pl_vpush(t, graph_record(t, 6, instances, 1, 0, 0));
   pl_vpush(t, session);
   pl_vpush(t, pipeline);
-  pl_vpush(t, target);
+  pl_vpush(t, pass_desc(t, target, 0xff000000u));
   pl_vpush(t, pointer_record(t, alloc_idx, 0, alloc_len, alloc_gen));
   pl_vpush(t, 0); /* no descriptor heap */
   pl_val graph_w = hostcall(t, "gpu.command-graph", args);
-  cr_assert_eq(witness_payload_u64(t, graph_w, "gpu.command-graph", 0), 2u);
+  cr_assert_eq(witness_payload_u64(t, graph_w, "gpu.command-graph", 0), 1u);
   cr_assert_eq(witness_payload_u64(t, graph_w, "gpu.command-graph", 1), 0u);
   uint64_t event_value =
       witness_payload_u64(t, graph_w, "gpu.command-graph", 2);
@@ -520,10 +533,10 @@ Test(hostcall, gfx_slice_renders_and_reads_back) {
 
   /* a pointer window past the allocation refuses with bounds */
   args = t->vsp;
-  pl_vpush(t, graph_record(t, 0xff000000u, 6, instances, 1, 0, 0));
+  pl_vpush(t, graph_record(t, 6, instances, 1, 0, 0));
   pl_vpush(t, session);
   pl_vpush(t, pipeline);
-  pl_vpush(t, target);
+  pl_vpush(t, pass_desc(t, target, 0xff000000u));
   pl_vpush(t, pointer_record(t, alloc_idx, 0, alloc_len * 2, alloc_gen));
   pl_vpush(t, 0);
   cr_assert_eq(
@@ -549,10 +562,10 @@ Test(hostcall, gfx_slice_renders_and_reads_back) {
   cr_assert_eq(witness_payload_u64(t, freed, "gpu.free", 1), alloc_gen + 1);
 
   args = t->vsp;
-  pl_vpush(t, graph_record(t, 0xff000000u, 6, instances, 1, 0, 0));
+  pl_vpush(t, graph_record(t, 6, instances, 1, 0, 0));
   pl_vpush(t, session);
   pl_vpush(t, pipeline);
-  pl_vpush(t, target);
+  pl_vpush(t, pass_desc(t, target, 0xff000000u));
   pl_vpush(t, pointer_record(t, alloc_idx, 0, alloc_len, alloc_gen));
   pl_vpush(t, 0);
   cr_assert_eq(
@@ -731,6 +744,7 @@ Test(hostcall, gfx_textured_draw_samples_descriptor_heap) {
   pl_vpush(t, session);
   pl_vpush(t, GFX_W);
   pl_vpush(t, GFX_H);
+  pl_vpush(t, 1); /* bgra8 */
   uint64_t target =
       witness_payload_u64(t, hostcall(t, "gpu.target", args), "gpu.target", 0);
 
@@ -745,10 +759,10 @@ Test(hostcall, gfx_textured_draw_samples_descriptor_heap) {
   uint64_t alloc_gen = witness_payload_u64(t, alloc_w, "gpu.alloc", 3);
 
   args = t->vsp;
-  pl_vpush(t, graph_record(t, 0xff000000u, 6, 1, 1, 0, 0));
+  pl_vpush(t, graph_record(t, 6, 1, 1, 0, 0));
   pl_vpush(t, session);
   pl_vpush(t, pipeline);
-  pl_vpush(t, target);
+  pl_vpush(t, pass_desc(t, target, 0xff000000u));
   pl_vpush(t, pointer_record(t, alloc_idx, 0, alloc_len, alloc_gen));
   pl_vpush(t, dheap);
   (void)witness_payload_u64(t, hostcall(t, "gpu.command-graph", args),
@@ -842,6 +856,7 @@ Test(hostcall, gfx_hazard_facts_lower_to_pass_splits) {
   pl_vpush(t, session);
   pl_vpush(t, GFX_W);
   pl_vpush(t, GFX_H);
+  pl_vpush(t, 1); /* bgra8 */
   uint64_t target =
       witness_payload_u64(t, hostcall(t, "gpu.target", args), "gpu.target", 0);
 
@@ -856,26 +871,26 @@ Test(hostcall, gfx_hazard_facts_lower_to_pass_splits) {
 
   /* two draws, no declared fact: one pass, zero splits */
   args = t->vsp;
-  pl_vpush(t, graph_record(t, 0xff000000u, 6, 1, 2, 0, 0));
+  pl_vpush(t, graph_record(t, 6, 1, 2, 0, 0));
   pl_vpush(t, session);
   pl_vpush(t, pipeline);
-  pl_vpush(t, target);
+  pl_vpush(t, pass_desc(t, target, 0xff000000u));
   pl_vpush(t, pointer_record(t, alloc_idx, 0, alloc_len, alloc_gen));
   pl_vpush(t, 0);
   pl_val no_fact = hostcall(t, "gpu.command-graph", args);
-  cr_assert_eq(witness_payload_u64(t, no_fact, "gpu.command-graph", 0), 3u);
+  cr_assert_eq(witness_payload_u64(t, no_fact, "gpu.command-graph", 0), 2u);
   cr_assert_eq(witness_payload_u64(t, no_fact, "gpu.command-graph", 1), 0u);
 
   /* two draws with a declared fact: the hazard lowers to one split */
   args = t->vsp;
-  pl_vpush(t, graph_record(t, 0xff000000u, 6, 1, 2, 1, 0));
+  pl_vpush(t, graph_record(t, 6, 1, 2, 1, 0));
   pl_vpush(t, session);
   pl_vpush(t, pipeline);
-  pl_vpush(t, target);
+  pl_vpush(t, pass_desc(t, target, 0xff000000u));
   pl_vpush(t, pointer_record(t, alloc_idx, 0, alloc_len, alloc_gen));
   pl_vpush(t, 0);
   pl_val with_fact = hostcall(t, "gpu.command-graph", args);
-  cr_assert_eq(witness_payload_u64(t, with_fact, "gpu.command-graph", 0), 3u);
+  cr_assert_eq(witness_payload_u64(t, with_fact, "gpu.command-graph", 0), 2u);
   cr_assert_eq(witness_payload_u64(t, with_fact, "gpu.command-graph", 1), 1u);
   cr_assert_eq(witness_payload_u64(t, with_fact, "gpu.command-graph", 2), 2u);
 
@@ -915,7 +930,7 @@ Test(hostcall, gfx_hazard_facts_lower_to_pass_splits) {
   }
   pl_vpush(t, session);
   pl_vpush(t, pipeline);
-  pl_vpush(t, target);
+  pl_vpush(t, pass_desc(t, target, 0xff000000u));
   pl_vpush(t, pointer_record(t, alloc_idx, 0, alloc_len, alloc_gen));
   pl_vpush(t, 0);
   cr_assert_eq(
@@ -1171,7 +1186,7 @@ Test(hostcall, gfx_motor_sandwich_dispatches_through_graph) {
 
   /* a draw step in a compute graph refuses as graph shape */
   args = t->vsp;
-  pl_vpush(t, graph_record(t, 0xff000000u, 6, 1, 1, 0, 0));
+  pl_vpush(t, graph_record(t, 6, 1, 1, 0, 0));
   pl_vpush(t, session);
   pl_vpush(t, kernel);
   pl_vpush(t, 0);
@@ -1477,12 +1492,14 @@ Test(hostcall, gfx_cross_pass_raw_pixel_divergence) {
   pl_vpush(t, session);
   pl_vpush(t, GFX_W);
   pl_vpush(t, GFX_H);
+  pl_vpush(t, 1); /* bgra8 */
   uint64_t t_target =
       witness_payload_u64(t, hostcall(t, "gpu.target", args), "gpu.target", 0);
   args = t->vsp;
   pl_vpush(t, session);
   pl_vpush(t, GFX_W);
   pl_vpush(t, GFX_H);
+  pl_vpush(t, 1); /* bgra8 */
   uint64_t u_target =
       witness_payload_u64(t, hostcall(t, "gpu.target", args), "gpu.target", 0);
 
@@ -1528,10 +1545,10 @@ Test(hostcall, gfx_cross_pass_raw_pixel_divergence) {
   /* seed T with a deterministic stale color (clear-only graph) and
    * force completion through the readback wait */
   args = t->vsp;
-  pl_vpush(t, graph_record(t, STALE_BLUE, 6, 1, 0, 0, 0));
+  pl_vpush(t, graph_record(t, 6, 1, 0, 0, 0));
   pl_vpush(t, session);
   pl_vpush(t, producer);
-  pl_vpush(t, t_target);
+  pl_vpush(t, pass_desc(t, t_target, STALE_BLUE));
   pl_vpush(t, pointer_record(t, prod_idx, 0, prod_len, prod_gen));
   pl_vpush(t, 0);
   (void)witness_payload_u64(t, hostcall(t, "gpu.command-graph", args),
@@ -1549,10 +1566,10 @@ Test(hostcall, gfx_cross_pass_raw_pixel_divergence) {
    * declared.  Submission order is free — run B to completion before A
    * is even submitted.  B samples the stale T, every time. */
   args = t->vsp;
-  pl_vpush(t, graph_record(t, BLACK, 6, 1, 1, 0, 0));
+  pl_vpush(t, graph_record(t, 6, 1, 1, 0, 0));
   pl_vpush(t, session);
   pl_vpush(t, consumer);
-  pl_vpush(t, u_target);
+  pl_vpush(t, pass_desc(t, u_target, BLACK));
   pl_vpush(t, pointer_record(t, cons_idx, 0, cons_len, cons_gen));
   pl_vpush(t, dheap);
   (void)witness_payload_u64(t, hostcall(t, "gpu.command-graph", args),
@@ -1569,10 +1586,10 @@ Test(hostcall, gfx_cross_pass_raw_pixel_divergence) {
                (unsigned long long)u_stale, STALE_BLUE);
 
   args = t->vsp;
-  pl_vpush(t, graph_record(t, BLACK, 6, 1, 1, 0, 0)); /* A, late */
+  pl_vpush(t, graph_record(t, 6, 1, 1, 0, 0)); /* A, late */
   pl_vpush(t, session);
   pl_vpush(t, producer);
-  pl_vpush(t, t_target);
+  pl_vpush(t, pass_desc(t, t_target, BLACK));
   pl_vpush(t, pointer_record(t, prod_idx, 0, prod_len, prod_gen));
   pl_vpush(t, 0);
   (void)witness_payload_u64(t, hostcall(t, "gpu.command-graph", args),
@@ -1598,10 +1615,10 @@ Test(hostcall, gfx_cross_pass_raw_pixel_divergence) {
    * stale, then submit A2 and B2 back to back — B2 waits A2's signal
    * value, so it samples the produced pixel. */
   args = t->vsp;
-  pl_vpush(t, graph_record(t, STALE_BLUE, 6, 1, 0, 0, 0));
+  pl_vpush(t, graph_record(t, 6, 1, 0, 0, 0));
   pl_vpush(t, session);
   pl_vpush(t, producer);
-  pl_vpush(t, t_target);
+  pl_vpush(t, pass_desc(t, t_target, STALE_BLUE));
   pl_vpush(t, pointer_record(t, prod_idx, 0, prod_len, prod_gen));
   pl_vpush(t, 0);
   (void)witness_payload_u64(t, hostcall(t, "gpu.command-graph", args),
@@ -1616,19 +1633,19 @@ Test(hostcall, gfx_cross_pass_raw_pixel_divergence) {
                (uint64_t)STALE_BLUE);
 
   args = t->vsp;
-  pl_vpush(t, graph_record(t, BLACK, 6, 1, 1, 0, 0)); /* A2 */
+  pl_vpush(t, graph_record(t, 6, 1, 1, 0, 0)); /* A2 */
   pl_vpush(t, session);
   pl_vpush(t, producer);
-  pl_vpush(t, t_target);
+  pl_vpush(t, pass_desc(t, t_target, BLACK));
   pl_vpush(t, pointer_record(t, prod_idx, 0, prod_len, prod_gen));
   pl_vpush(t, 0);
   uint64_t sig_a2 = witness_payload_u64(
       t, hostcall(t, "gpu.command-graph", args), "gpu.command-graph", 2);
   args = t->vsp;
-  pl_vpush(t, graph_record(t, BLACK, 6, 1, 1, 0, sig_a2)); /* B2 waits A2 */
+  pl_vpush(t, graph_record(t, 6, 1, 1, 0, sig_a2)); /* B2 waits A2 */
   pl_vpush(t, session);
   pl_vpush(t, consumer);
-  pl_vpush(t, u_target);
+  pl_vpush(t, pass_desc(t, u_target, BLACK));
   pl_vpush(t, pointer_record(t, cons_idx, 0, cons_len, cons_gen));
   pl_vpush(t, dheap);
   uint64_t sig_b2 = witness_payload_u64(
