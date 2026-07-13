@@ -22,6 +22,14 @@ void ax_profile_json_zone_begin(uint64_t tid, uint64_t zone,
                                 const uint8_t* name, size_t name_n);
 void ax_profile_json_zone_end(uint64_t tid, uint64_t zone, const uint8_t* name,
                               size_t name_n);
+/* Internal runtime spans.  Unlike explicit SPLAN zones, callers supply the
+ * Chrome Trace category and an opaque span identity. */
+void ax_profile_json_span_begin(uint64_t tid, uint64_t span,
+                                const uint8_t* category, size_t category_n,
+                                const uint8_t* name, size_t name_n);
+void ax_profile_json_span_end(uint64_t tid, uint64_t span,
+                              const uint8_t* category, size_t category_n,
+                              const uint8_t* name, size_t name_n);
 /* Flushes and closes the sink.  False reports any write/close failure. */
 bool ax_profile_json_finish(void);
 

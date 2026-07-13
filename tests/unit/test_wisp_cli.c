@@ -190,9 +190,10 @@ Test(wisp_cli, profile_json_accepts_both_flag_spellings) {
     int st = system(cmd);
     cr_assert(WIFEXITED(st) && WEXITSTATUS(st) == 0,
               "profile JSON invocation failed for equals=%d", equals);
-    cr_assert(file_contains(trace_path,
-                            "{\"traceEvents\":[],\"displayTimeUnit\":\"ms\"}"),
-              "empty trace was not finalized for equals=%d", equals);
+    cr_assert(file_contains(trace_path, "\"cat\":\"splan.store\""),
+              "store trace events were not emitted for equals=%d", equals);
+    cr_assert(file_contains(trace_path, "],\"displayTimeUnit\":\"ms\"}"),
+              "trace was not finalized for equals=%d", equals);
   }
 }
 

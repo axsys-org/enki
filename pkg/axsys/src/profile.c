@@ -4,6 +4,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
@@ -13,6 +14,9 @@ typedef struct ax_profile_json_state {
   FILE* file;
   struct timespec start;
   uint64_t pid;
+  uint64_t* named_tids;
+  size_t named_tid_n;
+  size_t named_tid_cap;
   bool first;
   bool failed;
 } ax_profile_json_state;
@@ -144,12 +148,32 @@ bool ax_profile_json_enabled(void) {
   return atomic_load_explicit(&ax_json_enabled, memory_order_acquire);
 }
 
+static bool ax_json_mark_tid_named(uint64_t tid) {
+  for (size_t i = 0; i < ax_json.named_tid_n; i++) {
+    if (ax_json.named_tids[i] == tid)
+      return false;
+  }
+  if (ax_json.named_tid_n == ax_json.named_tid_cap) {
+    size_t cap = ax_json.named_tid_cap == 0 ? 8 : ax_json.named_tid_cap * 2;
+    uint64_t* tids = realloc(ax_json.named_tids, cap * sizeof(*tids));
+    if (tids == NULL) {
+      ax_json.failed = true;
+      return false;
+    }
+    ax_json.named_tids = tids;
+    ax_json.named_tid_cap = cap;
+  }
+  ax_json.named_tids[ax_json.named_tid_n++] = tid;
+  return true;
+}
+
 void ax_profile_json_thread_name(uint64_t tid, const char* name,
                                  size_t name_n) {
   if (!ax_profile_json_enabled())
     return;
   pthread_mutex_lock(&ax_json.mu);
-  if (ax_json.file != NULL && ax_json_event_prefix()) {
+  if (ax_json.file != NULL && ax_json_mark_tid_named(tid) &&
+      ax_json_event_prefix()) {
     uint64_t ts = ax_json_now_us();
     int wrote = fprintf(ax_json.file,
                         "{\"cat\":\"__metadata\",\"name\":\"thread_name\","
@@ -164,20 +188,23 @@ void ax_profile_json_thread_name(uint64_t tid, const char* name,
   pthread_mutex_unlock(&ax_json.mu);
 }
 
-static void ax_profile_json_zone(char phase, uint64_t tid, uint64_t zone,
-                                 const uint8_t* name, size_t name_n) {
+static void ax_profile_json_span(char phase, uint64_t tid, uint64_t span,
+                                 const uint8_t* category, size_t category_n,
+                                 const char* arg_name, const uint8_t* name,
+                                 size_t name_n) {
   if (!ax_profile_json_enabled())
     return;
   pthread_mutex_lock(&ax_json.mu);
   if (ax_json.file != NULL && ax_json_event_prefix()) {
     uint64_t ts = ax_json_now_us();
-    static const char prefix[] = "{\"cat\":\"splan.zone\",\"name\":";
-    (void)ax_json_write(prefix, sizeof(prefix) - 1);
+    (void)ax_json_write("{\"cat\":", strlen("{\"cat\":"));
+    ax_json_string(category, category_n);
+    (void)ax_json_write(",\"name\":", strlen(",\"name\":"));
     ax_json_string(name, name_n);
     int wrote = fprintf(ax_json.file,
                         ",\"ph\":\"%c\",\"ts\":%" PRIu64 ",\"pid\":%" PRIu64
-                        ",\"tid\":%" PRIu64 ",\"args\":{\"zone\":%" PRIu64 "}}",
-                        phase, ts, ax_json.pid, tid, zone);
+                        ",\"tid\":%" PRIu64 ",\"args\":{\"%s\":%" PRIu64 "}}",
+                        phase, ts, ax_json.pid, tid, arg_name, span);
     if (wrote < 0)
       ax_json.failed = true;
   }
@@ -186,12 +213,30 @@ static void ax_profile_json_zone(char phase, uint64_t tid, uint64_t zone,
 
 void ax_profile_json_zone_begin(uint64_t tid, uint64_t zone,
                                 const uint8_t* name, size_t name_n) {
-  ax_profile_json_zone('B', tid, zone, name, name_n);
+  static const uint8_t category[] = "splan.zone";
+  ax_profile_json_span('B', tid, zone, category, sizeof(category) - 1, "zone",
+                       name, name_n);
 }
 
 void ax_profile_json_zone_end(uint64_t tid, uint64_t zone, const uint8_t* name,
                               size_t name_n) {
-  ax_profile_json_zone('E', tid, zone, name, name_n);
+  static const uint8_t category[] = "splan.zone";
+  ax_profile_json_span('E', tid, zone, category, sizeof(category) - 1, "zone",
+                       name, name_n);
+}
+
+void ax_profile_json_span_begin(uint64_t tid, uint64_t span,
+                                const uint8_t* category, size_t category_n,
+                                const uint8_t* name, size_t name_n) {
+  ax_profile_json_span('B', tid, span, category, category_n, "span", name,
+                       name_n);
+}
+
+void ax_profile_json_span_end(uint64_t tid, uint64_t span,
+                              const uint8_t* category, size_t category_n,
+                              const uint8_t* name, size_t name_n) {
+  ax_profile_json_span('E', tid, span, category, category_n, "span", name,
+                       name_n);
 }
 
 bool ax_profile_json_finish(void) {
@@ -208,6 +253,10 @@ bool ax_profile_json_finish(void) {
   if (fclose(ax_json.file) != 0)
     ok = false;
   ax_json.file = NULL;
+  free(ax_json.named_tids);
+  ax_json.named_tids = NULL;
+  ax_json.named_tid_n = 0;
+  ax_json.named_tid_cap = 0;
   ax_json.failed = false;
   ax_json.first = true;
   pthread_mutex_unlock(&ax_json.mu);

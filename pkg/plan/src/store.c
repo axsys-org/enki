@@ -1,16 +1,19 @@
 #include "plan/store.h"
 
-#include <pthread.h>
-#include <lmdb.h>
+#include <inttypes.h>
 #include <setjmp.h>
-#include <stdlib.h>
+#include <stdatomic.h>
 #include <assert.h>
-#include <string.h>
 #include <errno.h>
+#include <lmdb.h>
+#include <pthread.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include "axsys/arena.h"
 #include "axsys/assume.h"
 #include "axsys/ds.h"
+#include "axsys/profile.h"
 #include "axsys/util.h"
 #include "internal.h"
 #include "plan/build.h"
@@ -20,6 +23,82 @@
 #ifndef PL_STORE_REGION_BYTES
 #define PL_STORE_REGION_BYTES (((size_t)1) << 38)
 #endif
+
+/* Store spans use the active logical PLAN lane when called by an executor.
+ * Host-side work gets a stable lane per native thread so concurrent
+ * backend calls never produce crossed B/E pairs on one Chrome Trace lane. */
+typedef struct pl_store_profile_scope {
+  uint64_t lane;
+  uint64_t span;
+  const uint8_t* name;
+  size_t name_n;
+  bool active;
+} pl_store_profile_scope;
+
+static const uint8_t pl_store_profile_category[] = "splan.store";
+static _Atomic uint64_t pl_store_profile_next_span = 1;
+static _Atomic uint64_t pl_store_profile_next_host_lane = UINT32_MAX;
+static _Thread_local uint64_t pl_store_profile_host_lane;
+
+static uint64_t pl_store_profile_lane(void) {
+  uint64_t lane = pl_profile_current_lane();
+  bool host = lane == 0;
+  if (host) {
+    if (pl_store_profile_host_lane == 0) {
+      pl_store_profile_host_lane = atomic_fetch_sub_explicit(
+          &pl_store_profile_next_host_lane, 1, memory_order_relaxed);
+      ax_assume(pl_store_profile_host_lane != 0,
+                "store profile lane id exhausted");
+    }
+    lane = pl_store_profile_host_lane;
+  }
+
+  char name[64];
+  int n;
+  if (host) {
+    uint64_t ordinal = UINT32_MAX - lane + 1;
+    n = snprintf(name, sizeof(name), "Store thread %" PRIu64, ordinal);
+  } else {
+    n = snprintf(name, sizeof(name), "PLAN thread %" PRIu64, lane);
+  }
+  if (n >= 0) {
+    size_t name_n = (size_t)n < sizeof(name) ? (size_t)n : sizeof(name) - 1;
+    ax_profile_json_thread_name(lane, name, name_n);
+  }
+  return lane;
+}
+
+static pl_store_profile_scope pl_store_profile_begin(const char* name,
+                                                     size_t name_n) {
+  if (!ax_profile_json_enabled())
+    return (pl_store_profile_scope){0};
+  pl_store_profile_scope scope = {
+      .lane = pl_store_profile_lane(),
+      .span = atomic_fetch_add_explicit(&pl_store_profile_next_span, 1,
+                                        memory_order_relaxed),
+      .name = (const uint8_t*)name,
+      .name_n = name_n,
+      .active = true,
+  };
+  ax_assume(scope.span != 0, "store profile span id exhausted");
+  ax_profile_json_span_begin(scope.lane, scope.span, pl_store_profile_category,
+                             sizeof(pl_store_profile_category) - 1, scope.name,
+                             scope.name_n);
+  return scope;
+}
+
+static void pl_store_profile_end(pl_store_profile_scope* scope) {
+  if (!scope->active)
+    return;
+  ax_profile_json_span_end(scope->lane, scope->span, pl_store_profile_category,
+                           sizeof(pl_store_profile_category) - 1, scope->name,
+                           scope->name_n);
+  scope->active = false;
+}
+
+#define PL_STORE_PROFILE(name)                                                 \
+  __attribute__((cleanup(pl_store_profile_end))) pl_store_profile_scope        \
+      pl_store_profile_scope_ = pl_store_profile_begin(name, sizeof(name) - 1)
 
 /** TODO: the locking mechanism is fucking trash (but probably correct)
  * fix imminently
@@ -98,6 +177,7 @@ void pl_store_intern_put(pl_store* s, const uint8_t hash[32], pl_val pin) {
 
 bool pl_store_backend_put(pl_store* s, const uint8_t hash[32], const uint8_t* b,
                           size_t n) {
+  PL_STORE_PROFILE("store.backend.put");
   pl_store_lock(s);
   bool ok = s->be.put(s->be.ctx, hash, b, n);
   pl_store_unlock(s);
@@ -106,6 +186,7 @@ bool pl_store_backend_put(pl_store* s, const uint8_t hash[32], const uint8_t* b,
 
 bool pl_store_backend_get(pl_store* s, const uint8_t hash[32], uint8_t** out_b,
                           size_t* out_s) {
+  PL_STORE_PROFILE("store.backend.get");
   pl_store_lock(s);
   bool ok = s->be.get(s->be.ctx, hash, out_b, out_s);
   pl_store_unlock(s);
@@ -113,6 +194,7 @@ bool pl_store_backend_get(pl_store* s, const uint8_t hash[32], uint8_t** out_b,
 }
 
 bool pl_store_put_root(pl_store* s, const uint8_t hash[32]) {
+  PL_STORE_PROFILE("store.root.put");
   pl_store_lock(s);
   bool ok = s->be.put_root(s->be.ctx, hash);
   pl_store_unlock(s);
@@ -120,6 +202,7 @@ bool pl_store_put_root(pl_store* s, const uint8_t hash[32]) {
 }
 
 bool pl_store_get_root(pl_store* s, uint8_t hash[32]) {
+  PL_STORE_PROFILE("store.root.get");
   pl_store_lock(s);
   bool ok = s->be.get_root(s->be.ctx, hash);
   pl_store_unlock(s);
@@ -137,6 +220,7 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
   uint8_t compiler_hash[32];
   memcpy(compiler_hash, s->compiler, 32);
   pl_store_unlock(s);
+  PL_STORE_PROFILE("store.compile.law");
   /* the compiler is installed PLAN code: a compile failure must not
    * take the runtime down — the law just stays interpreted */
   pl_catch c;
@@ -172,6 +256,7 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
  * compiled rows), which mutates the map, so snapshot the hashes first.
  */
 static void pl_store_compile_existing(pl_store* s) {
+  PL_STORE_PROFILE("store.compile.existing");
   pl_hash* laws = NULL;
   pl_store_lock(s);
   for (ptrdiff_t i = 0; i < ax_hmlen(s->intern); i++) {
@@ -186,6 +271,7 @@ static void pl_store_compile_existing(pl_store* s) {
 }
 
 void pl_store_put_compiler(pl_store* s, const uint8_t hash[32]) {
+  PL_STORE_PROFILE("store.compiler.install");
   pl_store_lock(s);
   s->compiler_f = hash[0] ? memcmp(hash, hash + 1, 31) != 0 : true;
   memcpy(s->compiler, hash, 32);
@@ -279,6 +365,7 @@ pl_val pl_store_ix1_expr(pl_store* s) {
 /* ── Store lifecycle ───────────────────────────────────────────────────── */
 
 pl_store* pl_store_new(pl_store_backend backend) {
+  PL_STORE_PROFILE("store.open");
   pl_store* s = calloc(1, sizeof(*s));
   ax_assume(s != NULL, "oom");
   pthread_mutexattr_t attr;
@@ -301,6 +388,7 @@ pl_store* pl_store_new(pl_store_backend backend) {
 void pl_store_free(pl_store* s) {
   if (s == NULL)
     return;
+  PL_STORE_PROFILE("store.close");
   if (s->be.close != NULL)
     s->be.close(s->be.ctx);
   ax_hmfree(s->intern);
@@ -483,6 +571,7 @@ static void lmdb_close(void* ctx) {
 }
 
 pl_store* pl_store_new_lmdb(const char* path, size_t map_size) {
+  PL_STORE_PROFILE("store.lmdb.open");
   lmdb_backend* l = calloc(1, sizeof(*l));
   if (l == NULL)
     return NULL;

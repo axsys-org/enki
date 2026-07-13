@@ -6,7 +6,31 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "axsys/profile.h"
 #include "test_plan.h"
+
+static char* store_test_read_file(const char* path) {
+  FILE* f = fopen(path, "rb");
+  cr_assert_not_null(f);
+  cr_assert_eq(fseek(f, 0, SEEK_END), 0);
+  long end = ftell(f);
+  cr_assert_geq(end, 0);
+  cr_assert_eq(fseek(f, 0, SEEK_SET), 0);
+  char* data = malloc((size_t)end + 1);
+  cr_assert_not_null(data);
+  cr_assert_eq(fread(data, 1, (size_t)end, f), (size_t)end);
+  data[end] = '\0';
+  cr_assert_eq(fclose(f), 0);
+  return data;
+}
+
+static size_t store_test_count(const char* haystack, const char* needle) {
+  size_t count = 0;
+  size_t needle_n = strlen(needle);
+  for (const char* p = haystack; (p = strstr(p, needle)) != NULL; p += needle_n)
+    count++;
+  return count;
+}
 
 /* ── Interning ─────────────────────────────────────────────────────────── */
 
@@ -149,4 +173,42 @@ Test(store, missing_pin_raises) {
   pl_catch_unwind(t, &c);
   cr_assert_not_null(t->exn_msg);
   test_rt_free(&rt);
+}
+
+Test(store, chrome_json_profiles_slow_store_operations) {
+  char path[] = "/tmp/enki-profile-store-XXXXXX";
+  int fd = mkstemp(path);
+  cr_assert_geq(fd, 0);
+  cr_assert_eq(close(fd), 0);
+  cr_assert(ax_profile_json_start(path));
+
+  pl_store* s = pl_store_new_mem();
+  pl_heap* h = pl_heap_new(1 << 16, s);
+  pl_thread* t = pl_thread_new(h);
+  size_t base = t->vsp;
+  pl_vpush(t, 42);
+  pl_val pin = pl_pin(t, t->vstack[base]);
+  uint8_t hash[32];
+  memcpy(hash, pl_pin_hash(pin), sizeof(hash));
+  cr_assert(pl_store_put_root(s, hash));
+  memset(hash, 0, sizeof(hash));
+  cr_assert(pl_store_get_root(s, hash));
+  pl_thread_free(t);
+  pl_heap_free(h);
+  pl_store_free(s);
+
+  cr_assert(ax_profile_json_finish());
+  char* json = store_test_read_file(path);
+  cr_assert_not_null(strstr(json, "\"cat\":\"splan.store\""));
+  cr_assert_not_null(strstr(json, "\"name\":\"store.open\""));
+  cr_assert_not_null(strstr(json, "\"name\":\"store.backend.put\""));
+  cr_assert_not_null(strstr(json, "\"name\":\"store.root.put\""));
+  cr_assert_not_null(strstr(json, "\"name\":\"store.root.get\""));
+  cr_assert_not_null(strstr(json, "\"name\":\"store.close\""));
+  cr_assert_not_null(strstr(json, "\"args\":{\"span\":"));
+  cr_assert_not_null(strstr(json, "Store thread "));
+  cr_assert_eq(store_test_count(json, "\"ph\":\"B\""),
+               store_test_count(json, "\"ph\":\"E\""));
+  free(json);
+  cr_assert_eq(unlink(path), 0);
 }

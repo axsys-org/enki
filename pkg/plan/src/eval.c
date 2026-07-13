@@ -258,6 +258,12 @@ static void pl_profile_reopen_above(pl_thread* t, size_t base) {
 
 /* ── Explicit SPLAN profiling zones ───────────────────────────────────── */
 
+static _Thread_local uint64_t pl_profile_active_lane;
+
+uint64_t pl_profile_current_lane(void) {
+  return pl_profile_active_lane;
+}
+
 static bool pl_profile_physical_enabled(void) {
 #ifdef TRACY_ENABLE
   return true;
@@ -1532,6 +1538,8 @@ pl_run_status pl_thread_run(pl_thread* t, uint64_t fuel) {
   t->fuel = fuel;
   t->pending_yield = false;
   t->suspendable = true;
+  uint64_t previous_profile_lane = pl_profile_active_lane;
+  pl_profile_active_lane = t->profile_lane;
 
   pl_catch c;
   pl_catch_init(t, &c);
@@ -1547,6 +1555,7 @@ pl_run_status pl_thread_run(pl_thread* t, uint64_t fuel) {
     t->suspendable = false;
     t->fuel = UINT64_MAX;
     t->status = PL_RUN_EXN;
+    pl_profile_active_lane = previous_profile_lane;
     return PL_RUN_EXN;
   }
 
@@ -1567,6 +1576,7 @@ pl_run_status pl_thread_run(pl_thread* t, uint64_t fuel) {
   t->suspendable = false;
   t->fuel = UINT64_MAX;
   t->status = (uint8_t)s;
+  pl_profile_active_lane = previous_profile_lane;
   return s;
 }
 

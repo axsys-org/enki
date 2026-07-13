@@ -75,6 +75,9 @@ pl_val pl_op83_zone_end(pl_thread* t, size_t ab);
 
 /* Close and release all explicit profiler state before a thread is freed. */
 void pl_profile_thread_free(pl_thread* t);
+/* Logical Chrome Trace lane active while pl_thread_run drives this native
+ * thread, or zero for direct host-side evaluation. */
+uint64_t pl_profile_current_lane(void);
 
 /* Frame-push helpers usable from op bodies. */
 static inline void pl_push_apply(pl_thread* t, pl_val x) {
