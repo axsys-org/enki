@@ -66,9 +66,11 @@ pl_val pl_op82_send_caps(pl_thread* t, size_t ab);
 pl_val pl_op82_recv(pl_thread* t, size_t ab);
 pl_val pl_op82_close_handle(pl_thread* t, size_t ab);
 
-/* op 83 (HTTP driver) coordination effects; serviced in pkg/enki. */
+/* op 83 (provisional staging area) coordination effects; serviced in pkg/enki.
+ */
 pl_val pl_op83_read_folder(pl_thread* t, size_t ab);
 pl_val pl_op83_fetch(pl_thread* t, size_t ab);
+pl_val pl_op83_sleep(pl_thread* t, size_t ab);
 
 /* Frame-push helpers usable from op bodies. */
 static inline void pl_push_apply(pl_thread* t, pl_val x) {

@@ -717,3 +717,10 @@ pl_val pl_op83_fetch(pl_thread* t, size_t ab) {
    * stays out of the plan layer). */
   return rp_request(t, ab, 2);
 }
+
+pl_val pl_op83_sleep(pl_thread* t, size_t ab) {
+  /* Seconds in arg 0; the wait happens at service time in pkg/enki.  Here we
+   * only validate the (forced) arg and park as a coordination request. */
+  rp_want_nat(t, ARG(0));
+  return rp_request(t, ab, 1);
+}
