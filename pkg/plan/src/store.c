@@ -131,7 +131,7 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
   pl_store_lock(s);
   if (!s->compiler_f) {
     pl_store_unlock(s);
-    fprintf(stderr, "no compiler set! failing compile\n");
+    // fprintf(stderr, "no compiler set! failing compile\n");
     return;
   }
   uint8_t compiler_hash[32];
