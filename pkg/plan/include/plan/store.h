@@ -21,6 +21,10 @@
 #include "plan/value.h"
 #include "plan/bytecode.h"
 
+typedef struct pl_hash {
+  uint8_t b[32];
+} pl_hash;
+
 typedef struct pl_store_backend {
   void* ctx;
   /* get returns a malloc'd buffer the caller frees; false if missing. */
@@ -34,6 +38,8 @@ typedef struct pl_store_backend {
   void (*get_code)(void* ctx, const uint8_t hash[32], pl_code** out);
   void (*put_code)(void* ctx, const uint8_t hash[32], pl_code* out);
 } pl_store_backend;
+
+typedef struct pl_store pl_store;
 
 pl_store* pl_store_new(pl_store_backend backend);
 pl_store* pl_store_new_mem(void);
@@ -66,9 +72,9 @@ bool pl_store_get_root(pl_store* s, uint8_t hash[32]);
 pl_val pl_store_ix0_expr(pl_store* s);
 pl_val pl_store_ix1_expr(pl_store* s);
 
-/* bytecode manipulation */
-void pl_store_put_code(pl_thread* t, const uint8_t hash[32]);
-bool pl_store_get_code(pl_store* s, const uint8_t hash[32], pl_code** out);
+/* Compile the law pin `hash` with the installed compiler and cache the
+ * result on the pin itself (read back via pl_pin_code). */
+void pl_store_put_code(pl_store* s, const uint8_t hash[32]);
 
 void pl_store_put_compiler(pl_store* s, const uint8_t hash[32]);
 #endif

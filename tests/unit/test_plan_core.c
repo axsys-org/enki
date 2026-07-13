@@ -130,6 +130,96 @@ Test(nat, divmod_bignum) {
   test_rt_free(&rt);
 }
 
+/* LoadVar reference (Plan.hs op 66): (a >> 8*off) mod 2^(8*width) */
+Test(nat, load_var_small_subject) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t a = t->vsp;
+  pl_vpush(t, 1);        /* off */
+  pl_vpush(t, 2);        /* width */
+  pl_vpush(t, 0xCCBBAA); /* subject */
+  cr_assert_eq(
+      pl_nat_load_var(t, &t->vstack[a], &t->vstack[a + 1], &t->vstack[a + 2]),
+      0xCCBB);
+
+  /* width >= 8 bytes covers the whole value */
+  t->vstack[a] = 0;
+  t->vstack[a + 1] = 8;
+  t->vstack[a + 2] = 5;
+  cr_assert_eq(
+      pl_nat_load_var(t, &t->vstack[a], &t->vstack[a + 1], &t->vstack[a + 2]),
+      5);
+
+  /* offset past a small nat reads zero (shift count would exceed 63) */
+  t->vstack[a] = 8;
+  t->vstack[a + 1] = 1;
+  t->vstack[a + 2] = 0x1234;
+  cr_assert_eq(
+      pl_nat_load_var(t, &t->vstack[a], &t->vstack[a + 1], &t->vstack[a + 2]),
+      0);
+
+  test_rt_free(&rt);
+}
+
+Test(nat, load_var_big_subject) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t a = t->vsp;
+  pl_vpush(t, 0); /* off */
+  pl_vpush(t, 0); /* width */
+  pl_vpush(t, 0); /* subject */
+  pl_gc_reserve(t, PL_NAT_CELLS(2));
+  uint64_t* limbs;
+  pl_val big = pl_mk_nat_limbs(t, 2, &limbs);
+  limbs[0] = UINT64_C(0x1122334455667788);
+  limbs[1] = UINT64_C(0x99AABBCCDDEEFF00);
+  t->vstack[a + 2] = pl_nat_trim(big);
+
+  /* unaligned read across the limb boundary: bytes 7..8 = {0x11, 0x00} */
+  t->vstack[a] = 7;
+  t->vstack[a + 1] = 2;
+  cr_assert_eq(
+      pl_nat_load_var(t, &t->vstack[a], &t->vstack[a + 1], &t->vstack[a + 2]),
+      0x11);
+
+  /* aligned full-limb read */
+  t->vstack[a] = 8;
+  t->vstack[a + 1] = 8;
+  pl_val r =
+      pl_nat_load_var(t, &t->vstack[a], &t->vstack[a + 1], &t->vstack[a + 2]);
+  cr_assert(!pl_is_nat63(r));
+  cr_assert_eq(pl_nat_limb_at(r, 0), UINT64_C(0x99AABBCCDDEEFF00));
+  cr_assert_eq(pl_nat_limb_at(r, 1), 0);
+
+  /* read extending past the end: missing bytes are zero, result canonical */
+  t->vstack[a] = 12;
+  t->vstack[a + 1] = 8;
+  r = pl_nat_load_var(t, &t->vstack[a], &t->vstack[a + 1], &t->vstack[a + 2]);
+  cr_assert(pl_is_nat63(r)); /* trimmed: no garbage in the high limbs */
+  cr_assert_eq(r, 0x99AABBCC);
+
+  /* wide window over the whole value returns it unchanged */
+  t->vstack[a] = 0;
+  t->vstack[a + 1] = 32;
+  r = pl_nat_load_var(t, &t->vstack[a], &t->vstack[a + 1], &t->vstack[a + 2]);
+  cr_assert_eq(pl_nat_limb_at(r, 0), UINT64_C(0x1122334455667788));
+  cr_assert_eq(pl_nat_limb_at(r, 1), UINT64_C(0x99AABBCCDDEEFF00));
+
+  /* offset at/past the end reads zero, even for huge offsets */
+  t->vstack[a] = 16;
+  t->vstack[a + 1] = 4;
+  cr_assert_eq(
+      pl_nat_load_var(t, &t->vstack[a], &t->vstack[a + 1], &t->vstack[a + 2]),
+      0);
+  t->vstack[a] = UINT64_C(1) << 40;
+  t->vstack[a + 1] = 8;
+  cr_assert_eq(
+      pl_nat_load_var(t, &t->vstack[a], &t->vstack[a + 1], &t->vstack[a + 2]),
+      0);
+
+  test_rt_free(&rt);
+}
+
 Test(nat, from_decimal_roundtrip) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
@@ -205,6 +295,40 @@ Test(gc, ind_short_circuit_on_evacuation) {
   cr_assert_eq(pl_tag(t->vstack[base]), PL_TAG_DEFER);
   pl_gc_collect_now(t);
   cr_assert_eq(t->vstack[base], 42);
+
+  test_rt_free(&rt);
+}
+
+Test(gc, bytecode_thunk_scans_env_and_args) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+
+  size_t base = t->vsp;
+  pl_vpush(t, test_law(t, 1, 0, 1));
+  pl_vpush(t, test_app2(t, 0, 11, 12));
+
+  pl_gc_reserve(t, PL_ENV_CELLS(1) + PL_THKE_CELLS(2));
+  pl_val env = pl_mk_env(t, 1);
+  pl_val thke = pl_mk_thke(t, env, PL_BAN_SLOW, 2, &t->vstack[base]);
+  t->vsp = base;
+  pl_vpush(t, thke);
+
+  pl_gc_collect_now(t);
+
+  pl_cell* p = pl_ptr(t->vstack[base]);
+  cr_assert_eq(pl_hdr_kind(p[0]), PL_K_THKE);
+  cr_assert_eq(pl_thke_bane(p), PL_BAN_SLOW);
+
+  pl_cell* ep = pl_as(PL_TAG_ENV, pl_thke_env(p));
+  cr_assert_not_null(ep);
+  cr_assert_eq(pl_env_n(ep), 1);
+
+  pl_val* args = pl_thke_args(p);
+  cr_assert_eq(pl_kind_of(args[0]), PL_K_LAW);
+  pl_cell* ap = pl_as(PL_TAG_APP, args[1]);
+  cr_assert_not_null(ap);
+  cr_assert_eq(pl_app_args(ap)[0], 11);
+  cr_assert_eq(pl_app_args(ap)[1], 12);
 
   test_rt_free(&rt);
 }

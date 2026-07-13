@@ -1,5 +1,12 @@
 #include <criterion/criterion.h>
 
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
 #include "enki/actor.h"
 #include "test_plan.h"
 
@@ -38,12 +45,32 @@ static pl_val test_p82(pl_thread* t) {
   return pin;
 }
 
+/* The pin of nat 83 (structured request/response drivers). */
+static pl_val test_p83(pl_thread* t) {
+  size_t base = t->vsp;
+  pl_vpush(t, 83);
+  pl_val pin = pl_pin(t, t->vstack[base]);
+  t->vsp = base;
+  return pin;
+}
+
 /* Code performing (P82 % row) for a hand-built effect row. */
 static pl_val code_effect(pl_thread* t, pl_val name, size_t n,
                           const pl_val* args) {
   size_t base = t->vsp;
   pl_vpush(t, code_lit(t, test_app(t, name, n, args)));
   pl_vpush(t, code_lit(t, test_p82(t)));
+  pl_val out = code_app(t, t->vstack[base + 1], t->vstack[base]);
+  t->vsp = base;
+  return out;
+}
+
+/* Code performing (P83 % row) for a hand-built effect row. */
+static pl_val code_effect83(pl_thread* t, pl_val name, size_t n,
+                            const pl_val* args) {
+  size_t base = t->vsp;
+  pl_vpush(t, code_lit(t, test_app(t, name, n, args)));
+  pl_vpush(t, code_lit(t, test_p83(t)));
   pl_val out = code_app(t, t->vstack[base + 1], t->vstack[base]);
   t->vsp = base;
   return out;
@@ -71,6 +98,100 @@ static pl_val actor_fn(pl_thread* t, pl_val body) {
 static pl_val recv_code(pl_thread* t) {
   pl_val args[1] = {0};
   return code_effect(t, ax_s4('R', 'e', 'c', 'v'), 1, args);
+}
+
+static bool nat_text_eq(pl_val value, const char* text) {
+  size_t n = strlen(text);
+  if (!pl_is_nat(value) || pl_nat_byte_len(value) != n)
+    return false;
+  for (size_t i = 0; i < n; i++)
+    if (pl_nat_byte_at(value, i) != (uint8_t)text[i])
+      return false;
+  return true;
+}
+
+static pl_cell* folder_entry(pl_val row, const char* name) {
+  pl_cell* row_p = pl_as(PL_TAG_APP, row);
+  if (row_p == NULL || pl_app_head(row_p) != 0)
+    return NULL;
+  for (uint32_t i = 0; i < pl_app_n(row_p); i++) {
+    pl_cell* entry = pl_as(PL_TAG_APP, pl_app_args(row_p)[i]);
+    if (entry != NULL && pl_app_head(entry) == 0 && pl_app_n(entry) == 2 &&
+        nat_text_eq(pl_app_args(entry)[1], name))
+      return entry;
+  }
+  return NULL;
+}
+
+Test(actor, readfolder_lists_entries_and_honors_file_root) {
+  char dir[] = "/tmp/enki-read-folder-XXXXXX";
+  cr_assert_not_null(mkdtemp(dir));
+  char root[512], listing[512], child[512], file[512];
+  int n = snprintf(root, sizeof(root), "%s/files", dir);
+  cr_assert(n >= 0 && (size_t)n < sizeof(root));
+  n = snprintf(listing, sizeof(listing), "%s/listing", root);
+  cr_assert(n >= 0 && (size_t)n < sizeof(listing));
+  n = snprintf(child, sizeof(child), "%s/subdir", listing);
+  cr_assert(n >= 0 && (size_t)n < sizeof(child));
+  n = snprintf(file, sizeof(file), "%s/plain.txt", listing);
+  cr_assert(n >= 0 && (size_t)n < sizeof(file));
+  cr_assert_eq(mkdir(root, 0700), 0);
+  cr_assert_eq(mkdir(listing, 0700), 0);
+  cr_assert_eq(mkdir(child, 0700), 0);
+  FILE* f = fopen(file, "wb");
+  cr_assert_not_null(f);
+  fputs("contents", f);
+  fclose(f);
+
+  test_rt rt = test_rt_new();
+  er_scheduler* sys =
+      er_scheduler_new(rt.store, (er_config){.file_root_c = root});
+  er_actor* inside = er_scheduler_actor(sys);
+  pl_thread* inside_t = er_actor_thread(inside);
+  size_t base = inside_t->vsp;
+  pl_vpush(inside_t,
+           pl_nat_from_bytes(inside_t, (const uint8_t*)"ReadFolder", 10));
+  pl_vpush(inside_t, pl_nat_from_bytes(inside_t, (const uint8_t*)"listing", 7));
+  pl_val args[1] = {inside_t->vstack[base + 1]};
+  pl_val body = code_effect83(inside_t, inside_t->vstack[base], 1, args);
+  inside_t->vsp = base;
+  er_actor_start(inside, actor_fn(inside_t, body));
+
+  er_actor* outside = er_scheduler_actor(sys);
+  pl_thread* outside_t = er_actor_thread(outside);
+  base = outside_t->vsp;
+  pl_vpush(outside_t,
+           pl_nat_from_bytes(outside_t, (const uint8_t*)"ReadFolder", 10));
+  pl_vpush(outside_t, pl_nat_from_bytes(outside_t, (const uint8_t*)"../", 3));
+  args[0] = outside_t->vstack[base + 1];
+  body = code_effect83(outside_t, outside_t->vstack[base], 1, args);
+  outside_t->vsp = base;
+  er_actor_start(outside, actor_fn(outside_t, body));
+
+  cr_assert_eq(er_scheduler_run(sys), ER_RUN_IDLE);
+  cr_assert_eq(er_actor_state(inside), ER_ACTOR_HALTED);
+  pl_val row = er_actor_result(inside);
+  pl_cell* row_p = pl_as(PL_TAG_APP, row);
+  cr_assert_not_null(row_p);
+  cr_assert_eq(pl_app_head(row_p), 0);
+  cr_assert_eq(pl_app_n(row_p), 2);
+  pl_cell* subdir = folder_entry(row, "subdir");
+  cr_assert_not_null(subdir);
+  cr_assert_eq(pl_app_args(subdir)[0], 1);
+  pl_cell* plain = folder_entry(row, "plain.txt");
+  cr_assert_not_null(plain);
+  cr_assert_eq(pl_app_args(plain)[0], 0);
+
+  cr_assert_eq(er_actor_state(outside), ER_ACTOR_HALTED);
+  cr_assert_eq(er_actor_result(outside), 0);
+  er_scheduler_free(sys);
+  test_rt_free(&rt);
+
+  cr_assert_eq(unlink(file), 0);
+  cr_assert_eq(rmdir(child), 0);
+  cr_assert_eq(rmdir(listing), 0);
+  cr_assert_eq(rmdir(root), 0);
+  cr_assert_eq(rmdir(dir), 0);
 }
 
 Test(actor, single_actor_halts_with_result) {

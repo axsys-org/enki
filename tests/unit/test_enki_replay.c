@@ -2,6 +2,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "enki/actor.h"
@@ -32,11 +33,29 @@ static pl_val test_p82(pl_thread* t) {
   return pin;
 }
 
+static pl_val test_p83(pl_thread* t) {
+  size_t base = t->vsp;
+  pl_vpush(t, 83);
+  pl_val pin = pl_pin(t, t->vstack[base]);
+  t->vsp = base;
+  return pin;
+}
+
 static pl_val code_effect(pl_thread* t, pl_val name, size_t n,
                           const pl_val* args) {
   size_t base = t->vsp;
   pl_vpush(t, code_lit(t, test_app(t, name, n, args)));
   pl_vpush(t, code_lit(t, test_p82(t)));
+  pl_val out = code_app(t, t->vstack[base + 1], t->vstack[base]);
+  t->vsp = base;
+  return out;
+}
+
+static pl_val code_effect83(pl_thread* t, pl_val name, size_t n,
+                            const pl_val* args) {
+  size_t base = t->vsp;
+  pl_vpush(t, code_lit(t, test_app(t, name, n, args)));
+  pl_vpush(t, code_lit(t, test_p83(t)));
   pl_val out = code_app(t, t->vstack[base + 1], t->vstack[base]);
   t->vsp = base;
   return out;
@@ -89,6 +108,18 @@ static void start_readfile_actor(er_scheduler* sys, const char* path) {
   er_actor_start(a, actor_fn(t, body));
 }
 
+static void start_readfolder_actor(er_scheduler* sys, const char* path) {
+  er_actor* a = er_scheduler_actor(sys);
+  pl_thread* t = er_actor_thread(a);
+  size_t base = t->vsp;
+  pl_vpush(t, pl_nat_from_bytes(t, (const uint8_t*)path, strlen(path)));
+  pl_vpush(t, pl_nat_from_bytes(t, (const uint8_t*)"ReadFolder", 10));
+  pl_val rargs[1] = {t->vstack[base]};
+  pl_val body = code_effect83(t, t->vstack[base + 1], 1, rargs);
+  t->vsp = base;
+  er_actor_start(a, actor_fn(t, body));
+}
+
 static void assert_bar(pl_val v, const char* s) {
   size_t n = strlen(s);
   cr_assert(pl_is_nat(v), "expected a bar nat");
@@ -96,6 +127,29 @@ static void assert_bar(pl_val v, const char* s) {
   for (size_t i = 0; i < n; i++)
     cr_assert_eq(pl_nat_byte_at(v, i), (uint8_t)s[i]);
   cr_assert_eq(pl_nat_byte_at(v, n), 1); /* bar terminator */
+}
+
+static bool nat_text_eq(pl_val value, const char* text) {
+  size_t n = strlen(text);
+  if (!pl_is_nat(value) || pl_nat_byte_len(value) != n)
+    return false;
+  for (size_t i = 0; i < n; i++)
+    if (pl_nat_byte_at(value, i) != (uint8_t)text[i])
+      return false;
+  return true;
+}
+
+static pl_cell* folder_entry(pl_val row, const char* name) {
+  pl_cell* row_p = pl_as(PL_TAG_APP, row);
+  if (row_p == NULL || pl_app_head(row_p) != 0)
+    return NULL;
+  for (uint32_t i = 0; i < pl_app_n(row_p); i++) {
+    pl_cell* entry = pl_as(PL_TAG_APP, pl_app_args(row_p)[i]);
+    if (entry != NULL && pl_app_head(entry) == 0 && pl_app_n(entry) == 2 &&
+        nat_text_eq(pl_app_args(entry)[1], name))
+      return entry;
+  }
+  return NULL;
 }
 
 Test(replay, readfile_substitutes_without_syscall) {
@@ -147,6 +201,66 @@ Test(replay, readfile_substitutes_without_syscall) {
   }
   er_log_free(loaded);
   test_rt_free(&rt);
+}
+
+Test(replay, readfolder_substitutes_without_directory) {
+  char dir[] = "/tmp/enki-replay-folder-XXXXXX";
+  cr_assert_not_null(mkdtemp(dir));
+  char child[256], file[256], logpath[256];
+  (void)snprintf(child, sizeof(child), "%s/subdir", dir);
+  (void)snprintf(file, sizeof(file), "%s/plain.txt", dir);
+  (void)snprintf(logpath, sizeof(logpath), "%s/run.enkilog", dir);
+  cr_assert_eq(mkdir(child, 0700), 0);
+  FILE* f = fopen(file, "w");
+  cr_assert_not_null(f);
+  fputs("alpha", f);
+  fclose(f);
+
+  test_rt rt = test_rt_new();
+  er_log* log = er_log_new();
+  {
+    er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
+    er_scheduler_record(sys, log);
+    start_readfolder_actor(sys, dir);
+    cr_assert_eq(er_scheduler_run(sys), ER_RUN_IDLE);
+    er_actor* a = er_scheduler_actor_by_id(sys, 0);
+    pl_val row = er_actor_result(a);
+    pl_cell* subdir = folder_entry(row, "subdir");
+    cr_assert_not_null(subdir);
+    cr_assert_eq(pl_app_args(subdir)[0], 1);
+    pl_cell* plain = folder_entry(row, "plain.txt");
+    cr_assert_not_null(plain);
+    cr_assert_eq(pl_app_args(plain)[0], 0);
+    er_scheduler_free(sys);
+  }
+  cr_assert_eq(er_log_events(log), 1);
+  cr_assert(er_log_write_file(log, logpath));
+  er_log_free(log);
+  cr_assert_eq(unlink(file), 0);
+  cr_assert_eq(rmdir(child), 0);
+  er_log* loaded = er_log_read_file(logpath);
+  cr_assert_not_null(loaded);
+
+  {
+    er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
+    er_scheduler_replay(sys, loaded);
+    start_readfolder_actor(sys, dir); /* the directory no longer exists */
+    cr_assert_eq(er_scheduler_run(sys), ER_RUN_IDLE);
+    er_actor* a = er_scheduler_actor_by_id(sys, 0);
+    pl_val row = er_actor_result(a);
+    pl_cell* subdir = folder_entry(row, "subdir");
+    cr_assert_not_null(subdir);
+    cr_assert_eq(pl_app_args(subdir)[0], 1);
+    pl_cell* plain = folder_entry(row, "plain.txt");
+    cr_assert_not_null(plain);
+    cr_assert_eq(pl_app_args(plain)[0], 0);
+    cr_assert_eq(er_scheduler_log_cursor(sys), 1);
+    er_scheduler_free(sys);
+  }
+  er_log_free(loaded);
+  test_rt_free(&rt);
+  cr_assert_eq(unlink(logpath), 0);
+  cr_assert_eq(rmdir(dir), 0);
 }
 
 /* Self-ping with a lazy Now payload: the clock read happens while the

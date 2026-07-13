@@ -6,6 +6,7 @@
 #include "axsys/util.h"
 #include "plan/build.h"
 #include "plan/nat.h"
+#include "plan/rplan.h"
 #include "plan/wasm_io.h"
 
 #define ARG(i) (t->vstack[ab + (i)])
@@ -70,6 +71,11 @@ static pl_val rp_request(pl_thread* t, size_t ab, uint32_t argc) {
   pl_val r = pl_mk_app_from(t, t->vstack[ab - 1], argc, &t->vstack[ab]);
   PL_GC_ALLOW(t);
   return r;
+}
+
+pl_val pl_rplan_read_folder(pl_thread* t, pl_val path) {
+  rp_want_nat(t, path);
+  return 0;
 }
 
 pl_val pl_op82_input(pl_thread* t, size_t ab) {
@@ -205,4 +211,13 @@ pl_val pl_op82_recv(pl_thread* t, size_t ab) {
 pl_val pl_op82_close_handle(pl_thread* t, size_t ab) {
   rp_want_nat(t, ARG(0));
   return rp_request(t, ab, 1);
+}
+
+pl_val pl_op83_read_folder(pl_thread* t, size_t ab) {
+  rp_want_nat(t, ARG(0));
+  return rp_request(t, ab, 1);
+}
+
+pl_val pl_op83_fetch(pl_thread* t, size_t ab) {
+  return rp_request(t, ab, 2);
 }

@@ -35,17 +35,41 @@ WARN_COMMON := -Wall -Wextra  \
 	-Wpedantic -Wshadow -Wconversion -Wstrict-prototypes \
 	-Wmissing-prototypes -Wold-style-definition -Wnull-dereference \
 	-Wdouble-promotion -Werror \
-	-Wno-sign-conversion -Wno-char-subscripts -Wno-unused-function -Wno-gnu-label-as-value
+	-Wno-sign-conversion -Wno-char-subscripts -Wno-unused-function
+
+# Computed gotos (pl_run) are a GNU extension: clang has a targeted
+# suppression; gcc only has the -Wpedantic bucket, handled by a
+# GCC-only pragma in eval.c.
+ifneq (,$(findstring clang,$(shell $(CC) --version 2>/dev/null)))
+WARN_COMMON += -Wno-gnu-label-as-value
+endif
 
 WARN_CFLAGS = $(WARN_COMMON)
 
 HARDEN_CFLAGS := -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3 -fstack-protector-strong
 
+# Full LTO for the perf builds (release + final pgo): the evaluator's hot
+# loop calls out-of-line builders (pl_bump, pl_mk_thke, ...) across TUs.
+# profile (tracy) skips it for sane attribution; pgo-generate skips it
+# because only the final instr-use build's codegen matters.
+#
+# Darwin-only for now: ld64 links bitcode archive members out of the
+# box, but the Linux legs link with binutils ld.bfd, which chokes on
+# bitcode archives ("archive has no index") — enabling LTO there needs
+# llvm-ar + lld (llvmPackages.bintools) in the build environment first.
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+LTO_CFLAGS := -flto
+else
+LTO_CFLAGS :=
+endif
+
 BUILD_CFLAGS_debug := -O0 -g3 -DDEBUG
-BUILD_CFLAGS_release := -O3 -DNDEBUG $(HARDEN_CFLAGS)
-BUILD_CFLAGS_profile := $(BUILD_CFLAGS_release) -g3 -fno-omit-frame-pointer -fdebug-info-for-profiling
-BUILD_CFLAGS_pgo-generate := $(BUILD_CFLAGS_release) -fprofile-instr-generate
-BUILD_CFLAGS_pgo := $(BUILD_CFLAGS_release) -fprofile-instr-use=$(PGO_PROFILE) -Wno-error=profile-instr-unprofiled
+BUILD_CFLAGS_relbase := -O3 -DNDEBUG $(HARDEN_CFLAGS)
+BUILD_CFLAGS_release := $(BUILD_CFLAGS_relbase) $(LTO_CFLAGS)
+BUILD_CFLAGS_profile := $(BUILD_CFLAGS_relbase) -g3 -fno-omit-frame-pointer -fdebug-info-for-profiling
+BUILD_CFLAGS_pgo-generate := $(BUILD_CFLAGS_relbase) -fprofile-instr-generate
+BUILD_CFLAGS_pgo := $(BUILD_CFLAGS_relbase) $(LTO_CFLAGS) -fprofile-instr-use=$(PGO_PROFILE) -Wno-error=profile-instr-unprofiled
 BUILD_CFLAGS_asan := -O1 -g3 -fsanitize=address -fno-omit-frame-pointer $(HARDEN_CFLAGS)
 BUILD_CFLAGS_ubsan := -O1 -g3 -fsanitize=undefined -fno-omit-frame-pointer $(HARDEN_CFLAGS)
 BUILD_CFLAGS_tsan := -O1 -g3 -fsanitize=thread -fno-omit-frame-pointer $(HARDEN_CFLAGS)
@@ -55,10 +79,10 @@ BUILD_CFLAGS_wasm := -O3 -DNDEBUG -DENKI_WASM -mllvm -wasm-enable-sjlj \
 	-Wno-error=main
 
 BUILD_LDFLAGS_debug :=
-BUILD_LDFLAGS_release :=
+BUILD_LDFLAGS_release := $(LTO_CFLAGS)
 BUILD_LDFLAGS_profile :=
 BUILD_LDFLAGS_pgo-generate := -fprofile-instr-generate
-BUILD_LDFLAGS_pgo := -fprofile-instr-use=$(PGO_PROFILE)
+BUILD_LDFLAGS_pgo := $(LTO_CFLAGS) -fprofile-instr-use=$(PGO_PROFILE)
 BUILD_LDFLAGS_asan := -fsanitize=address
 BUILD_LDFLAGS_ubsan := -fsanitize=undefined
 BUILD_LDFLAGS_tsan := -fsanitize=thread
@@ -93,7 +117,7 @@ CFLAGS_ALL := $(BASE_CFLAGS) $(WARN_CFLAGS) $(BUILD_CFLAGS_$(BUILD_TYPE)) $(CFLA
 ifeq ($(BUILD_TYPE),wasm)
 LDFLAGS_ALL := $(BUILD_LDFLAGS_$(BUILD_TYPE)) $(LDFLAGS)
 else
-LDFLAGS_ALL := $(BUILD_LDFLAGS_$(BUILD_TYPE)) $(LDFLAGS) -pthread -L/opt/homebrew/lib -lgmp -llmdb -lcrypto
+LDFLAGS_ALL := $(BUILD_LDFLAGS_$(BUILD_TYPE)) $(LDFLAGS) -pthread -L/opt/homebrew/lib -lgmp -llmdb -lcrypto -lcurl
 endif
 
 ifeq ($(PROFILE),tracy)
@@ -108,6 +132,7 @@ ENKI_SRCS := $(filter-out pkg/enki/src/wisp_browser.c,$(wildcard pkg/enki/src/*.
 ifeq ($(BUILD_TYPE),wasm)
 PLAN_SRCS := $(filter-out pkg/plan/src/rplan.c pkg/plan/src/nat.c,$(PLAN_SRCS)) \
 	pkg/plan/src/nat_wasm.c pkg/plan/src/rplan_wasm.c
+ENKI_SRCS := $(filter-out pkg/enki/src/http.c,$(ENKI_SRCS))
 endif
 HEADERS := $(wildcard pkg/axsys/include/axsys/*.h) \
 	$(wildcard pkg/plan/include/plan/*.h) \
@@ -139,9 +164,11 @@ THEFT_OBJS := $(patsubst %.c,$(BUILD_DIR)/%.o,$(THEFT_SRCS))
 FUZZ_BINS := $(patsubst %.c,$(BUILD_DIR)/%,$(FUZZ_SRCS))
 PERF_BINS := $(patsubst %.c,$(BUILD_DIR)/%,$(PERF_SRCS))
 WASM_UNSUPPORTED_UNIT_SRCS := $(UNIT_DIR)/test_enki_actor.c \
+	$(UNIT_DIR)/test_enki_http.c \
 	$(UNIT_DIR)/test_enki_replay.c \
 	$(UNIT_DIR)/test_enki_wisp.c \
 	$(UNIT_DIR)/test_plan_op82.c \
+	$(UNIT_DIR)/test_plan_op83.c \
 	$(UNIT_DIR)/test_plan_store.c \
 	$(UNIT_DIR)/test_wisp_cli.c
 WASM_UNIT_SRCS := $(filter-out $(WASM_UNSUPPORTED_UNIT_SRCS),$(UNIT_SRCS))
@@ -204,7 +231,8 @@ FORMAT_FILES := $(HEADERS) $(AXSYS_SRCS) $(PLAN_SRCS) $(ENKI_SRCS) $(APP_SRCS) \
 	tests/support/criterion/criterion.h \
 	tests/support/criterion/parameterized.h \
 	tests/support/criterion/redirect.h \
-	tests/support/criterion/theories.h
+	tests/support/criterion/theories.h \
+	tests/support/test_http_server.h
 
 ifeq ($(BUILD_TYPE),wasm)
 CRITERION_CFLAGS :=

@@ -11,6 +11,7 @@
 #include "axsys/base58.h"
 #include "axsys/util.h"
 #include "internal.h"
+#include "store_internal.h"
 #include "plan/build.h"
 #include "plan/canon.h"
 #include "plan/debug.h"
@@ -28,6 +29,8 @@
  * op 82: rplan I/O (rplan.c) — RPLAN-mode gated.  Console/file/socket
  *        ops run inline; the actor ops are coordination effects that
  *        suspend the thread for an executor to service.
+ * op 83: staging area for provisional primops whose PLAN-level semantics
+ *        are not yet settled.  Its current entries are serviced in pkg/enki.
  */
 
 #define ARG(i) (t->vstack[ab + (i)])
@@ -634,7 +637,7 @@ static pl_val op_throw(pl_thread* t, size_t ab) {
 static pl_val op_try(pl_thread* t, size_t ab) {
   pl_frame* fr = pl_fpush(t);
   fr->kind = PL_F_TRY;
-  fr->argbase = ab - 1; /* vsp to restore when delivering the exn */
+  fr->argbase = (uint32_t)(ab - 1); /* vsp to restore on exn delivery */
   pl_push_nf(t);
   pl_push_apply(t, ARG(1));
   return ARG(0);
@@ -713,6 +716,8 @@ static pl_val op_install(pl_thread* t, size_t ab) {
   }
   memcpy(hash, pl_pin_hash_bytes(p), 32);
   pl_store* s = pl_heap_store(t->heap);
+  s->compiler_h = pl_heap_new(((size_t)1 << 26), s);
+  s->compiler_t = pl_thread_new(s->compiler_h);
   pl_store_put_compiler(s, hash);
   return 1;
 }
@@ -726,7 +731,7 @@ static pl_val op_compile(pl_thread* t, size_t ab) {
     return 0;
   }
   memcpy(hash, pl_pin_hash_bytes(p), 32);
-  pl_store_put_code(t, hash);
+  pl_store_put_code(pl_heap_store(t->heap), hash);
 
   return 1;
 }
@@ -869,6 +874,10 @@ static pl_val op_load(pl_thread* t, size_t ab) {
  * deep is the initiation-time payload normalization */
 #define OP82C(name, argc, mask, deep, body)                                    \
   {82, 0, name, argc, mask, deep, true, body}
+/* op 83 is the provisional-primop staging area; its current entries are
+ * coordination effects serviced in pkg/enki. */
+#define OP83C(name, argc, mask, deep, body)                                    \
+  {83, 0, name, argc, mask, deep, true, body}
 
 const pl_opdesc pl_ops[] = {
     /* op 0: core PLAN */
@@ -1007,6 +1016,16 @@ const pl_opdesc pl_ops[] = {
     OP82C("Recv", 1, 0b1, 0, pl_op82_recv),
     OP82C("CloseHandle", 1, 0b1, 0, pl_op82_close_handle),
     OP82("Connect", 3, 0b111, pl_op82_connect),
+
+    /* op 83: provisional primops; their PLAN-level semantics are deliberately
+     * not yet committed.  The current staging implementations are executor-
+     * serviced and mode-gated like op 82.  ReadFolder returns an arbitrary
+     * row, so it cannot use op 82's nat-only direct-effect replay seam.
+     * Fetch args deep-normalize at initiation: the request/config rows are
+     * consumed from C at service time, and effects inside them run as the
+     * caller's own execution before the request parks. */
+    OP83C("ReadFolder", 1, 0b1, 0, pl_op83_read_folder),
+    OP83C("Fetch", 2, 0b11, 0b11, pl_op83_fetch),
 };
 
 const size_t pl_nops = sizeof(pl_ops) / sizeof(pl_ops[0]);
@@ -1050,6 +1069,9 @@ static const uint16_t pl_op82_argc1[] = {105, 106, 107, 108, 110, 111, 112,
                                          113, 114, 115, 118, 121, 122};
 static const uint16_t pl_op82_argc2[] = {109, 116, 117, 119};
 static const uint16_t pl_op82_argc3[] = {120, 123};
+
+static const uint16_t pl_op83_argc1[] = {124};
+static const uint16_t pl_op83_argc2[] = {125};
 
 static pl_opbucket pl_op_lookup_bucket(uint64_t opset, uint32_t argc) {
   switch (opset) {
@@ -1109,6 +1131,14 @@ static pl_opbucket pl_op_lookup_bucket(uint64_t opset, uint32_t argc) {
       return PL_IX_BUCKET(pl_op82_argc2);
     case 3:
       return PL_IX_BUCKET(pl_op82_argc3);
+    }
+    break;
+  case 83:
+    switch (argc) {
+    case 1:
+      return PL_IX_BUCKET(pl_op83_argc1);
+    case 2:
+      return PL_IX_BUCKET(pl_op83_argc2);
     }
     break;
   }

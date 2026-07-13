@@ -5,10 +5,32 @@
 
 #include "plan/store.h"
 #include "plan/value.h"
+#include "axsys/arena.h"
 
-typedef struct pl_hash {
-  uint8_t b[32];
-} pl_hash;
+#ifndef ENKI_WASM
+#include <pthread.h>
+#endif
+
+typedef struct pl_intern_entry {
+  pl_hash key;
+  pl_val value;
+} pl_intern_entry;
+
+struct pl_store {
+#ifndef ENKI_WASM
+  pthread_mutex_t mu;
+#endif
+  ax_arena* region;
+  uint8_t* lo;
+  uint8_t* hi;
+  pl_intern_entry* intern;
+  pl_store_backend be;
+  pl_val ix0_expr, ix1_expr;
+  uint8_t compiler[32];
+  pl_thread* compiler_t;
+  pl_heap* compiler_h;
+  bool compiler_f;
+};
 
 pl_cell* pl_store_alloc(pl_store* s, size_t cells);
 size_t pl_store_mark(pl_store* s);

@@ -5,6 +5,14 @@
 #include "axsys/assume.h"
 #include "plan/nat.h"
 
+/* gcc -O3's inliner chains the pl_as-returned-NULL fact into
+ * pl_arity's APP case and reports an impossible null dereference
+ * (APP-tagged vals always carry an address); clang and lower -O
+ * levels are clean. */
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic ignored "-Wnull-dereference"
+#endif
+
 /* ── Nats ──────────────────────────────────────────────────────────────── */
 
 pl_val pl_mk_nat_u64(pl_thread* t, uint64_t n) {
@@ -87,6 +95,21 @@ pl_val pl_mk_app_from(pl_thread* t, pl_val head, uint32_t n,
   return pl_make(PL_TAG_APP, p);
 }
 
+pl_val pl_mk_app_cat(pl_thread* t, pl_val f, uint32_t m, const pl_val* args) {
+  ax_assume(m >= 1, "empty cat");
+  pl_cell* fp = pl_as(PL_TAG_APP, f);
+  if (fp == NULL)
+    return pl_mk_app_from(t, f, m, args);
+  uint32_t n = pl_app_n(fp);
+  pl_cell* p = pl_bump(t, PL_APP_CELLS(n + m));
+  p[0] = pl_hdr_make(PL_K_APP, 0, pl_need_after(pl_app_head(fp), n + m),
+                     PL_APP_CELLS(n + m));
+  p[1] = fp[1];
+  memcpy(p + 2, fp + 2, n * sizeof(pl_val));
+  memcpy(p + 2 + n, args, m * sizeof(pl_val));
+  return pl_make(PL_TAG_APP, p);
+}
+
 pl_val pl_mk_app_snoc(pl_thread* t, pl_val f, pl_val x) {
   pl_cell* fp = pl_as(PL_TAG_APP, f);
   if (fp != NULL) {
@@ -152,6 +175,18 @@ pl_val pl_mk_thke(pl_thread* t, pl_val env, pl_bane bane, uint32_t nargs,
   p[1] = env;
   p[2] = (pl_bane)bane;
   memcpy(p + 3, args, sizeof(pl_val) * nargs);
+  return pl_make(PL_TAG_DEFER, p);
+}
+
+pl_val pl_mk_thke_known(pl_thread* t, pl_val env, uint32_t idx, uint32_t nargs,
+                        pl_val* args) {
+  uint32_t size = PL_THKE_CELLS(nargs + 1);
+  pl_cell* p = pl_bump(t, size);
+  p[0] = pl_hdr_make(PL_K_THKE, 0, 0, size);
+  p[1] = env;
+  p[2] = PL_BAN_PRIM_KNOWN;
+  p[3] = idx; /* the ingest-resolved pl_ops index, a nat63 */
+  memcpy(p + 4, args, sizeof(pl_val) * nargs);
   return pl_make(PL_TAG_DEFER, p);
 }
 

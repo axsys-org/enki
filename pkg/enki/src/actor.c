@@ -10,11 +10,23 @@
 #include <unistd.h>
 #endif
 
+#include "actor_internal.h"
 #include "axsys/assume.h"
 #include "axsys/ds.h"
 #include "axsys/sha256.h"
 #include "plan/build.h"
+#include "plan/debug.h"
+#include "plan/eval.h"
+#include "axsys/allocator.h"
 #include "plan/nat.h"
+#include "plan/rplan.h"
+
+/* Defined with the event-log helpers below; ReadFolder service appears in
+ * the scheduler section above that implementation. */
+static void er_vals_hash(const pl_val* args, uint32_t argc, uint8_t out[32]);
+static uint8_t* er_folder_result_encode(pl_val row, uint64_t* out_n);
+static pl_val er_folder_result_build(pl_thread* t, const uint8_t* data,
+                                     uint64_t data_n);
 
 /*
  * Deterministic single-OS-thread executor.  Everything
@@ -38,79 +50,40 @@
 #define ER_DEFAULT_QUANTUM    4096
 #define ER_DEFAULT_HEAP_CELLS 8192 /* 64 KiB per semispace */
 
-typedef struct er_msg {
-  pl_val payload; /* nat63 or store-resident — terminal for every GC */
-  struct er_msg* next;
-  uint32_t ncaps;
-  er_actor* caps[]; /* actor refs, translated at send */
-} er_msg;
+/* Struct definitions live in actor_internal.h, shared with http.c. */
 
-struct er_actor {
-  er_scheduler* sys;
-  uint64_t id; /* creation order; deterministic tie-break key */
-  pl_heap* heap;
-  pl_thread* t;
-  er_actor_status status;
-  bool started;
-  bool adopted;      /* embedder-owned thread/heap; never HALTED, never freed */
-  er_msg* mbox_head; /* arrival-order FIFO (matches reaver's Chan) */
-  er_msg* mbox_tail;
-  er_actor** handle_v; /* dense handle table; NULL = closed; [0] = self */
-  size_t handle_n;     /* next handle to mint (never reused) */
-  size_t handle_cap;
-  er_actor* qnext;
-  er_actor* all_next;
-};
+#ifdef ENKI_WASM
+void er_http_service(er_scheduler* sys, er_actor* a, uint32_t argc,
+                     pl_val* args) {
+  AX_UNUSED(sys);
+  AX_UNUSED(argc);
+  AX_UNUSED(args);
+  er_crash_msg(a, "Fetch is unavailable in the WASM host");
+}
 
-/* ── Event log ─────────────────────────────────────────────────────────── */
+void er_http_pump(er_scheduler* sys) {
+  AX_UNUSED(sys);
+}
 
-typedef enum { ER_EV_IO = 1, ER_EV_INJECT = 2 } er_ev_kind;
+bool er_http_idle(er_scheduler* sys) {
+  AX_UNUSED(sys);
+  return false;
+}
 
-typedef struct er_event {
-  uint8_t kind;
-  uint64_t actor;        /* er_actor id */
-  uint64_t op;           /* IO: effect-name mote; INJECT: 0 */
-  uint8_t args_hash[32]; /* IO: SHA-256 of the forced args */
-  uint8_t* data;         /* IO: result nat bytes; INJECT: payload encoding */
-  uint64_t data_n;
-} er_event;
+bool er_http_outstanding(const er_scheduler* sys) {
+  AX_UNUSED(sys);
+  return false;
+}
 
-struct er_log {
-  uint64_t quantum; /* header: replay must use the same quantum */
-  er_event* ev;     /* stb_ds array */
-};
+bool er_http_mt_pump(er_scheduler* sys) {
+  AX_UNUSED(sys);
+  return false;
+}
 
-typedef enum { ER_MODE_LIVE = 0, ER_MODE_RECORD, ER_MODE_REPLAY } er_mode;
-
-struct er_scheduler {
-  pl_store* store;
-  er_config cfg;
-#ifndef ENKI_WASM
-  pthread_mutex_t mu;
-  pthread_cond_t cv;
+void er_http_teardown(er_scheduler* sys) {
+  AX_UNUSED(sys);
+}
 #endif
-  er_actor* qhead; /* run queue */
-  er_actor* qtail;
-  er_actor* all_head; /* every actor, creation order */
-  er_actor* all_tail;
-  uint64_t next_id;
-  er_mode mode;
-  er_log* rec;        /* RECORD sink */
-  const er_log* play; /* REPLAY source */
-  size_t cursor;      /* next replay event */
-};
-
-struct er_mt_executor {
-  er_scheduler* sys;
-#ifndef ENKI_WASM
-  er_actor* root;
-  uint32_t workers;
-  pthread_t* thread_v;
-  size_t active;
-  bool stopping;
-  er_run_reason reason;
-#endif
-};
 
 /* ── Construction ──────────────────────────────────────────────────────── */
 
@@ -124,10 +97,20 @@ er_scheduler* er_scheduler_new(pl_store* store, er_config cfg) {
 #endif
   sys->store = store;
   sys->cfg = cfg;
-  if (sys->cfg.quantum == 0)
-    sys->cfg.quantum = ER_DEFAULT_QUANTUM;
-  if (sys->cfg.heap_cells == 0)
-    sys->cfg.heap_cells = ER_DEFAULT_HEAP_CELLS;
+  if (sys->cfg.quantum == 0) {
+    const char* q_c = getenv("ENKI_QUANTUM");
+    sys->cfg.quantum =
+        q_c != NULL && q_c[0] != '\0' ? strtoull(q_c, NULL, 10) : 0;
+    if (sys->cfg.quantum == 0)
+      sys->cfg.quantum = ER_DEFAULT_QUANTUM;
+  }
+  if (sys->cfg.heap_cells == 0) {
+    const char* h_c = getenv("ENKI_ACTOR_HEAP_CELLS");
+    sys->cfg.heap_cells =
+        h_c != NULL && h_c[0] != '\0' ? strtoull(h_c, NULL, 10) : 0;
+    if (sys->cfg.heap_cells == 0)
+      sys->cfg.heap_cells = ER_DEFAULT_HEAP_CELLS;
+  }
   ax_assume(sys->cfg.quantum >= 2, "er_scheduler_new: quantum must be >= 2");
   return sys;
 }
@@ -172,6 +155,7 @@ er_actor* er_scheduler_adopt(er_scheduler* sys, pl_thread* t) {
 void er_scheduler_free(er_scheduler* sys) {
   if (sys == NULL)
     return;
+  er_http_teardown(sys); /* before the actors: transfers reference them */
   for (er_actor* a = sys->all_head; a != NULL;) {
     er_actor* next = a->all_next;
     for (er_msg* m = a->mbox_head; m != NULL;) {
@@ -223,7 +207,16 @@ pl_val er_actor_result(er_actor* a) {
 
 /* ── Run queue / handle table ──────────────────────────────────────────── */
 
-static void er_enqueue(er_actor* a) {
+static bool er_trace(void) {
+  static int on = -1;
+  if (on < 0)
+    on = getenv("ENKI_TRACE") != NULL;
+  return on;
+}
+
+void er_enqueue(er_actor* a) {
+  if (er_trace())
+    fprintf(stderr, "[trace] enqueue actor=%llu\n", (unsigned long long)a->id);
   a->qnext = NULL;
   if (a->sys->qtail != NULL)
     a->sys->qtail->qnext = a;
@@ -269,6 +262,9 @@ static er_actor* er_dequeue_spawned(er_scheduler* sys) {
   for (er_actor* a = sys->qhead; a != NULL; a = a->qnext) {
     if (!a->adopted) {
       (void)er_remove_from_queue(sys, a);
+      if (er_trace())
+        fprintf(stderr, "[trace] dequeue-spawned actor=%llu\n",
+                (unsigned long long)a->id);
       return a;
     }
   }
@@ -307,9 +303,25 @@ static bool er_name_is(pl_val name, const char* s) {
   return true;
 }
 
+/* The evaluator parks coordination requests with the op-table INDEX at
+ * the head of the spine (rp_request rebuilds from the dispatch stack),
+ * while hand-built requests (and the unit tests) use the op-name atom.
+ * Accept both: translate an index head to its table name.
+ *
+ * THIS IS A DUMB HACK: TODO: FIX
+ * */
+static bool er_op_is(pl_val name, const char* s) {
+  extern const size_t pl_nops;
+  if (pl_is_nat63(name) && (size_t)name < pl_nops)
+    return strcmp(pl_io_name((uint32_t)name), s) == 0;
+  return er_name_is(name, s);
+}
+
 /* ── Messaging ─────────────────────────────────────────────────────────── */
 
 void er_actor_start(er_actor* a, pl_val fn) {
+  if (er_trace())
+    fprintf(stderr, "[trace] start actor=%llu\n", (unsigned long long)a->id);
   ax_assume(!a->started && a->status == ER_ACTOR_RUNNABLE,
             "er_actor_start: actor already started");
   a->started = true;
@@ -372,7 +384,8 @@ static void er_deliver(er_actor* to, pl_val payload, uint32_t ncaps,
   else
     to->mbox_head = m;
   to->mbox_tail = m;
-  if (to->status == ER_ACTOR_BLOCKED)
+  /* an http-parked actor is not waiting on Recv; its mail just queues */
+  if (to->status == ER_ACTOR_BLOCKED && to->http == NULL)
     er_recv_ready(to);
 }
 
@@ -424,7 +437,7 @@ static void er_crash(er_actor* a) {
 
 /* Service-detected crash (no PLAN raise happened): leave a message in
  * the thread's exn slot so embedders report something useful. */
-static void er_crash_msg(er_actor* a, const char* msg) {
+void er_crash_msg(er_actor* a, const char* msg) {
   a->t->exn = 0;
   a->t->exn_msg = msg;
   er_crash(a);
@@ -488,7 +501,7 @@ static void er_service(er_scheduler* sys, er_actor* a) {
   uint32_t argc = pl_app_n(p);
   pl_val* args = pl_app_args(p);
 
-  if (er_name_is(name, "Recv")) {
+  if (er_op_is(name, "Recv")) {
     ax_assume(argc == 1, "Recv arity");
     if (a->mbox_head == NULL)
       a->status = ER_ACTOR_BLOCKED; /* park; a deliver will wake us */
@@ -497,7 +510,7 @@ static void er_service(er_scheduler* sys, er_actor* a) {
     return;
   }
 
-  if (er_name_is(name, "Send")) {
+  if (er_op_is(name, "Send")) {
     ax_assume(argc == 2, "Send arity");
     er_actor* to = er_handle_get(a, args[0]);
     if (to == NULL) {
@@ -516,7 +529,7 @@ static void er_service(er_scheduler* sys, er_actor* a) {
     return;
   }
 
-  if (er_name_is(name, "SendCaps")) {
+  if (er_op_is(name, "SendCaps")) {
     ax_assume(argc == 3, "SendCaps arity");
     er_actor* to = er_handle_get(a, args[0]);
     if (to == NULL) {
@@ -550,7 +563,7 @@ static void er_service(er_scheduler* sys, er_actor* a) {
     return;
   }
 
-  if (er_name_is(name, "Spawn")) {
+  if (er_op_is(name, "Spawn")) {
     ax_assume(argc == 1, "Spawn arity");
     pl_val fn;
     if (!er_pin_payload(a, args[0], &fn)) {
@@ -566,7 +579,43 @@ static void er_service(er_scheduler* sys, er_actor* a) {
     return;
   }
 
-  if (er_name_is(name, "CloseHandle")) {
+  if (er_op_is(name, "Fetch")) {
+    er_http_service(sys, a, argc, args);
+    return;
+  }
+
+  if (er_op_is(name, "ReadFolder")) {
+    ax_assume(argc == 1, "ReadFolder arity");
+    uint8_t hash[32];
+    er_vals_hash(args, argc, hash);
+    pl_val result;
+    if (sys->mode == ER_MODE_REPLAY) {
+      const er_event* e = er_replay_next(sys);
+      ax_assume(e->kind == ER_EV_FOLDER && e->actor == a->id &&
+                    memcmp(e->args_hash, hash, 32) == 0,
+                "er_log: replay divergence at a ReadFolder");
+      result = er_folder_result_build(t, e->data, e->data_n);
+    } else {
+      /* Root the path while the directory result is assembled: its request
+       * spine may move during collection. */
+      size_t base = t->vsp;
+      pl_vpush(t, args[0]);
+      result = pl_rplan_read_folder(t, t->vstack[base]);
+      t->vsp = base;
+      if (sys->mode == ER_MODE_RECORD) {
+        er_event e = {.kind = ER_EV_FOLDER, .actor = a->id};
+        memcpy(e.args_hash, hash, 32);
+        e.data = er_folder_result_encode(result, &e.data_n);
+        ax_arrpush(sys->rec->ev, e);
+      }
+    }
+    pl_thread_deposit(t, result);
+    a->status = ER_ACTOR_RUNNABLE;
+    er_enqueue(a);
+    return;
+  }
+
+  if (er_op_is(name, "CloseHandle")) {
     ax_assume(argc == 1, "CloseHandle arity");
     pl_val h = args[0];
     /* unknown handles are a silent no-op; even handle 0 may be closed
@@ -579,6 +628,11 @@ static void er_service(er_scheduler* sys, er_actor* a) {
     return;
   }
 
+  {
+    size_t dbg_n;
+    char* dbg_s = pl_show(ax_allocator_system(), req, &dbg_n);
+    fprintf(stderr, "er_service: unmatched request: %.*s\n", (int)dbg_n, dbg_s);
+  }
   ax_abort("er_service: unknown coordination op");
 }
 
@@ -604,8 +658,11 @@ static void er_step(er_scheduler* sys, er_actor* a, pl_run_status s) {
 
 er_run_reason er_scheduler_run(er_scheduler* sys) {
   for (;;) {
+    er_http_pump(sys);
     er_actor* a = er_dequeue(sys);
     if (a == NULL) {
+      if (er_http_idle(sys))
+        continue; /* an http completion made someone runnable */
       for (er_actor* it = sys->all_head; it != NULL; it = it->all_next)
         if (it->status == ER_ACTOR_BLOCKED)
           return ER_RUN_QUIESCENT;
@@ -639,7 +696,9 @@ static void* er_mt_worker(void* arg) {
       a = ex->root == NULL ? er_dequeue(sys) : er_dequeue_spawned(sys);
       if (a != NULL)
         break;
-      if (ex->root == NULL && ex->active == 0) {
+      if (er_http_mt_pump(sys))
+        continue; /* pumped the CURLM: completions may have enqueued */
+      if (ex->root == NULL && ex->active == 0 && !er_http_outstanding(sys)) {
         ex->reason = er_run_reason_locked(sys);
         ex->stopping = true;
         pthread_cond_broadcast(&sys->cv);
@@ -658,7 +717,8 @@ static void* er_mt_worker(void* arg) {
     pthread_mutex_lock(&sys->mu);
     er_step(sys, a, s);
     ex->active--;
-    if (ex->root == NULL && sys->qhead == NULL && ex->active == 0) {
+    if (ex->root == NULL && sys->qhead == NULL && ex->active == 0 &&
+        !er_http_outstanding(sys)) {
       ex->reason = er_run_reason_locked(sys);
       ex->stopping = true;
       pthread_cond_broadcast(&sys->cv);
@@ -747,8 +807,11 @@ er_drive_status er_scheduler_drive(er_scheduler* sys, er_actor* root) {
   root->status = ER_ACTOR_RUNNABLE;
   er_enqueue(root);
   for (;;) {
+    er_http_pump(sys);
     er_actor* a = er_dequeue(sys);
     if (a == NULL) {
+      if (er_http_idle(sys))
+        continue; /* an http completion made someone runnable */
       /* root is parked on Recv and nothing runnable can ever wake it */
       er_root_unwind(root);
       return ER_DRIVE_DEADLOCK;
@@ -833,7 +896,7 @@ er_drive_status er_mt_executor_drive(er_mt_executor* ex, er_actor* root) {
     }
 
     if (root->status == ER_ACTOR_BLOCKED && sys->qhead == NULL &&
-        ex->active == 0) {
+        ex->active == 0 && !er_http_outstanding(sys)) {
       er_root_unwind(root);
       out = ER_DRIVE_DEADLOCK;
       ex->stopping = true;
@@ -880,7 +943,7 @@ size_t er_log_events(const er_log* log) {
 }
 
 /* Effect names are <= 8 bytes; pack them as a mote like ax_s*. */
-static uint64_t er_mote(const char* s) {
+uint64_t er_mote(const char* s) {
   uint64_t v = 0;
   for (int i = 0; s[i] != '\0'; i++) {
     ax_assume(i < 8, "er_log: effect name too long");
@@ -891,12 +954,10 @@ static uint64_t er_mote(const char* s) {
 
 /* SHA-256 over the forced args of a direct effect, as length-prefixed
  * nat bytes (non-nat args — e.g. Now's ignored slot — are a marker). */
-static void er_args_hash(pl_thread* t, uint32_t op, size_t ab,
-                         uint8_t out[32]) {
+static void er_vals_hash(const pl_val* args, uint32_t argc, uint8_t out[32]) {
   uint8_t* buf = NULL;
-  uint32_t argc = pl_io_argc(op);
   for (uint32_t i = 0; i < argc; i++) {
-    pl_val v = t->vstack[ab + i];
+    pl_val v = args[i];
     if (pl_is_nat(v)) {
       ax_arrpush(buf, 'n');
       uint64_t n = pl_nat_byte_len(v);
@@ -912,6 +973,11 @@ static void er_args_hash(pl_thread* t, uint32_t op, size_t ab,
   ax_arrfree(buf);
 }
 
+static void er_args_hash(pl_thread* t, uint32_t op, size_t ab,
+                         uint8_t out[32]) {
+  er_vals_hash(&t->vstack[ab], pl_io_argc(op), out);
+}
+
 static uint8_t* er_nat_bytes(pl_val v, uint64_t* out_n) {
   uint64_t n = pl_nat_byte_len(v);
   uint8_t* b = malloc(n ? (size_t)n : 1);
@@ -922,7 +988,106 @@ static uint8_t* er_nat_bytes(pl_val v, uint64_t* out_n) {
   return b;
 }
 
-static const er_event* er_replay_next(er_scheduler* sys) {
+/* ReadFolder log payload: entry count followed by
+ *   is-folder:u8, name-length:u64-le, name-bytes
+ * for every entry.  Zero is both an empty row and the rplan error result. */
+static uint8_t* er_folder_result_encode(pl_val row, uint64_t* out_n) {
+  pl_cell* row_p = NULL;
+  uint32_t count = 0;
+  size_t size = 8;
+  if (row != 0) {
+    row_p = pl_as(PL_TAG_APP, row);
+    ax_assume(row_p != NULL && pl_app_head(row_p) == 0,
+              "er_log: malformed ReadFolder result");
+    count = pl_app_n(row_p);
+    for (uint32_t i = 0; i < count; i++) {
+      pl_cell* entry = pl_as(PL_TAG_APP, pl_app_args(row_p)[i]);
+      ax_assume(entry != NULL && pl_app_head(entry) == 0 &&
+                    pl_app_n(entry) == 2 && pl_is_nat(pl_app_args(entry)[0]) &&
+                    pl_app_args(entry)[0] <= 1 &&
+                    pl_is_nat(pl_app_args(entry)[1]),
+                "er_log: malformed ReadFolder entry");
+      uint64_t name_n = pl_nat_byte_len(pl_app_args(entry)[1]);
+      ax_assume(name_n <= SIZE_MAX - size - 9,
+                "er_log: ReadFolder result too large");
+      size += 9 + (size_t)name_n;
+    }
+  }
+
+  uint8_t* data = malloc(size);
+  ax_assume(data != NULL, "oom");
+  size_t off = 0;
+  for (int b = 0; b < 8; b++)
+    data[off++] = (uint8_t)((uint64_t)count >> (8 * b));
+  for (uint32_t i = 0; i < count; i++) {
+    pl_cell* entry = pl_as(PL_TAG_APP, pl_app_args(row_p)[i]);
+    pl_val name = pl_app_args(entry)[1];
+    uint64_t name_n = pl_nat_byte_len(name);
+    data[off++] = (uint8_t)pl_app_args(entry)[0];
+    for (int b = 0; b < 8; b++)
+      data[off++] = (uint8_t)(name_n >> (8 * b));
+    for (uint64_t j = 0; j < name_n; j++)
+      data[off++] = pl_nat_byte_at(name, j);
+  }
+  ax_assume(off == size, "er_log: ReadFolder encoder size mismatch");
+  *out_n = (uint64_t)size;
+  return data;
+}
+
+static uint64_t er_folder_u64_read(const uint8_t** p, const uint8_t* end) {
+  ax_assume((size_t)(end - *p) >= 8, "er_log: malformed ReadFolder event");
+  uint64_t out = 0;
+  for (int b = 0; b < 8; b++)
+    out |= (uint64_t)(*p)[b] << (8 * b);
+  *p += 8;
+  return out;
+}
+
+/* The decoder follows the same stack-rooting discipline as the filesystem
+ * producer: every name and completed entry stays rooted across a collection.
+ */
+static pl_val er_folder_result_build(pl_thread* t, const uint8_t* data,
+                                     uint64_t data_n) {
+  ax_assume(data_n <= SIZE_MAX && data_n >= 8,
+            "er_log: malformed ReadFolder event");
+  const uint8_t* p = data;
+  const uint8_t* end = data + (size_t)data_n;
+  uint64_t count64 = er_folder_u64_read(&p, end);
+  ax_assume(count64 <= UINT32_MAX - 2, "er_log: ReadFolder result too large");
+  uint32_t count = (uint32_t)count64;
+  if (count == 0) {
+    ax_assume(p == end, "er_log: malformed empty ReadFolder event");
+    return 0;
+  }
+
+  size_t base = t->vsp;
+  for (uint32_t i = 0; i < count; i++) {
+    ax_assume(p < end, "er_log: malformed ReadFolder entry");
+    uint8_t is_folder = *p++;
+    ax_assume(is_folder <= 1, "er_log: malformed ReadFolder flag");
+    uint64_t name_n = er_folder_u64_read(&p, end);
+    ax_assume(name_n <= (uint64_t)(end - p),
+              "er_log: malformed ReadFolder name");
+    pl_vpush(t, is_folder);
+    pl_vpush(t, pl_nat_from_bytes(t, p, (size_t)name_n));
+    p += (size_t)name_n;
+    pl_gc_reserve(t, PL_APP_CELLS(2));
+    PL_GC_FORBID(t);
+    pl_val entry = pl_mk_app_from(t, 0, 2, &t->vstack[t->vsp - 2]);
+    PL_GC_ALLOW(t);
+    t->vsp -= 2;
+    pl_vpush(t, entry);
+  }
+  ax_assume(p == end, "er_log: trailing ReadFolder event bytes");
+  pl_gc_reserve(t, PL_APP_CELLS(count));
+  PL_GC_FORBID(t);
+  pl_val row = pl_mk_app_from(t, 0, count, &t->vstack[base]);
+  PL_GC_ALLOW(t);
+  t->vsp = base;
+  return row;
+}
+
+const er_event* er_replay_next(er_scheduler* sys) {
   ax_assume(sys->cursor < er_log_events(sys->play),
             "er_log: replay ran past the end of the recording");
   return &sys->play->ev[sys->cursor++];
@@ -976,6 +1141,8 @@ void er_scheduler_replay(er_scheduler* sys, const er_log* log) {
   ax_assume(sys->mode == ER_MODE_LIVE, "er_scheduler_replay: mode already set");
   ax_assume(log->quantum == sys->cfg.quantum,
             "er_scheduler_replay: quantum differs from the recording");
+  ax_assume(sys->curlm == NULL && sys->http_inflight_n == 0,
+            "er_scheduler_replay: live http transfers exist");
   sys->mode = ER_MODE_REPLAY;
   sys->play = log;
   sys->cursor = 0;

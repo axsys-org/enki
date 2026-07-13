@@ -394,26 +394,31 @@ pl_val pl_nat_trunc(pl_thread* t, pl_val* width, pl_val* a) {
 
 static uint64_t clamp_to_width(uint64_t w, uint64_t a) {
   if (w >= 8)
-    return 0;
+    return a;
   return a & ((UINT64_C(1) << (w * 8)) - 1);
 }
 
-/* LoadVar: simple memcpy from one nat to another */
+/* LoadVar: (a >> 8*off) mod 2^(8*width); bytes past the end read as zero */
 pl_val pl_nat_load_var(pl_thread* t, pl_val* off, pl_val* width, pl_val* a) {
   uint64_t w = pl_nat_u64_clamp(*width);
   uint64_t o = pl_nat_u64_clamp(*off);
   if (w == 0)
     return 0;
-  if (pl_is_nat63(*a)) {
-    return clamp_to_width(w, (*a) >> (8 * o));
-  }
-  pl_gc_reserve(t, PL_NAT_CELLS(w));
+  if (pl_is_nat63(*a))
+    return o >= 8 ? 0 : clamp_to_width(w, (*a) >> (8 * o));
+  size_t avail = pl_nat_limb_len(*a) * 8;
+  if (o >= avail)
+    return 0;
+  size_t n = (avail - o < w) ? avail - o : (size_t)w;
+  size_t lr = (n + 7) / 8;
+  pl_gc_reserve(t, PL_NAT_CELLS(lr));
   PL_GC_FORBID(t);
   uint64_t* out;
-  pl_val r = pl_mk_nat_limbs(t, w, &out);
+  pl_val r = pl_mk_nat_limbs(t, lr, &out);
   mp_limb_t ta;
   pl_limbs va = pl_limb_view(a, &ta);
-  memcpy(out, (char*)va.p + o, w);
+  out[lr - 1] = 0;
+  memcpy(out, (const char*)va.p + o, n);
   r = pl_nat_trim(r);
   PL_GC_ALLOW(t);
   return r;
