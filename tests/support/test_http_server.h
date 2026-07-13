@@ -313,9 +313,24 @@ static void test_http_server_stop(test_http_server* srv) {
   pthread_mutex_lock(&srv->mu);
   srv->stopping = true;
   pthread_mutex_unlock(&srv->mu);
-  /* closing the listener pops the accept loop */
-  close(srv->listen_fd);
+
+  /* Closing a listening socket from another thread does not reliably wake a
+   * blocking accept() on Linux.  Connect to the listener instead: the accept
+   * loop observes stopping, closes this connection, and exits. */
+  int wake_fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (wake_fd >= 0) {
+    struct sockaddr_in addr = {0};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons(srv->port);
+    if (connect(wake_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0)
+      (void)shutdown(srv->listen_fd, SHUT_RDWR);
+    close(wake_fd);
+  } else {
+    (void)shutdown(srv->listen_fd, SHUT_RDWR);
+  }
   pthread_join(srv->thread, NULL);
+  close(srv->listen_fd);
   pthread_mutex_destroy(&srv->mu);
 }
 
