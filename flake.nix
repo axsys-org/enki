@@ -4,7 +4,10 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
-    treefmt-nix.url = "github:numtide/treefmt-nix";
+    treefmt-nix = {
+      url = "github:numtide/treefmt-nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
     reaver = {
       url = "github:axsys-org/shrine-plan/lf/bytecode";
       flake = false;
@@ -23,18 +26,15 @@
         pkgs = import nixpkgs {inherit system;};
         lib = pkgs.lib;
         stdenv = pkgs.stdenv;
-        src = lib.cleanSourceWith {
-          src = ./.;
-          filter = path: type: let
-            base = baseNameOf path;
-          in
-            !(base
-              == "build"
-              || base == "result"
-              || lib.hasPrefix "result-" base
-              || base == ".direnv"
-              || base == "compile_commands.json"
-              || base == "compile_commands.bear.json");
+        src = lib.fileset.toSource {
+          root = ./.;
+          fileset = lib.fileset.unions [
+            ./.clang-format
+            ./.clang-tidy
+            ./Makefile
+            ./pkg
+            ./tests
+          ];
         };
 
         treefmtEval = treefmt-nix.lib.evalModule pkgs {
@@ -57,21 +57,25 @@
         compilerFor = buildType:
           if buildType == "coverage"
           then {
-            compiler = pkgs.gcc;
+            stdenv = pkgs.gccStdenv;
+            compiler = pkgs.gccStdenv.cc;
             cc = "gcc";
           }
           else if stdenv.isDarwin
           then {
-            compiler = pkgs.clang;
+            stdenv = pkgs.llvmPackages.stdenv;
+            compiler = pkgs.llvmPackages.stdenv.cc;
             cc = "clang";
           }
           else if lib.elem buildType ["debug" "release"]
           then {
-            compiler = pkgs.gcc;
+            stdenv = pkgs.gccStdenv;
+            compiler = pkgs.gccStdenv.cc;
             cc = "gcc";
           }
           else {
-            compiler = pkgs.clang;
+            stdenv = pkgs.llvmPackages.stdenv;
+            compiler = pkgs.llvmPackages.stdenv.cc;
             cc = "clang";
           };
 
@@ -79,9 +83,9 @@
           selected = compilerFor buildType;
         in
           import ./nix/mkenki.nix {
-            inherit lib stdenv src;
-            inherit (pkgs) gnumake pkg-config criterion curl gmp lmdb openssl binutils;
-            inherit (selected) compiler cc;
+            inherit lib src;
+            inherit (pkgs) gnumake pkg-config criterion curl gmp lmdb openssl;
+            inherit (selected) stdenv compiler cc;
           };
 
         mkenki = buildType: let
@@ -116,7 +120,7 @@
           pkgs.runCommand "enki-${name}-0.1.0" {
             meta = {
               description = "${name} binary from enki";
-              homepage = "https://example.invalid/enki";
+              homepage = "https://github.com/axsys-org/enki";
               license = lib.licenses.mit;
               mainProgram = name;
               platforms = lib.platforms.unix;
@@ -132,74 +136,48 @@
         '';
         assemblerPackage = mkBinPackage "assembler" "";
 
-        mkCheckArgs = kind: buildType: suffix: makeArgs:
+        mkCheckArgs = buildType: suffix: makeArgs:
           (mkWithCompiler buildType {
-            pname = "enki-${kind}-${buildType}${suffix}";
+            pname = "enki-tests-${buildType}${suffix}";
             inherit buildType makeArgs;
-            makeTarget =
-              if kind == "unit-tests"
-              then "test-unit"
-              else "test-property";
+            makeTarget = "test";
             installPackage = false;
-          }).overrideAttrs (old:
-            {
-              nativeBuildInputs =
-                old.nativeBuildInputs
-                ++ lib.optionals (kind == "unit-tests") [
-                  wispPackage
-                ];
-            }
-            // lib.optionalAttrs (kind == "unit-tests") {
-              ENKI_REAVER_SRC_DIR = "${wispPackage}/share/enki/reaver/src";
-              ENKI_REAVER_PLAN_DIR = "${wispPackage}/share/enki/reaver/src/plan";
-              # the HTTP tests talk to a loopback mock server; the darwin
-              # sandbox blocks even localhost without this
-              __darwinAllowLocalNetworking = true;
-            });
+          }).overrideAttrs (_old: {
+            ENKI_REAVER_SRC_DIR = "${reaver}/src";
+            ENKI_REAVER_PLAN_DIR = "${reaver}/src/plan";
+            # The HTTP tests talk to a loopback mock server; the Darwin
+            # sandbox blocks even localhost without this.
+            __darwinAllowLocalNetworking = true;
+          });
 
-        mkCheck = kind: buildType: mkCheckArgs kind buildType "" "";
+        mkCheck = buildType: mkCheckArgs buildType "" "";
         /*
         no TSAN for macOS - causes occasional (nondeterministic) crashes in CI
         ASAN should be disabled until we fix bytecode lifecycles
         */
         testBuildTypes = ["debug" "ubsan"];
         linuxTestBuildTypes = ["tsan"];
-        # linuxTestBuildTypes = [];
         testChecks =
           lib.listToAttrs
-          (lib.concatMap
-            (buildType: [
-              {
-                name = "unit-tests-${buildType}";
-                value = mkCheck "unit-tests" buildType;
-              }
-              {
-                name = "property-tests-${buildType}";
-                value = mkCheck "property-tests" buildType;
-              }
-            ])
+          (map
+            (buildType: {
+              name = "tests-${buildType}";
+              value = mkCheck buildType;
+            })
             testBuildTypes)
-          // (lib.optionalAttrs (stdenv.isLinux) (lib.listToAttrs (lib.concatMap
-            (buildType: [
-              {
-                name = "unit-tests-${buildType}";
-                value = mkCheck "unit-tests" buildType;
-              }
-              {
-                name = "property-tests-${buildType}";
-                value = mkCheck "property-tests" buildType;
-              }
-            ])
+          // (lib.optionalAttrs (stdenv.isLinux) (lib.listToAttrs (map
+            (buildType: {
+              name = "tests-${buildType}";
+              value = mkCheck buildType;
+            })
             linuxTestBuildTypes)))
           // {
             # YIELD_STRESS (spec §10.1): every depth-0 safepoint suspends
-            unit-tests-debug-yield-stress =
-              mkCheckArgs "unit-tests" "debug" "-yield-stress" "YIELD_STRESS=1";
-            property-tests-debug-yield-stress =
-              mkCheckArgs "property-tests" "debug" "-yield-stress" "YIELD_STRESS=1";
+            tests-debug-yield-stress =
+              mkCheckArgs "debug" "-yield-stress" "YIELD_STRESS=1";
           };
 
-        coverageReport = stdenv.mkDerivation {
+        coverageReport = (compilerFor "coverage").stdenv.mkDerivation {
           pname = "enki-coverage-report";
           version = "0.1.0";
           inherit src;
@@ -208,23 +186,22 @@
             pkgs.gnumake
             pkgs.pkg-config
             pkgs.lcov
-            pkgs.gcovr
-            (compilerFor "coverage").compiler
           ];
 
-          ENKI_REAVER_SRC_DIR = "${wispPackage}/share/enki/reaver/src";
-          ENKI_REAVER_PLAN_DIR = "${wispPackage}/share/enki/reaver/src/plan";
+          ENKI_REAVER_SRC_DIR = "${reaver}/src";
+          ENKI_REAVER_PLAN_DIR = "${reaver}/src/plan";
           buildInputs = [
             pkgs.criterion
             pkgs.curl
             pkgs.gmp
             pkgs.lmdb
             pkgs.openssl
-            wispPackage
           ];
           __darwinAllowLocalNetworking = true;
 
           dontConfigure = true;
+          strictDeps = true;
+          enableParallelBuilding = true;
           buildPhase = ''
             runHook preBuild
             make coverage BUILD_TYPE=coverage CC=${(compilerFor "coverage").compiler}/bin/${(compilerFor "coverage").cc}
@@ -239,78 +216,6 @@
             runHook postInstall
           '';
         };
-
-        tidyCheck = stdenv.mkDerivation {
-          pname = "enki-tidy";
-          version = "0.1.0";
-          inherit src;
-
-          nativeBuildInputs = [
-            pkgs.gnumake
-            pkgs.binutils
-            pkgs.pkg-config
-            pkgs.bear
-            pkgs.clang
-            pkgs.clang-tools
-          ];
-
-          buildInputs = [
-            pkgs.criterion
-            pkgs.curl
-            pkgs.gmp
-            pkgs.lmdb
-            pkgs.openssl
-            pkgs.compiledb
-          ];
-
-          dontConfigure = true;
-          buildPhase = ''
-            runHook preBuild
-            compiledb BUILD_TYPE=debug CC=${pkgs.clang}/bin/clang make
-            make BUILD_TYPE=debug CC=${pkgs.clang}/bin/clang tidy
-            runHook postBuild
-          '';
-
-          installPhase = ''
-            runHook preInstall
-            mkdir -p $out
-            cp compile_commands.json $out/
-            runHook postInstall
-          '';
-        };
-
-        # fuzzBinary = stdenv.mkDerivation {
-        #   pname = "enki-fuzz-vector";
-        #   version = "0.1.0";
-        #   inherit src;
-        #
-        #   nativeBuildInputs = [
-        #     pkgs.gnumake
-        #     pkgs.clang
-        #   ];
-        #
-        #   dontConfigure = true;
-        #   buildPhase = ''
-        #     runHook preBuild
-        #     make BUILD_TYPE=asan CC=${pkgs.clang}/bin/clang fuzz-bin
-        #     runHook postBuild
-        #   '';
-        #
-        #   installPhase = ''
-        #     runHook preInstall
-        #     mkdir -p $out/bin $out/share/enki/fuzz
-        #     cp build/asan/tests/fuzz/fuzz_vector $out/bin/enki-fuzz-vector
-        #     cp -R tests/fuzz/corpus $out/share/enki/fuzz/corpus
-        #     runHook postInstall
-        #   '';
-        # };
-
-        # fuzzApp = pkgs.writeShellApplication {
-        #   name = "enki-fuzz";
-        #   text = ''
-        #     exec ${fuzzBinary}/bin/enki-fuzz-vector ${fuzzBinary}/share/enki/fuzz/corpus "$@"
-        #   '';
-        # };
 
         coverageApp = pkgs.writeShellApplication {
           name = "enki-coverage-report";
@@ -342,9 +247,7 @@
         checks =
           testChecks
           // {
-            # tidy = tidyCheck;
             format = treefmtEval.config.build.check self;
-            #coverage = coverageReport;
           };
 
         apps = {
@@ -356,15 +259,14 @@
             drv = assemblerPackage;
             name = "assembler";
           };
-          # fuzz = flake-utils.lib.mkApp {drv = fuzzApp;};
           coverage-report = flake-utils.lib.mkApp {drv = coverageApp;};
         };
 
         formatter = treefmtEval.config.build.wrapper;
 
         devShells.default = pkgs.mkShell {
-          ENKI_REAVER_SRC_DIR = "${wispPackage}/share/enki/reaver/src";
-          ENKI_REAVER_PLAN_DIR = "${wispPackage}/share/enki/reaver/src/plan";
+          ENKI_REAVER_SRC_DIR = "${reaver}/src";
+          ENKI_REAVER_PLAN_DIR = "${reaver}/src/plan";
 
           packages =
             [
@@ -386,7 +288,7 @@
               pkgs.mdformat
               pkgs.samply
               treefmtEval.config.build.wrapper
-              wispPackage
+              enkiReleaseNoPGO
             ]
             ++ lib.optionals stdenv.isLinux [
               pkgs.valgrind

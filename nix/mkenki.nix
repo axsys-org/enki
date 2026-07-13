@@ -9,7 +9,6 @@
   gmp,
   lmdb,
   openssl,
-  binutils,
   compiler,
   cc,
   extraNativeBuildInputs ? [],
@@ -28,8 +27,6 @@ stdenv.mkDerivation {
     [
       gnumake
       pkg-config
-      compiler
-      binutils
     ]
     ++ extraNativeBuildInputs;
 
@@ -42,6 +39,7 @@ stdenv.mkDerivation {
   ];
 
   dontConfigure = true;
+  strictDeps = true;
   enableParallelBuilding = true;
   hardeningDisable = ["fortify" "fortify3"];
 
@@ -66,8 +64,10 @@ stdenv.mkDerivation {
     '';
 
   meta = {
-    description = "";
+    description = "PLAN runtime and C libraries";
+    homepage = "https://github.com/axsys-org/enki";
     license = lib.licenses.mit;
+    mainProgram = "wisp";
     platforms = lib.platforms.unix;
   };
 }
