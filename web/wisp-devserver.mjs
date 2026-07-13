@@ -70,6 +70,13 @@ async function dynamicReaverBundle() {
       base64: (await readFile(file)).toString("base64"),
     });
   }
+  const jplanDemo = resolve(here, "jplan-demo.plan");
+  const jplanInfo = await stat(jplanDemo);
+  files.push({
+    path: "reaver/src/plan/jplan-demo.plan",
+    mtime: Math.floor(jplanInfo.mtimeMs / 1000),
+    base64: (await readFile(jplanDemo)).toString("base64"),
+  });
   return `${JSON.stringify({ root: "reaver/src", files })}\n`;
 }
 

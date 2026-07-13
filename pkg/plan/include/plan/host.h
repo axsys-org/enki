@@ -32,6 +32,7 @@ typedef enum pl_host_op {
   PL_HOST_OP_READ = 12,
   PL_HOST_OP_WRITE = 13,
   PL_HOST_OP_CONNECT = 14,
+  PL_HOST_OP_JPLAN_EVAL = 15,
 } pl_host_op;
 
 typedef pl_val (*pl_host_effect_fn)(void* process_ctx, void* thread_scope,

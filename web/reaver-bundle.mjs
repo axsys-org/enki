@@ -6,6 +6,7 @@ const [srcArg = "reaver/src", outArg = "build/wasm/browser/reaver-src.json"] =
   process.argv.slice(2);
 const srcRoot = resolve(srcArg);
 const outPath = resolve(outArg);
+const jplanDemoPath = new URL("./jplan-demo.plan", import.meta.url);
 
 async function collect(dir) {
   const entries = await readdir(dir, { withFileTypes: true });
@@ -28,6 +29,13 @@ for (const file of await collect(srcRoot)) {
     base64: (await readFile(file)).toString("base64"),
   });
 }
+
+const jplanInfo = await stat(jplanDemoPath);
+files.push({
+  path: "reaver/src/plan/jplan-demo.plan",
+  mtime: Math.floor(jplanInfo.mtimeMs / 1000),
+  base64: (await readFile(jplanDemoPath)).toString("base64"),
+});
 
 await mkdir(dirname(outPath), { recursive: true });
 await writeFile(

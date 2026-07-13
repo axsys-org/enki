@@ -57,6 +57,8 @@ typedef enum {
 void pl_thread_start(pl_thread* t, pl_val v);
 /* As pl_thread_start, but drive a deep normalization of v. */
 void pl_thread_start_nf(pl_thread* t, pl_val v);
+/* Arm a weak-head evaluation of (f x). */
+void pl_thread_start_call(pl_thread* t, pl_val f, pl_val x);
 /* Arm a deep normalization of (f x) — the actor boot shape, the
  * reference `force (fn % N 0)`. */
 void pl_thread_start_call_nf(pl_thread* t, pl_val f, pl_val x);
