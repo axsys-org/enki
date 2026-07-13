@@ -118,8 +118,8 @@ struct pl_thread {
    * mode (REPL / snapshot execution), never while assembling modules. */
   bool rplan_f;
 
-  /* When non-NULL, ReadFile resolves its argument relative to this root and
-   * refuses paths whose canonical target escapes it. */
+  /* When non-NULL, ReadFile and ReadFolder resolve their arguments relative
+   * to this root and refuse paths whose canonical target escapes it. */
   const char* rplan_file_root_c;
 
   /* Opaque embedder slot (the actor runtime stores its er_actor here so

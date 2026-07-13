@@ -2,6 +2,7 @@
 #include <fcntl.h>
 #include <libgen.h>
 #include <inttypes.h>
+#include <dirent.h>
 #include <netinet/in.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,6 +19,7 @@
 #include "axsys/util.h"
 #include "internal.h"
 #include "plan/nat.h"
+#include "plan/rplan.h"
 #include "plan/xtract.h"
 
 /*
@@ -331,6 +333,118 @@ pl_val pl_op82_read_file(pl_thread* t, size_t ab) {
   return out;
 }
 
+typedef struct rp_folder_item {
+  char* name;
+  bool is_folder;
+} rp_folder_item;
+
+static void rp_folder_items_free(rp_folder_item* items, size_t n) {
+  for (size_t i = 0; i < n; i++)
+    free(items[i].name);
+  free(items);
+}
+
+/* List names first, keeping the directory stream out of the PLAN allocation
+ * window.  fstatat follows symlinks, matching doesDirectoryExist in the
+ * reference implementation. */
+static bool rp_folder_items_read(const char* path, rp_folder_item** out_items,
+                                 size_t* out_n) {
+  DIR* dir = opendir(path);
+  if (dir == NULL)
+    return false;
+
+  rp_folder_item* items = NULL;
+  size_t n = 0, cap = 0;
+  int fd = dirfd(dir);
+  bool ok = true;
+  for (;;) {
+    errno = 0;
+    struct dirent* ent = readdir(dir);
+    if (ent == NULL) {
+      if (errno != 0)
+        ok = false;
+      break;
+    }
+    if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0)
+      continue;
+    if (n >= UINT32_MAX - 2) {
+      ok = false; /* the enclosing PLAN row would not fit */
+      break;
+    }
+    if (n == cap) {
+      size_t next = cap == 0 ? 16 : cap * 2;
+      if (next < cap || next > SIZE_MAX / sizeof(*items)) {
+        ok = false;
+        break;
+      }
+      rp_folder_item* grown = realloc(items, next * sizeof(*items));
+      ax_assume(grown != NULL, "oom");
+      items = grown;
+      cap = next;
+    }
+    struct stat st;
+    items[n].is_folder =
+        fd >= 0 && fstatat(fd, ent->d_name, &st, 0) == 0 && S_ISDIR(st.st_mode);
+    items[n].name = rp_strdup(ent->d_name);
+    n++;
+  }
+  if (closedir(dir) != 0)
+    ok = false;
+  if (!ok) {
+    rp_folder_items_free(items, n);
+    return false;
+  }
+  *out_items = items;
+  *out_n = n;
+  return true;
+}
+
+/* Build the row with every intermediate rooted on the value stack: both
+ * pl_nat_from_bytes and the APP constructors may collect. */
+static pl_val rp_folder_row(pl_thread* t, const rp_folder_item* items,
+                            uint32_t n) {
+  if (n == 0)
+    return 0;
+  size_t base = t->vsp;
+  for (uint32_t i = 0; i < n; i++) {
+    pl_vpush(t, items[i].is_folder ? 1 : 0);
+    pl_vpush(t, pl_nat_from_bytes(t, (const uint8_t*)items[i].name,
+                                  strlen(items[i].name)));
+    pl_gc_reserve(t, PL_APP_CELLS(2));
+    PL_GC_FORBID(t);
+    pl_val item = pl_mk_app_from(t, 0, 2, &t->vstack[t->vsp - 2]);
+    PL_GC_ALLOW(t);
+    t->vsp -= 2;
+    pl_vpush(t, item);
+  }
+  pl_gc_reserve(t, PL_APP_CELLS(n));
+  PL_GC_FORBID(t);
+  pl_val row = pl_mk_app_from(t, 0, n, &t->vstack[base]);
+  PL_GC_ALLOW(t);
+  t->vsp = base;
+  return row;
+}
+
+pl_val pl_rplan_read_folder(pl_thread* t, pl_val path_v) {
+  char* arg_path = rp_nat_path(rp_want_nat(t, path_v));
+  char* path = NULL;
+  if (!rp_resolve_read_path(t, arg_path, &path)) {
+    free(arg_path);
+    return 0;
+  }
+  free(arg_path);
+
+  rp_folder_item* items = NULL;
+  size_t n = 0;
+  bool ok = rp_folder_items_read(path, &items, &n);
+  free(path);
+  if (!ok)
+    return 0;
+  pl_val out = rp_folder_row(t, items, (uint32_t)n);
+  rp_folder_items_free(items, n);
+  return out;
+}
+
 pl_val pl_op82_write_file(pl_thread* t, size_t ab) {
   char* arg_path = rp_nat_path(rp_want_nat(t, ARG(0)));
   char* path = NULL;
@@ -590,7 +704,12 @@ pl_val pl_op82_close_handle(pl_thread* t, size_t ab) {
   return rp_request(t, ab, 1);
 }
 
-/* ── op 83: HTTP driver ────────────────────────────────────────────────── */
+/* ── op 83: structured drivers ─────────────────────────────────────────── */
+
+pl_val pl_op83_read_folder(pl_thread* t, size_t ab) {
+  rp_want_nat(t, ARG(0));
+  return rp_request(t, ab, 1);
+}
 
 pl_val pl_op83_fetch(pl_thread* t, size_t ab) {
   /* req and cfg are deep-normalized by the machine before the body runs;

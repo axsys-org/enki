@@ -16,6 +16,14 @@
 #include "plan/eval.h"
 #include "axsys/allocator.h"
 #include "plan/nat.h"
+#include "plan/rplan.h"
+
+/* Defined with the event-log helpers below; ReadFolder service appears in
+ * the scheduler section above that implementation. */
+static void er_vals_hash(const pl_val* args, uint32_t argc, uint8_t out[32]);
+static uint8_t* er_folder_result_encode(pl_val row, uint64_t* out_n);
+static pl_val er_folder_result_build(pl_thread* t, const uint8_t* data,
+                                     uint64_t data_n);
 
 /*
  * Deterministic single-OS-thread executor.  Everything
@@ -534,6 +542,37 @@ static void er_service(er_scheduler* sys, er_actor* a) {
     return;
   }
 
+  if (er_op_is(name, "ReadFolder")) {
+    ax_assume(argc == 1, "ReadFolder arity");
+    uint8_t hash[32];
+    er_vals_hash(args, argc, hash);
+    pl_val result;
+    if (sys->mode == ER_MODE_REPLAY) {
+      const er_event* e = er_replay_next(sys);
+      ax_assume(e->kind == ER_EV_FOLDER && e->actor == a->id &&
+                    memcmp(e->args_hash, hash, 32) == 0,
+                "er_log: replay divergence at a ReadFolder");
+      result = er_folder_result_build(t, e->data, e->data_n);
+    } else {
+      /* Root the path while the directory result is assembled: its request
+       * spine may move during collection. */
+      size_t base = t->vsp;
+      pl_vpush(t, args[0]);
+      result = pl_rplan_read_folder(t, t->vstack[base]);
+      t->vsp = base;
+      if (sys->mode == ER_MODE_RECORD) {
+        er_event e = {.kind = ER_EV_FOLDER, .actor = a->id};
+        memcpy(e.args_hash, hash, 32);
+        e.data = er_folder_result_encode(result, &e.data_n);
+        ax_arrpush(sys->rec->ev, e);
+      }
+    }
+    pl_thread_deposit(t, result);
+    a->status = ER_ACTOR_RUNNABLE;
+    er_enqueue(a);
+    return;
+  }
+
   if (er_op_is(name, "CloseHandle")) {
     ax_assume(argc == 1, "CloseHandle arity");
     pl_val h = args[0];
@@ -846,12 +885,10 @@ uint64_t er_mote(const char* s) {
 
 /* SHA-256 over the forced args of a direct effect, as length-prefixed
  * nat bytes (non-nat args — e.g. Now's ignored slot — are a marker). */
-static void er_args_hash(pl_thread* t, uint32_t op, size_t ab,
-                         uint8_t out[32]) {
+static void er_vals_hash(const pl_val* args, uint32_t argc, uint8_t out[32]) {
   uint8_t* buf = NULL;
-  uint32_t argc = pl_io_argc(op);
   for (uint32_t i = 0; i < argc; i++) {
-    pl_val v = t->vstack[ab + i];
+    pl_val v = args[i];
     if (pl_is_nat(v)) {
       ax_arrpush(buf, 'n');
       uint64_t n = pl_nat_byte_len(v);
@@ -867,6 +904,11 @@ static void er_args_hash(pl_thread* t, uint32_t op, size_t ab,
   ax_arrfree(buf);
 }
 
+static void er_args_hash(pl_thread* t, uint32_t op, size_t ab,
+                         uint8_t out[32]) {
+  er_vals_hash(&t->vstack[ab], pl_io_argc(op), out);
+}
+
 static uint8_t* er_nat_bytes(pl_val v, uint64_t* out_n) {
   uint64_t n = pl_nat_byte_len(v);
   uint8_t* b = malloc(n ? (size_t)n : 1);
@@ -875,6 +917,105 @@ static uint8_t* er_nat_bytes(pl_val v, uint64_t* out_n) {
     b[i] = pl_nat_byte_at(v, i);
   *out_n = n;
   return b;
+}
+
+/* ReadFolder log payload: entry count followed by
+ *   is-folder:u8, name-length:u64-le, name-bytes
+ * for every entry.  Zero is both an empty row and the rplan error result. */
+static uint8_t* er_folder_result_encode(pl_val row, uint64_t* out_n) {
+  pl_cell* row_p = NULL;
+  uint32_t count = 0;
+  size_t size = 8;
+  if (row != 0) {
+    row_p = pl_as(PL_TAG_APP, row);
+    ax_assume(row_p != NULL && pl_app_head(row_p) == 0,
+              "er_log: malformed ReadFolder result");
+    count = pl_app_n(row_p);
+    for (uint32_t i = 0; i < count; i++) {
+      pl_cell* entry = pl_as(PL_TAG_APP, pl_app_args(row_p)[i]);
+      ax_assume(entry != NULL && pl_app_head(entry) == 0 &&
+                    pl_app_n(entry) == 2 && pl_is_nat(pl_app_args(entry)[0]) &&
+                    pl_app_args(entry)[0] <= 1 &&
+                    pl_is_nat(pl_app_args(entry)[1]),
+                "er_log: malformed ReadFolder entry");
+      uint64_t name_n = pl_nat_byte_len(pl_app_args(entry)[1]);
+      ax_assume(name_n <= SIZE_MAX - size - 9,
+                "er_log: ReadFolder result too large");
+      size += 9 + (size_t)name_n;
+    }
+  }
+
+  uint8_t* data = malloc(size);
+  ax_assume(data != NULL, "oom");
+  size_t off = 0;
+  for (int b = 0; b < 8; b++)
+    data[off++] = (uint8_t)((uint64_t)count >> (8 * b));
+  for (uint32_t i = 0; i < count; i++) {
+    pl_cell* entry = pl_as(PL_TAG_APP, pl_app_args(row_p)[i]);
+    pl_val name = pl_app_args(entry)[1];
+    uint64_t name_n = pl_nat_byte_len(name);
+    data[off++] = (uint8_t)pl_app_args(entry)[0];
+    for (int b = 0; b < 8; b++)
+      data[off++] = (uint8_t)(name_n >> (8 * b));
+    for (uint64_t j = 0; j < name_n; j++)
+      data[off++] = pl_nat_byte_at(name, j);
+  }
+  ax_assume(off == size, "er_log: ReadFolder encoder size mismatch");
+  *out_n = (uint64_t)size;
+  return data;
+}
+
+static uint64_t er_folder_u64_read(const uint8_t** p, const uint8_t* end) {
+  ax_assume((size_t)(end - *p) >= 8, "er_log: malformed ReadFolder event");
+  uint64_t out = 0;
+  for (int b = 0; b < 8; b++)
+    out |= (uint64_t)(*p)[b] << (8 * b);
+  *p += 8;
+  return out;
+}
+
+/* The decoder follows the same stack-rooting discipline as the filesystem
+ * producer: every name and completed entry stays rooted across a collection.
+ */
+static pl_val er_folder_result_build(pl_thread* t, const uint8_t* data,
+                                     uint64_t data_n) {
+  ax_assume(data_n <= SIZE_MAX && data_n >= 8,
+            "er_log: malformed ReadFolder event");
+  const uint8_t* p = data;
+  const uint8_t* end = data + (size_t)data_n;
+  uint64_t count64 = er_folder_u64_read(&p, end);
+  ax_assume(count64 <= UINT32_MAX - 2, "er_log: ReadFolder result too large");
+  uint32_t count = (uint32_t)count64;
+  if (count == 0) {
+    ax_assume(p == end, "er_log: malformed empty ReadFolder event");
+    return 0;
+  }
+
+  size_t base = t->vsp;
+  for (uint32_t i = 0; i < count; i++) {
+    ax_assume(p < end, "er_log: malformed ReadFolder entry");
+    uint8_t is_folder = *p++;
+    ax_assume(is_folder <= 1, "er_log: malformed ReadFolder flag");
+    uint64_t name_n = er_folder_u64_read(&p, end);
+    ax_assume(name_n <= (uint64_t)(end - p),
+              "er_log: malformed ReadFolder name");
+    pl_vpush(t, is_folder);
+    pl_vpush(t, pl_nat_from_bytes(t, p, (size_t)name_n));
+    p += (size_t)name_n;
+    pl_gc_reserve(t, PL_APP_CELLS(2));
+    PL_GC_FORBID(t);
+    pl_val entry = pl_mk_app_from(t, 0, 2, &t->vstack[t->vsp - 2]);
+    PL_GC_ALLOW(t);
+    t->vsp -= 2;
+    pl_vpush(t, entry);
+  }
+  ax_assume(p == end, "er_log: trailing ReadFolder event bytes");
+  pl_gc_reserve(t, PL_APP_CELLS(count));
+  PL_GC_FORBID(t);
+  pl_val row = pl_mk_app_from(t, 0, count, &t->vstack[base]);
+  PL_GC_ALLOW(t);
+  t->vsp = base;
+  return row;
 }
 
 const er_event* er_replay_next(er_scheduler* sys) {
