@@ -26,7 +26,7 @@
  * evaluating the body's result.  The name slot sits at vstack[ab - 1].
  */
 typedef struct pl_opdesc {
-  uint64_t opset;     /* 0, 66 or 82 */
+  uint64_t opset;     /* 0, 66, 82 or 83 */
   uint64_t name;      /* op0: subop number; op66: name mote */
   const char* name_c; /* non-NULL: match the name nat against this string
                          (op-82 names can exceed the 7-byte mote width) */
@@ -65,6 +65,9 @@ pl_val pl_op82_send(pl_thread* t, size_t ab);
 pl_val pl_op82_send_caps(pl_thread* t, size_t ab);
 pl_val pl_op82_recv(pl_thread* t, size_t ab);
 pl_val pl_op82_close_handle(pl_thread* t, size_t ab);
+
+/* op 83 (HTTP driver) coordination effects; serviced in pkg/enki. */
+pl_val pl_op83_fetch(pl_thread* t, size_t ab);
 
 /* Frame-push helpers usable from op bodies. */
 static inline void pl_push_apply(pl_thread* t, pl_val x) {

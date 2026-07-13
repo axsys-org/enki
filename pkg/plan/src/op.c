@@ -785,6 +785,9 @@ static pl_val op_load(pl_thread* t, size_t ab) {
  * deep is the initiation-time payload normalization */
 #define OP82C(name, argc, mask, deep, body)                                    \
   {82, 0, name, argc, mask, deep, true, body}
+/* op 83 (HTTP driver) is coordination-only: serviced in pkg/enki */
+#define OP83C(name, argc, mask, deep, body)                                    \
+  {83, 0, name, argc, mask, deep, true, body}
 
 const pl_opdesc pl_ops[] = {
     /* op 0: core PLAN */
@@ -923,6 +926,12 @@ const pl_opdesc pl_ops[] = {
     OP82C("Recv", 1, 0b1, 0, pl_op82_recv),
     OP82C("CloseHandle", 1, 0b1, 0, pl_op82_close_handle),
     OP82("Connect", 3, 0b111, pl_op82_connect),
+
+    /* op 83: HTTP driver (mode-gated like op 82).  Both args deep-
+     * normalize at initiation: the request/config rows are consumed
+     * from C at service time, and effects inside them run as the
+     * caller's own execution before the request parks. */
+    OP83C("Fetch", 2, 0b11, 0b11, pl_op83_fetch),
 };
 
 const size_t pl_nops = sizeof(pl_ops) / sizeof(pl_ops[0]);
@@ -966,6 +975,8 @@ static const uint16_t pl_op82_argc1[] = {105, 106, 107, 108, 110, 111, 112,
                                          113, 114, 115, 118, 121, 122};
 static const uint16_t pl_op82_argc2[] = {109, 116, 117, 119};
 static const uint16_t pl_op82_argc3[] = {120, 123};
+
+static const uint16_t pl_op83_argc2[] = {124};
 
 static pl_opbucket pl_op_lookup_bucket(uint64_t opset, uint32_t argc) {
   switch (opset) {
@@ -1025,6 +1036,12 @@ static pl_opbucket pl_op_lookup_bucket(uint64_t opset, uint32_t argc) {
       return PL_IX_BUCKET(pl_op82_argc2);
     case 3:
       return PL_IX_BUCKET(pl_op82_argc3);
+    }
+    break;
+  case 83:
+    switch (argc) {
+    case 2:
+      return PL_IX_BUCKET(pl_op83_argc2);
     }
     break;
   }
