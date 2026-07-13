@@ -10,6 +10,7 @@
 #include "axsys/assume.h"
 #include "axsys/allocator.h"
 #include "axsys/perf.h"
+#include "host_internal.h"
 #include "internal.h"
 #include "plan/build.h"
 #include "plan/canon.h"
@@ -82,14 +83,10 @@ void pl_set_enter_hook(pl_enter_hook hook) {
 
 /* ── Direct-effect interception seam ───────────────────────────────────── */
 
-static pl_io_hook pl_io = NULL;
-
-void pl_set_io_hook(pl_io_hook hook) {
-  pl_io = hook;
-}
-
 pl_val pl_io_run(pl_thread* t, uint32_t op, size_t argbase) {
-  return pl_ops[op].body(t, argbase);
+  ax_assume(op < pl_nops && pl_ops[op].host_op != PL_HOST_OP_NONE,
+            "pl_io_run: not a direct host effect");
+  return pl_host_effect_run(t, pl_ops[op].host_op, argbase);
 }
 
 const char* pl_io_name(uint32_t op) {
@@ -1192,10 +1189,14 @@ op_body:
     t->fsp--;          /* pop before the body so its frames take this slot */
     t->centry_depth++; /* op bodies are C-entry regions */
     pl_val r;
-    /* direct op-82 effects route through the record/replay seam */
-    if (!(d->opset == 82 && !d->coord && pl_io != NULL &&
-          pl_io(t, opi, argbase, &r)))
+    if (d->host_op != PL_HOST_OP_NONE) {
+      if (t->effect_interceptor == NULL ||
+          !t->effect_interceptor(t->effect_interceptor_ctx, t, opi, argbase,
+                                 &r))
+        r = pl_host_effect_run(t, d->host_op, argbase);
+    } else {
       r = d->body(t, argbase);
+    }
     t->centry_depth--;
     t->vsp = argbase - 1; /* drop args and the name slot */
     if (ax_unlikely(d->coord)) {

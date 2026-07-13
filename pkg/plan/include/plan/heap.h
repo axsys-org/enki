@@ -19,6 +19,7 @@
 #include <assert.h>
 
 #include "axsys/profile.h"
+#include "plan/host.h"
 #include "plan/value.h"
 #include "plan/bytecode.h"
 
@@ -118,19 +119,15 @@ struct pl_thread {
    * mode (REPL / snapshot execution), never while assembling modules. */
   bool rplan_f;
 
-  /* When non-NULL, ReadFile and ReadFolder resolve their arguments relative
-   * to this root and refuse paths whose canonical target escapes it. */
-  const char* rplan_file_root_c;
-
-  /* Opaque embedder slot (the actor runtime stores its er_actor here so
-   * the pl_io_hook can attribute effects); never touched by the plan
-   * layer. */
-  void* host;
+  void* host_scope;
+  pl_effect_interceptor effect_interceptor;
+  void* effect_interceptor_ctx;
 };
 
 pl_heap* pl_heap_new(size_t cells, pl_store* store);
 void pl_heap_free(pl_heap* h);
 pl_store* pl_heap_store(pl_heap* h);
+bool pl_heap_owns(pl_heap* h, pl_val v);
 
 pl_thread* pl_thread_new(pl_heap* h);
 void pl_thread_free(pl_thread* t);

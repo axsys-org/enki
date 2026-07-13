@@ -4,27 +4,19 @@
 #include <string.h>
 
 #include "axsys/util.h"
+#include "host_internal.h"
 #include "plan/build.h"
+#include "plan/host.h"
 #include "plan/nat.h"
 #include "plan/rplan.h"
 #include "plan/wasm_io.h"
 
 #define ARG(i) (t->vstack[ab + (i)])
 
-static const pl_wasm_io* rp_io = NULL;
-
-void pl_wasm_io_set(const pl_wasm_io* io) {
-  rp_io = io;
-}
-
-const pl_wasm_io* pl_wasm_io_get(void) {
-  return rp_io;
-}
-
 static const pl_wasm_io* rp_need_io(pl_thread* t) {
-  if (rp_io == NULL)
+  if (!pl_host_is_installed())
     pl_raise_msg(t, "op82 browser I/O is not configured");
-  return rp_io;
+  return pl_host_process_context();
 }
 
 static pl_val rp_want_nat(pl_thread* t, pl_val v) {
@@ -63,14 +55,6 @@ static pl_val rp_bar(pl_thread* t, const uint8_t* b, size_t n) {
   pl_val out = pl_nat_from_bytes(t, bar, n + 1);
   free(bar);
   return out;
-}
-
-static pl_val rp_request(pl_thread* t, size_t ab, uint32_t argc) {
-  pl_gc_reserve(t, PL_APP_CELLS(argc));
-  PL_GC_FORBID(t);
-  pl_val r = pl_mk_app_from(t, t->vstack[ab - 1], argc, &t->vstack[ab]);
-  PL_GC_ALLOW(t);
-  return r;
 }
 
 pl_val pl_rplan_read_folder(pl_thread* t, pl_val path) {
@@ -124,7 +108,7 @@ pl_val pl_op82_read_file(pl_thread* t, size_t ab) {
   char* path = rp_nat_path(rp_want_nat(t, ARG(0)));
   uint8_t* bytes = NULL;
   size_t len = 0;
-  bool ok = io->read_file(io->ctx, t->rplan_file_root_c, path, &bytes, &len);
+  bool ok = io->read_file(io->ctx, pl_thread_host_scope(t), path, &bytes, &len);
   free(path);
   if (!ok)
     return 0;
@@ -140,7 +124,7 @@ pl_val pl_op82_write_file(pl_thread* t, size_t ab) {
   char* path = rp_nat_path(rp_want_nat(t, ARG(0)));
   size_t n;
   uint8_t* b = rp_nat_bytes(rp_want_nat(t, ARG(1)), true, &n);
-  bool ok = io->write_file(io->ctx, t->rplan_file_root_c, path, b, n);
+  bool ok = io->write_file(io->ctx, pl_thread_host_scope(t), path, b, n);
   free(b);
   free(path);
   return ok ? 1 : 0;
@@ -152,16 +136,15 @@ pl_val pl_op82_stamp(pl_thread* t, size_t ab) {
     return 0;
   char* path = rp_nat_path(rp_want_nat(t, ARG(0)));
   uint64_t mtime = 0;
-  bool ok = io->stamp(io->ctx, t->rplan_file_root_c, path, &mtime);
+  bool ok = io->stamp(io->ctx, pl_thread_host_scope(t), path, &mtime);
   free(path);
   return ok ? (pl_val)mtime : 0;
 }
 
 pl_val pl_op82_now(pl_thread* t, size_t ab) {
-  AX_UNUSED(t);
   AX_UNUSED(ab);
-  const pl_wasm_io* io = rp_io;
-  return io != NULL && io->now != NULL ? (pl_val)io->now(io->ctx) : 0;
+  const pl_wasm_io* io = rp_need_io(t);
+  return io->now != NULL ? (pl_val)io->now(io->ctx) : 0;
 }
 
 static pl_val rp_unavailable(pl_thread* t, size_t ab) {
@@ -186,38 +169,4 @@ pl_val pl_op82_read(pl_thread* t, size_t ab) {
 }
 pl_val pl_op82_write(pl_thread* t, size_t ab) {
   return rp_unavailable(t, ab);
-}
-
-pl_val pl_op82_spawn(pl_thread* t, size_t ab) {
-  return rp_request(t, ab, 1);
-}
-
-pl_val pl_op82_send(pl_thread* t, size_t ab) {
-  rp_want_nat(t, ARG(0));
-  return rp_request(t, ab, 2);
-}
-
-pl_val pl_op82_send_caps(pl_thread* t, size_t ab) {
-  rp_want_nat(t, ARG(0));
-  return rp_request(t, ab, 3);
-}
-
-pl_val pl_op82_recv(pl_thread* t, size_t ab) {
-  if (ARG(0) != 0)
-    pl_raise_msg(t, "unknown actor/net op");
-  return rp_request(t, ab, 1);
-}
-
-pl_val pl_op82_close_handle(pl_thread* t, size_t ab) {
-  rp_want_nat(t, ARG(0));
-  return rp_request(t, ab, 1);
-}
-
-pl_val pl_op83_read_folder(pl_thread* t, size_t ab) {
-  rp_want_nat(t, ARG(0));
-  return rp_request(t, ab, 1);
-}
-
-pl_val pl_op83_fetch(pl_thread* t, size_t ab) {
-  return rp_request(t, ab, 2);
 }

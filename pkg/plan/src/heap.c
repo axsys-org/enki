@@ -5,6 +5,7 @@
 
 #include "axsys/assume.h"
 #include "axsys/perf.h"
+#include "host_internal.h"
 #include "plan/store.h"
 
 typedef struct pl_root_entry {
@@ -38,6 +39,19 @@ static pl_cell* pl_space_alloc(size_t cells) {
   return p;
 }
 
+static void pl_release_wormholes(pl_cell* first, pl_cell* end) {
+  for (pl_cell* p = first; p < end;) {
+    pl_cell hdr = p[0];
+    uint32_t cells = pl_hdr_cells(hdr);
+    ax_assume(cells > 0 && p + cells <= end,
+              "wormhole sweep: malformed heap object");
+    if (pl_hdr_kind(hdr) == PL_K_BH &&
+        (pl_hdr_flags(hdr) & (PL_F_WORM | PL_F_CLOSED)) == PL_F_WORM)
+      pl_host_token_release(p[1]);
+    p += cells;
+  }
+}
+
 pl_heap* pl_heap_new(size_t cells, pl_store* store) {
   if (cells < 4096)
     cells = 4096;
@@ -55,6 +69,7 @@ pl_heap* pl_heap_new(size_t cells, pl_store* store) {
 void pl_heap_free(pl_heap* h) {
   if (h == NULL)
     return;
+  pl_release_wormholes(h->from, h->free);
   free(h->from);
   free(h->to);
   free(h->roots);
@@ -63,6 +78,13 @@ void pl_heap_free(pl_heap* h) {
 
 pl_store* pl_heap_store(pl_heap* h) {
   return h->store;
+}
+
+bool pl_heap_owns(pl_heap* h, pl_val v) {
+  if (pl_is_nat63(v))
+    return false;
+  uintptr_t p = (uintptr_t)pl_ptr(v);
+  return p >= (uintptr_t)h->from && p < (uintptr_t)h->free;
 }
 
 #ifndef NDEBUG
@@ -172,9 +194,14 @@ static void pl_cheney_scan(pl_gc_ctx* gc) {
       continue;
     }
     case PL_K_IND:
-    case PL_K_BH:
       first = 1;
       count = 1;
+      break;
+    case PL_K_BH:
+      if ((pl_hdr_flags(hdr) & PL_F_WORM) == 0) {
+        first = 1;
+        count = 1;
+      }
       break;
     case PL_K_PIN: /* store-region only; never copied into the heap */
     default:
@@ -201,8 +228,10 @@ static void pl_collect_into(pl_heap* h, pl_cell* target) {
 }
 
 static void pl_gc_collect(pl_heap* h) {
+  pl_cell* old_free = h->free;
   pl_collect_into(h, h->to);
   pl_cell* old_from = h->from;
+  pl_release_wormholes(old_from, old_free);
   h->from = h->to;
   h->to = old_from;
   h->limit = h->from + h->cells;
@@ -217,7 +246,9 @@ static void pl_gc_grow(pl_heap* h, size_t need_cells) {
   /* live data currently sits in h->from; evacuate it into nfrom */
   pl_cell* old_from = h->from;
   pl_cell* old_to = h->to;
+  pl_cell* old_free = h->free;
   pl_collect_into(h, nfrom);
+  pl_release_wormholes(old_from, old_free);
   h->from = nfrom;
   h->to = nto;
   h->cells = want;

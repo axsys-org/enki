@@ -135,9 +135,12 @@ void pl_show_sb(ax_sb* sb, pl_val v) {
     ax_sb_append_lit(sb, ">");
     return;
   case PL_TAG_DEFER:
-    if (pl_hdr_kind(p[0]) == PL_K_BH)
-      ax_sb_append_lit(sb, "<bh>");
-    else
+    if (pl_hdr_kind(p[0]) == PL_K_BH) {
+      if ((pl_hdr_flags(p[0]) & PL_F_WORM) != 0)
+        ax_sb_append_lit(sb, "<wormhole>");
+      else
+        ax_sb_append_lit(sb, "<bh>");
+    } else
       ax_sb_append_lit(sb, "<thk>");
     return;
   default:

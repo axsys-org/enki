@@ -17,6 +17,10 @@
 #include "plan/build.h"
 #include "plan/debug.h"
 #include "plan/eval.h"
+#include "plan/host.h"
+#ifndef ENKI_WASM
+#include "plan/host_native.h"
+#endif
 #include "axsys/allocator.h"
 #include "plan/nat.h"
 #include "plan/rplan.h"
@@ -27,6 +31,8 @@ static void er_vals_hash(const pl_val* args, uint32_t argc, uint8_t out[32]);
 static uint8_t* er_folder_result_encode(pl_val row, uint64_t* out_n);
 static pl_val er_folder_result_build(pl_thread* t, const uint8_t* data,
                                      uint64_t data_n);
+static bool er_io_hook(void* ctx, pl_thread* t, uint32_t op, size_t ab,
+                       pl_val* out);
 
 /*
  * Deterministic single-OS-thread executor.  Everything
@@ -89,6 +95,9 @@ void er_http_teardown(er_scheduler* sys) {
 
 er_scheduler* er_scheduler_new(pl_store* store, er_config cfg) {
   ax_assume(store != NULL, "er_scheduler_new: store required");
+#ifndef ENKI_WASM
+  pl_native_host_install();
+#endif
   er_scheduler* sys = calloc(1, sizeof(*sys));
   ax_assume(sys != NULL, "oom");
 #ifndef ENKI_WASM
@@ -123,7 +132,9 @@ static er_actor* er_register(er_scheduler* sys, pl_heap* heap, pl_thread* t,
   a->id = sys->next_id++;
   a->heap = heap;
   a->t = t;
-  a->t->host = a; /* effect attribution for the pl_io_hook */
+  if (sys->cfg.file_root_c != NULL)
+    pl_thread_set_host_scope(t, (void*)sys->cfg.file_root_c);
+  pl_thread_set_effect_interceptor(t, er_io_hook, a);
   a->adopted = adopted;
   a->handle_cap = 8;
   a->handle_v = calloc(a->handle_cap, sizeof(er_actor*));
@@ -142,7 +153,6 @@ er_actor* er_scheduler_actor(er_scheduler* sys) {
   pl_heap* heap = pl_heap_new(sys->cfg.heap_cells, sys->store);
   pl_thread* t = pl_thread_new(heap);
   t->rplan_f = true; /* actors exist to perform effects */
-  t->rplan_file_root_c = sys->cfg.file_root_c;
   return er_register(sys, heap, t, false);
 }
 
@@ -164,7 +174,7 @@ void er_scheduler_free(er_scheduler* sys) {
       m = mn;
     }
     free(a->handle_v);
-    a->t->host = NULL; /* the backpointer dies with the actor */
+    pl_thread_set_effect_interceptor(a->t, NULL, NULL);
     if (!a->adopted) { /* adopted threads/heaps stay with the embedder */
       pl_thread_free(a->t);
       pl_heap_free(a->heap);
@@ -1094,15 +1104,16 @@ const er_event* er_replay_next(er_scheduler* sys) {
 }
 
 /*
- * The pl_io_hook: every direct op-82 effect of every actor on
+ * The per-thread I/O interceptor: every direct op-82 effect of every actor on
  * a recording or replaying system funnels through here.  Record mode
  * performs the effect and appends (actor, op, args-hash, result);
  * replay mode verifies the site against the next record and substitutes
  * the logged result without any syscall.
  */
-static bool er_io_hook(pl_thread* t, uint32_t op, size_t ab, pl_val* out) {
-  er_actor* a = t->host;
-  if (a == NULL || a->sys->mode == ER_MODE_LIVE)
+static bool er_io_hook(void* ctx, pl_thread* t, uint32_t op, size_t ab,
+                       pl_val* out) {
+  er_actor* a = ctx;
+  if (a->sys->mode == ER_MODE_LIVE)
     return false;
   er_scheduler* sys = a->sys;
   uint8_t hash[32];
@@ -1134,7 +1145,6 @@ void er_scheduler_record(er_scheduler* sys, er_log* log) {
   log->quantum = sys->cfg.quantum;
   sys->mode = ER_MODE_RECORD;
   sys->rec = log;
-  pl_set_io_hook(er_io_hook);
 }
 
 void er_scheduler_replay(er_scheduler* sys, const er_log* log) {
@@ -1146,7 +1156,6 @@ void er_scheduler_replay(er_scheduler* sys, const er_log* log) {
   sys->mode = ER_MODE_REPLAY;
   sys->play = log;
   sys->cursor = 0;
-  pl_set_io_hook(er_io_hook);
 }
 
 size_t er_scheduler_log_cursor(const er_scheduler* sys) {

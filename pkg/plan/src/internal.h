@@ -33,6 +33,7 @@ typedef struct pl_opdesc {
   uint8_t argc;
   uint32_t strict_mask;
   uint32_t deep_mask;
+  pl_host_op host_op; /* stable direct-effect identity, NONE for core/coord */
   bool coord;
   pl_val (*body)(pl_thread* t, size_t ab);
 } pl_opdesc;
@@ -43,7 +44,7 @@ extern const size_t pl_nops;
 /* Returns descriptor index, or -1 if there is no matching primop. */
 int pl_op_lookup(uint64_t opset, pl_val name, uint32_t argc);
 
-/* op 82 (rplan) bodies, in rplan.c; arg conventions as pl_opdesc. */
+/* Direct op-82 bodies supplied by the selected native/WASM host adapter. */
 pl_val pl_op82_input(pl_thread* t, size_t ab);
 pl_val pl_op82_output(pl_thread* t, size_t ab);
 pl_val pl_op82_warn(pl_thread* t, size_t ab);

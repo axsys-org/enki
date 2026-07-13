@@ -65,6 +65,8 @@ typedef enum {
  */
 #define PL_F_NORMAL 0x1u /* deep normal form reached (§ nf) */
 #define PL_F_HOLE   0x2u /* currently evaluating */
+#define PL_F_WORM   0x4u /* process-scoped opaque blackhole */
+#define PL_F_CLOSED 0x8u /* wormhole host reference released */
 
 static inline pl_cell pl_hdr_make(pl_kind kind, uint32_t flags, uint32_t meta,
                                   uint32_t cells) {
@@ -163,6 +165,7 @@ static inline uint64_t pl_tag_for_kind(pl_kind k) {
 #define PL_THUNK_CELLS      3u
 #define PL_ENV_CELLS(n)     (1u + (uint32_t)(n))
 #define PL_IND_CELLS        2u
+#define PL_WORMHOLE_CELLS   2u
 #define PL_THKE_CELLS(n)    (3u + (uint32_t)(n))
 
 /* K_NAT { hdr(meta=used limbs); limb[..] } — mpn limbs, little-endian. */

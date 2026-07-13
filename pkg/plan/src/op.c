@@ -15,6 +15,7 @@
 #include "plan/build.h"
 #include "plan/canon.h"
 #include "plan/debug.h"
+#include "plan/host.h"
 #include "plan/value.h"
 #include "plan/nat.h"
 #include "plan/store.h"
@@ -26,9 +27,9 @@
  * Primops, normative semantics from the Haskell reference (Plan.hs).
  * op 0:  core PLAN ops (pin / law / case).
  * op 66: named extended ops.
- * op 82: rplan I/O (rplan.c) — RPLAN-mode gated.  Console/file/socket
- *        ops run inline; the actor ops are coordination effects that
- *        suspend the thread for an executor to service.
+ * op 82: RPLAN-mode gated effects.  Console/file/socket operations cross
+ *        the process host; actor coordination stays in the core runtime and
+ *        suspends the thread for an executor to service.
  * op 83: staging area for provisional primops whose PLAN-level semantics
  *        are not yet settled.  Its current entries are serviced in pkg/enki.
  */
@@ -650,7 +651,8 @@ static pl_val op_trace(pl_thread* t, size_t ab) {
   size_t n = 0;
   char* s = pl_show_val(ax_allocator_system(), ARG(0), &n);
 #ifdef ENKI_WASM
-  const pl_wasm_io* io = pl_wasm_io_get();
+  const pl_host* host = pl_host_get();
+  const pl_wasm_io* io = host != NULL ? host->ctx : NULL;
   if (io != NULL && io->output != NULL) {
     io->output(io->ctx, PL_WASM_IO_STDERR, (const uint8_t*)s, n);
     io->output(io->ctx, PL_WASM_IO_STDERR, (const uint8_t*)"\n", 1);
@@ -744,7 +746,8 @@ static pl_val op_compile(pl_thread* t, size_t ab) {
  */
 #ifdef ENKI_WASM
 static const pl_wasm_io* save_wasm_io(pl_thread* t) {
-  const pl_wasm_io* io = pl_wasm_io_get();
+  const pl_host* host = pl_host_get();
+  const pl_wasm_io* io = host != NULL ? host->ctx : NULL;
   if (io == NULL || io->write_file == NULL)
     pl_raise_msg(t, "Save: browser I/O is not configured");
   return io;
@@ -868,22 +871,23 @@ static pl_val op_load(pl_thread* t, size_t ab) {
 
 #define M2(a, b) ax_s2(a, b)
 #define OP66(name, argc, mask, deep, body)                                     \
-  {66, name, NULL, argc, mask, deep, false, body}
-#define OP82(name, argc, mask, body) {82, 0, name, argc, mask, 0, false, body}
+  {66, name, NULL, argc, mask, deep, PL_HOST_OP_NONE, false, body}
+#define OP82(name, argc, mask, host)                                           \
+  {82, 0, name, argc, mask, 0, host, false, NULL}
 /* coordination effects: the machine blocks instead of executing;
  * deep is the initiation-time payload normalization */
 #define OP82C(name, argc, mask, deep, body)                                    \
-  {82, 0, name, argc, mask, deep, true, body}
+  {82, 0, name, argc, mask, deep, PL_HOST_OP_NONE, true, body}
 /* op 83 is the provisional-primop staging area; its current entries are
  * coordination effects serviced in pkg/enki. */
 #define OP83C(name, argc, mask, deep, body)                                    \
-  {83, 0, name, argc, mask, deep, true, body}
+  {83, 0, name, argc, mask, deep, PL_HOST_OP_NONE, true, body}
 
 const pl_opdesc pl_ops[] = {
     /* op 0: core PLAN */
-    {0, 0, NULL, 1, 0b1, 0b1, false, op_pin},
-    {0, 1, NULL, 3, 0b111, 0, false, op_law},
-    {0, 2, NULL, 6, 0b100000, 0, false, op_elim},
+    {0, 0, NULL, 1, 0b1, 0b1, PL_HOST_OP_NONE, false, op_pin},
+    {0, 1, NULL, 3, 0b111, 0, PL_HOST_OP_NONE, false, op_law},
+    {0, 2, NULL, 6, 0b100000, 0, PL_HOST_OP_NONE, false, op_elim},
 
     OP66(ax_s3('P', 'i', 'n'), 1, 0b1, 0b1, op_pin),
     OP66(ax_s3('L', 'a', 'w'), 3, 0b111, 0, op_law),
@@ -994,19 +998,19 @@ const pl_opdesc pl_ops[] = {
     OP66(ax_s7('C', 'o', 'm', 'p', 'i', 'l', 'e'), 1, 0b1, 0b1, op_compile),
 
     /* op 82: rplan I/O (mode-gated in eval.c) */
-    OP82("Input", 1, 0b1, pl_op82_input),
-    OP82("Output", 1, 0b1, pl_op82_output),
-    OP82("Warn", 1, 0b1, pl_op82_warn),
-    OP82("ReadFile", 1, 0b1, pl_op82_read_file),
-    OP82("WriteFile", 2, 0b11, pl_op82_write_file),
-    OP82("Print", 1, 0b1, pl_op82_print),
-    OP82("Stamp", 1, 0b1, pl_op82_stamp),
-    OP82("Now", 1, 0, pl_op82_now),
-    OP82("CloseFd", 1, 0b1, pl_op82_closefd),
-    OP82("Listen", 1, 0b1, pl_op82_listen),
-    OP82("Accept", 1, 0b1, pl_op82_accept),
-    OP82("Read", 2, 0b11, pl_op82_read),
-    OP82("Write", 2, 0b11, pl_op82_write),
+    OP82("Input", 1, 0b1, PL_HOST_OP_INPUT),
+    OP82("Output", 1, 0b1, PL_HOST_OP_OUTPUT),
+    OP82("Warn", 1, 0b1, PL_HOST_OP_WARN),
+    OP82("ReadFile", 1, 0b1, PL_HOST_OP_READ_FILE),
+    OP82("WriteFile", 2, 0b11, PL_HOST_OP_WRITE_FILE),
+    OP82("Print", 1, 0b1, PL_HOST_OP_PRINT),
+    OP82("Stamp", 1, 0b1, PL_HOST_OP_STAMP),
+    OP82("Now", 1, 0, PL_HOST_OP_NOW),
+    OP82("CloseFd", 1, 0b1, PL_HOST_OP_CLOSE_FD),
+    OP82("Listen", 1, 0b1, PL_HOST_OP_LISTEN),
+    OP82("Accept", 1, 0b1, PL_HOST_OP_ACCEPT),
+    OP82("Read", 2, 0b11, PL_HOST_OP_READ),
+    OP82("Write", 2, 0b11, PL_HOST_OP_WRITE),
     /* payloads deep-normalize at initiation: forcing — and any
      * effects within it — runs as the sender's own execution, before
      * the request parks; the service pins already-normal values */
@@ -1015,7 +1019,7 @@ const pl_opdesc pl_ops[] = {
     OP82C("SendCaps", 3, 0b1, 0b110, pl_op82_send_caps),
     OP82C("Recv", 1, 0b1, 0, pl_op82_recv),
     OP82C("CloseHandle", 1, 0b1, 0, pl_op82_close_handle),
-    OP82("Connect", 3, 0b111, pl_op82_connect),
+    OP82("Connect", 3, 0b111, PL_HOST_OP_CONNECT),
 
     /* op 83: provisional primops; their PLAN-level semantics are deliberately
      * not yet committed.  The current staging implementations are executor-

@@ -8,7 +8,9 @@
 
 #include "axsys/allocator.h"
 #include "enki/actor.h"
+#include "plan/host_wasm.h"
 #include "plan/wasm_io.h"
+#include "plan/wormhole.h"
 
 #define ENKI_WISP_EMBEDDED 1
 #include "../app/wisp.c"
@@ -39,6 +41,13 @@ WISP_EXPORT const uint8_t* wisp_file_data_ptr(size_t i);
 WISP_EXPORT size_t wisp_file_data_len(size_t i);
 WISP_EXPORT int wisp_file_written(size_t i);
 WISP_EXPORT void wisp_dispose(void);
+WISP_EXPORT void wisp_wormhole_heap_new(void);
+WISP_EXPORT uint32_t wisp_wormhole_adopt(uint64_t token);
+WISP_EXPORT uint32_t wisp_wormhole_clone(uint32_t slot);
+WISP_EXPORT void wisp_wormhole_close(uint32_t slot);
+WISP_EXPORT void wisp_wormhole_drop(uint32_t slot);
+WISP_EXPORT void wisp_wormhole_collect(void);
+WISP_EXPORT void wisp_wormhole_heap_dispose(void);
 
 typedef struct browser_buf {
   uint8_t* data;
@@ -69,6 +78,8 @@ typedef struct browser_state {
 } browser_state;
 
 static browser_state g_browser = {.now_s = 0, .emit_top_level_f = true};
+static pl_heap* g_wormhole_heap;
+static pl_thread* g_wormhole_thread;
 
 static void buf_clear(browser_buf* b) {
   b->len = 0;
@@ -421,7 +432,7 @@ WISP_EXPORT void wisp_set_emit_top_level(int enabled) {
 WISP_EXPORT int wisp_run(const char* src_dir_c, const char* mod_c,
                          const char* fn_c, int argc, char** argv) {
   wisp_reset();
-  pl_wasm_io_set(&browser_io);
+  pl_wasm_host_install(&browser_io);
   boot_io_set(&g_browser, browser_read_boot_file, browser_emit);
 
   int rc = 1;
@@ -440,7 +451,7 @@ WISP_EXPORT int wisp_run(const char* src_dir_c, const char* mod_c,
     buf_append(&g_browser.error_buf, (const uint8_t*)"wisp: oom\n", 10);
     goto cleanup;
   }
-  w->t->rplan_file_root_c = g_browser.file_root;
+  pl_thread_set_host_scope(w->t, g_browser.file_root);
   sched =
       er_scheduler_new(store, (er_config){.file_root_c = g_browser.file_root});
   w->sched = sched;
@@ -539,6 +550,7 @@ WISP_EXPORT int wisp_file_written(size_t i) {
 }
 
 WISP_EXPORT void wisp_dispose(void) {
+  wisp_wormhole_heap_dispose();
   wisp_clear_files();
   buf_free(&g_browser.input);
   buf_free(&g_browser.stdout_buf);
@@ -546,6 +558,61 @@ WISP_EXPORT void wisp_dispose(void) {
   buf_free(&g_browser.error_buf);
   free(g_browser.file_root);
   g_browser.file_root = NULL;
+}
+
+WISP_EXPORT void wisp_wormhole_heap_dispose(void) {
+  pl_thread_free(g_wormhole_thread);
+  pl_heap_free(g_wormhole_heap);
+  g_wormhole_thread = NULL;
+  g_wormhole_heap = NULL;
+}
+
+WISP_EXPORT void wisp_wormhole_heap_new(void) {
+  pl_wasm_host_install(&browser_io);
+  wisp_wormhole_heap_dispose();
+  g_wormhole_heap = pl_heap_new(4096, NULL);
+  g_wormhole_thread = pl_thread_new(g_wormhole_heap);
+}
+
+static pl_thread* wisp_wormhole_thread(void) {
+  ax_assume(g_wormhole_thread != NULL, "wormhole test heap is not open");
+  return g_wormhole_thread;
+}
+
+WISP_EXPORT uint32_t wisp_wormhole_adopt(uint64_t token) {
+  pl_thread* t = wisp_wormhole_thread();
+  ax_assume(t->vsp < UINT32_MAX, "too many browser wormhole roots");
+  uint32_t slot = (uint32_t)t->vsp;
+  pl_vpush(t, pl_wormhole_adopt(t, token));
+  return slot;
+}
+
+WISP_EXPORT uint32_t wisp_wormhole_clone(uint32_t slot) {
+  pl_thread* t = wisp_wormhole_thread();
+  ax_assume(slot < t->vsp && pl_is_wormhole(t->vstack[slot]),
+            "invalid browser wormhole slot");
+  ax_assume(t->vsp < UINT32_MAX, "too many browser wormhole roots");
+  pl_val clone = pl_wormhole_clone(t, t->vstack[slot]);
+  uint32_t clone_slot = (uint32_t)t->vsp;
+  pl_vpush(t, clone);
+  return clone_slot;
+}
+
+WISP_EXPORT void wisp_wormhole_close(uint32_t slot) {
+  pl_thread* t = wisp_wormhole_thread();
+  ax_assume(slot < t->vsp && pl_is_wormhole(t->vstack[slot]),
+            "invalid browser wormhole slot");
+  pl_wormhole_close(t->vstack[slot]);
+}
+
+WISP_EXPORT void wisp_wormhole_drop(uint32_t slot) {
+  pl_thread* t = wisp_wormhole_thread();
+  ax_assume(slot < t->vsp, "invalid browser wormhole slot");
+  t->vstack[slot] = 0;
+}
+
+WISP_EXPORT void wisp_wormhole_collect(void) {
+  pl_gc_collect_now(wisp_wormhole_thread());
 }
 
 #endif

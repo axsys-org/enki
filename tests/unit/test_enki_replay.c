@@ -348,8 +348,8 @@ Test(replay, injections_are_logged_and_verified) {
 }
 
 Test(replay, live_systems_are_unaffected_by_the_hook) {
-  /* the io hook stays registered globally after a recording system is
-   * freed; a plain live system must keep executing effects directly */
+  /* Removing one scheduler's per-thread interceptors cannot affect a plain
+   * live scheduler. */
   test_rt rt = test_rt_new();
   er_log* log = er_log_new();
   {
@@ -369,5 +369,53 @@ Test(replay, live_systems_are_unaffected_by_the_hook) {
     cr_assert_gt(er_actor_result(a), 0);
     er_scheduler_free(sys);
   }
+  test_rt_free(&rt);
+}
+
+static er_actor* start_now_actor(er_scheduler* sys) {
+  er_actor* a = er_scheduler_actor(sys);
+  pl_thread* t = er_actor_thread(a);
+  pl_val args[1] = {0};
+  er_actor_start(a, actor_fn(t, code_effect(t, ax_s3('N', 'o', 'w'), 1, args)));
+  return a;
+}
+
+Test(replay, schedulers_intercept_effects_independently) {
+  test_rt rt = test_rt_new();
+  er_log* left_log = er_log_new();
+  er_log* right_log = er_log_new();
+  er_scheduler* left = er_scheduler_new(rt.store, (er_config){0});
+  er_scheduler* right = er_scheduler_new(rt.store, (er_config){0});
+  er_scheduler_record(left, left_log);
+  er_scheduler_record(right, right_log);
+  er_actor* left_actor = start_now_actor(left);
+  er_actor* right_actor = start_now_actor(right);
+
+  cr_assert_eq(er_scheduler_run(right), ER_RUN_IDLE);
+  cr_assert_eq(er_scheduler_run(left), ER_RUN_IDLE);
+  cr_assert_eq(er_log_events(left_log), 1);
+  cr_assert_eq(er_log_events(right_log), 1);
+  pl_val left_now = er_actor_result(left_actor);
+  pl_val right_now = er_actor_result(right_actor);
+  er_scheduler_free(left);
+  er_scheduler_free(right);
+
+  left = er_scheduler_new(rt.store, (er_config){0});
+  right = er_scheduler_new(rt.store, (er_config){0});
+  er_scheduler_replay(left, left_log);
+  er_scheduler_replay(right, right_log);
+  left_actor = start_now_actor(left);
+  right_actor = start_now_actor(right);
+  cr_assert_eq(er_scheduler_run(left), ER_RUN_IDLE);
+  cr_assert_eq(er_scheduler_run(right), ER_RUN_IDLE);
+  cr_assert_eq(er_actor_result(left_actor), left_now);
+  cr_assert_eq(er_actor_result(right_actor), right_now);
+  cr_assert_eq(er_scheduler_log_cursor(left), 1);
+  cr_assert_eq(er_scheduler_log_cursor(right), 1);
+
+  er_scheduler_free(left);
+  er_scheduler_free(right);
+  er_log_free(left_log);
+  er_log_free(right_log);
   test_rt_free(&rt);
 }
