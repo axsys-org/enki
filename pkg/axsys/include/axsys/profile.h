@@ -5,6 +5,26 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+/*
+ * Optional Chrome Trace JSON sink.  The sink is process-global and must be
+ * started before worker threads begin emitting events, then finished after
+ * they have quiesced.  Event timestamps are monotonic microseconds relative
+ * to ax_profile_json_start().
+ */
+bool ax_profile_json_start(const char* path);
+bool ax_profile_json_enabled(void);
+void ax_profile_json_thread_name(uint64_t tid, const char* name, size_t name_n);
+void ax_profile_json_zone_begin(uint64_t tid, uint64_t zone,
+                                const uint8_t* name, size_t name_n);
+void ax_profile_json_zone_end(uint64_t tid, uint64_t zone, const uint8_t* name,
+                              size_t name_n);
+/* Flushes and closes the sink.  False reports any write/close failure. */
+bool ax_profile_json_finish(void);
+
 #ifdef TRACY_ENABLE
 #include <tracy/TracyC.h>
 #include <time.h>

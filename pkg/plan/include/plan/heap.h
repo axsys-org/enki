@@ -65,12 +65,13 @@ typedef struct pl_frame {
   uint32_t k;       /* field index / mask cursor / ip */
   uint32_t argbase; /* offset into vstack (never a pointer) */
   uint32_t argc;
-  pl_val a;         /* root */
-  pl_val b;         /* root */
-  union {           /* kind-exclusive state: */
-    uint64_t opset; /*   op set number (F_OPENT) */
-    pl_code* code;  /*   bytecode (F_EXEC) */
-    uint32_t op;    /*   op descriptor index (F_OPARG/F_OPDEEP) */
+  pl_val a;                /* root */
+  pl_val b;                /* root */
+  union {                  /* kind-exclusive state: */
+    uint64_t opset;        /*   op set number (F_OPENT) */
+    pl_code* code;         /*   bytecode (F_EXEC) */
+    uint32_t op;           /*   op descriptor index (F_OPARG/F_OPDEEP) */
+    uint64_t profile_mark; /* profile generation watermark (F_TRY) */
   };
 #ifdef TRACY_ENABLE
   ax_profile_zone_ctx profile_ctx;
@@ -83,6 +84,17 @@ static_assert(sizeof(pl_frame) == 40, "pl_frame grew");
 #endif
 
 /* ── Thread ────────────────────────────────────────────────────────────── */
+
+typedef struct pl_profile_zone {
+  pl_val handle; /* rooted opaque identity returned by ZoneStart */
+  uint8_t* name;
+  size_t name_n;
+  uint64_t generation;
+#ifdef TRACY_ENABLE
+  ax_profile_zone_ctx tracy_ctx;
+#endif
+  bool live; /* at least one physical backend currently has this segment */
+} pl_profile_zone;
 
 struct pl_thread {
   pl_heap* heap;
@@ -113,6 +125,15 @@ struct pl_thread {
   pl_val resume_val;     /* root: value to EVAL or RETURN on re-entry */
   pl_val blocked_on;     /* root: effect request while blocked */
   pl_val result;         /* root: final value after PL_RUN_DONE */
+
+  /* Explicit op-83 profiling zones.  Logical zones survive suspension and
+   * normal entry returns; physical Tracy/JSON segments do not. */
+  pl_profile_zone* profile_zones;
+  size_t profile_zone_n, profile_zone_cap;
+  uint64_t profile_next_generation;
+  uint64_t profile_run_mark;
+  uint64_t profile_lane;
+  bool profile_json_named;
 
   /* The reference vMode: op 82 (rplan I/O) is callable only in RPLAN
    * mode (REPL / snapshot execution), never while assembling modules. */

@@ -69,6 +69,12 @@ pl_val pl_op82_close_handle(pl_thread* t, size_t ab);
 /* op 83 (HTTP driver) coordination effects; serviced in pkg/enki. */
 pl_val pl_op83_read_folder(pl_thread* t, size_t ab);
 pl_val pl_op83_fetch(pl_thread* t, size_t ab);
+/* op 83 direct profiling controls, implemented beside evaluator profiling. */
+pl_val pl_op83_zone_start(pl_thread* t, size_t ab);
+pl_val pl_op83_zone_end(pl_thread* t, size_t ab);
+
+/* Close and release all explicit profiler state before a thread is freed. */
+void pl_profile_thread_free(pl_thread* t);
 
 /* Frame-push helpers usable from op bodies. */
 static inline void pl_push_apply(pl_thread* t, pl_val x) {

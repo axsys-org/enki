@@ -1,4 +1,5 @@
 #include <ctype.h>
+#include <errno.h>
 #include <setjmp.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -17,7 +18,7 @@
 #include "plan/store.h"
 
 /*
- * wisp [--file-root DIR] DIR MODULE [FUNCTION ARGS...]
+ * wisp [--file-root DIR] [--profile-json FILE] DIR MODULE [FUNCTION ARGS...]
  *
  * Loads MODULE (and its @includes) from DIR, then optionally applies the
  * binding FUNCTION to a row of the remaining arguments.  Mirrors the
@@ -464,7 +465,7 @@ static bool boot_parse_double(const char* s, double* out) {
 static void boot_usage(const char* argv0_c) {
   fprintf(stderr,
           "usage: %s [--file-root DIR] [--wait-for-tracy[=SECONDS]] "
-          "DIR MODULE [FUNCTION ARGS...]\n",
+          "[--profile-json FILE] DIR MODULE [FUNCTION ARGS...]\n",
           argv0_c);
 }
 
@@ -475,6 +476,7 @@ static const char* boot_env_file_root(void) {
 
 int main(int argc, char** argv) {
   const char* file_root_c = boot_env_file_root();
+  const char* profile_json_c = NULL;
   double tracy_wait_s = 0.0;
   volatile int argi = 1;
   while (argi < argc && strncmp(argv[argi], "--", 2) == 0) {
@@ -495,6 +497,26 @@ int main(int argc, char** argv) {
     size_t prefix_s = sizeof(prefix_c) - 1;
     if (strncmp(argv[argi], prefix_c, prefix_s) == 0) {
       file_root_c = argv[argi] + prefix_s;
+      argi++;
+      continue;
+    }
+    if (strcmp(argv[argi], "--profile-json") == 0) {
+      if (argi + 1 >= argc || argv[argi + 1][0] == '\0') {
+        boot_usage(argv[0]);
+        return 2;
+      }
+      profile_json_c = argv[argi + 1];
+      argi += 2;
+      continue;
+    }
+    const char json_prefix_c[] = "--profile-json=";
+    size_t json_prefix_s = sizeof(json_prefix_c) - 1;
+    if (strncmp(argv[argi], json_prefix_c, json_prefix_s) == 0) {
+      profile_json_c = argv[argi] + json_prefix_s;
+      if (profile_json_c[0] == '\0') {
+        boot_usage(argv[0]);
+        return 2;
+      }
       argi++;
       continue;
     }
@@ -533,6 +555,12 @@ int main(int argc, char** argv) {
     return 2;
   }
 
+  if (profile_json_c != NULL && !ax_profile_json_start(profile_json_c)) {
+    fprintf(stderr, "wisp: cannot open profile JSON `%s`: %s\n", profile_json_c,
+            strerror(errno));
+    return 1;
+  }
+
   ax_wait_for_tracy(tracy_wait_s);
 
   pl_store* store = pl_store_new_mem();
@@ -540,6 +568,10 @@ int main(int argc, char** argv) {
   en_wisp* w = en_wisp_new(heap);
   if (w == NULL) {
     fprintf(stderr, "wisp: oom\n");
+    pl_heap_free(heap);
+    pl_store_free(store);
+    if (!ax_profile_json_finish())
+      fprintf(stderr, "wisp: failed to finalize profile JSON\n");
     return 1;
   }
   w->t->rplan_file_root_c = file_root_c;
@@ -553,38 +585,46 @@ int main(int argc, char** argv) {
   er_mt_executor* exec = er_mt_executor_new(sched, (er_mt_config){0});
   w->exec = exec;
 
-  boot_ctx ctx = {
+  boot_ctx* ctx = malloc(sizeof(*ctx));
+  ax_assume(ctx != NULL, "oom");
+  *ctx = (boot_ctx){
       .loc_a = ax_allocator_system(),
       .w = w,
       .src_dir_c = argv[argi],
       .mod_v = NULL,
       .emit_top_level_f = true,
   };
-  pl_gc_add_root_source(heap, boot_roots, &ctx);
+  pl_gc_add_root_source(heap, boot_roots, ctx);
 
+  volatile int exit_code = 1;
   w->err_f = true;
   if (setjmp(w->errjmp) != 0) {
     fprintf(stderr, "wisp: %s\n",
             w->msg_c == NULL ? "unknown error" : w->msg_c);
-    return 1;
+  } else {
+    const char* fn_c = argc - argi >= 3 ? argv[argi + 2] : NULL;
+    int run_argc = argc - argi >= 4 ? argc - argi - 3 : 0;
+    char** run_argv = argc - argi >= 4 ? argv + argi + 3 : NULL;
+    bool ok = boot_load_assembly(ctx, argv[argi + 1], fn_c, run_argc, run_argv);
+    exit_code = ok ? 0 : 1;
   }
 
-  const char* fn_c = argc - argi >= 3 ? argv[argi + 2] : NULL;
-  int run_argc = argc - argi >= 4 ? argc - argi - 3 : 0;
-  char** run_argv = argc - argi >= 4 ? argv + argi + 3 : NULL;
-  bool ok = boot_load_assembly(&ctx, argv[argi + 1], fn_c, run_argc, run_argv);
-
-  pl_gc_del_root_source(heap, boot_roots, &ctx);
-  for (boot_module* mod = ctx.mod_v; mod != NULL;) {
+  pl_gc_del_root_source(heap, boot_roots, ctx);
+  for (boot_module* mod = ctx->mod_v; mod != NULL;) {
     boot_module* next = mod->next;
-    boot_env_free(&ctx, mod->env);
-    ax_free(ctx.loc_a, mod);
+    boot_env_free(ctx, mod->env);
+    ax_free(ctx->loc_a, mod);
     mod = next;
   }
+  free(ctx);
   er_mt_executor_free(exec);
   er_scheduler_free(sched); /* leftover actors die with the program */
   en_wisp_free(w);
   pl_heap_free(heap);
   pl_store_free(store);
-  return ok ? 0 : 1;
+  if (!ax_profile_json_finish()) {
+    fprintf(stderr, "wisp: failed to finalize profile JSON\n");
+    exit_code = 1;
+  }
+  return exit_code;
 }

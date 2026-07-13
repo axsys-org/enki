@@ -162,6 +162,81 @@ Test(wisp_cli, rplan_op_rejected_in_bplan) {
             "RPLAN op should be rejected outside RPLAN mode");
 }
 
+Test(wisp_cli, profile_json_accepts_both_flag_spellings) {
+  char dir[] = "/tmp/enki-profile-cli-XXXXXX";
+  cr_assert_not_null(mkdtemp(dir));
+
+  char module_path[512];
+  (void)snprintf(module_path, sizeof(module_path), "%s/ok.plan", dir);
+  FILE* f = fopen(module_path, "w");
+  cr_assert_not_null(f);
+  fputs("0\n", f);
+  fclose(f);
+
+  char trace_path[512];
+  char cmd[2048];
+  for (int equals = 0; equals < 2; equals++) {
+    (void)snprintf(trace_path, sizeof(trace_path), "%s/trace-%d.json", dir,
+                   equals);
+    if (equals) {
+      (void)snprintf(cmd, sizeof(cmd),
+                     "%s --profile-json=%s %s ok >/dev/null 2>&1", wisp_bin(),
+                     trace_path, dir);
+    } else {
+      (void)snprintf(cmd, sizeof(cmd),
+                     "%s --profile-json %s %s ok >/dev/null 2>&1", wisp_bin(),
+                     trace_path, dir);
+    }
+    int st = system(cmd);
+    cr_assert(WIFEXITED(st) && WEXITSTATUS(st) == 0,
+              "profile JSON invocation failed for equals=%d", equals);
+    cr_assert(file_contains(trace_path,
+                            "{\"traceEvents\":[],\"displayTimeUnit\":\"ms\"}"),
+              "empty trace was not finalized for equals=%d", equals);
+  }
+}
+
+Test(wisp_cli, profile_json_open_failure_exits_early) {
+  char dir[] = "/tmp/enki-profile-missing-XXXXXX";
+  cr_assert_not_null(mkdtemp(dir));
+  cr_assert_eq(rmdir(dir), 0);
+
+  char trace_path[512];
+  (void)snprintf(trace_path, sizeof(trace_path), "%s/trace.json", dir);
+  char cmd[2048];
+  (void)snprintf(cmd, sizeof(cmd),
+                 "%s --profile-json %s %s reaver >/dev/null 2>&1", wisp_bin(),
+                 trace_path, reaver_plan_dir());
+  int st = system(cmd);
+  cr_assert(WIFEXITED(st) && WEXITSTATUS(st) != 0,
+            "unopenable profile destination should fail");
+  cr_assert_neq(access(trace_path, F_OK), 0);
+}
+
+Test(wisp_cli, profile_json_finalizes_after_runtime_error) {
+  char dir[] = "/tmp/enki-profile-error-XXXXXX";
+  cr_assert_not_null(mkdtemp(dir));
+
+  char module_path[512];
+  (void)snprintf(module_path, sizeof(module_path), "%s/bad.plan", dir);
+  FILE* f = fopen(module_path, "w");
+  cr_assert_not_null(f);
+  fputs("((#pin \"R\") (\"Print\" \"nope\"))\n", f);
+  fclose(f);
+
+  char trace_path[512];
+  (void)snprintf(trace_path, sizeof(trace_path), "%s/error.json", dir);
+  char cmd[2048];
+  (void)snprintf(cmd, sizeof(cmd),
+                 "%s --profile-json %s %s bad >/dev/null 2>&1", wisp_bin(),
+                 trace_path, dir);
+  int st = system(cmd);
+  cr_assert(WIFEXITED(st) && WEXITSTATUS(st) != 0,
+            "runtime error should remain nonzero");
+  cr_assert(file_contains(trace_path, "],\"displayTimeUnit\":\"ms\"}"),
+            "runtime-error trace was not finalized");
+}
+
 /*
  * P4: actor scenarios through the boot driver — the wisp boot thread is
  * the root actor (the reference withNewRts), spawned actors run through
