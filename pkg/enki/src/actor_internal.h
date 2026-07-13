@@ -47,6 +47,7 @@ typedef enum {
   ER_EV_IO = 1,
   ER_EV_INJECT = 2,
   ER_EV_HTTP = 3,
+  ER_EV_FOLDER = 4,
 } er_ev_kind;
 
 typedef struct er_event {
@@ -54,8 +55,8 @@ typedef struct er_event {
   uint64_t actor;        /* er_actor id */
   uint64_t op;           /* IO/HTTP: effect-name mote; INJECT: 0 */
   uint8_t args_hash[32]; /* IO/HTTP: SHA-256 of the request */
-  uint8_t* data;         /* IO: result nat bytes; INJECT: payload
-                            encoding; HTTP: flat result encoding */
+  uint8_t* data;         /* IO: result nat bytes; INJECT: payload encoding;
+                            HTTP: flat result encoding; FOLDER: entries */
   uint64_t data_n;
 } er_event;
 

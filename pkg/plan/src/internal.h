@@ -67,6 +67,7 @@ pl_val pl_op82_recv(pl_thread* t, size_t ab);
 pl_val pl_op82_close_handle(pl_thread* t, size_t ab);
 
 /* op 83 (HTTP driver) coordination effects; serviced in pkg/enki. */
+pl_val pl_op83_read_folder(pl_thread* t, size_t ab);
 pl_val pl_op83_fetch(pl_thread* t, size_t ab);
 
 /* Frame-push helpers usable from op bodies. */

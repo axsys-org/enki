@@ -6,10 +6,14 @@
  * private heap; an actor's whole life is one deep normalization of
  * (fn 0).  The single-OS-thread deterministic executor drives actors in
  * FIFO run-queue order with a fixed fuel quantum and services the
- * coordination effects (op 82 Spawn/Send/SendCaps/Recv/CloseHandle and
- * op 83 Fetch) that pl_thread_run parks as PL_RUN_BLOCKED requests.
+ * coordination effects (op 82 Spawn/Send/SendCaps/Recv/CloseHandle and the
+ * current provisional op 83 primops, Fetch/ReadFolder) that pl_thread_run
+ * parks as PL_RUN_BLOCKED requests.  Op 83 is a staging area: its PLAN-level
+ * primop semantics are not yet settled.
  *
  * HTTP (op 83 Fetch, src/http.c): a libcurl-backed req/res effect.
+ * ReadFolder is an op-83 req/res effect that returns filesystem entries;
+ * it observes the same file-root jail as ReadFile.
  * The caller parks while the transfer runs on a scheduler-owned multi
  * handle; other actors keep executing, and the run loops block in
  * curl_multi_poll only when the run queue is empty.  The Result value
@@ -45,7 +49,7 @@ typedef enum {
 typedef struct er_config {
   uint64_t quantum;        /* fuel per slice (>= 2); 0 = default */
   size_t heap_cells;       /* per-actor semispace cells; 0 = default (8192) */
-  const char* file_root_c; /* spawned actors' ReadFile jail (may be NULL) */
+  const char* file_root_c; /* spawned actors' ReadFile/ReadFolder jail */
   /* HTTP driver (op 83 Fetch) */
   long http_max_total_connections;  /* CURLM connection cap; 0 = curl default */
   uint64_t http_connect_default_ms; /* connectMs None default; 0 = 10000 */
@@ -134,10 +138,10 @@ pl_val er_actor_result(er_actor* a);
  * ── Event log & replay ─────────────────────────────────────────────────────
  *
  * The log records exactly the external inputs: every direct (unix)
- * effect's result as (actor, op name, args hash, result-nat bytes),
- * every host injection, and every HTTP fetch result, in occurrence
- * order.  Internal events — actor messages, yields, scheduling — are
- * reproducible and never logged.
+ * effect's result as (actor, op name, args hash, result-nat bytes), every
+ * ReadFolder result, every host injection, and every HTTP fetch result, in
+ * occurrence order.  Internal events — actor messages, yields, scheduling —
+ * are reproducible and never logged.
  *
  * HTTP fetches are the one source of completion-order nondeterminism,
  * so recording constrains when they resume: a completion deposits only

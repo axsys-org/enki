@@ -62,6 +62,30 @@ static pl_run_status test_run(pl_thread* t) {
 
 #define FETCH ax_s5('F', 'e', 't', 'c', 'h')
 
+Test(op83, readfolder_parks_then_deposit_resumes) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  t->rplan_f = true;
+  size_t base = t->vsp;
+  pl_vpush(t, pl_nat_from_bytes(t, (const uint8_t*)"ReadFolder", 10));
+  pl_vpush(t, pl_nat_from_bytes(t, (const uint8_t*)"folder", 6));
+  pl_val args[1] = {t->vstack[base + 1]};
+  pl_thread_start(t, test_op83_thunk(t, t->vstack[base], 1, args));
+  cr_assert_eq(test_run(t), PL_RUN_BLOCKED);
+
+  pl_cell* p = pl_as(PL_TAG_APP, pl_thread_request(t));
+  cr_assert_not_null(p);
+  cr_assert_eq(pl_app_head(p), t->vstack[base]);
+  cr_assert_eq(pl_app_n(p), 1);
+  cr_assert_eq(pl_app_args(p)[0], t->vstack[base + 1]);
+
+  pl_thread_deposit(t, 0);
+  cr_assert_eq(test_run(t), PL_RUN_DONE);
+  cr_assert_eq(pl_thread_result(t), 0);
+  t->vsp = base;
+  test_rt_free(&rt);
+}
+
 Test(op83, fetch_parks_then_deposit_resumes) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
