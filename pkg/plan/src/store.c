@@ -27,14 +27,6 @@
 /* Store spans use the active logical PLAN lane when called by an executor.
  * Host-side work gets a stable lane per native thread so concurrent
  * backend calls never produce crossed B/E pairs on one Chrome Trace lane. */
-typedef struct pl_store_profile_scope {
-  uint64_t lane;
-  uint64_t span;
-  const uint8_t* name;
-  size_t name_n;
-  bool active;
-} pl_store_profile_scope;
-
 static const uint8_t pl_store_profile_category[] = "splan.store";
 static _Atomic uint64_t pl_store_profile_next_span = 1;
 static _Atomic uint64_t pl_store_profile_next_host_lane = UINT32_MAX;
@@ -68,8 +60,7 @@ static uint64_t pl_store_profile_lane(void) {
   return lane;
 }
 
-static pl_store_profile_scope pl_store_profile_begin(const char* name,
-                                                     size_t name_n) {
+pl_store_profile_scope pl_store_profile_begin(const char* name, size_t name_n) {
   if (!ax_profile_json_enabled())
     return (pl_store_profile_scope){0};
   pl_store_profile_scope scope = {
@@ -87,7 +78,7 @@ static pl_store_profile_scope pl_store_profile_begin(const char* name,
   return scope;
 }
 
-static void pl_store_profile_end(pl_store_profile_scope* scope) {
+void pl_store_profile_end(pl_store_profile_scope* scope) {
   if (!scope->active)
     return;
   ax_profile_json_span_end(scope->lane, scope->span, pl_store_profile_category,

@@ -182,26 +182,18 @@ Test(store, chrome_json_profiles_slow_store_operations) {
   cr_assert_eq(close(fd), 0);
   cr_assert(ax_profile_json_start(path));
 
-  pl_store* s = pl_store_new_mem();
-  pl_heap* h = pl_heap_new(1 << 16, s);
-  pl_thread* t = pl_thread_new(h);
-  size_t base = t->vsp;
-  pl_vpush(t, 42);
-  pl_val pin = pl_pin(t, t->vstack[base]);
-  uint8_t hash[32];
-  memcpy(hash, pl_pin_hash(pin), sizeof(hash));
-  cr_assert(pl_store_put_root(s, hash));
-  memset(hash, 0, sizeof(hash));
-  cr_assert(pl_store_get_root(s, hash));
-  pl_thread_free(t);
-  pl_heap_free(h);
-  pl_store_free(s);
+  char dir[] = "/tmp/enki-profile-store-db-XXXXXX";
+  cr_assert_not_null(mkdtemp(dir));
+  roundtrip_via(mk_lmdb, dir);
 
   cr_assert(ax_profile_json_finish());
   char* json = store_test_read_file(path);
   cr_assert_not_null(strstr(json, "\"cat\":\"splan.store\""));
   cr_assert_not_null(strstr(json, "\"name\":\"store.open\""));
   cr_assert_not_null(strstr(json, "\"name\":\"store.backend.put\""));
+  cr_assert_not_null(strstr(json, "\"name\":\"store.backend.get\""));
+  cr_assert_not_null(strstr(json, "\"name\":\"store.serialize\""));
+  cr_assert_not_null(strstr(json, "\"name\":\"store.deserialize\""));
   cr_assert_not_null(strstr(json, "\"name\":\"store.root.put\""));
   cr_assert_not_null(strstr(json, "\"name\":\"store.root.get\""));
   cr_assert_not_null(strstr(json, "\"name\":\"store.close\""));
@@ -211,4 +203,10 @@ Test(store, chrome_json_profiles_slow_store_operations) {
                store_test_count(json, "\"ph\":\"E\""));
   free(json);
   cr_assert_eq(unlink(path), 0);
+  char db_path[96];
+  snprintf(db_path, sizeof(db_path), "%s/data.mdb", dir);
+  cr_assert_eq(unlink(db_path), 0);
+  snprintf(db_path, sizeof(db_path), "%s/lock.mdb", dir);
+  cr_assert_eq(unlink(db_path), 0);
+  cr_assert_eq(rmdir(dir), 0);
 }

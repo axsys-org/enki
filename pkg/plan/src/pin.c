@@ -129,6 +129,30 @@ static void serialize(canon_ctx* c, pl_val v) {
   }
 }
 
+/* Build the persistence bytes and the canonical-text content hash. */
+static uint8_t* encode_pin(canon_ctx* c, pl_val body, uint8_t hash[32],
+                           size_t* out_n) {
+  size_t nsub = (size_t)ax_arrlen(c->subpins);
+  uint8_t* full = NULL;
+  ax_arrpush(full, PL_CANON_VERSION);
+  for (int i = 0; i < 8; i++)
+    ax_arrpush(full, (uint8_t)((uint64_t)nsub >> (8 * i)));
+  for (size_t j = 0; j < nsub; j++) {
+    const uint8_t* h = pl_pin_hash(c->subpins[j]);
+    for (int i = 0; i < 32; i++)
+      ax_arrpush(full, h[i]);
+  }
+  for (ptrdiff_t i = 0; i < ax_arrlen(c->buf); i++)
+    ax_arrpush(full, c->buf[i]);
+
+  size_t text_n;
+  char* text = pl_canonize(ax_allocator_system(), body, &text_n);
+  ax_sha256((const uint8_t*)text, text_n, hash);
+  ax_free(ax_allocator_system(), text);
+  *out_n = (size_t)ax_arrlen(full);
+  return full;
+}
+
 /* ── Deep copy of a normalized graph into the store region ─────────────── */
 
 typedef struct copy_entry {
@@ -186,29 +210,10 @@ static pl_val store_copy(pl_store* s, copy_entry** map, pl_val v) {
 
 /* ── Pinning ───────────────────────────────────────────────────────────── */
 
-static pl_val pin_from_canon(pl_store* s, canon_ctx* c, pl_val body) {
+static pl_val pin_from_canon(pl_store* s, canon_ctx* c, pl_val body,
+                             const uint8_t hash[32], const uint8_t* full,
+                             size_t full_n) {
   size_t nsub = (size_t)ax_arrlen(c->subpins);
-  /* assemble the full canonical buffer: header + body bytes */
-  uint8_t* full = NULL;
-  ax_arrpush(full, PL_CANON_VERSION);
-  for (int i = 0; i < 8; i++)
-    ax_arrpush(full, (uint8_t)((uint64_t)nsub >> (8 * i)));
-  for (size_t j = 0; j < nsub; j++) {
-    const uint8_t* h = pl_pin_hash(c->subpins[j]);
-    for (int i = 0; i < 32; i++)
-      ax_arrpush(full, h[i]);
-  }
-  for (ptrdiff_t i = 0; i < ax_arrlen(c->buf); i++)
-    ax_arrpush(full, c->buf[i]);
-
-  /* the content hash is SHA-256 of the canonical TEXT (mkPin) */
-  uint8_t hash[32];
-  {
-    size_t text_n;
-    char* text = pl_canonize(ax_allocator_system(), body, &text_n);
-    ax_sha256((const uint8_t*)text, text_n, hash);
-    ax_free(ax_allocator_system(), text);
-  }
 
   pl_store_lock(s);
   pl_val pin = pl_store_intern_get(s, hash);
@@ -220,11 +225,10 @@ static pl_val pin_from_canon(pl_store* s, canon_ctx* c, pl_val body) {
     pl_store_intern_put(s, hash, pin);
     if (pl_tag(body_copy) == PL_TAG_LAW)
       pl_store_put_code(s, hash);
-    ax_assume(pl_store_backend_put(s, hash, full, (size_t)ax_arrlen(full)),
+    ax_assume(pl_store_backend_put(s, hash, full, full_n),
               "store backend put failed");
   }
   pl_store_unlock(s);
-  ax_arrfree(full);
   return pin;
 }
 
@@ -240,9 +244,17 @@ pl_val pl_pin(pl_thread* t, pl_val v) {
   v = pl_nf(t, v);
 
   canon_ctx c = {0};
+  uint8_t hash[32];
+  uint8_t* full;
+  size_t full_n;
+  pl_store_profile_scope profile =
+      pl_store_profile_begin("store.serialize", sizeof("store.serialize") - 1);
   collect_subpins(&c, v);
   serialize(&c, v);
-  pl_val pin = pin_from_canon(s, &c, v);
+  full = encode_pin(&c, v, hash, &full_n);
+  pl_store_profile_end(&profile);
+  pl_val pin = pin_from_canon(s, &c, v, hash, full, full_n);
+  ax_arrfree(full);
   ax_arrfree(c.buf);
   ax_arrfree(c.subpins);
   ax_hmfree(c.idx);
@@ -253,8 +265,15 @@ pl_val pl_pin(pl_thread* t, pl_val v) {
 pl_val pl_store_pin_of_nat(pl_store* s, uint64_t n) {
   ax_assume(n <= PL_NAT63_MAX, "pin_of_nat: too large");
   canon_ctx c = {0};
+  uint8_t hash[32];
+  size_t full_n;
+  pl_store_profile_scope profile =
+      pl_store_profile_begin("store.serialize", sizeof("store.serialize") - 1);
   serialize(&c, n);
-  pl_val pin = pin_from_canon(s, &c, n);
+  uint8_t* full = encode_pin(&c, n, hash, &full_n);
+  pl_store_profile_end(&profile);
+  pl_val pin = pin_from_canon(s, &c, n, hash, full, full_n);
+  ax_arrfree(full);
   ax_arrfree(c.buf);
   ax_arrfree(c.subpins);
   ax_hmfree(c.idx);
@@ -370,9 +389,12 @@ pl_val pl_store_load(pl_thread* t, const uint8_t hash[32]) {
     ax_arrpush(subs, pl_store_load(t, sub));
   }
   d.subpins = subs;
+  pl_store_profile_scope profile = pl_store_profile_begin(
+      "store.deserialize", sizeof("store.deserialize") - 1);
   pl_val body = deser(s, &d);
   pl_val pin = pl_store_mk_pin(s, hash, body, (uint32_t)d.nsub, subs);
   pl_store_intern_put(s, hash, pin);
+  pl_store_profile_end(&profile);
   if (pl_tag(body) == PL_TAG_LAW)
     pl_store_put_code(s, hash);
   ax_arrfree(subs);
