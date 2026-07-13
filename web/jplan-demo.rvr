@@ -1,0 +1,414 @@
+;;;; JPLAN Smalltalk-style workspace.
+;;;;
+;;;; The browser only supplies a root DOM capability and a dispatch bridge.
+;;;; This Reaver module owns the component tree, event bindings, model
+;;;; transitions, and rendering.  Every DOM operation crosses JPLAN Eval.
+
+(#bind std (#module std))
+(#import std)
+
+;; Keep the demo compiler input self-contained until the pinned Reaver source
+;; includes JPLAN's opcode-74 bindings.  This can coexist with a newer Reaver:
+;; the module-local Eval binding simply shadows the imported one.
+(#bind J (#pin "J"))
+
+(#macro jplan-demo-op
+  (#fun pin noinline "jplan-demo-op" (jplan-demo-op _ u g _ _ x)
+    (#let ((sig (Ix 1 x)))
+      (#let ((nam (Ix 0 (Ix 0 sig))))
+        (0 u g
+          (0 "#bind" nam
+            (0 "#fun" "pin" "noinline" (1 nam) (Up 0 nam sig)
+              (0 (1 J) sig))))))))
+
+(jplan-demo-op ("Eval" environment objects source))
+
+;; Used only by web/compile-jplan-demo.mjs to snapshot `main` after Reaver has
+;; compiled this module.  It is not reachable from the browser entry point.
+(bplan ("Save" x))
+
+(define default-source
+"const counter = objects[0];
+counter.value += counter.step;
+environment.print('counter is now ' + counter.value);
+return {
+  message: 'Hello from Reaver + JPLAN',
+  count: counter.value,
+  updatedAt: new Date(),
+};")
+
+(define workspace-css
+":root {
+  color-scheme: light;
+  --ink: #17253a;
+  --muted: #59697f;
+  --paper: #f5f0df;
+  --panel: #fffdf4;
+  --blue: #245ea8;
+  --blue-dark: #173f75;
+  --line: #23334b;
+  --sun: #e7b94e;
+  --danger: #a43a34;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  min-height: 100vh;
+  color: var(--ink);
+  background:
+    linear-gradient(90deg, rgb(35 51 75 / 0.045) 1px, transparent 1px),
+    linear-gradient(rgb(35 51 75 / 0.045) 1px, transparent 1px),
+    var(--paper);
+  background-size: 24px 24px;
+}
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 18px 24px 14px;
+  border-bottom: 2px solid var(--line);
+  background: rgb(255 253 244 / 0.92);
+}
+.app-header h1 { margin: 0; font-size: clamp(1.3rem, 3vw, 2rem); letter-spacing: -0.03em; }
+.subtitle { color: var(--muted); font: 0.82rem ui-monospace, monospace; }
+.status {
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  color: #1e6b45;
+  background: white;
+  font: 700 0.72rem ui-monospace, monospace;
+  text-transform: uppercase;
+}
+.warning {
+  margin: 14px 24px 0;
+  padding: 10px 12px;
+  border: 1px solid #8a5a14;
+  border-left: 6px solid var(--sun);
+  background: #fff4cc;
+  font-size: 0.82rem;
+}
+.workspace-grid {
+  display: grid;
+  grid-template-columns: minmax(190px, 0.7fr) minmax(360px, 1.55fr) minmax(270px, 1fr);
+  grid-template-rows: minmax(430px, 1fr) 210px;
+  gap: 12px;
+  min-height: calc(100vh - 145px);
+  padding: 14px 24px 24px;
+}
+.window {
+  min-width: 0;
+  border: 2px solid var(--line);
+  box-shadow: 5px 5px 0 rgb(35 51 75 / 0.18);
+  background: var(--panel);
+  display: flex;
+  flex-direction: column;
+}
+.titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 34px;
+  padding: 6px 9px;
+  color: white;
+  background: var(--blue);
+  border-bottom: 2px solid var(--line);
+  font: 700 0.75rem ui-monospace, monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.titlebar span:last-child { opacity: 0.75; font-weight: 500; }
+.objects { grid-column: 1; grid-row: 1; }
+.workspace { grid-column: 2; grid-row: 1; }
+.inspector { grid-column: 3; grid-row: 1; }
+.transcript { grid-column: 1 / -1; grid-row: 2; }
+.object-list { list-style: none; padding: 8px; margin: 0; overflow: auto; }
+.object-list li { margin-bottom: 7px; }
+.object-row {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 34px 1fr;
+  gap: 8px;
+  align-items: center;
+  padding: 9px;
+  border: 1px solid var(--line);
+  background: white;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.object-row.selected { color: white; background: var(--blue-dark); }
+.slot { font: 700 0.72rem ui-monospace, monospace; opacity: 0.75; }
+.object-name { font-weight: 750; }
+.object-type { display: block; opacity: 0.65; font: 0.7rem ui-monospace, monospace; margin-top: 2px; }
+.source {
+  flex: 1;
+  width: 100%;
+  resize: none;
+  border: 0;
+  outline: none;
+  padding: 16px;
+  color: #142239;
+  background: #fffef9;
+  font: 0.9rem/1.58 ui-monospace, SFMono-Regular, Menlo, monospace;
+  tab-size: 2;
+}
+.controls { display: flex; gap: 8px; padding: 9px; border-top: 1px solid var(--line); background: #e8e1ce; }
+.action {
+  min-width: 86px;
+  padding: 8px 12px;
+  border: 2px solid var(--line);
+  box-shadow: 2px 2px 0 var(--line);
+  background: white;
+  color: inherit;
+  font-weight: 800;
+  cursor: pointer;
+}
+.action.primary { background: var(--sun); }
+.action:active { transform: translate(2px, 2px); box-shadow: none; }
+.result-summary { padding: 12px; border-bottom: 1px solid var(--line); background: #edf3fb; }
+.result-kind { color: var(--muted); font: 0.72rem ui-monospace, monospace; text-transform: uppercase; }
+.result-value { margin-top: 5px; overflow-wrap: anywhere; font: 700 0.9rem ui-monospace, monospace; }
+.properties { overflow: auto; }
+.property { display: grid; grid-template-columns: minmax(90px, 0.8fr) 1.2fr; border-bottom: 1px solid #c7cfda; font: 0.76rem/1.35 ui-monospace, monospace; }
+.property > span { padding: 7px 8px; overflow-wrap: anywhere; }
+.property > span:first-child { color: var(--blue-dark); border-right: 1px solid #c7cfda; font-weight: 700; }
+.transcript-output { flex: 1; margin: 0; padding: 10px 12px; overflow: auto; white-space: pre-wrap; color: #dceaff; background: #111c2c; font: 0.78rem/1.45 ui-monospace, monospace; }
+@media (max-width: 980px) {
+  .workspace-grid { grid-template-columns: 1fr 1.6fr; grid-template-rows: 220px 430px 210px; }
+  .objects { grid-column: 1; grid-row: 1; }
+  .workspace { grid-column: 1 / -1; grid-row: 2; }
+  .inspector { grid-column: 2; grid-row: 1; }
+  .transcript { grid-column: 1 / -1; grid-row: 3; }
+}
+@media (max-width: 650px) {
+  .app-header { align-items: flex-start; }
+  .workspace-grid { display: flex; flex-direction: column; padding-inline: 12px; }
+  .warning { margin-inline: 12px; }
+  .window { min-height: 260px; }
+  .workspace { min-height: 430px; }
+}")
+
+;;; React-ish DOM algebra ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(define (eval0 environment source)
+  (Eval environment [] source))
+
+(define (eval1 environment a source)
+  (Eval environment [a] source))
+
+(define (eval2 environment a b source)
+  (Eval environment [a b] source))
+
+(define (append-child environment parent child)
+  (eval2 environment parent child
+    "objects[0].append(objects[1]); return objects[0];"))
+
+;; A component constructor: make one node, then append the child component
+;; handles from left to right.  Like React's h(), but its host values are
+;; process-local wormholes rather than a serializable VDOM.
+(define (append-children environment parent children index count)
+  (If (Eq index count)
+    parent
+    (append-children environment
+      (append-child environment parent (Ix index children))
+      children
+      (Inc index)
+      count)))
+
+(define (h environment constructor children)
+  (append-children environment
+    (eval0 environment constructor)
+    children
+    0
+    (Sz children)))
+
+;;; Components ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(define (style-view environment)
+  (eval0 environment
+    (strcat ["const el=document.createElement('style'); el.textContent=`"
+             workspace-css
+             "`; return el;"])))
+
+(define (header-title environment)
+  (eval0 environment
+    "const el=document.createElement('div'); el.innerHTML='<h1>JPLAN Browser Workspace</h1><div class=\'subtitle\'>Reaver components · JPLAN DOM effects · process-local state</div>'; return el;"))
+
+(define (header-status environment)
+  (eval0 environment
+    "const el=document.createElement('div'); el.className='status'; el.dataset.testid='status'; el.textContent='ready · rendered by Reaver'; return el;"))
+
+(define (header-view environment)
+  (h environment
+    "const el=document.createElement('header'); el.className='app-header'; return el;"
+    [(header-title environment) (header-status environment)]))
+
+(define (warning-view environment)
+  (eval0 environment
+    "const el=document.createElement('div'); el.className='warning'; el.innerHTML='<strong>Unsandboxed demo.</strong> The Reaver component tree uses JPLAN Eval to run arbitrary same-origin JavaScript and manipulate the DOM.'; return el;"))
+
+(define (titlebar environment title detail)
+  ;; title/detail are constructor fragments authored by the calling component.
+  (eval0 environment (strcat ["const el=document.createElement('div'); el.className='titlebar'; el.innerHTML='<span>" title "</span><span>" detail "</span>'; return el;"])))
+
+(define (object-button environment index action)
+  (eval0 environment
+    (strcat [
+      "const i=" index "; const entry=environment.state.namedObjects[i]; const el=document.createElement('button'); el.type='button'; el.className='object-row'+(environment.state.selected===i?' selected':''); el.dataset.testid='object-'+i; const slot=document.createElement('span'); slot.className='slot'; slot.textContent=environment.state.selected===i?'#0':'—'; const body=document.createElement('span'); const name=document.createElement('span'); name.className='object-name'; name.textContent=entry.name; const type=document.createElement('span'); type.className='object-type'; type.textContent=environment.shortValue(entry.value); body.append(name,type); el.append(slot,body); el.addEventListener('click',()=>environment.dispatch('" action "','')); return el;"
+    ])))
+
+(define (object-item environment button)
+  (h environment "return document.createElement('li');" [button]))
+
+(define (objects-view environment)
+  (define list
+    (h environment
+      "const el=document.createElement('ul'); el.className='object-list'; return el;"
+      [(object-item environment (object-button environment "0" "select-counter"))
+       (object-item environment (object-button environment "1" "select-workspace"))
+       (object-item environment (object-button environment "2" "select-root"))]))
+  (h environment
+    "const el=document.createElement('section'); el.className='window objects'; return el;"
+    [(titlebar environment "Named objects" "argument row") list]))
+
+(define (source-editor environment)
+  (eval0 environment
+    "const el=document.createElement('textarea'); el.id='source'; el.className='source'; el.dataset.testid='source'; el.spellcheck=false; el.setAttribute('aria-label','JavaScript source'); el.value=environment.state.source; return el;"))
+
+(define (action-button environment label action primary)
+  (eval0 environment
+    (strcat [
+      "const el=document.createElement('button'); el.type='button'; el.className='action"
+      primary
+      "'; el.dataset.testid='" action "'; el.textContent='" label
+      "'; el.addEventListener('click',()=>{ const source=environment.root.querySelector('#source'); environment.dispatch('"
+      action
+      "',source?source.value:''); }); return el;"
+    ])))
+
+(define (controls-view environment)
+  (h environment
+    "const el=document.createElement('div'); el.className='controls'; return el;"
+    [(action-button environment "Do It" "do-it" " primary")
+     (action-button environment "Inspect" "inspect" "")
+     (action-button environment "Reset" "reset" "")]))
+
+(define (workspace-view environment)
+  (h environment
+    "const el=document.createElement('section'); el.className='window workspace'; return el;"
+    [(titlebar environment "Workspace" "JavaScript function body")
+     (source-editor environment)
+     (controls-view environment)]))
+
+(define (result-summary environment)
+  (eval0 environment
+    "const value=environment.state.result; const el=document.createElement('div'); el.className='result-summary'; const kind=document.createElement('div'); kind.className='result-kind'; kind.dataset.testid='result-kind'; kind.textContent=value instanceof Error?value.name:(value===null?'null':typeof value); const rendered=document.createElement('div'); rendered.className='result-value'; rendered.dataset.testid='result-value'; rendered.textContent=environment.shortValue(value); el.append(kind,rendered); return el;"))
+
+(define (property-list environment)
+  (eval0 environment
+    "const value=environment.state.result; const el=document.createElement('div'); el.className='properties'; let keys=[]; if(value!==null&&(typeof value==='object'||typeof value==='function')){try{keys=Reflect.ownKeys(value);}catch(error){keys=['<inspection failed: '+error+'>'];}} for(const key of keys){const row=document.createElement('div'); row.className='property'; const name=document.createElement('span'); name.textContent=typeof key==='symbol'?String(key):key; const rendered=document.createElement('span'); try{const descriptor=Object.getOwnPropertyDescriptor(value,key); rendered.textContent=descriptor&&'value' in descriptor?environment.shortValue(descriptor.value):'<accessor>';}catch(error){rendered.textContent='<unavailable: '+error+'>';}; row.append(name,rendered); el.append(row);} el.dataset.count=String(keys.length); return el;"))
+
+(define (inspector-view environment)
+  (h environment
+    "const el=document.createElement('section'); el.className='window inspector'; return el;"
+    [(titlebar environment "Inspector" "result properties")
+     (result-summary environment)
+     (property-list environment)]))
+
+(define (transcript-output environment)
+  (eval0 environment
+    "const el=document.createElement('pre'); el.className='transcript-output'; el.dataset.testid='transcript'; el.textContent=environment.state.transcript.join('\\n'); return el;"))
+
+(define (transcript-view environment)
+  (h environment
+    "const el=document.createElement('section'); el.className='window transcript'; return el;"
+    [(titlebar environment "Transcript" "temporary PLAN handles: 0")
+     (transcript-output environment)]))
+
+(define (workspace-grid environment)
+  (h environment
+    "const el=document.createElement('main'); el.className='workspace-grid'; return el;"
+    [(objects-view environment)
+     (workspace-view environment)
+     (inspector-view environment)
+     (transcript-view environment)]))
+
+(define (app-view environment)
+  (h environment "const el=document.createElement('div'); el.dataset.testid='reaver-app'; return el;"
+    [(header-view environment)
+     (warning-view environment)
+     (workspace-grid environment)]))
+
+(define (render environment)
+  (define tree
+    (h environment "return document.createDocumentFragment();"
+      [(style-view environment) (app-view environment)]))
+  (eval1 environment tree
+    "environment.root.replaceChildren(objects[0]); environment.state.renders+=1; return environment;"))
+
+;;; State transitions ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(define (initialize environment)
+  (eval0 environment
+    (strcat [
+      "environment.shortValue=(value)=>{if(value instanceof Error)return value.name+': '+value.message;if(typeof value==='string')return JSON.stringify(value);if(typeof value==='function')return '[Function '+(value.name||'anonymous')+']';if(typeof value==='symbol')return String(value);if(value===null||typeof value!=='object')return String(value);const tag=Object.prototype.toString.call(value).slice(8,-1);try{const json=JSON.stringify(value);return json&&json.length<=140?json:'['+tag+']';}catch{return '['+tag+']';}}; const counter={value:0,step:1}; const workspace={name:'JPLAN workspace',runs:0}; environment.state={counter,workspace,selected:0,result:undefined,renders:0,source:`"
+      default-source
+      "`,transcript:['workspace mounted by Reaver']}; environment.state.namedObjects=[{name:'counter',value:counter},{name:'workspace',value:workspace},{name:'document.body',value:environment.root}]; environment.print=(value)=>environment.state.transcript.push(String(value)); return environment;"
+    ])))
+
+(define (select-object environment index)
+  (render
+    (eval0 environment
+      (strcat ["environment.state.selected=" index "; return environment;"]))))
+
+(define (publish-result environment result label)
+  (eval1 environment result
+    (strcat [
+      "environment.state.source=environment.pendingPayload; environment.state.result=objects[0]; environment.state.workspace.runs+=1; environment.state.transcript.push('"
+      label
+      " ← '+environment.shortValue(objects[0])); return environment;"
+    ])))
+
+(define (do-it environment source)
+  (define selected
+    (eval0 environment
+      "return environment.state.namedObjects[environment.state.selected].value;"))
+  (define result (Eval environment [selected] source))
+  (render (publish-result environment result "Do It")))
+
+(define (inspect environment)
+  (define selected
+    (eval0 environment
+      "return environment.state.namedObjects[environment.state.selected].value;"))
+  (render (publish-result environment selected "Inspect")))
+
+(define (dispatch environment action payload)
+  (cond
+    ((Eq action "mount") (render (initialize environment)))
+    ((Eq action "reset") (render (initialize environment)))
+    ((Eq action "select-counter") (select-object environment "0"))
+    ((Eq action "select-workspace") (select-object environment "1"))
+    ((Eq action "select-root") (select-object environment "2"))
+    ((Eq action "do-it") (do-it environment payload))
+    ((Eq action "inspect") (inspect environment))
+    (else
+      (render
+        (eval0 environment
+          "environment.state.transcript.push('unknown Reaver action: '+environment.pendingAction); return environment;")))))
+
+;; Keep the original three-argument runner useful as a generic JPLAN smoke
+;; path.  The four-argument form is the browser component dispatch protocol.
+(define (legacy-run environment objects source)
+  (define result (Eval environment objects source))
+  (eval1 environment result
+    "environment.acceptResult(objects[0]); return environment;"))
+
+(define (main args)
+  (define environment (Ix0 args))
+  (define objects (Ix1 args))
+  (define third (Ix2 args))
+  (If (Eq 3 (Sz args))
+    (legacy-run environment objects third)
+    (dispatch environment third (Ix3 args))))

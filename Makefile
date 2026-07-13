@@ -186,6 +186,11 @@ LIBS := $(LIB_AXSYS) $(LIB_PLAN) $(LIB_ENKI)
 WISP_BROWSER_OBJ := $(BUILD_DIR)/pkg/enki/src/wisp_browser.o
 WISP_BROWSER_WASM := $(BUILD_DIR)/browser/wisp.wasm
 WISP_BROWSER_REAVER := $(BUILD_DIR)/browser/reaver-src.json
+JPLAN_DEMO_DIR ?= build/jplan-demo
+JPLAN_DEMO_PLAN := $(JPLAN_DEMO_DIR)/jplan-demo.plan
+JPLAN_DEMO_SNAP := $(JPLAN_DEMO_DIR)/jplan-demo-snap
+JPLAN_DEMO_WISP ?= build/debug/bin/wisp
+JPLAN_DEMO_REAVER ?= reaver/src
 WISP_BROWSER_EXPORTS := \
 	-Wl,--export=wisp_alloc \
 	-Wl,--export=wisp_free \
@@ -198,6 +203,7 @@ WISP_BROWSER_EXPORTS := \
 	-Wl,--export=wisp_set_emit_top_level \
 	-Wl,--export=wisp_run \
 	-Wl,--export=wisp_jplan_run \
+	-Wl,--export=wisp_jplan_dispatch \
 	-Wl,--export=wisp_output_ptr \
 	-Wl,--export=wisp_output_len \
 	-Wl,--export=wisp_error_ptr \
@@ -265,7 +271,7 @@ LCOV_FILTERED_INFO := $(BUILD_DIR)/coverage/enki.filtered.info
 COVERAGE_HTML_DIR := $(BUILD_DIR)/html
 LCOV_IGNORE_ERRORS ?= --ignore-errors inconsistent,inconsistent,mismatch,mismatch,gcov,gcov,unused,unused
 
-.PHONY: all lib bin wasm wasm-browser wasm-test-binaries install test test-binaries test-unit test-property fuzz fuzz-bin perf-binaries pgo \
+.PHONY: all lib bin wasm wasm-browser wasm-browser-artifacts jplan-demo wasm-test-binaries install test test-binaries test-unit test-property fuzz fuzz-bin perf-binaries pgo \
 	pgo-profile coverage tidy check-layering format format-check compile-commands clean distclean
 
 all: lib bin
@@ -273,8 +279,21 @@ all: lib bin
 wasm:
 	$(MAKE) BUILD_TYPE=wasm lib wasm-test-binaries
 
+wasm-browser-artifacts: $(WISP_BROWSER_WASM) $(WISP_BROWSER_REAVER)
+
+ifeq ($(BUILD_TYPE),wasm)
+wasm-browser: wasm-browser-artifacts
+else
 wasm-browser:
-	$(MAKE) BUILD_TYPE=wasm $(WISP_BROWSER_WASM) $(WISP_BROWSER_REAVER)
+	nix build .#enki-wasm
+endif
+
+jplan-demo: $(JPLAN_DEMO_PLAN)
+
+ifeq ($(JPLAN_DEMO_DIR),build/jplan-demo)
+$(JPLAN_DEMO_PLAN): web/compile-jplan-demo.mjs web/jplan-demo.rvr $(JPLAN_DEMO_WISP) $(shell find $(JPLAN_DEMO_REAVER) -type f 2>/dev/null)
+	node web/compile-jplan-demo.mjs $(JPLAN_DEMO_WISP) $(JPLAN_DEMO_REAVER) $(JPLAN_DEMO_DIR)
+endif
 
 bin: $(APP_BINS)
 
@@ -315,9 +334,9 @@ $(WISP_BROWSER_WASM): $(WISP_BROWSER_OBJ) $(LIBS)
 	$(CC) $(CPPFLAGS_ALL) $(ENKI_INC) $(CFLAGS_ALL) $< $(LIB_ENKI) $(LIB_PLAN) $(LIB_AXSYS) \
 		$(LDFLAGS_ALL) -Wl,--no-entry -Wl,--export-memory $(WISP_BROWSER_EXPORTS) -o $@
 
-$(WISP_BROWSER_REAVER): web/reaver-bundle.mjs web/jplan-demo.plan $(shell find $(REAVER_SRC) -type f 2>/dev/null)
+$(WISP_BROWSER_REAVER): web/reaver-bundle.mjs web/jplan-demo.rvr $(JPLAN_DEMO_PLAN) $(shell find $(JPLAN_DEMO_SNAP) -type f 2>/dev/null) $(shell find $(REAVER_SRC) -type f 2>/dev/null)
 	@mkdir -p $(dir $@)
-	node web/reaver-bundle.mjs $(REAVER_SRC) $@
+	node web/reaver-bundle.mjs $(REAVER_SRC) $@ $(JPLAN_DEMO_DIR)
 
 $(BUILD_DIR)/tests/%.o: tests/%.c
 	@mkdir -p $(dir $@)

@@ -117,6 +117,29 @@
         enkiRelease = mkenki "pgo";
         enkiReleaseNoPGO = mkenki "release";
 
+        jplanDemo = stdenv.mkDerivation {
+          pname = "enki-jplan-demo";
+          version = "0.1.0";
+          inherit src;
+
+          nativeBuildInputs = [pkgs.nodejs];
+
+          dontConfigure = true;
+
+          buildPhase = ''
+            runHook preBuild
+            node web/compile-jplan-demo.mjs ${enkiReleaseNoPGO}/bin/wisp ${reaver}/src build/jplan-demo
+            runHook postBuild
+          '';
+
+          installPhase = ''
+            runHook preInstall
+            mkdir -p $out
+            cp -R build/jplan-demo/. $out/
+            runHook postInstall
+          '';
+        };
+
         mkBinPackage = name: extraInstall:
           pkgs.runCommand "enki-${name}-0.1.0" {
             meta = {
@@ -153,7 +176,7 @@
 
           buildPhase = ''
             runHook preBuild
-            make BUILD_TYPE=wasm REAVER_SRC=${reaver}/src lib wasm-test-binaries wasm-browser
+            make BUILD_TYPE=wasm REAVER_SRC=${reaver}/src JPLAN_DEMO_DIR=${jplanDemo} lib wasm-test-binaries wasm-browser
             node web/wisp-smoke.mjs build/wasm/browser/wisp.wasm .
             runHook postBuild
           '';
@@ -288,6 +311,7 @@
           enki-release = enkiReleaseNoPGO;
           wisp = wispPackage;
           assembler = assemblerPackage;
+          jplan-demo = jplanDemo;
           enki-wasm = enkiWasm;
           enki-debug = mkenki "debug";
           enki-asan = mkenki "asan";

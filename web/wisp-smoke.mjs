@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { JPlanHost } from "./jplan-host.mjs";
@@ -206,6 +207,82 @@ function runJplan(environment, objects, source) {
   }
 }
 
+function runJplanDispatch(environment, action, payload = "") {
+  environment.pendingAction = action;
+  environment.pendingPayload = payload;
+  const environmentToken = wormholes.adopt(environment);
+  const actionBytes = encoder.encode(action);
+  const payloadBytes = encoder.encode(payload);
+  const actionPtr = instance.exports.wisp_alloc(actionBytes.length || 1);
+  const payloadPtr = instance.exports.wisp_alloc(payloadBytes.length || 1);
+  u8().set(actionBytes, actionPtr);
+  u8().set(payloadBytes, payloadPtr);
+  try {
+    return instance.exports.wisp_jplan_dispatch(
+      environmentToken,
+      actionPtr,
+      actionBytes.length,
+      payloadPtr,
+      payloadBytes.length,
+    );
+  } finally {
+    free(actionPtr, actionBytes.length || 1);
+    free(payloadPtr, payloadBytes.length || 1);
+  }
+}
+
+class FakeNode {
+  constructor(tagName) {
+    this.tagName = tagName;
+    this.children = [];
+    this.dataset = {};
+    this.className = "";
+    this.textContent = "";
+    this.innerHTML = "";
+    this.value = "";
+    this.id = "";
+    this.listeners = new Map();
+  }
+
+  append(...children) {
+    for (const child of children) {
+      if (child.tagName === "#fragment") this.children.push(...child.children);
+      else this.children.push(child);
+    }
+  }
+
+  replaceChildren(...children) {
+    this.children = [];
+    this.append(...children);
+  }
+
+  addEventListener(name, listener) {
+    this.listeners.set(name, listener);
+  }
+
+  setAttribute(name, value) {
+    this[name] = value;
+  }
+
+  querySelector(selector) {
+    if (selector.startsWith("#") && this.id === selector.slice(1)) return this;
+    for (const child of this.children) {
+      const found = child.querySelector(selector);
+      if (found) return found;
+    }
+    return null;
+  }
+}
+
+function findTestId(node, testId) {
+  if (node.dataset.testid === testId) return node;
+  for (const child of node.children) {
+    const found = findTestId(child, testId);
+    if (found) return found;
+  }
+  return null;
+}
+
 function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
@@ -331,10 +408,15 @@ assert(rc !== 0 && errors().includes("deadlock"), "stuck did not report deadlock
 
 instance.exports.wisp_clear_files();
 setFileRoot("reaver/src");
-mount(
-  "reaver/src/plan/jplan-demo.plan",
-  await readFile(resolve(repoRoot, "web/jplan-demo.plan"), "utf8"),
+const browserBundle = JSON.parse(
+  await readFile(resolve(wasmPath, "..", "reaver-src.json"), "utf8"),
 );
+for (const file of browserBundle.files)
+  mount(
+    file.path,
+    decoder.decode(Buffer.from(file.base64, "base64")),
+    BigInt(file.mtime || 0),
+  );
 const environment = {
   result: undefined,
   acceptResult(value) {
@@ -363,5 +445,144 @@ assert(wormholes.size === 0, "JPLAN Error result leaked wormholes");
 rc = runJplan(environment, [], "return 7;");
 assert(rc === 0 && environment.result === 7, "JPLAN primitive result failed");
 assert(wormholes.size === 0, "JPLAN primitive result leaked wormholes");
+
+const document = {
+  body: new FakeNode("body"),
+  createElement: (tagName) => new FakeNode(tagName),
+  createDocumentFragment: () => new FakeNode("#fragment"),
+};
+globalThis.document = document;
+const uiEnvironment = {
+  root: document.body,
+  pendingAction: "",
+  pendingPayload: "",
+  dispatched: null,
+  dispatch(action, payload) {
+    this.dispatched = { action, payload };
+  },
+};
+
+rc = runJplanDispatch(uiEnvironment, "mount");
+assert(rc === 0, `JPLAN Reaver mount failed: ${errors()}`);
+assert(
+  findTestId(document.body, "reaver-app") !== null,
+  "Reaver did not instantiate the UI tree",
+);
+assert(
+  findTestId(document.body, "status")?.textContent.includes("Reaver"),
+  "Reaver status component was not rendered",
+);
+assert(wormholes.size === 0, "Reaver mount leaked wormholes");
+
+const demoSource = findTestId(document.body, "source").value;
+findTestId(document.body, "do-it").listeners.get("click")();
+assert(
+  uiEnvironment.dispatched.action === "do-it" &&
+    uiEnvironment.dispatched.payload === demoSource,
+  "Reaver did not wire the Do It event through its dispatch bridge",
+);
+rc = runJplanDispatch(uiEnvironment, "do-it", demoSource);
+assert(rc === 0, `JPLAN Reaver Do It failed: ${errors()}`);
+assert(uiEnvironment.state.counter.value === 1, "Reaver Do It did not mutate the model");
+assert(
+  findTestId(document.body, "result-value").textContent.includes("count"),
+  "Reaver did not publish the Do It result",
+);
+assert(
+  findTestId(document.body, "transcript").textContent.includes("counter is now 1"),
+  "Reaver transcript did not receive environment.print",
+);
+assert(wormholes.size === 0, "Reaver Do It leaked wormholes");
+
+// Exercise the browser entry point itself, including its WASI shims, queued
+// dispatch bridge, packaged source bundle, and event listener.  The direct
+// calls above intentionally remain lower-level runtime tests.
+const bootstrapDocument = {
+  body: new FakeNode("body"),
+  createElement: (tagName) => new FakeNode(tagName),
+  createDocumentFragment: () => new FakeNode("#fragment"),
+};
+globalThis.document = bootstrapDocument;
+const realFetch = globalThis.fetch;
+globalThis.fetch = async (input) => {
+  const url = String(input);
+  if (url.endsWith("/wisp.wasm"))
+    return new Response(await readFile(wasmPath), {
+      headers: { "content-type": "application/wasm" },
+    });
+  if (url.endsWith("/reaver-src.json"))
+    return new Response(
+      await readFile(resolve(wasmPath, "..", "reaver-src.json")),
+      { headers: { "content-type": "application/json" } },
+    );
+  return realFetch(input);
+};
+
+await import(new URL("./jplan.js?smoke", import.meta.url));
+for (
+  let i = 0;
+  i < 200 && findTestId(bootstrapDocument.body, "reaver-app") === null;
+  i++
+)
+  await new Promise((done) => setTimeout(done, 10));
+assert(
+  findTestId(bootstrapDocument.body, "reaver-app") !== null,
+  `JPLAN browser bootstrap did not render: ${bootstrapDocument.body.textContent}`,
+);
+
+findTestId(bootstrapDocument.body, "do-it").listeners.get("click")();
+for (let i = 0; i < 200; i++) {
+  const text =
+    findTestId(bootstrapDocument.body, "transcript")?.textContent ?? "";
+  if (text.includes("counter is now 1")) break;
+  await new Promise((done) => setTimeout(done, 10));
+}
+assert(
+  findTestId(bootstrapDocument.body, "transcript").textContent.includes(
+    "counter is now 1",
+  ),
+  "JPLAN browser bootstrap click did not dispatch and render",
+);
+
+findTestId(bootstrapDocument.body, "object-1").listeners.get("click")();
+for (let i = 0; i < 200; i++) {
+  if (
+    findTestId(bootstrapDocument.body, "object-1")?.className.includes(
+      "selected",
+    )
+  )
+    break;
+  await new Promise((done) => setTimeout(done, 10));
+}
+assert(
+  findTestId(bootstrapDocument.body, "object-1").className.includes("selected"),
+  "JPLAN browser object selection did not rerender",
+);
+
+findTestId(bootstrapDocument.body, "inspect").listeners.get("click")();
+for (let i = 0; i < 200; i++) {
+  const text =
+    findTestId(bootstrapDocument.body, "transcript")?.textContent ?? "";
+  if (text.includes("Inspect")) break;
+  await new Promise((done) => setTimeout(done, 10));
+}
+assert(
+  findTestId(bootstrapDocument.body, "transcript").textContent.includes("Inspect"),
+  "JPLAN browser Inspect click did not dispatch and render",
+);
+
+findTestId(bootstrapDocument.body, "reset").listeners.get("click")();
+for (let i = 0; i < 200; i++) {
+  const text =
+    findTestId(bootstrapDocument.body, "transcript")?.textContent ?? "";
+  if (text === "workspace mounted by Reaver") break;
+  await new Promise((done) => setTimeout(done, 10));
+}
+assert(
+  findTestId(bootstrapDocument.body, "transcript").textContent ===
+    "workspace mounted by Reaver",
+  "JPLAN browser Reset click did not restore the workspace",
+);
+globalThis.fetch = realFetch;
 
 console.log("wisp browser smoke: OK");

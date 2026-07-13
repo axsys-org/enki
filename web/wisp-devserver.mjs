@@ -13,6 +13,7 @@ let host = "127.0.0.1";
 let port = 8787;
 let root = "";
 let wasmPath = "";
+let jplanDir = resolve(repoRoot, "build/jplan-demo");
 
 function takeValue(flag, i) {
   if (i + 1 >= args.length) throw new Error(`${flag} needs a value`);
@@ -25,9 +26,11 @@ for (let i = 0; i < args.length; i++) {
   else if (arg === "--port") port = Number(takeValue(arg, i++));
   else if (arg === "--root") root = takeValue(arg, i++);
   else if (arg === "--wasm") wasmPath = takeValue(arg, i++);
+  else if (arg === "--jplan-dir")
+    jplanDir = resolve(takeValue(arg, i++));
   else if (arg === "-h" || arg === "--help") {
     console.log(
-      "usage: node web/wisp-devserver.mjs [--host HOST] [--port PORT] [--root DIR] [--wasm FILE]",
+      "usage: node web/wisp-devserver.mjs [--host HOST] [--port PORT] [--root DIR] [--wasm FILE] [--jplan-dir DIR]",
     );
     process.exit(0);
   } else {
@@ -70,13 +73,30 @@ async function dynamicReaverBundle() {
       base64: (await readFile(file)).toString("base64"),
     });
   }
-  const jplanDemo = resolve(here, "jplan-demo.plan");
+  const jplanDemo = resolve(jplanDir, "jplan-demo.plan");
   const jplanInfo = await stat(jplanDemo);
   files.push({
     path: "reaver/src/plan/jplan-demo.plan",
     mtime: Math.floor(jplanInfo.mtimeMs / 1000),
     base64: (await readFile(jplanDemo)).toString("base64"),
   });
+  const jplanSource = resolve(here, "jplan-demo.rvr");
+  const jplanSourceInfo = await stat(jplanSource);
+  files.push({
+    path: "reaver/src/reaver/jplan-demo.rvr",
+    mtime: Math.floor(jplanSourceInfo.mtimeMs / 1000),
+    base64: (await readFile(jplanSource)).toString("base64"),
+  });
+  const jplanSnap = resolve(jplanDir, "jplan-demo-snap");
+  for (const file of await collectFiles(jplanSnap)) {
+    const info = await stat(file);
+    const rel = file.slice(jplanSnap.length + 1).replaceAll("\\", "/");
+    files.push({
+      path: `reaver/src/plan/${rel}`,
+      mtime: Math.floor(info.mtimeMs / 1000),
+      base64: (await readFile(file)).toString("base64"),
+    });
+  }
   return `${JSON.stringify({ root: "reaver/src", files })}\n`;
 }
 
