@@ -212,7 +212,8 @@
             runHook preInstall
             mkdir -p $out
             cp -R build/coverage/html $out/html
-            cp build/coverage/coverage/enki.filtered.info $out/enki.info
+            sed "s#^SF:$PWD/#SF:#" \
+              build/coverage/coverage/enki.filtered.info > $out/enki.info
             runHook postInstall
           '';
         };
