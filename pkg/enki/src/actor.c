@@ -2,9 +2,11 @@
 
 #include <pthread.h>
 #include <setjmp.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "actor_internal.h"
@@ -568,6 +570,24 @@ static void er_service(er_scheduler* sys, er_actor* a) {
       }
     }
     pl_thread_deposit(t, result);
+    a->status = ER_ACTOR_RUNNABLE;
+    er_enqueue(a);
+    return;
+  }
+
+  if (er_op_is(name, "Sleep")) {
+    ax_assume(argc == 1, "Sleep arity");
+    /* Provisional staging op: a synchronous blocking sleep on the scheduler
+     * thread.  The result is the constant 0 (no external data), so it needs
+     * no event-log entry and replay simply skips the wait.  A non-blocking
+     * timer that parks only this actor is the natural settled version. */
+    if (sys->mode != ER_MODE_REPLAY) {
+      uint64_t secs = pl_nat_u64_clamp(args[0]);
+      struct timespec ts = {.tv_sec = (time_t)secs, .tv_nsec = 0}, rem;
+      while (nanosleep(&ts, &rem) == -1 && errno == EINTR)
+        ts = rem;
+    }
+    pl_thread_deposit(t, 0);
     a->status = ER_ACTOR_RUNNABLE;
     er_enqueue(a);
     return;

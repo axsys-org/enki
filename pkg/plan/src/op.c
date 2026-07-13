@@ -939,6 +939,10 @@ const pl_opdesc pl_ops[] = {
      * caller's own execution before the request parks. */
     OP83C("ReadFolder", 1, 0b1, 0, pl_op83_read_folder),
     OP83C("Fetch", 2, 0b11, 0b11, pl_op83_fetch),
+    /* provisional: a blocking sleep, serviced synchronously in pkg/enki.
+     * appended last so op indices and the buckets below do not shift;
+     * Sleep is index 126. */
+    OP83C("Sleep", 1, 0b1, 0, pl_op83_sleep),
 };
 
 const size_t pl_nops = sizeof(pl_ops) / sizeof(pl_ops[0]);
@@ -983,7 +987,7 @@ static const uint16_t pl_op82_argc1[] = {105, 106, 107, 108, 110, 111, 112,
 static const uint16_t pl_op82_argc2[] = {109, 116, 117, 119};
 static const uint16_t pl_op82_argc3[] = {120, 123};
 
-static const uint16_t pl_op83_argc1[] = {124};
+static const uint16_t pl_op83_argc1[] = {124, 126};
 static const uint16_t pl_op83_argc2[] = {125};
 
 static pl_opbucket pl_op_lookup_bucket(uint64_t opset, uint32_t argc) {
