@@ -304,6 +304,7 @@ void pl_store_free(pl_store* s) {
   if (s->be.close != NULL)
     s->be.close(s->be.ctx);
   ax_hmfree(s->intern);
+  ax_arrfree(s->loading);
   ax_arena_destroy(s->region);
   pthread_mutex_destroy(&s->mu);
   free(s);

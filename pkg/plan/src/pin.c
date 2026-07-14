@@ -1,4 +1,5 @@
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "axsys/allocator.h"
@@ -188,19 +189,6 @@ static pl_val store_copy(pl_store* s, copy_entry** map, pl_val v) {
 
 static pl_val pin_from_canon(pl_store* s, canon_ctx* c, pl_val body) {
   size_t nsub = (size_t)ax_arrlen(c->subpins);
-  /* assemble the full canonical buffer: header + body bytes */
-  uint8_t* full = NULL;
-  ax_arrpush(full, PL_CANON_VERSION);
-  for (int i = 0; i < 8; i++)
-    ax_arrpush(full, (uint8_t)((uint64_t)nsub >> (8 * i)));
-  for (size_t j = 0; j < nsub; j++) {
-    const uint8_t* h = pl_pin_hash(c->subpins[j]);
-    for (int i = 0; i < 32; i++)
-      ax_arrpush(full, h[i]);
-  }
-  for (ptrdiff_t i = 0; i < ax_arrlen(c->buf); i++)
-    ax_arrpush(full, c->buf[i]);
-
   /* the content hash is SHA-256 of the canonical TEXT (mkPin) */
   uint8_t hash[32];
   {
@@ -213,6 +201,28 @@ static pl_val pin_from_canon(pl_store* s, canon_ctx* c, pl_val body) {
   pl_store_lock(s);
   pl_val pin = pl_store_intern_get(s, hash);
   if (pin == 0) {
+    if (s->format == PL_STORE_FORMAT_SILO_V1) {
+      char err[192] = {0};
+      ax_assume(
+          pl_store_silo_put(s, hash, body, c->subpins, nsub, err, sizeof(err)),
+          "Silo store put failed: %s", err);
+    } else {
+      /* Legacy persistence bytes: fixed header + direct pin table + body. */
+      uint8_t* full = NULL;
+      ax_arrpush(full, PL_CANON_VERSION);
+      for (int i = 0; i < 8; i++)
+        ax_arrpush(full, (uint8_t)((uint64_t)nsub >> (8 * i)));
+      for (size_t j = 0; j < nsub; j++) {
+        const uint8_t* h = pl_pin_hash(c->subpins[j]);
+        for (int i = 0; i < 32; i++)
+          ax_arrpush(full, h[i]);
+      }
+      for (ptrdiff_t i = 0; i < ax_arrlen(c->buf); i++)
+        ax_arrpush(full, c->buf[i]);
+      ax_assume(pl_store_backend_put(s, hash, full, (size_t)ax_arrlen(full)),
+                "store backend put failed");
+      ax_arrfree(full);
+    }
     copy_entry* map = NULL;
     pl_val body_copy = store_copy(s, &map, body);
     ax_hmfree(map);
@@ -220,11 +230,8 @@ static pl_val pin_from_canon(pl_store* s, canon_ctx* c, pl_val body) {
     pl_store_intern_put(s, hash, pin);
     if (pl_tag(body_copy) == PL_TAG_LAW)
       pl_store_put_code(s, hash);
-    ax_assume(pl_store_backend_put(s, hash, full, (size_t)ax_arrlen(full)),
-              "store backend put failed");
   }
   pl_store_unlock(s);
-  ax_arrfree(full);
   return pin;
 }
 
@@ -241,7 +248,8 @@ pl_val pl_pin(pl_thread* t, pl_val v) {
 
   canon_ctx c = {0};
   collect_subpins(&c, v);
-  serialize(&c, v);
+  if (s->format == PL_STORE_FORMAT_LEGACY_V1)
+    serialize(&c, v);
   pl_val pin = pin_from_canon(s, &c, v);
   ax_arrfree(c.buf);
   ax_arrfree(c.subpins);
@@ -253,7 +261,8 @@ pl_val pl_pin(pl_thread* t, pl_val v) {
 pl_val pl_store_pin_of_nat(pl_store* s, uint64_t n) {
   ax_assume(n <= PL_NAT63_MAX, "pin_of_nat: too large");
   canon_ctx c = {0};
-  serialize(&c, n);
+  if (s->format == PL_STORE_FORMAT_LEGACY_V1)
+    serialize(&c, n);
   pl_val pin = pin_from_canon(s, &c, n);
   ax_arrfree(c.buf);
   ax_arrfree(c.subpins);
@@ -342,14 +351,127 @@ static pl_val deser(pl_store* s, deser_ctx* d) {
   }
 }
 
+static bool silo_hash_loading(pl_store* s, const uint8_t hash[32]) {
+  for (ptrdiff_t i = 0; i < ax_arrlen(s->loading); i++)
+    if (memcmp(s->loading[i].b, hash, 32) == 0)
+      return true;
+  return false;
+}
+
+static bool load_silo_pin(pl_thread* t, pl_store* s, const uint8_t hash[32],
+                          pl_val* out, char* err, size_t err_cap) {
+  pl_val hit = pl_store_intern_get(s, hash);
+  if (hit != 0) {
+    *out = hit;
+    return true;
+  }
+  if (silo_hash_loading(s, hash)) {
+    (void)snprintf(err, err_cap, "cyclic Silo PIN dependency");
+    return false;
+  }
+  pl_hash loading;
+  memcpy(loading.b, hash, 32);
+  ax_arrpush(s->loading, loading);
+
+  pl_silo_reader reader = {0};
+  pl_silo_scan scan = {0};
+  pl_val* resolved = NULL;
+  pl_val* subpins = NULL;
+  size_t mark = 0;
+  bool marked = false;
+  bool reader_open = false;
+  bool ok = pl_store_silo_open(s, hash, &reader, err, err_cap);
+  if (!ok)
+    goto done;
+  reader_open = true;
+  if (!pl_silo_scan_stream(&reader, false, &scan, err, err_cap)) {
+    ok = false;
+    goto done;
+  }
+  resolved = calloc(scan.pin_count ? scan.pin_count : 1, sizeof(*resolved));
+  if (resolved == NULL) {
+    (void)snprintf(err, err_cap, "out of memory resolving Silo PINs");
+    ok = false;
+    goto done;
+  }
+  for (size_t i = 0; i < scan.used_count; i++) {
+    uint32_t index = scan.used[i];
+    pl_val sub;
+    if (!load_silo_pin(t, s, scan.pins[index].b, &sub, err, err_cap)) {
+      ok = false;
+      goto done;
+    }
+    resolved[index] = sub;
+    ax_arrpush(subpins, sub);
+  }
+
+  mark = pl_store_mark(s);
+  marked = true;
+  pl_val body;
+  if (!pl_silo_build_stream(&reader, s, &scan, resolved, &body, err, err_cap)) {
+    ok = false;
+    goto done;
+  }
+
+  size_t text_n;
+  char* text = pl_canonize(ax_allocator_system(), body, &text_n);
+  uint8_t actual[32];
+  ax_sha256((const uint8_t*)text, text_n, actual);
+  ax_free(ax_allocator_system(), text);
+  if (memcmp(actual, hash, 32) != 0) {
+    (void)snprintf(err, err_cap,
+                   "Silo value does not match requested semantic pin hash");
+    ok = false;
+    goto done;
+  }
+
+  size_t pin_cells = PL_PIN_CELLS((uint32_t)scan.used_count);
+  size_t region_mark = pl_store_mark(s);
+  if (region_mark > s->region->cap_s ||
+      pin_cells > (s->region->cap_s - region_mark) / sizeof(pl_cell)) {
+    (void)snprintf(err, err_cap,
+                   "decoded PIN exceeds remaining store-region capacity");
+    ok = false;
+    goto done;
+  }
+
+  *out = pl_store_mk_pin(s, hash, body, (uint32_t)scan.used_count, subpins);
+  pl_store_intern_put(s, hash, *out);
+  marked = false; /* the successful allocations now belong to the store */
+  ok = true;
+
+done:
+  if (!ok && marked)
+    pl_store_release(s, mark);
+  if (reader_open)
+    pl_store_silo_close_reader(&reader);
+  pl_silo_scan_free(&scan);
+  free(resolved);
+  ax_arrfree(subpins);
+  ax_assume(ax_arrlen(s->loading) > 0, "Silo loading stack underflow");
+  (void)stbds_arrpop(s->loading);
+  if (ok && pl_tag(pl_pin_body(pl_ptr(*out))) == PL_TAG_LAW)
+    pl_store_put_code(s, hash);
+  return ok;
+}
+
 pl_val pl_store_load(pl_thread* t, const uint8_t hash[32]) {
   pl_store* s = pl_heap_store(t->heap);
-  pl_store_lock(s);
   ax_assume(s != NULL, "store_load requires a store");
+  pl_store_lock(s);
   pl_val hit = pl_store_intern_get(s, hash);
   if (hit != 0) {
     pl_store_unlock(s);
     return hit;
+  }
+  if (s->format == PL_STORE_FORMAT_SILO_V1) {
+    char err[192] = {0};
+    pl_val pin = 0;
+    bool ok = load_silo_pin(t, s, hash, &pin, err, sizeof(err));
+    pl_store_unlock(s);
+    if (!ok)
+      pl_raise_msgf(t, "store_load: %s", err[0] != '\0' ? err : "bad Silo");
+    return pin;
   }
   uint8_t* bytes;
   size_t n;

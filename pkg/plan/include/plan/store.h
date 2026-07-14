@@ -26,6 +26,11 @@ typedef struct pl_hash {
   uint8_t b[32];
 } pl_hash;
 
+typedef enum pl_store_format {
+  PL_STORE_FORMAT_LEGACY_V1 = 0,
+  PL_STORE_FORMAT_SILO_V1 = 1,
+} pl_store_format;
+
 typedef struct pl_store_backend {
   void* ctx;
   /* get returns a malloc'd buffer the caller frees; false if missing. */
@@ -51,7 +56,9 @@ typedef struct pl_store {
   uint8_t* lo;
   uint8_t* hi;
   pl_intern_entry* intern; /* stb_ds hashmap: hash -> PIN val */
+  pl_hash* loading;        /* active Silo loads; cycle detection */
   pl_store_backend be;
+  pl_store_format format;
   pl_val ix0_expr, ix1_expr;
   uint8_t compiler[32];
   pl_thread* compiler_t;
@@ -63,6 +70,8 @@ pl_store* pl_store_new(pl_store_backend backend);
 pl_store* pl_store_new_mem(void);
 /* NULL on failure (path must be an existing directory). */
 pl_store* pl_store_new_lmdb(const char* path, size_t map_size);
+/* Canonical Silo streams in pins.pack, indexed by LMDB. */
+pl_store* pl_store_new_silo(const char* path, size_t map_size);
 void pl_store_free(pl_store* s);
 
 /* Address-range test used by the collector (store vals are terminal). */
