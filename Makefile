@@ -2,7 +2,7 @@ BUILD_TYPE ?= debug
 PROFILE ?=
 CC ?= cc
 PREFIX ?= /usr/local
-BUILD_PROFILE_SUFFIX := $(if $(PROFILE),-$(PROFILE),$(if $(filter profile,$(BUILD_TYPE)),-plain,))
+BUILD_PROFILE_SUFFIX := $(if $(PROFILE),-$(PROFILE),)
 BUILD_DIR ?= build/$(BUILD_TYPE)$(BUILD_PROFILE_SUFFIX)
 AR ?= ar
 

@@ -56,6 +56,7 @@ typedef struct pl_store {
   uint8_t* lo;
   uint8_t* hi;
   pl_intern_entry* intern; /* stb_ds hashmap: hash -> PIN val */
+  pl_val* pins;            /* every runtime PIN, including provisional ones */
   pl_hash* loading;        /* active Silo loads; cycle detection */
   pl_store_backend be;
   pl_store_format format;
@@ -78,15 +79,21 @@ void pl_store_free(pl_store* s);
 bool pl_store_owns(pl_store* s, pl_val v);
 
 /*
- * Pin a value: nf, canonize + SHA-256, intern.  Returns the
- * (store-resident, deduplicated) PIN.  v is rooted internally for the
- * normalization; the caller's copy may be stale afterwards and should
- * be re-fetched from a root if reused.
+ * Pin a value and copy it into the non-moving store region.  Legacy stores
+ * immediately hash, persist, and intern it.  Silo PINs remain provisional
+ * until Save finalizes their reachable closure.
  */
 pl_val pl_pin(pl_thread* t, pl_val v);
 
-/* Hash bytes of a PIN value (32 bytes, borrowed). */
+/* True when a PIN has a persistent content hash. */
+bool pl_pin_is_hashed(pl_val pin);
+
+/* Hash bytes of a PIN value (32 bytes, borrowed), or NULL while provisional. */
 const uint8_t* pl_pin_hash(pl_val pin);
+
+/* Finalize and persist a Silo PIN closure, then publish it as the root. */
+bool pl_store_save_root(pl_store* s, pl_val pin, uint8_t out_hash[32],
+                        char* err, size_t err_cap);
 
 /* Intern-or-load a pin by hash; raises if the backend lacks it. */
 pl_val pl_store_load(pl_thread* t, const uint8_t hash[32]);

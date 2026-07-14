@@ -41,6 +41,10 @@ typedef struct pl_silo_scan {
 bool pl_silo_encode(pl_silo_writer* w, pl_val root, const pl_val* subpins,
                     size_t nsub, char* err, size_t err_cap);
 
+/* SHA-256 of the canonical stream produced by pl_silo_encode. */
+bool pl_silo_hash(pl_val root, const pl_val* subpins, size_t nsub,
+                  uint8_t out[32], char* err, size_t err_cap);
+
 /* General-v1 validation.  When canonical is true, also enforce the unique
  * canonical profile.  The scan owns malloc'd pins/used arrays until freed. */
 bool pl_silo_scan_stream(pl_silo_reader* r, bool canonical, pl_silo_scan* scan,

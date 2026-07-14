@@ -7,8 +7,8 @@
 
 /*
  * Canonical-text rendering, checked against hand-derived reference
- * (Print.hs) output.  These bytes are normative: a pin's content hash is
- * SHA-256 of pl_canonize, and Save writes pl_canonize to disk.
+ * (Print.hs) output.  These bytes are normative for legacy stores and text
+ * snapshots; Silo stores use canonical Silo bytes for identity.
  */
 
 static char* show(pl_thread* t, pl_val v) {
@@ -103,8 +103,8 @@ Test(canon, canonize_module_text) {
 }
 
 Test(canon, pin_hash_is_canonical_text) {
-  /* The pin hash is SHA-256 of the canonical text: re-pinning a
-   * structurally identical graph interns to the same pin. */
+  /* The legacy memory-store pin hash is SHA-256 of canonical text:
+   * re-pinning a structurally identical graph interns to the same pin. */
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
   size_t base = t->vsp;

@@ -3,9 +3,10 @@
 
 /*
  * Canonical text rendering of normalized PLAN values, a faithful port of
- * the reference Print.hs.  These are the snapshot bytes: a pin's content
- * hash is SHA-256 of pl_canonize, and the Save op writes that same text
- * to snap/<base58>.plan, where any PLAN assembler can reload it.
+ * the reference Print.hs.  These are the legacy snapshot bytes: legacy
+ * stores hash pl_canonize with SHA-256, and text-mode Save writes that same
+ * text to snap/<base58>.plan, where any PLAN assembler can reload it.  Silo
+ * identity instead hashes the complete canonical Silo stream.
  *
  * Inputs must be deeply normal (no thunks); both functions are pure
  * reads of the graph and allocate only through the given allocator.

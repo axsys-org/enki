@@ -34,7 +34,9 @@ typedef struct pack_reader {
 
 static const uint8_t index_magic[8] = {'p', 'i', 'n', 'p', 'a', 'c', 'k', 1};
 static const uint8_t format_key[] = "format";
-static const uint8_t format_value[] = {'S', 'I', 'L', 'O', 1};
+/* Persistence revision 2 changes object identity from canonical text to the
+ * SHA-256 of the canonical Silo stream.  Revision-1 stores are rejected. */
+static const uint8_t format_value[] = {'S', 'I', 'L', 'O', 2};
 static const uint8_t root_key[] = "root";
 
 static bool pack_error(char* err, size_t cap, const char* fmt, ...) {
@@ -223,8 +225,17 @@ bool pl_store_silo_put(pl_store* store, const uint8_t hash[32], pl_val root,
   MDB_val old;
   int rc = mdb_get(txn, b->objects, &key, &old);
   if (rc == 0) {
+    uint64_t off = 0, len = 0;
+    struct stat indexed;
+    bool valid = index_decode(&old, &off, &len) && len != 0 &&
+                 fstat(b->pack_fd, &indexed) == 0 && indexed.st_size >= 0 &&
+                 off <= (uint64_t)indexed.st_size &&
+                 len <= (uint64_t)indexed.st_size - off &&
+                 off <= (uint64_t)INT64_MAX && len <= (uint64_t)INT64_MAX - off;
     mdb_txn_abort(txn);
-    return true;
+    return valid ? true
+                 : pack_error(err, err_cap,
+                              "existing Silo object index is invalid");
   }
   if (rc != MDB_NOTFOUND) {
     mdb_txn_abort(txn);

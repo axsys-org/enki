@@ -661,8 +661,13 @@ static bool pl_eq_deep(pl_val a, pl_val b) {
   if (pl_tag(a) != pl_tag(b))
     return false;
   switch (pl_tag(a)) {
-  case PL_TAG_PIN:
-    return false; /* interned: equal pins are pointer-equal */
+  case PL_TAG_PIN: {
+    const uint8_t* ah = pl_pin_hash(a);
+    const uint8_t* bh = pl_pin_hash(b);
+    if (ah != NULL && bh != NULL)
+      return memcmp(ah, bh, 32) == 0;
+    return pl_eq_deep(pl_pin_body(pl_ptr(a)), pl_pin_body(pl_ptr(b)));
+  }
   case PL_TAG_LAW: {
     pl_cell *pa = pl_ptr(a), *pb = pl_ptr(b);
     return pl_law_arity(pa) == pl_law_arity(pb) &&
@@ -692,14 +697,15 @@ static pl_val op_equal(pl_thread* t, size_t ab) {
 }
 
 static pl_val op_install(pl_thread* t, size_t ab) {
-  uint8_t hash[32];
   pl_val a = pl_resolve(ARG(0));
   pl_cell* p = pl_as(PL_TAG_PIN, a);
   if (!p) {
     fprintf(stderr, "compiler not pin, ignoring\n");
     return 0;
   }
-  memcpy(hash, pl_pin_hash_bytes(p), 32);
+  const uint8_t* hash = pl_pin_hash(a);
+  if (hash == NULL)
+    pl_raise_msg(t, "Install: compiler PIN must be saved first");
   pl_store* s = pl_heap_store(t->heap);
   s->compiler_h = pl_heap_new(((size_t)1 << 26), s);
   s->compiler_t = pl_thread_new(s->compiler_h);
@@ -709,13 +715,14 @@ static pl_val op_install(pl_thread* t, size_t ab) {
 
 static pl_val op_compile(pl_thread* t, size_t ab) {
   pl_val a = pl_resolve(ARG(0));
-  uint8_t hash[32];
   pl_cell* p = pl_as(PL_TAG_PIN, a);
   if (!p) {
     fprintf(stderr, "no pin, failing compile\n");
     return 0;
   }
-  memcpy(hash, pl_pin_hash_bytes(p), 32);
+  const uint8_t* hash = pl_pin_hash(a);
+  if (hash == NULL)
+    pl_raise_msg(t, "Compile: PIN must be saved first");
   pl_store_put_code(pl_heap_store(t->heap), hash);
 
   return 1;
@@ -757,6 +764,15 @@ static pl_val op_save(pl_thread* t, size_t ab) {
   pl_cell* pp = pl_as(PL_TAG_PIN, ARG(0));
   if (pp == NULL)
     pl_raise_msg(t, "Save: expected a pin");
+  pl_store* store = pl_heap_store(t->heap);
+  if (store->format == PL_STORE_FORMAT_SILO_V1) {
+    char err[192] = {0};
+    if (!pl_store_save_root(store, ARG(0), NULL, err, sizeof(err)))
+      pl_raise_msgf(t, "Save: %s", err[0] != '\0' ? err : "Silo failure");
+    pl_gc_collect_now(t);
+    return 0;
+  }
+
   (void)mkdir("./snap", 0777); /* EEXIST is fine */
   save_pin_only(t, ARG(0));
 

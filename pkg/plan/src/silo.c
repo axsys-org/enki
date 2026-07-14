@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <openssl/evp.h>
+
 #include "axsys/assume.h"
 #include "axsys/ds.h"
 #include "axsys/sha256.h"
@@ -180,14 +182,9 @@ static bool srewind(pl_silo_reader* r, char* err, size_t cap) {
 /* Canonical encoder                                                        */
 
 typedef struct enc_pin_idx {
-  pl_val key;
+  pl_hash key;
   uint32_t value;
 } enc_pin_idx;
-
-typedef struct enc_pin_hash {
-  pl_hash key;
-  uint8_t value;
-} enc_pin_hash;
 
 typedef struct silo_enc {
   pl_silo_writer* w;
@@ -437,7 +434,13 @@ static bool encode_node(silo_enc* e, pl_val v, uint32_t depth) {
   pl_cell* p = pl_ptr(v);
   switch (pl_tag(v)) {
   case PL_TAG_PIN: {
-    ptrdiff_t at = ax_hmgeti(e->pin_idx, v);
+    const uint8_t* bytes = pl_pin_hash(v);
+    if (bytes == NULL)
+      return silo_error(e->err, e->err_cap,
+                        "cannot encode a provisional PIN reference");
+    pl_hash hash;
+    memcpy(hash.b, bytes, sizeof(hash.b));
+    ptrdiff_t at = ax_hmgeti(e->pin_idx, hash);
     if (at < 0)
       return silo_error(e->err, e->err_cap,
                         "PIN missing from canonical Silo table");
@@ -475,36 +478,64 @@ bool pl_silo_encode(pl_silo_writer* w, pl_val root, const pl_val* subpins,
   if (nsub > PL_SILO_MAX_PIN_COUNT)
     return silo_error(err, err_cap, "too many Silo pins");
   silo_enc e = {.w = w, .err = err, .err_cap = err_cap};
-  enc_pin_hash* hashes = NULL;
   for (size_t i = 0; i < nsub; i++) {
     if (pl_tag(subpins[i]) != PL_TAG_PIN) {
       ax_hmfree(e.pin_idx);
-      ax_hmfree(hashes);
       return silo_error(err, err_cap, "non-PIN in Silo pin table");
     }
-    if (ax_hmgeti(e.pin_idx, subpins[i]) >= 0) {
+    const uint8_t* bytes = pl_pin_hash(subpins[i]);
+    if (bytes == NULL) {
       ax_hmfree(e.pin_idx);
-      ax_hmfree(hashes);
-      return silo_error(err, err_cap, "duplicate Silo pin table entry");
+      return silo_error(err, err_cap, "provisional PIN in Silo pin table");
     }
     pl_hash hash;
-    memcpy(hash.b, pl_pin_hash(subpins[i]), sizeof(hash.b));
-    if (ax_hmgeti(hashes, hash) >= 0) {
+    memcpy(hash.b, bytes, sizeof(hash.b));
+    if (ax_hmgeti(e.pin_idx, hash) >= 0) {
       ax_hmfree(e.pin_idx);
-      ax_hmfree(hashes);
       return silo_error(err, err_cap, "duplicate Silo pin table hash");
     }
-    ax_hmput(e.pin_idx, subpins[i], (uint32_t)i);
-    ax_hmput(hashes, hash, 1);
+    ax_hmput(e.pin_idx, hash, (uint32_t)i);
   }
   bool ok = swrite(w, silo_magic, sizeof(silo_magic), err, err_cap) &&
             swrite_varnat(w, nsub, err, err_cap);
-  for (size_t i = 0; ok && i < nsub; i++)
-    ok = swrite(w, pl_pin_hash(subpins[i]), 32, err, err_cap);
+  for (size_t i = 0; ok && i < nsub; i++) {
+    const uint8_t* hash = pl_pin_hash(subpins[i]);
+    ok = hash != NULL && swrite(w, hash, 32, err, err_cap);
+  }
   if (ok)
     ok = encode_node(&e, root, 0);
   ax_hmfree(e.pin_idx);
-  ax_hmfree(hashes);
+  return ok;
+}
+
+typedef struct silo_hash_sink {
+  EVP_MD_CTX* digest;
+} silo_hash_sink;
+
+static bool silo_hash_write(void* ctx, const uint8_t* bytes, size_t len) {
+  silo_hash_sink* sink = ctx;
+  return EVP_DigestUpdate(sink->digest, bytes, len) == 1;
+}
+
+bool pl_silo_hash(pl_val root, const pl_val* subpins, size_t nsub,
+                  uint8_t out[32], char* err, size_t err_cap) {
+  if (out == NULL)
+    return silo_error(err, err_cap, "invalid Silo hash output");
+  EVP_MD_CTX* digest = EVP_MD_CTX_new();
+  if (digest == NULL)
+    return silo_error(err, err_cap, "cannot allocate Silo hash context");
+  if (EVP_DigestInit_ex(digest, EVP_sha256(), NULL) != 1) {
+    EVP_MD_CTX_free(digest);
+    return silo_error(err, err_cap, "cannot initialize Silo hash");
+  }
+
+  silo_hash_sink sink = {.digest = digest};
+  pl_silo_writer writer = {.ctx = &sink, .write = silo_hash_write};
+  bool ok = pl_silo_encode(&writer, root, subpins, nsub, err, err_cap);
+  unsigned int hash_len = 0;
+  if (ok && (EVP_DigestFinal_ex(digest, out, &hash_len) != 1 || hash_len != 32))
+    ok = silo_error(err, err_cap, "cannot finalize Silo hash");
+  EVP_MD_CTX_free(digest);
   return ok;
 }
 

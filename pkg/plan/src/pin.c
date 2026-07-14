@@ -1,5 +1,6 @@
 #include <stdlib.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <string.h>
 
 #include "axsys/allocator.h"
@@ -14,16 +15,16 @@
 #include "store_internal.h"
 
 /*
- * Pinning.  The value is normalized, rendered to the canonical
- * snapshot text (plan/canon.h), hashed with SHA-256 — exactly the
- * reference mkPin — then interned, and on an intern miss deep-copied
- * into the non-moving store region.  Nothing here allocates on the
- * moving heap, so the source graph is stable and bare pointers are safe
- * throughout.
+ * Pinning.  The value is normalized and deep-copied into the non-moving store
+ * region.  Legacy stores immediately hash and intern it using the reference
+ * canonical snapshot text.  Silo stores leave it provisional until Save,
+ * which hashes the complete canonical stream and persists the reachable PIN
+ * closure.  Nothing here allocates on the moving heap, so the source graph is
+ * stable and bare pointers are safe throughout.
  *
  * The persistence backend keeps a binary rendering (below), because
  * rehydration must not depend on the enki-layer assembler; it is keyed
- * by the same canonical-text hash.
+ * by the selected serialization hash.
  *
  * Backend byte format (version 1):
  *   u8  version
@@ -187,42 +188,42 @@ static pl_val store_copy(pl_store* s, copy_entry** map, pl_val v) {
 
 /* ── Pinning ───────────────────────────────────────────────────────────── */
 
-static pl_val pin_from_canon(pl_store* s, canon_ctx* c, pl_val body) {
+static pl_val pin_from_normal(pl_store* s, canon_ctx* c, pl_val body) {
   size_t nsub = (size_t)ax_arrlen(c->subpins);
-  /* the content hash is SHA-256 of the canonical TEXT (mkPin) */
-  uint8_t hash[32];
-  {
-    size_t text_n;
-    char* text = pl_canonize(ax_allocator_system(), body, &text_n);
-    ax_sha256((const uint8_t*)text, text_n, hash);
-    ax_free(ax_allocator_system(), text);
+  if (s->format == PL_STORE_FORMAT_SILO_V1) {
+    ax_assume(nsub <= PL_SILO_MAX_PIN_COUNT,
+              "Silo PIN exceeds the direct PIN-table limit");
+    copy_entry* map = NULL;
+    pl_val body_copy = store_copy(s, &map, body);
+    ax_hmfree(map);
+    return pl_store_mk_pin(s, NULL, body_copy, (uint32_t)nsub, c->subpins);
   }
+
+  /* Legacy identity is SHA-256 of canonical text (reference mkPin). */
+  uint8_t hash[32];
+  size_t text_n;
+  char* text = pl_canonize(ax_allocator_system(), body, &text_n);
+  ax_sha256((const uint8_t*)text, text_n, hash);
+  ax_free(ax_allocator_system(), text);
 
   pl_store_lock(s);
   pl_val pin = pl_store_intern_get(s, hash);
   if (pin == 0) {
-    if (s->format == PL_STORE_FORMAT_SILO_V1) {
-      char err[192] = {0};
-      ax_assume(
-          pl_store_silo_put(s, hash, body, c->subpins, nsub, err, sizeof(err)),
-          "Silo store put failed: %s", err);
-    } else {
-      /* Legacy persistence bytes: fixed header + direct pin table + body. */
-      uint8_t* full = NULL;
-      ax_arrpush(full, PL_CANON_VERSION);
-      for (int i = 0; i < 8; i++)
-        ax_arrpush(full, (uint8_t)((uint64_t)nsub >> (8 * i)));
-      for (size_t j = 0; j < nsub; j++) {
-        const uint8_t* h = pl_pin_hash(c->subpins[j]);
-        for (int i = 0; i < 32; i++)
-          ax_arrpush(full, h[i]);
-      }
-      for (ptrdiff_t i = 0; i < ax_arrlen(c->buf); i++)
-        ax_arrpush(full, c->buf[i]);
-      ax_assume(pl_store_backend_put(s, hash, full, (size_t)ax_arrlen(full)),
-                "store backend put failed");
-      ax_arrfree(full);
+    /* Legacy persistence bytes: fixed header + direct pin table + body. */
+    uint8_t* full = NULL;
+    ax_arrpush(full, PL_CANON_VERSION);
+    for (int i = 0; i < 8; i++)
+      ax_arrpush(full, (uint8_t)((uint64_t)nsub >> (8 * i)));
+    for (size_t j = 0; j < nsub; j++) {
+      const uint8_t* h = pl_pin_hash(c->subpins[j]);
+      for (int i = 0; i < 32; i++)
+        ax_arrpush(full, h[i]);
     }
+    for (ptrdiff_t i = 0; i < ax_arrlen(c->buf); i++)
+      ax_arrpush(full, c->buf[i]);
+    ax_assume(pl_store_backend_put(s, hash, full, (size_t)ax_arrlen(full)),
+              "store backend put failed");
+    ax_arrfree(full);
     copy_entry* map = NULL;
     pl_val body_copy = store_copy(s, &map, body);
     ax_hmfree(map);
@@ -233,6 +234,143 @@ static pl_val pin_from_canon(pl_store* s, canon_ctx* c, pl_val body) {
   }
   pl_store_unlock(s);
   return pin;
+}
+
+/* ── Silo Save-time finalization ───────────────────────────────────────── */
+
+typedef struct save_visit {
+  pl_val key;
+  uint8_t value; /* 1 = active, 2 = complete */
+} save_visit;
+
+typedef struct save_ctx {
+  pl_store* store;
+  save_visit* visit;
+  pl_intern_entry* compile; /* unique finalized LAW hashes */
+  char* err;
+  size_t err_cap;
+} save_ctx;
+
+static bool save_error(save_ctx* c, const char* fmt, ...) {
+  if (c->err != NULL && c->err_cap != 0) {
+    va_list ap;
+    va_start(ap, fmt);
+    (void)vsnprintf(c->err, c->err_cap, fmt, ap);
+    va_end(ap);
+  }
+  return false;
+}
+
+static bool save_silo_pin(save_ctx* c, pl_val pin, uint32_t depth) {
+  if (depth > PL_SILO_MAX_DEPTH)
+    return save_error(c, "Silo PIN closure exceeds depth %u",
+                      PL_SILO_MAX_DEPTH);
+  pl_cell* p = pl_as(PL_TAG_PIN, pin);
+  if (p == NULL || !pl_store_owns(c->store, pin))
+    return save_error(c, "Silo Save encountered a non-store PIN");
+
+  ptrdiff_t seen_at = ax_hmgeti(c->visit, pin);
+  if (seen_at >= 0) {
+    if (c->visit[seen_at].value == 1)
+      return save_error(c, "cyclic Silo PIN dependency");
+    return true;
+  }
+  ax_hmput(c->visit, pin, 1);
+
+  uint32_t nsub = pl_pin_npins(p);
+  pl_val* subpins = pl_pin_subpins(p);
+  for (uint32_t i = 0; i < nsub; i++)
+    if (!save_silo_pin(c, subpins[i], depth + 1))
+      return false;
+
+  /* Provisional values may contain distinct, semantically equal PIN
+   * pointers.  Once their children have hashes, compact the direct table by
+   * hash while preserving first occurrence. */
+  pl_intern_entry* unique = NULL;
+  uint32_t out_n = 0;
+  for (uint32_t i = 0; i < nsub; i++) {
+    const uint8_t* hash = pl_pin_hash(subpins[i]);
+    if (hash == NULL) {
+      ax_hmfree(unique);
+      return save_error(c, "Silo child PIN was not finalized");
+    }
+    pl_hash key;
+    memcpy(key.b, hash, 32);
+    if (ax_hmgeti(unique, key) < 0) {
+      ax_hmput(unique, key, subpins[i]);
+      subpins[out_n++] = subpins[i];
+    }
+  }
+  ax_hmfree(unique);
+  p[0] = pl_hdr_set_meta(p[0], out_n);
+
+  uint8_t pending_hash[32];
+  const uint8_t* hash = pl_pin_hash(pin);
+  if (hash == NULL) {
+    if (!pl_silo_hash(pl_pin_body(p), subpins, out_n, pending_hash, c->err,
+                      c->err_cap))
+      return false;
+    hash = pending_hash;
+  }
+
+  /* pl_store_silo_put performs the second streaming encode only on an index
+   * miss.  Do not expose the hash on the runtime PIN until that record is
+   * durably indexed. */
+  if (!pl_store_silo_put(c->store, hash, pl_pin_body(p), subpins, out_n, c->err,
+                         c->err_cap))
+    return false;
+
+  if (!pl_pin_is_hashed(pin)) {
+    memcpy(pl_pin_hash_bytes(p), pending_hash, 32);
+    p[0] = pl_hdr_set_flag(p[0], PL_F_PIN_HASHED);
+    if (pl_store_intern_get(c->store, pending_hash) == 0)
+      pl_store_intern_put(c->store, pending_hash, pin);
+  }
+
+  /* A previous Save may have indexed and finalized this law before failing
+   * to publish its root.  Queue any still-interpreted law in the closure so a
+   * successful retry performs the deferred compilation. */
+  if (c->store->compiler_f && pl_tag(pl_pin_body(p)) == PL_TAG_LAW &&
+      pl_pin_code(p) == NULL) {
+    pl_hash key;
+    memcpy(key.b, hash, 32);
+    if (ax_hmgeti(c->compile, key) < 0)
+      ax_hmput(c->compile, key, pin);
+  }
+
+  ptrdiff_t at = ax_hmgeti(c->visit, pin);
+  ax_assume(at >= 0, "Silo Save visit disappeared");
+  c->visit[at].value = 2;
+  return true;
+}
+
+bool pl_store_save_root(pl_store* s, pl_val pin, uint8_t out_hash[32],
+                        char* err, size_t err_cap) {
+  if (s == NULL || s->format != PL_STORE_FORMAT_SILO_V1) {
+    if (err != NULL && err_cap != 0)
+      (void)snprintf(err, err_cap, "store is not a Silo backend");
+    return false;
+  }
+
+  save_ctx c = {.store = s, .err = err, .err_cap = err_cap};
+  pl_store_lock(s);
+  bool ok = save_silo_pin(&c, pin, 0);
+  const uint8_t* root_hash = ok ? pl_pin_hash(pin) : NULL;
+  if (ok && root_hash == NULL)
+    ok = save_error(&c, "Silo root PIN was not finalized");
+  if (ok && !s->be.put_root(s->be.ctx, root_hash))
+    ok = save_error(&c, "cannot publish Silo root");
+  if (ok && out_hash != NULL)
+    memcpy(out_hash, root_hash, 32);
+  bool compile = ok && s->compiler_f;
+  pl_store_unlock(s);
+
+  if (compile)
+    for (ptrdiff_t i = 0; i < ax_hmlen(c.compile); i++)
+      pl_store_put_code(s, c.compile[i].key.b);
+  ax_hmfree(c.compile);
+  ax_hmfree(c.visit);
+  return ok;
 }
 
 pl_val pl_pin(pl_thread* t, pl_val v) {
@@ -250,7 +388,7 @@ pl_val pl_pin(pl_thread* t, pl_val v) {
   collect_subpins(&c, v);
   if (s->format == PL_STORE_FORMAT_LEGACY_V1)
     serialize(&c, v);
-  pl_val pin = pin_from_canon(s, &c, v);
+  pl_val pin = pin_from_normal(s, &c, v);
   ax_arrfree(c.buf);
   ax_arrfree(c.subpins);
   ax_hmfree(c.idx);
@@ -263,7 +401,7 @@ pl_val pl_store_pin_of_nat(pl_store* s, uint64_t n) {
   canon_ctx c = {0};
   if (s->format == PL_STORE_FORMAT_LEGACY_V1)
     serialize(&c, n);
-  pl_val pin = pin_from_canon(s, &c, n);
+  pl_val pin = pin_from_normal(s, &c, n);
   ax_arrfree(c.buf);
   ax_arrfree(c.subpins);
   ax_hmfree(c.idx);
@@ -413,14 +551,15 @@ static bool load_silo_pin(pl_thread* t, pl_store* s, const uint8_t hash[32],
     goto done;
   }
 
-  size_t text_n;
-  char* text = pl_canonize(ax_allocator_system(), body, &text_n);
   uint8_t actual[32];
-  ax_sha256((const uint8_t*)text, text_n, actual);
-  ax_free(ax_allocator_system(), text);
+  if (!pl_silo_hash(body, subpins, (size_t)ax_arrlen(subpins), actual, err,
+                    err_cap)) {
+    ok = false;
+    goto done;
+  }
   if (memcmp(actual, hash, 32) != 0) {
     (void)snprintf(err, err_cap,
-                   "Silo value does not match requested semantic pin hash");
+                   "Silo value does not match canonical stream hash");
     ok = false;
     goto done;
   }

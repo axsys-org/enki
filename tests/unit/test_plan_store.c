@@ -9,6 +9,9 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "axsys/allocator.h"
+#include "axsys/sha256.h"
+#include "plan/canon.h"
 #include "test_plan.h"
 
 /* ── Interning ─────────────────────────────────────────────────────────── */
@@ -74,8 +77,14 @@ static void roundtrip_via(pl_store* (*mk)(const char* dir), const char* dir) {
     pl_vpush(t, test_law(t, 2, ax_s2('h', 'i'), 1));
     pl_vpush(t, test_app2(t, 0, inner, t->vstack[base + 1]));
     pl_val pin = pl_pin(t, t->vstack[base + 2]);
-    memcpy(hash, pl_pin_hash(pin), 32);
-    cr_assert(pl_store_put_root(s, hash));
+    if (s->format == PL_STORE_FORMAT_SILO_V1) {
+      char err[192] = {0};
+      cr_assert_null(pl_pin_hash(pin));
+      cr_assert(pl_store_save_root(s, pin, hash, err, sizeof(err)), "%s", err);
+    } else {
+      memcpy(hash, pl_pin_hash(pin), 32);
+      cr_assert(pl_store_put_root(s, hash));
+    }
     pl_thread_free(t);
     pl_heap_free(h);
     pl_store_free(s);
@@ -113,7 +122,17 @@ static void roundtrip_via(pl_store* (*mk)(const char* dir), const char* dir) {
     size_t base = t->vsp;
     pl_vpush(t, pl_pin_body(p));
     pl_val again = pl_pin(t, t->vstack[base]);
-    cr_assert_eq(again, pin);
+    if (s->format == PL_STORE_FORMAT_SILO_V1) {
+      char err[192] = {0};
+      uint8_t again_hash[32];
+      cr_assert_neq(again, pin);
+      cr_assert_null(pl_pin_hash(again));
+      cr_assert(pl_store_save_root(s, again, again_hash, err, sizeof(err)),
+                "%s", err);
+      cr_assert_eq(memcmp(again_hash, hash, 32), 0);
+    } else {
+      cr_assert_eq(again, pin);
+    }
 
     pl_thread_free(t);
     pl_heap_free(h);
@@ -149,7 +168,9 @@ static void silo_pin_nat(const char* dir, uint64_t natural, uint8_t hash[32]) {
   pl_thread* t = pl_thread_new(h);
   pl_vpush(t, natural);
   pl_val pin = pl_pin(t, t->vstack[t->vsp - 1]);
-  memcpy(hash, pl_pin_hash(pin), 32);
+  char err[192] = {0};
+  cr_assert_null(pl_pin_hash(pin));
+  cr_assert(pl_store_save_root(s, pin, hash, err, sizeof(err)), "%s", err);
   pl_thread_free(t);
   pl_heap_free(h);
   pl_store_free(s);
@@ -161,7 +182,12 @@ static void pin_sample(pl_store* s, uint8_t hash[32]) {
   pl_vpush(t, test_law(t, 2, ax_s2('h', 'i'), 1));
   pl_vpush(t, test_app2(t, 0, t->vstack[t->vsp - 1], 42));
   pl_val pin = pl_pin(t, t->vstack[t->vsp - 1]);
-  memcpy(hash, pl_pin_hash(pin), 32);
+  if (s->format == PL_STORE_FORMAT_SILO_V1) {
+    char err[192] = {0};
+    cr_assert(pl_store_save_root(s, pin, hash, err, sizeof(err)), "%s", err);
+  } else {
+    memcpy(hash, pl_pin_hash(pin), 32);
+  }
   pl_thread_free(t);
   pl_heap_free(h);
 }
@@ -283,6 +309,132 @@ Test(store, silo_pack_round_trip) {
   cleanup_store_dir(dir, true);
 }
 
+Test(store, silo_pin_defers_hash_and_io_until_save) {
+  char dir[64];
+  snprintf(dir, sizeof(dir), "/tmp/enki-test-silo-defer-%lu",
+           (unsigned long)getpid());
+  cr_assert(mkdir(dir, 0700) == 0 || errno == EEXIST);
+  pl_store* s = mk_silo(dir);
+  cr_assert_not_null(s);
+  pl_heap* h = pl_heap_new(1 << 16, s);
+  pl_thread* t = pl_thread_new(h);
+
+  pl_vpush(t, 42);
+  pl_val unreachable = pl_pin(t, t->vstack[t->vsp - 1]);
+  pl_vpush(t, 43);
+  pl_val root = pl_pin(t, t->vstack[t->vsp - 1]);
+  cr_assert_null(pl_pin_hash(unreachable));
+  cr_assert_null(pl_pin_hash(root));
+
+  char path[96];
+  snprintf(path, sizeof(path), "%s/pins.pack", dir);
+  struct stat before, after;
+  cr_assert_eq(stat(path, &before), 0);
+  cr_assert_eq(before.st_size, 0);
+  uint8_t absent[32];
+  cr_assert_not(pl_store_get_root(s, absent));
+
+  uint8_t hash[32];
+  char err[192] = {0};
+  cr_assert(pl_store_save_root(s, root, hash, err, sizeof(err)), "%s", err);
+  cr_assert_not_null(pl_pin_hash(root));
+  cr_assert_null(pl_pin_hash(unreachable));
+  cr_assert_eq(stat(path, &after), 0);
+  cr_assert_gt(after.st_size, 0);
+
+  pl_thread_free(t);
+  pl_heap_free(h);
+  pl_store_free(s);
+  cleanup_store_dir(dir, true);
+}
+
+Test(store, silo_equal_provisional_pins_share_wire_identity) {
+  char dir[64];
+  snprintf(dir, sizeof(dir), "/tmp/enki-test-silo-equal-%lu",
+           (unsigned long)getpid());
+  cr_assert(mkdir(dir, 0700) == 0 || errno == EEXIST);
+  pl_store* s = mk_silo(dir);
+  cr_assert_not_null(s);
+  pl_heap* h = pl_heap_new(1 << 16, s);
+  pl_thread* t = pl_thread_new(h);
+
+  pl_vpush(t, 42);
+  pl_vpush(t, 42);
+  pl_val first = pl_pin(t, t->vstack[t->vsp - 2]);
+  pl_val second = pl_pin(t, t->vstack[t->vsp - 1]);
+  cr_assert_neq(first, second);
+  cr_assert_eq(test_op66_2(t, ax_s5('E', 'q', 'u', 'a', 'l'), first, second),
+               1);
+  pl_vpush(t, test_app2(t, 0, first, second));
+  pl_val outer = pl_pin(t, t->vstack[t->vsp - 1]);
+  cr_assert_eq(pl_pin_npins(pl_ptr(outer)), 2);
+
+  char err[192] = {0};
+  cr_assert(pl_store_save_root(s, outer, NULL, err, sizeof(err)), "%s", err);
+  cr_assert_eq(memcmp(pl_pin_hash(first), pl_pin_hash(second), 32), 0);
+  cr_assert_eq(pl_pin_npins(pl_ptr(outer)), 1);
+
+  pl_thread_free(t);
+  pl_heap_free(h);
+  pl_store_free(s);
+  cleanup_store_dir(dir, true);
+}
+
+Test(store, silo_prints_pending_pins_as_liquid) {
+  char dir[64];
+  snprintf(dir, sizeof(dir), "/tmp/enki-test-silo-print-%lu",
+           (unsigned long)getpid());
+  cr_assert(mkdir(dir, 0700) == 0 || errno == EEXIST);
+  pl_store* s = mk_silo(dir);
+  cr_assert_not_null(s);
+  pl_heap* h = pl_heap_new(1 << 16, s);
+  pl_thread* t = pl_thread_new(h);
+
+  pl_vpush(t, test_law(t, 1, (pl_val)'h', 1));
+  pl_val inner = pl_pin(t, t->vstack[t->vsp - 1]);
+  cr_assert_not(pl_pin_is_hashed(inner));
+  char* shown = pl_show_val(ax_allocator_system(), inner, NULL);
+  cr_assert_str_eq(shown, "liquid");
+  ax_free(ax_allocator_system(), shown);
+
+  pl_vpush(t, test_app2(t, 0, inner, 7));
+  shown = pl_show_val(ax_allocator_system(), t->vstack[t->vsp - 1], NULL);
+  cr_assert_str_eq(shown, "(0 liquid 7)");
+  ax_free(ax_allocator_system(), shown);
+
+  pl_thread_free(t);
+  pl_heap_free(h);
+  pl_store_free(s);
+  cleanup_store_dir(dir, true);
+}
+
+Test(store, silo_rejects_text_hash_store_revision) {
+  char dir[64];
+  snprintf(dir, sizeof(dir), "/tmp/enki-test-silo-v1-%lu",
+           (unsigned long)getpid());
+  cr_assert(mkdir(dir, 0700) == 0 || errno == EEXIST);
+
+  MDB_env* env;
+  MDB_txn* txn;
+  MDB_dbi meta, objects;
+  cr_assert_eq(mdb_env_create(&env), 0);
+  cr_assert_eq(mdb_env_set_maxdbs(env, 2), 0);
+  cr_assert_eq(mdb_env_open(env, dir, 0, 0600), 0);
+  cr_assert_eq(mdb_txn_begin(env, NULL, 0, &txn), 0);
+  cr_assert_eq(mdb_dbi_open(txn, "objects", MDB_CREATE, &objects), 0);
+  cr_assert_eq(mdb_dbi_open(txn, "meta", MDB_CREATE, &meta), 0);
+  static const char key[] = "format";
+  static const uint8_t old_format[] = {'S', 'I', 'L', 'O', 1};
+  MDB_val k = {.mv_size = sizeof(key) - 1, .mv_data = (void*)key};
+  MDB_val v = {.mv_size = sizeof(old_format), .mv_data = (void*)old_format};
+  cr_assert_eq(mdb_put(txn, meta, &k, &v, 0), 0);
+  cr_assert_eq(mdb_txn_commit(txn), 0);
+  mdb_env_close(env);
+
+  cr_assert_null(mk_silo(dir));
+  cleanup_store_dir(dir, true);
+}
+
 Test(store, silo_deduplicates_and_tolerates_orphan_pack_tails) {
   char dir[64];
   snprintf(dir, sizeof(dir), "/tmp/enki-test-silo-tail-%lu",
@@ -382,9 +534,11 @@ Test(store, silo_reports_missing_referents) {
     pl_thread* t = pl_thread_new(h);
     pl_vpush(t, 42);
     pl_val inner = pl_pin(t, t->vstack[t->vsp - 1]);
-    memcpy(inner_hash, pl_pin_hash(inner), 32);
     pl_vpush(t, test_app2(t, 0, inner, 7));
     pl_val outer = pl_pin(t, t->vstack[t->vsp - 1]);
+    char err[192] = {0};
+    cr_assert(pl_store_save_root(s, outer, NULL, err, sizeof(err)), "%s", err);
+    memcpy(inner_hash, pl_pin_hash(inner), 32);
     memcpy(outer_hash, pl_pin_hash(outer), 32);
     pl_thread_free(t);
     pl_heap_free(h);
@@ -408,9 +562,11 @@ Test(store, silo_rejects_cyclic_referent_loads) {
     pl_thread* t = pl_thread_new(h);
     pl_vpush(t, 42);
     pl_val inner = pl_pin(t, t->vstack[t->vsp - 1]);
-    memcpy(inner_hash, pl_pin_hash(inner), 32);
     pl_vpush(t, test_app2(t, 0, inner, 7));
     pl_val outer = pl_pin(t, t->vstack[t->vsp - 1]);
+    char err[192] = {0};
+    cr_assert(pl_store_save_root(s, outer, NULL, err, sizeof(err)), "%s", err);
+    memcpy(inner_hash, pl_pin_hash(inner), 32);
     memcpy(outer_hash, pl_pin_hash(outer), 32);
     pl_thread_free(t);
     pl_heap_free(h);
@@ -441,7 +597,7 @@ Test(store, silo_rejects_cyclic_referent_loads) {
   cleanup_store_dir(dir, true);
 }
 
-Test(store, silo_preserves_cross_backend_semantic_hashes) {
+Test(store, silo_hashes_canonical_stream_not_canonical_text) {
   uint8_t memory_hash[32], silo_hash[32];
   pl_store* memory = pl_store_new_mem();
   pin_sample(memory, memory_hash);
@@ -455,7 +611,23 @@ Test(store, silo_preserves_cross_backend_semantic_hashes) {
   cr_assert_not_null(silo);
   pin_sample(silo, silo_hash);
   pl_store_free(silo);
-  cr_assert_eq(memcmp(memory_hash, silo_hash, 32), 0);
+  cr_assert_neq(memcmp(memory_hash, silo_hash, 32), 0);
+
+  char path[96];
+  snprintf(path, sizeof(path), "%s/pins.pack", dir);
+  int fd = open(path, O_RDONLY);
+  cr_assert_geq(fd, 0);
+  struct stat st;
+  cr_assert_eq(fstat(fd, &st), 0);
+  cr_assert_gt(st.st_size, 0);
+  uint8_t* bytes = malloc((size_t)st.st_size);
+  cr_assert_not_null(bytes);
+  cr_assert(fd_read_exact(fd, bytes, (size_t)st.st_size));
+  cr_assert_eq(close(fd), 0);
+  uint8_t expected[32];
+  ax_sha256(bytes, (size_t)st.st_size, expected);
+  free(bytes);
+  cr_assert_eq(memcmp(expected, silo_hash, sizeof(expected)), 0);
   cleanup_store_dir(dir, true);
 }
 

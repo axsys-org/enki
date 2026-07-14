@@ -6,7 +6,7 @@
 
 set -ex
 
-BUILD_TYPE=${BUILD_TYPE:-"release"}
+BUILD_TYPE=${BUILD_TYPE:-"profile"}
 PREFIX=${PREFIX-""}
 case "${1-}" in
   ''|--reset) ;;
@@ -19,7 +19,7 @@ do_make () {
 
 
 reset () {
-	$PREFIX ./build/$BUILD_TYPE/bin/wisp --file-root ./reaver/src ../reaver/src/plan reaver main
+	$PREFIX ./build/$BUILD_TYPE/bin/wisp --file-root ./reaver/src ./reaver/src/plan reaver main
 }
 
 repl () {

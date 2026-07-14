@@ -99,7 +99,7 @@ static bool file_contains(const char* path, const char* needle) {
   return found;
 }
 
-Test(wisp_cli, save_snapshot_round_trip) {
+Test(wisp_cli, save_silo_snapshot_round_trip) {
   char dir[] = "/tmp/enki-snaptest-XXXXXX";
   cr_assert_not_null(mkdtemp(dir), "failed to make temp dir");
 
@@ -124,14 +124,14 @@ Test(wisp_cli, save_snapshot_round_trip) {
   char cmd[1024];
   char out[256];
 
-  /* BPLAN assemble: pins prog, Save writes snap/ under the cwd */
+  /* BPLAN assemble: pins prog, Save publishes it as the Silo root. */
   (void)snprintf(cmd, sizeof(cmd), "cd %s && %s %s save1 >/dev/null 2>&1", dir,
                  wisp_bin(), dir);
   int st = system(cmd);
   cr_assert(WIFEXITED(st) && WEXITSTATUS(st) == 0, "assemble failed");
 
-  (void)snprintf(path, sizeof(path), "%s/snap/root.plan", dir);
-  cr_assert_eq(access(path, F_OK), 0, "snap/root.plan not written");
+  (void)snprintf(path, sizeof(path), "%s/snap/pins.pack", dir);
+  cr_assert_eq(access(path, F_OK), 0, "snap/pins.pack not written");
 
   /* RPLAN resume: run the saved program, which prints "snap-ok" */
   (void)snprintf(cmd, sizeof(cmd), "cd %s && %s snap root _ 2>/dev/null", dir,
@@ -139,6 +139,45 @@ Test(wisp_cli, save_snapshot_round_trip) {
   st = run_cmd(cmd, out, sizeof(out));
   cr_assert(WIFEXITED(st) && WEXITSTATUS(st) == 0, "resume failed");
   cr_assert_not_null(strstr(out, "snap-ok"),
+                     "resumed program did not print; got `%s`", out);
+}
+
+Test(wisp_cli, save_text_hash_snapshot_round_trip) {
+  char dir[] = "/tmp/enki-text-snaptest-XXXXXX";
+  cr_assert_not_null(mkdtemp(dir), "failed to make temp dir");
+
+  char path[512];
+  (void)snprintf(path, sizeof(path), "%s/save1.plan", dir);
+  FILE* f = fopen(path, "w");
+  cr_assert_not_null(f);
+  fprintf(f,
+          "(#bind Print\n"
+          "  (#pin (#law \"Print\" (Print x) ((#pin \"R\") (\"Print\" x)))))\n"
+          "(#bind Save (#pin (#law \"Save\" (Save x) ((#pin \"B\") (\"Save\" "
+          "x)))))\n"
+          "(#bind prog\n"
+          "  (#pin (#law \"prog\" (prog args) ((#pin \"R\") (\"Print\" "
+          "\"text-ok\")))))\n"
+          "(Save prog)\n");
+  fclose(f);
+
+  char cmd[1024];
+  char out[256];
+  (void)snprintf(cmd, sizeof(cmd),
+                 "cd %s && %s --text-hash %s save1 >/dev/null 2>&1", dir,
+                 wisp_bin(), dir);
+  int st = system(cmd);
+  cr_assert(WIFEXITED(st) && WEXITSTATUS(st) == 0, "assemble failed");
+
+  (void)snprintf(path, sizeof(path), "%s/snap/root.plan", dir);
+  cr_assert_eq(access(path, F_OK), 0, "snap/root.plan not written");
+
+  (void)snprintf(cmd, sizeof(cmd),
+                 "cd %s && %s --text-hash snap root _ 2>/dev/null", dir,
+                 wisp_bin());
+  st = run_cmd(cmd, out, sizeof(out));
+  cr_assert(WIFEXITED(st) && WEXITSTATUS(st) == 0, "resume failed");
+  cr_assert_not_null(strstr(out, "text-ok"),
                      "resumed program did not print; got `%s`", out);
 }
 
@@ -272,14 +311,16 @@ Test(wisp_cli, read_file_honors_file_root) {
   char out[256];
 
   (void)snprintf(cmd, sizeof(cmd),
-                 "cd %s && %s --file-root files snap root inside 2>/dev/null",
+                 "cd %s && %s --text-hash --file-root files snap root inside "
+                 "2>/dev/null",
                  dir, wisp_bin());
   int st = run_cmd(cmd, out, sizeof(out));
   cr_assert(WIFEXITED(st) && WEXITSTATUS(st) == 0, "inside run failed");
   cr_assert_not_null(strstr(out, "inside-ok"), "got `%s`", out);
 
   (void)snprintf(cmd, sizeof(cmd),
-                 "cd %s && %s --file-root files snap root escape 2>/dev/null",
+                 "cd %s && %s --text-hash --file-root files snap root escape "
+                 "2>/dev/null",
                  dir, wisp_bin());
   st = run_cmd(cmd, out, sizeof(out));
   cr_assert(WIFEXITED(st) && WEXITSTATUS(st) == 0, "escape run failed");

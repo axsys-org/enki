@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "../../pkg/plan/src/silo_internal.h"
+#include "axsys/sha256.h"
 #include "test_plan.h"
 
 typedef struct mem_stream {
@@ -152,6 +153,17 @@ Test(silo, scalar_golden_bytes) {
   cr_assert_eq(m.bytes[sizeof(prefix)], 0xc2);
   cr_assert_eq(m.bytes[sizeof(prefix) + 1], 0);
   cr_assert_eq(m.bytes[sizeof(prefix) + 2], 1);
+  free(m.bytes);
+}
+
+Test(silo, identity_is_sha256_of_canonical_stream) {
+  mem_stream m = {0};
+  encode(&m, 64, NULL, 0);
+  uint8_t expected[32], actual[32];
+  ax_sha256(m.bytes, m.len, expected);
+  char err[192] = {0};
+  cr_assert(pl_silo_hash(64, NULL, 0, actual, err, sizeof(err)), "%s", err);
+  cr_assert_eq(memcmp(actual, expected, sizeof(actual)), 0);
   free(m.bytes);
 }
 
