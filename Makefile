@@ -188,13 +188,22 @@ ifeq ($(strip $(CRITERION_LIBS)),)
 CRITERION_LIBS := -lcriterion
 endif
 
+# Criterion uses a fixed /tmp IPC namespace.  Nix can reuse that namespace
+# between test executables in a single coverage build, so remove only stale
+# Criterion sockets before starting the next executable when requested.
+CRITERION_CLEANUP_SOCKETS ?= 0
+
 FUZZ_CFLAGS := -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer
 FUZZ_ARGS ?= $(FUZZ_DIR)/corpus -max_total_time=10
 
 LCOV_INFO := $(BUILD_DIR)/coverage/enki.info
 LCOV_FILTERED_INFO := $(BUILD_DIR)/coverage/enki.filtered.info
+LCOV_NORMALIZED_INFO := $(BUILD_DIR)/coverage/enki.normalized.info
 COVERAGE_HTML_DIR := $(BUILD_DIR)/html
 LCOV_IGNORE_ERRORS ?= --ignore-errors inconsistent,inconsistent,mismatch,mismatch,gcov,gcov,unused,unused
+
+LCOV_NORMALIZE_AWK = function emit(tag, count, i) { printf "%s%s", tag, field[1]; for (i = 2; i <= count; i++) printf ",%s", field[i]; printf "\n" } /^SF:/ { prefix = "SF:" source_root "/"; if (index($$0, prefix) == 1) print "SF:" substr($$0, length(prefix) + 1); else print; next } /^DA:/ { count = split(substr($$0, 4), field, ","); field[2] = field[2] == "0" ? "0" : "1"; emit("DA:", count); next } /^FNA:/ { count = split(substr($$0, 5), field, ","); field[2] = field[2] == "0" ? "0" : "1"; emit("FNA:", count); next } /^BRDA:/ { count = split(substr($$0, 6), field, ","); if (field[4] != "-") field[4] = field[4] == "0" ? "0" : "1"; emit("BRDA:", count); next } { print }
+LCOV_NORMALIZE_HTML_AWK = function replace(line, position) { while ((position = index(line, source_root)) != 0) line = substr(line, 1, position - 1) "." substr(line, position + length(source_root)); return line } { print replace($$0) }
 
 .PHONY: all lib bin install test test-binaries test-unit test-property fuzz fuzz-bin perf-binaries pgo \
 	pgo-profile coverage tidy check-layering format format-check compile-commands nix-ci linux-check \
@@ -305,6 +314,9 @@ test: check-layering test-unit test-property
 
 test-unit: $(ACTIVE_UNIT_BINS) $(APP_BINS)
 	@set -eu; for test_bin in $(ACTIVE_UNIT_BINS); do \
+		if [ "$(CRITERION_CLEANUP_SOCKETS)" = 1 ]; then \
+			find /tmp -maxdepth 1 -type s -name 'criterion_*.sock' -delete; \
+		fi; \
 		ENKI_WISP_BIN=$(CURDIR)/$(BUILD_DIR)/bin/wisp "$$test_bin" --jobs 1; \
 	done
 
@@ -351,7 +363,10 @@ coverage:
 	lcov --capture --directory $(BUILD_DIR) --output-file $(LCOV_INFO) $(LCOV_IGNORE_ERRORS)
 	lcov --remove $(LCOV_INFO) '*/tests/*' '*/nix/store/*' --output-file $(LCOV_FILTERED_INFO) \
 		$(LCOV_IGNORE_ERRORS)
+	awk -v 'source_root=$(CURDIR)' '$(LCOV_NORMALIZE_AWK)' $(LCOV_FILTERED_INFO) > $(LCOV_NORMALIZED_INFO)
+	mv $(LCOV_NORMALIZED_INFO) $(LCOV_FILTERED_INFO)
 	genhtml $(LCOV_FILTERED_INFO) --output-directory $(COVERAGE_HTML_DIR)
+	find $(COVERAGE_HTML_DIR) -type f -name '*.html' -exec sh -c 'root=$$1; program=$$2; shift 2; for file; do awk -v "source_root=$$root" "$$program" "$$file" > "$$file.tmp"; mv "$$file.tmp" "$$file"; done' sh "$(CURDIR)" '$(LCOV_NORMALIZE_HTML_AWK)' {} +
 
 tidy:
 	@test -f compile_commands.json || \

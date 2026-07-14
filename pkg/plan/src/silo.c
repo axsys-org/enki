@@ -613,7 +613,7 @@ static bool decode_varnat(silo_dec* d, uint64_t* out) {
 
 static bool decode_header(silo_dec* d) {
   uint8_t magic[5];
-  uint64_t count;
+  uint64_t count = 0;
   if (!dread(d, magic, sizeof(magic)) ||
       memcmp(magic, silo_magic, sizeof(magic)) != 0)
     return silo_error(d->err, d->err_cap, "bad Silo magic or version");

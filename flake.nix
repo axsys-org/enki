@@ -204,7 +204,7 @@
           enableParallelBuilding = true;
           buildPhase = ''
             runHook preBuild
-            make coverage BUILD_TYPE=coverage CC=${(compilerFor "coverage").compiler}/bin/${(compilerFor "coverage").cc}
+            make coverage BUILD_TYPE=coverage CC=${(compilerFor "coverage").compiler}/bin/${(compilerFor "coverage").cc} CRITERION_CLEANUP_SOCKETS=1
             runHook postBuild
           '';
 

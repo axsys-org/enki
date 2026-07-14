@@ -704,8 +704,9 @@ static char* er_cstr(const uint8_t* b, size_t n) {
  * hold mu (or are the only thread).  Waits out an in-progress poll. */
 static void er_http_curlm_settle(er_scheduler* sys) {
   while (sys->http_pumping) {
-    curl_multi_wakeup(sys->curlm);
-    pthread_cond_wait(&sys->cv, &sys->mu);
+    curl_multi_wakeup(sys->curlm); // LCOV_EXCL_LINE: scheduling-dependent
+    pthread_cond_wait(&sys->cv,
+                      &sys->mu); // LCOV_EXCL_LINE: scheduling-dependent
   }
 }
 
