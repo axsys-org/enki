@@ -5,6 +5,7 @@
 
 #include "plan/store.h"
 #include "plan/value.h"
+#include "silo_internal.h"
 
 pl_cell* pl_store_alloc(pl_store* s, size_t cells);
 size_t pl_store_mark(pl_store* s);
@@ -22,7 +23,14 @@ bool pl_store_backend_put(pl_store* s, const uint8_t hash[32], const uint8_t* b,
 bool pl_store_backend_get(pl_store* s, const uint8_t hash[32], uint8_t** out_b,
                           size_t* out_s);
 
-pl_val pl_store_mk_pin(pl_store* s, const uint8_t hash[32], pl_val body,
+bool pl_store_silo_put(pl_store* s, const uint8_t hash[32], pl_val root,
+                       const pl_val* subpins, size_t nsub, char* err,
+                       size_t err_cap);
+bool pl_store_silo_open(pl_store* s, const uint8_t hash[32],
+                        pl_silo_reader* out, char* err, size_t err_cap);
+void pl_store_silo_close_reader(pl_silo_reader* r);
+
+pl_val pl_store_mk_pin(pl_store* s, const uint8_t* hash, pl_val body,
                        uint32_t npins, const pl_val* subpins);
 
 /* Intern the pin of a small nat (used for the op-66 row exprs). */

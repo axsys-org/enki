@@ -57,7 +57,15 @@ typedef struct cn_law {
   cn_expr* body;
 } cn_law;
 
-typedef enum { CN_DNUM, CN_DSTR, CN_DREF, CN_DPIN, CN_DLAW, CN_DAPP } cn_dkind;
+typedef enum {
+  CN_DNUM,
+  CN_DSTR,
+  CN_DREF,
+  CN_DPIN,
+  CN_DLIQUID,
+  CN_DLAW,
+  CN_DAPP
+} cn_dkind;
 
 struct cn_doc {
   cn_dkind k;
@@ -410,6 +418,8 @@ static cn_doc* cn_extract(cn* c, pl_val v) {
   switch (pl_tag(v)) {
   case PL_TAG_PIN: {
     pl_val body = pl_pin_body(p);
+    if (!pl_pin_is_hashed(v))
+      return cn_doc_new(c, CN_DLIQUID);
     if (pl_is_nat(body)) {
       cn_doc* d = cn_doc_new(c, CN_DPIN);
       d->inner = cn_extract(c, body);
@@ -459,9 +469,11 @@ static void cn_collect_doc(cn* c, cn_doc* d) {
   switch (d->k) {
   case CN_DNUM:
   case CN_DSTR:
+  case CN_DLIQUID:
     return;
   case CN_DPIN:
-    return; /* orderedGlobals skips DPin contents */
+    cn_collect_doc(c, d->inner);
+    return;
   case CN_DREF:
     if (d->ref->rk == CN_RPIN && ax_hmgeti(c->pinidx, d->ref->pin) < 0) {
       ax_hmput(c->pinidx, d->ref->pin, ax_arrlenu(c->globals));
@@ -569,6 +581,7 @@ static void cn_resolve_doc(cn* c, cn_doc* d) {
   switch (d->k) {
   case CN_DNUM:
   case CN_DSTR:
+  case CN_DLIQUID:
     return;
   case CN_DPIN:
     cn_resolve_doc(c, d->inner);
@@ -666,6 +679,7 @@ static void cn_namevars_doc(cn* c, cn_doc* d) {
   case CN_DNUM:
   case CN_DSTR:
   case CN_DREF:
+  case CN_DLIQUID:
     return;
   case CN_DPIN:
     cn_namevars_doc(c, d->inner);
@@ -751,6 +765,8 @@ static const char* cn_pp_flat(cn* c, cn_doc* d) {
     return cn_cstr("cn_pp_flat DREF", d->ref->name);
   case CN_DPIN:
     return CN_CAT(c, "(#pin ", cn_pp_flat(c, d->inner), ")");
+  case CN_DLIQUID:
+    return "liquid";
   case CN_DLAW:
     return cn_flat_law(c, d->law);
   case CN_DAPP: {
@@ -1148,6 +1164,8 @@ static const char* cn_pp_wide(cn* c, int col, cn_doc* d) {
     return cn_cstr("cn_pp_wide DREF", d->ref->name);
   case CN_DPIN:
     return CN_CAT(c, "(#pin ", cn_pp(c, col + 6, d->inner), ")");
+  case CN_DLIQUID:
+    return "liquid";
   case CN_DLAW:
     return cn_wide_law(c, col, d->law);
   case CN_DAPP:
@@ -1209,7 +1227,9 @@ char* pl_show_val(const ax_allocator* a, pl_val v, size_t* out_s) {
 
   cn_doc* top;
   pl_cell* pp = pl_as(PL_TAG_PIN, v);
-  if (pp != NULL)
+  if (pp != NULL && !pl_pin_is_hashed(v))
+    top = cn_pipeline(&c, v);
+  else if (pp != NULL)
     top = cn_app1_doc(&c, cn_ref_doc(&c, "#pin"),
                       cn_pipeline(&c, pl_pin_body(pp)));
   else

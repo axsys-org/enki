@@ -2,9 +2,15 @@ BUILD_TYPE ?= debug
 PROFILE ?=
 CC ?= cc
 PREFIX ?= /usr/local
-BUILD_PROFILE_SUFFIX := $(if $(PROFILE),-$(PROFILE),$(if $(filter profile,$(BUILD_TYPE)),-plain,))
+BUILD_PROFILE_SUFFIX := $(if $(PROFILE),-$(PROFILE),)
 BUILD_DIR ?= build/$(BUILD_TYPE)$(BUILD_PROFILE_SUFFIX)
 AR ?= ar
+DOCKER ?= docker
+
+NIX_DOCKER_IMAGE ?= nixos/nix@sha256:bf1d938835ab96312f098fa6c2e9cab367728e0aad0646ee3e02a787c80d8fb8
+LINUX_PLATFORM ?= linux/amd64
+LINUX_PLATFORM_ID := $(subst /,-,$(LINUX_PLATFORM))
+LINUX_NIX_VOLUME ?= enki-nix-2-34-7-$(LINUX_PLATFORM_ID)
 
 VALID_BUILD_TYPES := debug release asan ubsan tsan coverage profile
 VALID_BUILD_TYPES += pgo-generate pgo
@@ -59,8 +65,10 @@ HARDEN_CFLAGS := -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3 -fstack-protector-strong
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
 LTO_CFLAGS := -flto
+HOST_LDFLAGS := -L/opt/homebrew/lib
 else
 LTO_CFLAGS :=
+HOST_LDFLAGS :=
 endif
 
 BUILD_CFLAGS_debug := -O0 -g3 -DDEBUG
@@ -105,7 +113,7 @@ APP_BINS := $(patsubst $(APP_DIR)/%.c,$(BUILD_DIR)/bin/%,$(APP_SRCS))
 
 CPPFLAGS_ALL := $(BASE_CPPFLAGS) $(CPPFLAGS)
 CFLAGS_ALL := $(BASE_CFLAGS) $(WARN_CFLAGS) $(BUILD_CFLAGS_$(BUILD_TYPE)) $(CFLAGS)
-LDFLAGS_ALL := $(BUILD_LDFLAGS_$(BUILD_TYPE)) $(LDFLAGS) -pthread -L/opt/homebrew/lib -lgmp -llmdb -lcrypto -lcurl
+LDFLAGS_ALL := $(BUILD_LDFLAGS_$(BUILD_TYPE)) $(LDFLAGS) -pthread $(HOST_LDFLAGS) -lgmp -llmdb -lcrypto -lcurl
 
 ifeq ($(PROFILE),tracy)
 CPPFLAGS_ALL += -I/opt/homebrew/opt/tracy/include/tracy
@@ -151,7 +159,6 @@ LIB_PLAN := $(BUILD_DIR)/lib/libplan.a
 LIB_ENKI := $(BUILD_DIR)/lib/libenki.a
 LIBS := $(LIB_AXSYS) $(LIB_PLAN) $(LIB_ENKI)
 
-UNAME_S := $(shell uname -s 2>/dev/null)
 ifeq ($(BUILD_TYPE),tsan)
 ACTIVE_UNIT_BINS := $(TSAN_UNIT_BINS)
 else
@@ -181,18 +188,51 @@ ifeq ($(strip $(CRITERION_LIBS)),)
 CRITERION_LIBS := -lcriterion
 endif
 
+# Criterion uses a fixed /tmp IPC namespace.  Nix can reuse that namespace
+# between test executables in a single coverage build, so remove only stale
+# Criterion sockets before starting the next executable when requested.
+CRITERION_CLEANUP_SOCKETS ?= 0
+
 FUZZ_CFLAGS := -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer
 FUZZ_ARGS ?= $(FUZZ_DIR)/corpus -max_total_time=10
 
 LCOV_INFO := $(BUILD_DIR)/coverage/enki.info
 LCOV_FILTERED_INFO := $(BUILD_DIR)/coverage/enki.filtered.info
+LCOV_NORMALIZED_INFO := $(BUILD_DIR)/coverage/enki.normalized.info
 COVERAGE_HTML_DIR := $(BUILD_DIR)/html
 LCOV_IGNORE_ERRORS ?= --ignore-errors inconsistent,inconsistent,mismatch,mismatch,gcov,gcov,unused,unused
 
+LCOV_NORMALIZE_AWK = function emit(tag, count, i) { printf "%s%s", tag, field[1]; for (i = 2; i <= count; i++) printf ",%s", field[i]; printf "\n" } /^SF:/ { prefix = "SF:" source_root "/"; if (index($$0, prefix) == 1) print "SF:" substr($$0, length(prefix) + 1); else print; next } /^DA:/ { count = split(substr($$0, 4), field, ","); field[2] = field[2] == "0" ? "0" : "1"; emit("DA:", count); next } /^FNA:/ { count = split(substr($$0, 5), field, ","); field[2] = field[2] == "0" ? "0" : "1"; emit("FNA:", count); next } /^BRDA:/ { count = split(substr($$0, 6), field, ","); if (field[4] != "-") field[4] = field[4] == "0" ? "0" : "1"; emit("BRDA:", count); next } { print }
+LCOV_NORMALIZE_HTML_AWK = function replace(line, position) { while ((position = index(line, source_root)) != 0) line = substr(line, 1, position - 1) "." substr(line, position + length(source_root)); return line } { print replace($$0) }
+
 .PHONY: all lib bin install test test-binaries test-unit test-property fuzz fuzz-bin perf-binaries pgo \
-	pgo-profile coverage tidy check-layering format format-check compile-commands clean distclean
+	pgo-profile coverage tidy check-layering format format-check compile-commands nix-ci linux-check \
+	linux-shell clean distclean
 
 all: lib bin
+
+nix-ci:
+	./tools/nix-ci
+
+linux-check:
+	@$(DOCKER) volume create $(LINUX_NIX_VOLUME) >/dev/null
+	$(DOCKER) run --rm --platform $(LINUX_PLATFORM) \
+		--volume $(LINUX_NIX_VOLUME):/nix \
+		--volume $(CURDIR):/source:ro \
+		--env 'NIX_CONFIG=filter-syscalls = false' \
+		--workdir / \
+		$(NIX_DOCKER_IMAGE) \
+		/bin/sh /source/tools/linux-check
+
+linux-shell:
+	@$(DOCKER) volume create $(LINUX_NIX_VOLUME) >/dev/null
+	$(DOCKER) run --rm --interactive --tty --platform $(LINUX_PLATFORM) \
+		--volume $(LINUX_NIX_VOLUME):/nix \
+		--volume $(CURDIR):/src \
+		--env 'NIX_CONFIG=filter-syscalls = false' \
+		--workdir /src \
+		$(NIX_DOCKER_IMAGE) \
+		nix --extra-experimental-features 'nix-command flakes' develop path:/src
 
 bin: $(APP_BINS)
 
@@ -274,6 +314,9 @@ test: check-layering test-unit test-property
 
 test-unit: $(ACTIVE_UNIT_BINS) $(APP_BINS)
 	@set -eu; for test_bin in $(ACTIVE_UNIT_BINS); do \
+		if [ "$(CRITERION_CLEANUP_SOCKETS)" = 1 ]; then \
+			find /tmp -maxdepth 1 -type s -name 'criterion_*.sock' -delete; \
+		fi; \
 		ENKI_WISP_BIN=$(CURDIR)/$(BUILD_DIR)/bin/wisp "$$test_bin" --jobs 1; \
 	done
 
@@ -320,7 +363,10 @@ coverage:
 	lcov --capture --directory $(BUILD_DIR) --output-file $(LCOV_INFO) $(LCOV_IGNORE_ERRORS)
 	lcov --remove $(LCOV_INFO) '*/tests/*' '*/nix/store/*' --output-file $(LCOV_FILTERED_INFO) \
 		$(LCOV_IGNORE_ERRORS)
+	awk -v 'source_root=$(CURDIR)' '$(LCOV_NORMALIZE_AWK)' $(LCOV_FILTERED_INFO) > $(LCOV_NORMALIZED_INFO)
+	mv $(LCOV_NORMALIZED_INFO) $(LCOV_FILTERED_INFO)
 	genhtml $(LCOV_FILTERED_INFO) --output-directory $(COVERAGE_HTML_DIR)
+	find $(COVERAGE_HTML_DIR) -type f -name '*.html' -exec sh -c 'root=$$1; program=$$2; shift 2; for file; do awk -v "source_root=$$root" "$$program" "$$file" > "$$file.tmp"; mv "$$file.tmp" "$$file"; done' sh "$(CURDIR)" '$(LCOV_NORMALIZE_HTML_AWK)' {} +
 
 tidy:
 	@test -f compile_commands.json || \

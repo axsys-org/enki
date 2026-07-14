@@ -131,7 +131,6 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
   pl_store_lock(s);
   if (!s->compiler_f) {
     pl_store_unlock(s);
-    fprintf(stderr, "no compiler set! failing compile\n");
     return;
   }
   uint8_t compiler_hash[32];
@@ -156,11 +155,17 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
   ax_assume(p, "wack");
   pl_code* code = pl_bytecode_from_val(pl_pin_body(p));
   if (code != NULL) {
-    /* cache on the law's pin itself: JUDGE reads the field directly */
+    /* Equal provisional PINs remain distinct pointers after finalization.
+     * Cache the code on every matching runtime PIN so JUDGE never depends
+     * on which representative the intern table retained. */
     pl_store_lock(s);
-    pl_val target = pl_store_intern_get(s, hash);
-    if (target != 0)
-      pl_pin_set_code(pl_ptr(target), code);
+    for (ptrdiff_t i = 0; i < ax_arrlen(s->pins); i++) {
+      pl_val target = s->pins[i];
+      pl_cell* tp = pl_ptr(target);
+      if ((pl_hdr_flags(tp[0]) & PL_F_PIN_HASHED) != 0 &&
+          memcmp(pl_pin_hash_bytes(tp), hash, 32) == 0)
+        pl_pin_set_code(tp, code);
+    }
     pl_store_unlock(s);
   }
 }
@@ -172,31 +177,39 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
  * compiled rows), which mutates the map, so snapshot the hashes first.
  */
 static void pl_store_compile_existing(pl_store* s) {
-  pl_hash* laws = NULL;
+  pl_intern_entry* laws = NULL;
   pl_store_lock(s);
-  for (ptrdiff_t i = 0; i < ax_hmlen(s->intern); i++) {
-    pl_val pin = s->intern[i].value;
-    if (pl_tag(pl_pin_body(pl_ptr(pin))) == PL_TAG_LAW)
-      ax_arrpush(laws, s->intern[i].key);
+  for (ptrdiff_t i = 0; i < ax_arrlen(s->pins); i++) {
+    pl_cell* p = pl_ptr(s->pins[i]);
+    if ((pl_hdr_flags(p[0]) & PL_F_PIN_HASHED) == 0 ||
+        pl_tag(pl_pin_body(p)) != PL_TAG_LAW)
+      continue;
+    pl_hash key;
+    memcpy(key.b, pl_pin_hash_bytes(p), 32);
+    if (ax_hmgeti(laws, key) < 0)
+      ax_hmput(laws, key, s->pins[i]);
   }
   pl_store_unlock(s);
-  for (ptrdiff_t i = 0; i < ax_arrlen(laws); i++)
-    pl_store_put_code(s, laws[i].b);
-  ax_arrfree(laws);
+  for (ptrdiff_t i = 0; i < ax_hmlen(laws); i++)
+    pl_store_put_code(s, laws[i].key.b);
+  ax_hmfree(laws);
 }
 
 void pl_store_put_compiler(pl_store* s, const uint8_t hash[32]) {
   pl_store_lock(s);
   s->compiler_f = hash[0] ? memcmp(hash, hash + 1, 31) != 0 : true;
+
   memcpy(s->compiler, hash, 32);
   bool sweep = s->compiler_f;
   /* invalidate code from the previous compiler (the pl_code allocations
    * leak, as before — TODO: fix) */
-  for (ptrdiff_t i = 0; i < ax_hmlen(s->intern); i++)
-    pl_pin_set_code(pl_ptr(s->intern[i].value), NULL);
+  for (ptrdiff_t i = 0; i < ax_arrlen(s->pins); i++)
+    pl_pin_set_code(pl_ptr(s->pins[i]), NULL);
   pl_store_unlock(s);
-  if (sweep)
+  if (sweep) {
+    fprintf(stderr, "store: installing bytecode compiler\r\n");
     pl_store_compile_existing(s);
+  }
 }
 
 /* ── Store-resident value construction (no GC interaction) ─────────────── */
@@ -216,21 +229,36 @@ static pl_val st_app(pl_store* s, pl_val head, uint32_t n, const pl_val* args) {
   return pl_make(PL_TAG_APP, p);
 }
 
-pl_val pl_store_mk_pin(pl_store* s, const uint8_t hash[32], pl_val body,
+pl_val pl_store_mk_pin(pl_store* s, const uint8_t* hash, pl_val body,
                        uint32_t npins, const pl_val* subpins) {
   pl_cell* p = pl_store_alloc(s, PL_PIN_CELLS(npins));
-  p[0] = pl_hdr_make(PL_K_PIN, PL_F_NORMAL, npins, PL_PIN_CELLS(npins));
-  memcpy(p + 1, hash, 32);
+  uint32_t flags = PL_F_NORMAL | (hash != NULL ? PL_F_PIN_HASHED : 0);
+  p[0] = pl_hdr_make(PL_K_PIN, flags, npins, PL_PIN_CELLS(npins));
+  if (hash != NULL)
+    memcpy(p + 1, hash, 32);
+  else
+    memset(p + 1, 0, 32);
   p[5] = body;
   pl_pin_set_code(p, NULL);
   if (npins > 0)
     memcpy(p + 7, subpins, npins * sizeof(pl_val));
-  return pl_make(PL_TAG_PIN, p);
+  pl_val pin = pl_make(PL_TAG_PIN, p);
+  pl_store_lock(s);
+  ax_arrpush(s->pins, pin);
+  pl_store_unlock(s);
+  return pin;
+}
+
+bool pl_pin_is_hashed(pl_val pin) {
+  pl_cell* p = pl_as(PL_TAG_PIN, pin);
+  return p != NULL && (pl_hdr_flags(p[0]) & PL_F_PIN_HASHED) != 0;
 }
 
 const uint8_t* pl_pin_hash(pl_val pin) {
   pl_cell* p = pl_as(PL_TAG_PIN, pin);
   ax_assume(p != NULL, "pl_pin_hash on a non-pin");
+  if ((pl_hdr_flags(p[0]) & PL_F_PIN_HASHED) == 0)
+    return NULL;
   return pl_pin_hash_bytes(p);
 }
 
@@ -304,6 +332,8 @@ void pl_store_free(pl_store* s) {
   if (s->be.close != NULL)
     s->be.close(s->be.ctx);
   ax_hmfree(s->intern);
+  ax_arrfree(s->pins);
+  ax_arrfree(s->loading);
   ax_arena_destroy(s->region);
   pthread_mutex_destroy(&s->mu);
   free(s);

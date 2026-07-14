@@ -65,6 +65,8 @@ typedef enum {
  */
 #define PL_F_NORMAL 0x1u /* deep normal form reached (§ nf) */
 #define PL_F_HOLE   0x2u /* currently evaluating */
+#define PL_F_PIN_HASHED                                                        \
+  0x4u /* PIN hash is finalized and persistently indexed */
 
 static inline pl_cell pl_hdr_make(pl_kind kind, uint32_t flags, uint32_t meta,
                                   uint32_t cells) {
@@ -83,6 +85,11 @@ static inline pl_cell pl_hdr_set_flag(pl_cell hdr, uint32_t flags) {
   uint32_t old = pl_hdr_flags(hdr);
   old |= flags;
   return hdr | ((pl_cell)((old) & 0xFu) << 8);
+}
+
+static inline pl_cell pl_hdr_set_meta(pl_cell hdr, uint32_t meta) {
+  return (hdr & ~((pl_cell)0xFFFFFu << 12)) |
+         ((pl_cell)(meta & 0xFFFFFu) << 12);
 }
 
 static inline uint32_t pl_hdr_meta(pl_cell hdr) {

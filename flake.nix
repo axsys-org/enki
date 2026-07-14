@@ -9,7 +9,7 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     reaver = {
-      url = "github:axsys-org/shrine-plan/lf/bytecode";
+      url = "github:axsys-org/shrine-plan/lf/fix-silo";
       flake = false;
     };
   };
@@ -204,7 +204,7 @@
           enableParallelBuilding = true;
           buildPhase = ''
             runHook preBuild
-            make coverage BUILD_TYPE=coverage CC=${(compilerFor "coverage").compiler}/bin/${(compilerFor "coverage").cc}
+            make coverage BUILD_TYPE=coverage CC=${(compilerFor "coverage").compiler}/bin/${(compilerFor "coverage").cc} CRITERION_CLEANUP_SOCKETS=1
             runHook postBuild
           '';
 
@@ -289,7 +289,6 @@
               pkgs.mdformat
               pkgs.samply
               treefmtEval.config.build.wrapper
-              enkiReleaseNoPGO
             ]
             ++ lib.optionals stdenv.isLinux [
               pkgs.valgrind

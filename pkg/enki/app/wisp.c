@@ -1,9 +1,11 @@
 #include <ctype.h>
+#include <errno.h>
 #include <setjmp.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include "axsys/allocator.h"
 #include "axsys/profile.h"
@@ -17,17 +19,21 @@
 #include "plan/store.h"
 
 /*
- * wisp [--file-root DIR] DIR MODULE [FUNCTION ARGS...]
+ * wisp [--text-hash] [--file-root DIR] DIR MODULE [FUNCTION ARGS...]
  *
  * Loads MODULE (and its @includes) from DIR, then optionally applies the
- * binding FUNCTION to a row of the remaining arguments.  Mirrors the
- * reference loadAssembly / runRepl drivers.
+ * binding FUNCTION to a row of the remaining arguments.  Pins and the
+ * saved root use the Silo pack by default; --text-hash selects the
+ * reference canonical-text snapshots.  Mirrors the reference
+ * loadAssembly / runRepl drivers.
  */
 
 #define BOOT_HEAP_CELLS        ((size_t)1 << 26) /* 32 MiB per semispace, grows */
 // ./build/release/bin/wisp --file-root ../reaver/src ../reaver/src/plan
 // main  35.43s user 0.55s system 99% cpu 36.136 total
 #define BOOT_DEFAULT_FILE_ROOT "./reaver/src"
+#define BOOT_DEFAULT_STORE_DIR "./snap"
+#define BOOT_STORE_MAP_SIZE    ((size_t)1 << 30)
 
 typedef struct boot_module {
   pl_val key_v;
@@ -433,6 +439,28 @@ static bool boot_load_assembly(boot_ctx* ctx, const char* mod_c,
                                const char* fn_c, int argc, char** argv) {
   en_wisp* w = ctx->w;
   w->env = NULL;
+
+  pl_store* store = pl_heap_store(w->t->heap);
+  bool silo_root_f = store->format == PL_STORE_FORMAT_SILO_V1 &&
+                     (strcmp(ctx->src_dir_c, "snap") == 0 ||
+                      strcmp(ctx->src_dir_c, "./snap") == 0) &&
+                     strcmp(mod_c, "root") == 0;
+  if (silo_root_f) {
+    uint8_t hash[32];
+    if (!pl_store_get_root(store, hash)) {
+      fprintf(stderr, "wisp: Silo store has no root\n");
+      return false;
+    }
+    pl_val root = pl_store_load(w->t, hash);
+    if (fn_c == NULL)
+      return true;
+    if (strcmp(fn_c, "_") != 0) {
+      fprintf(stderr, "wisp: Silo root only binds _\n");
+      return false;
+    }
+    return boot_run_function(ctx, root, argc, argv);
+  }
+
   /* the reference loadAssembly: snapshots load in RPLAN mode, plan
    * sources in BPLAN mode (op 82 is gated on this) */
   w->t->rplan_f = strcmp(ctx->src_dir_c, "snap") == 0;
@@ -463,7 +491,8 @@ static bool boot_parse_double(const char* s, double* out) {
 
 static void boot_usage(const char* argv0_c) {
   fprintf(stderr,
-          "usage: %s [--file-root DIR] [--wait-for-tracy[=SECONDS]] "
+          "usage: %s [--text-hash] [--file-root DIR] "
+          "[--wait-for-tracy[=SECONDS]] "
           "DIR MODULE [FUNCTION ARGS...]\n",
           argv0_c);
 }
@@ -476,11 +505,17 @@ static const char* boot_env_file_root(void) {
 int main(int argc, char** argv) {
   const char* file_root_c = boot_env_file_root();
   double tracy_wait_s = 0.0;
+  bool text_hash_f = false;
   volatile int argi = 1;
   while (argi < argc && strncmp(argv[argi], "--", 2) == 0) {
     if (strcmp(argv[argi], "--") == 0) {
       argi++;
       break;
+    }
+    if (strcmp(argv[argi], "--text-hash") == 0) {
+      text_hash_f = true;
+      argi++;
+      continue;
     }
     if (strcmp(argv[argi], "--file-root") == 0) {
       if (argi + 1 >= argc) {
@@ -535,7 +570,22 @@ int main(int argc, char** argv) {
 
   ax_wait_for_tracy(tracy_wait_s);
 
-  pl_store* store = pl_store_new_mem();
+  pl_store* store;
+  if (text_hash_f) {
+    store = pl_store_new_mem();
+  } else {
+    if (mkdir(BOOT_DEFAULT_STORE_DIR, 0777) != 0 && errno != EEXIST) {
+      fprintf(stderr, "wisp: cannot create Silo store %s\n",
+              BOOT_DEFAULT_STORE_DIR);
+      return 1;
+    }
+    store = pl_store_new_silo(BOOT_DEFAULT_STORE_DIR, BOOT_STORE_MAP_SIZE);
+    if (store == NULL) {
+      fprintf(stderr, "wisp: cannot open Silo store %s\n",
+              BOOT_DEFAULT_STORE_DIR);
+      return 1;
+    }
+  }
   pl_heap* heap = pl_heap_new(BOOT_HEAP_CELLS, store);
   en_wisp* w = en_wisp_new(heap);
   if (w == NULL) {

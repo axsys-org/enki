@@ -26,6 +26,11 @@ typedef struct pl_hash {
   uint8_t b[32];
 } pl_hash;
 
+typedef enum pl_store_format {
+  PL_STORE_FORMAT_LEGACY_V1 = 0,
+  PL_STORE_FORMAT_SILO_V1 = 1,
+} pl_store_format;
+
 typedef struct pl_store_backend {
   void* ctx;
   /* get returns a malloc'd buffer the caller frees; false if missing. */
@@ -51,7 +56,10 @@ typedef struct pl_store {
   uint8_t* lo;
   uint8_t* hi;
   pl_intern_entry* intern; /* stb_ds hashmap: hash -> PIN val */
+  pl_val* pins;            /* every runtime PIN, including provisional ones */
+  pl_hash* loading;        /* active Silo loads; cycle detection */
   pl_store_backend be;
+  pl_store_format format;
   pl_val ix0_expr, ix1_expr;
   uint8_t compiler[32];
   pl_thread* compiler_t;
@@ -63,21 +71,29 @@ pl_store* pl_store_new(pl_store_backend backend);
 pl_store* pl_store_new_mem(void);
 /* NULL on failure (path must be an existing directory). */
 pl_store* pl_store_new_lmdb(const char* path, size_t map_size);
+/* Canonical Silo streams in pins.pack, indexed by LMDB. */
+pl_store* pl_store_new_silo(const char* path, size_t map_size);
 void pl_store_free(pl_store* s);
 
 /* Address-range test used by the collector (store vals are terminal). */
 bool pl_store_owns(pl_store* s, pl_val v);
 
 /*
- * Pin a value: nf, canonize + SHA-256, intern.  Returns the
- * (store-resident, deduplicated) PIN.  v is rooted internally for the
- * normalization; the caller's copy may be stale afterwards and should
- * be re-fetched from a root if reused.
+ * Pin a value and copy it into the non-moving store region.  Legacy stores
+ * immediately hash, persist, and intern it.  Silo PINs remain provisional
+ * until Save finalizes their reachable closure.
  */
 pl_val pl_pin(pl_thread* t, pl_val v);
 
-/* Hash bytes of a PIN value (32 bytes, borrowed). */
+/* True when a PIN has a persistent content hash. */
+bool pl_pin_is_hashed(pl_val pin);
+
+/* Hash bytes of a PIN value (32 bytes, borrowed), or NULL while provisional. */
 const uint8_t* pl_pin_hash(pl_val pin);
+
+/* Finalize and persist a Silo PIN closure, then publish it as the root. */
+bool pl_store_save_root(pl_store* s, pl_val pin, uint8_t out_hash[32],
+                        char* err, size_t err_cap);
 
 /* Intern-or-load a pin by hash; raises if the backend lacks it. */
 pl_val pl_store_load(pl_thread* t, const uint8_t hash[32]);

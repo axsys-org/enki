@@ -1114,8 +1114,10 @@ static uint64_t er_inject_encode(pl_val payload, uint8_t buf[33]) {
   }
   ax_assume(pl_tag(payload) == PL_TAG_PIN,
             "er_log: logged injection payloads must be nat63s or pins");
+  const uint8_t* hash = pl_pin_hash(payload);
+  ax_assume(hash != NULL, "er_log: recorded PIN injection requires Save first");
   buf[0] = 1;
-  memcpy(buf + 1, pl_pin_hash(payload), 32);
+  memcpy(buf + 1, hash, 32);
   return 33;
 }
 

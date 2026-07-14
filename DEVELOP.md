@@ -170,3 +170,42 @@ nix fmt
 `make tidy` consumes `compile_commands.json` (generate with Bear) and runs
 clang-tidy with checks from `.clang-tidy`. `nix fmt` uses treefmt-nix with
 clang-format for C and headers, alejandra for Nix, and mdformat for Markdown.
+
+## Debugging Linux builds with Docker
+
+The Docker workflow uses a pinned Nix 2.34.7 image and the same `tools/nix-ci`
+runner as GitHub Actions. The default platform is `linux/amd64`, matching the
+GitHub Ubuntu runner:
+
+```sh
+make linux-check
+```
+
+On Apple Silicon, use the native platform for faster iteration:
+
+```sh
+make linux-check LINUX_PLATFORM=linux/arm64
+```
+
+Checks stage a clean source copy inside the container, excluding Git metadata,
+build artifacts, snapshots, and the local `reaver` checkout. This keeps linked
+Git worktrees reproducible without modifying the host workspace. The Docker
+harness disables Nix's inner syscall filter for cross-architecture emulation;
+Docker remains the outer isolation boundary, and native CI keeps the filter.
+
+Open an interactive Linux development shell with the current worktree mounted
+read/write at `/src`:
+
+```sh
+make linux-shell
+# or, on Apple Silicon
+make linux-shell LINUX_PLATFORM=linux/arm64
+```
+
+Nix downloads are cached in a Docker volume specific to the image version and
+architecture. Remove a cache when a clean Nix store is needed:
+
+```sh
+docker volume rm enki-nix-2-34-7-linux-amd64
+docker volume rm enki-nix-2-34-7-linux-arm64
+```
