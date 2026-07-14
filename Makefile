@@ -5,6 +5,12 @@ PREFIX ?= /usr/local
 BUILD_PROFILE_SUFFIX := $(if $(PROFILE),-$(PROFILE),)
 BUILD_DIR ?= build/$(BUILD_TYPE)$(BUILD_PROFILE_SUFFIX)
 AR ?= ar
+DOCKER ?= docker
+
+NIX_DOCKER_IMAGE ?= nixos/nix@sha256:bf1d938835ab96312f098fa6c2e9cab367728e0aad0646ee3e02a787c80d8fb8
+LINUX_PLATFORM ?= linux/amd64
+LINUX_PLATFORM_ID := $(subst /,-,$(LINUX_PLATFORM))
+LINUX_NIX_VOLUME ?= enki-nix-2-34-7-$(LINUX_PLATFORM_ID)
 
 VALID_BUILD_TYPES := debug release asan ubsan tsan coverage profile
 VALID_BUILD_TYPES += pgo-generate pgo
@@ -59,8 +65,10 @@ HARDEN_CFLAGS := -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3 -fstack-protector-strong
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
 LTO_CFLAGS := -flto
+HOST_LDFLAGS := -L/opt/homebrew/lib
 else
 LTO_CFLAGS :=
+HOST_LDFLAGS :=
 endif
 
 BUILD_CFLAGS_debug := -O0 -g3 -DDEBUG
@@ -105,7 +113,7 @@ APP_BINS := $(patsubst $(APP_DIR)/%.c,$(BUILD_DIR)/bin/%,$(APP_SRCS))
 
 CPPFLAGS_ALL := $(BASE_CPPFLAGS) $(CPPFLAGS)
 CFLAGS_ALL := $(BASE_CFLAGS) $(WARN_CFLAGS) $(BUILD_CFLAGS_$(BUILD_TYPE)) $(CFLAGS)
-LDFLAGS_ALL := $(BUILD_LDFLAGS_$(BUILD_TYPE)) $(LDFLAGS) -pthread -L/opt/homebrew/lib -lgmp -llmdb -lcrypto -lcurl
+LDFLAGS_ALL := $(BUILD_LDFLAGS_$(BUILD_TYPE)) $(LDFLAGS) -pthread $(HOST_LDFLAGS) -lgmp -llmdb -lcrypto -lcurl
 
 ifeq ($(PROFILE),tracy)
 CPPFLAGS_ALL += -I/opt/homebrew/opt/tracy/include/tracy
@@ -151,7 +159,6 @@ LIB_PLAN := $(BUILD_DIR)/lib/libplan.a
 LIB_ENKI := $(BUILD_DIR)/lib/libenki.a
 LIBS := $(LIB_AXSYS) $(LIB_PLAN) $(LIB_ENKI)
 
-UNAME_S := $(shell uname -s 2>/dev/null)
 ifeq ($(BUILD_TYPE),tsan)
 ACTIVE_UNIT_BINS := $(TSAN_UNIT_BINS)
 else
@@ -190,9 +197,33 @@ COVERAGE_HTML_DIR := $(BUILD_DIR)/html
 LCOV_IGNORE_ERRORS ?= --ignore-errors inconsistent,inconsistent,mismatch,mismatch,gcov,gcov,unused,unused
 
 .PHONY: all lib bin install test test-binaries test-unit test-property fuzz fuzz-bin perf-binaries pgo \
-	pgo-profile coverage tidy check-layering format format-check compile-commands clean distclean
+	pgo-profile coverage tidy check-layering format format-check compile-commands nix-ci linux-check \
+	linux-shell clean distclean
 
 all: lib bin
+
+nix-ci:
+	./tools/nix-ci
+
+linux-check:
+	@$(DOCKER) volume create $(LINUX_NIX_VOLUME) >/dev/null
+	$(DOCKER) run --rm --platform $(LINUX_PLATFORM) \
+		--volume $(LINUX_NIX_VOLUME):/nix \
+		--volume $(CURDIR):/source:ro \
+		--env 'NIX_CONFIG=filter-syscalls = false' \
+		--workdir / \
+		$(NIX_DOCKER_IMAGE) \
+		/bin/sh /source/tools/linux-check
+
+linux-shell:
+	@$(DOCKER) volume create $(LINUX_NIX_VOLUME) >/dev/null
+	$(DOCKER) run --rm --interactive --tty --platform $(LINUX_PLATFORM) \
+		--volume $(LINUX_NIX_VOLUME):/nix \
+		--volume $(CURDIR):/src \
+		--env 'NIX_CONFIG=filter-syscalls = false' \
+		--workdir /src \
+		$(NIX_DOCKER_IMAGE) \
+		nix --extra-experimental-features 'nix-command flakes' develop path:/src
 
 bin: $(APP_BINS)
 

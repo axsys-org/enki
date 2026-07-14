@@ -1192,7 +1192,7 @@ static bool decode_node(silo_dec* d, uint32_t depth, pl_val* out,
   }
 
   if (opcode >= 0xf1 && opcode <= 0xf8) {
-    uint8_t width = opcode - 0xf0u;
+    uint8_t width = (uint8_t)(opcode - 0xf0u);
     uint8_t b[8] = {0};
     if (!dread(d, b, width))
       return false;

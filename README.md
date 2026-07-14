@@ -9,6 +9,8 @@
 nix build
 # testing
 nix flake check -L
+# full CI check (tests followed by the default package build)
+make nix-ci
 ```
 
 ## Entering a reaver dev environment

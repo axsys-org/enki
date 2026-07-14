@@ -580,7 +580,7 @@ extern void* stbds_shmode_func(size_t elemsize, int mode);
 #define stbds_arraddnindex(a, n)                                               \
   (stbds_arrmaybegrow(a, n),                                                   \
    (n) ? (stbds_header(a)->length += (n), stbds_header(a)->length - (n))       \
-       : stbds_arrlen(a))
+       : stbds_arrlenu(a))
 #define stbds_arraddnoff stbds_arraddnindex
 #define stbds_arrlast(a) ((a)[stbds_header(a)->length - 1])
 #define stbds_arrfree(a)                                                       \

@@ -289,7 +289,6 @@
               pkgs.mdformat
               pkgs.samply
               treefmtEval.config.build.wrapper
-              enkiReleaseNoPGO
             ]
             ++ lib.optionals stdenv.isLinux [
               pkgs.valgrind
