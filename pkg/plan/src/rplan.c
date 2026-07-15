@@ -475,12 +475,21 @@ pl_val pl_op82_write_file(pl_thread* t, size_t ab) {
 }
 
 pl_val pl_op82_stamp(pl_thread* t, size_t ab) {
-  char* path = rp_nat_path(rp_want_nat(t, ARG(0)));
+  char* arg_path = rp_nat_path(rp_want_nat(t, ARG(0)));
+  char* path;
+  bool resolved = rp_resolve_read_path(t, arg_path, &path);
+  free(arg_path);
+  if (!resolved) {
+    return 0;
+  }
   struct stat st;
   int rc = stat(path, &st);
+
   free(path);
-  if (rc < 0)
+  if (rc < 0) {
+    perror("stamp");
     return 0;
+  }
   return (pl_val)(uint64_t)st.st_mtime;
 }
 
