@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest]
+        os: [macos-15, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
@@ -34,7 +34,7 @@ jobs:
   #     - run: nix run .#fuzz -- -max_total_time=60 -error_exitcode=1
 
   coverage:
-    runs-on: macos-latest
+    runs-on: macos-15
     permissions:
       contents: read
       pull-requests: write
