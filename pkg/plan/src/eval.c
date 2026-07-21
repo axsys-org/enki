@@ -1192,6 +1192,8 @@ op_body:
     t->fsp--;          /* pop before the body so its frames take this slot */
     t->centry_depth++; /* op bodies are C-entry regions */
     pl_val r;
+    if (ax_unlikely(d->opset >= 82 && t->rplan_effect_f != NULL))
+      t->rplan_effect_f(t);
     /* direct op-82 effects route through the record/replay seam */
     if (!(d->opset == 82 && !d->coord && pl_io != NULL &&
           pl_io(t, opi, argbase, &r)))

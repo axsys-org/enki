@@ -5,8 +5,10 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
+#include "axsys/fd.h"
 #include "enki/actor.h"
 #include "test_plan.h"
 
@@ -98,6 +100,17 @@ static pl_val actor_fn(pl_thread* t, pl_val body) {
 static pl_val recv_code(pl_thread* t) {
   pl_val args[1] = {0};
   return code_effect(t, ax_s4('R', 'e', 'c', 'v'), 1, args);
+}
+
+static pl_val sleep_code(pl_thread* t, uint64_t seconds) {
+  pl_val args[1] = {seconds};
+  return code_effect83(t, ax_s5('S', 'l', 'e', 'e', 'p'), 1, args);
+}
+
+static double monotonic_seconds(void) {
+  struct timespec ts;
+  cr_assert_eq(clock_gettime(CLOCK_MONOTONIC, &ts), 0);
+  return (double)ts.tv_sec + (double)ts.tv_nsec / 1000000000.0;
 }
 
 static bool nat_text_eq(pl_val value, const char* text) {
@@ -286,6 +299,77 @@ Test(actor, mt_multiple_actors_halt) {
   test_rt_free(&rt);
 }
 
+Test(actor, mt_blocking_effect_replenishes_shared_pool, .timeout = 4) {
+  test_rt rt = test_rt_new();
+  er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
+  er_actor* a = er_scheduler_actor(sys);
+  er_actor* b = er_scheduler_actor(sys);
+  pl_thread* at = er_actor_thread(a);
+  pl_thread* bt = er_actor_thread(b);
+  er_actor_start(a, actor_fn(at, sleep_code(at, 1)));
+  er_actor_start(b, actor_fn(bt, sleep_code(bt, 1)));
+
+  /* With one shared worker and no executor affinity/compensation these
+   * sleeps serialize and take at least two seconds.  Each actor's first
+   * RPLAN effect instead claims its worker and immediately replenishes the
+   * shared pool, allowing both blocking syscalls to overlap. */
+  er_mt_executor* ex = er_mt_executor_new(sys, (er_mt_config){.workers = 1});
+  double before = monotonic_seconds();
+  cr_assert_eq(er_mt_executor_run(ex), ER_RUN_IDLE);
+  double elapsed = monotonic_seconds() - before;
+  cr_assert_lt(elapsed, 1.95,
+               "blocking effects serialized across the shared pool: %.3fs",
+               elapsed);
+  cr_assert_eq(er_actor_state(a), ER_ACTOR_HALTED);
+  cr_assert_eq(er_actor_state(b), ER_ACTOR_HALTED);
+
+  er_mt_executor_free(ex);
+  er_scheduler_free(sys);
+  test_rt_free(&rt);
+}
+
+Test(actor, mt_direct_read_replenishes_before_blocking, .timeout = 4) {
+  int pipe_fd[2];
+  cr_assert_eq(pipe(pipe_fd), 0);
+  size_t read_handle = ax_fd_add(pipe_fd[0]);
+  size_t write_handle = ax_fd_add(pipe_fd[1]);
+  cr_assert_neq(read_handle, AX_FD_INVALID);
+  cr_assert_neq(write_handle, AX_FD_INVALID);
+
+  test_rt rt = test_rt_new();
+  er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
+  er_actor* reader = er_scheduler_actor(sys);
+  er_actor* writer = er_scheduler_actor(sys);
+  pl_thread* reader_t = er_actor_thread(reader);
+  pl_thread* writer_t = er_actor_thread(writer);
+  pl_val read_args[2] = {read_handle, 1};
+  pl_val write_args[2] = {write_handle, ((pl_val)1 << 8) | 42};
+  er_actor_start(
+      reader,
+      actor_fn(reader_t,
+               code_effect(reader_t, ax_s4('R', 'e', 'a', 'd'), 2, read_args)));
+  er_actor_start(
+      writer,
+      actor_fn(writer_t, code_effect(writer_t, ax_s5('W', 'r', 'i', 't', 'e'),
+                                     2, write_args)));
+
+  /* The reader is first in the queue and blocks in read(2).  With one
+   * shared worker, the writer can run only if the effect hook binds the
+   * reader and replenishes the pool before entering the direct-op body. */
+  er_mt_executor* ex = er_mt_executor_new(sys, (er_mt_config){.workers = 1});
+  cr_assert_eq(er_mt_executor_run(ex), ER_RUN_IDLE);
+  cr_assert_eq(er_actor_state(reader), ER_ACTOR_HALTED);
+  cr_assert_eq(er_actor_result(reader), ((pl_val)1 << 8) | 42);
+  cr_assert_eq(er_actor_state(writer), ER_ACTOR_HALTED);
+  cr_assert_eq(er_actor_result(writer), 0);
+
+  er_mt_executor_free(ex);
+  er_scheduler_free(sys);
+  test_rt_free(&rt);
+  cr_assert_eq(ax_fd_close(read_handle), 0);
+  cr_assert_eq(ax_fd_close(write_handle), 0);
+}
+
 Test(actor, mt_recv_blocks_until_injection) {
   test_rt rt = test_rt_new();
   er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
@@ -304,6 +388,29 @@ Test(actor, mt_recv_blocks_until_injection) {
   cr_assert_not_null(r);
   cr_assert_eq(pl_app_args(r)[0], 123);
   er_mt_executor_free(ex);
+  er_scheduler_free(sys);
+  test_rt_free(&rt);
+}
+
+Test(actor, mt_free_detaches_bound_actor) {
+  test_rt rt = test_rt_new();
+  er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
+  er_actor* a = er_scheduler_actor(sys);
+  pl_thread* t = er_actor_thread(a);
+  er_actor_start(a, actor_fn(t, recv_code(t)));
+
+  er_mt_executor* ex = er_mt_executor_new(sys, (er_mt_config){.workers = 1});
+  cr_assert_eq(er_mt_executor_run(ex), ER_RUN_QUIESCENT);
+  cr_assert_eq(er_actor_state(a), ER_ACTOR_BLOCKED);
+  er_mt_executor_free(ex); /* releases the actor's private worker affinity */
+
+  er_scheduler_inject(sys, a, 77);
+  cr_assert_eq(er_scheduler_run(sys), ER_RUN_IDLE);
+  cr_assert_eq(er_actor_state(a), ER_ACTOR_HALTED);
+  pl_cell* r = pl_as(PL_TAG_APP, er_actor_result(a));
+  cr_assert_not_null(r);
+  cr_assert_eq(pl_app_args(r)[0], 77);
+
   er_scheduler_free(sys);
   test_rt_free(&rt);
 }

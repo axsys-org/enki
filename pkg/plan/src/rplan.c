@@ -259,10 +259,18 @@ pl_val pl_op82_input(pl_thread* t, size_t ab) {
     n = 1u << 26;
   uint8_t* buf = malloc(n ? n : 1);
   ax_assume(buf != NULL, "oom");
+  int fd;
+  if (ax_fd_acquire(STDIN_FILENO, &fd) < 0) {
+    free(buf);
+    pl_raise_msg(t, "Input: closed");
+  }
   ssize_t r;
   do {
-    r = read(STDIN_FILENO, buf, n);
+    r = read(fd, buf, n);
   } while (r < 0 && errno == EINTR);
+  int read_errno = errno;
+  (void)ax_fd_release(STDIN_FILENO);
+  errno = read_errno;
   if (r < 0) {
     free(buf);
     pl_raise_msg(t, "Input: read failed");
@@ -272,10 +280,18 @@ pl_val pl_op82_input(pl_thread* t, size_t ab) {
   return out;
 }
 
-static pl_val rp_output_fd(pl_thread* t, size_t ab, int fd) {
+static pl_val rp_output_fd(pl_thread* t, size_t ab, size_t handle) {
   size_t n;
   uint8_t* b = rp_nat_bytes(pl_nat_coerce(ARG(0)), true, &n);
+  int fd;
+  if (ax_fd_acquire(handle, &fd) < 0) {
+    free(b);
+    pl_raise_msg(t, "Output: closed");
+  }
   int rc = rp_write_all(fd, b, n);
+  int write_errno = errno;
+  (void)ax_fd_release(handle);
+  errno = write_errno;
   free(b);
   if (rc < 0)
     pl_raise_msg(t, "Output: write failed");
@@ -283,17 +299,25 @@ static pl_val rp_output_fd(pl_thread* t, size_t ab, int fd) {
 }
 
 pl_val pl_op82_output(pl_thread* t, size_t ab) {
-  return rp_output_fd(t, ab, STDOUT_FILENO);
+  return rp_output_fd(t, ab, (size_t)STDOUT_FILENO);
 }
 
 pl_val pl_op82_warn(pl_thread* t, size_t ab) {
-  return rp_output_fd(t, ab, STDERR_FILENO);
+  return rp_output_fd(t, ab, (size_t)STDERR_FILENO);
 }
 
 pl_val pl_op82_print(pl_thread* t, size_t ab) {
   size_t n;
   uint8_t* b = rp_nat_bytes(rp_want_nat(t, ARG(0)), false, &n);
-  int rc = rp_write_all(STDOUT_FILENO, b, n);
+  int fd;
+  if (ax_fd_acquire(STDOUT_FILENO, &fd) < 0) {
+    free(b);
+    pl_raise_msg(t, "Print: closed");
+  }
+  int rc = rp_write_all(fd, b, n);
+  int write_errno = errno;
+  (void)ax_fd_release(STDOUT_FILENO);
+  errno = write_errno;
   free(b);
   if (rc < 0)
     pl_raise_msg(t, "Print: write failed");
@@ -619,10 +643,13 @@ pl_val pl_op82_listen(pl_thread* t, size_t ab) {
 
 pl_val pl_op82_accept(pl_thread* t, size_t ab) {
   uint64_t h = pl_nat_u64_clamp(rp_want_nat(t, ARG(0)));
-  int listen_fd = ax_fd_get((size_t)h);
-  if (listen_fd < 0)
+  int listen_fd;
+  if (ax_fd_acquire((size_t)h, &listen_fd) < 0)
     pl_raise_msg(t, "Accept: bad handle");
   int client_fd = accept(listen_fd, NULL, NULL);
+  int accept_errno = errno;
+  (void)ax_fd_release((size_t)h);
+  errno = accept_errno;
   if (client_fd < 0)
     pl_raise_msg(t, "Accept: accept failed");
   size_t ch = ax_fd_add(client_fd);
@@ -638,8 +665,8 @@ pl_val pl_op82_read(pl_thread* t, size_t ab) {
   uint64_t n = pl_nat_u64_clamp(rp_want_nat(t, ARG(1)));
   if (n > (1u << 26))
     n = 1u << 26;
-  int fd = ax_fd_get((size_t)h);
-  if (fd < 0)
+  int fd;
+  if (ax_fd_acquire((size_t)h, &fd) < 0)
     pl_raise_msg(t, "Read: bad handle");
   uint8_t* buf = malloc(n ? n : 1);
   ax_assume(buf != NULL, "oom");
@@ -647,6 +674,9 @@ pl_val pl_op82_read(pl_thread* t, size_t ab) {
   do {
     r = read(fd, buf, n);
   } while (r < 0 && errno == EINTR);
+  int read_errno = errno;
+  (void)ax_fd_release((size_t)h);
+  errno = read_errno;
   if (r < 0) {
     free(buf);
     pl_raise_msg(t, "Read: read failed");
@@ -663,12 +693,15 @@ pl_val pl_op82_read(pl_thread* t, size_t ab) {
 pl_val pl_op82_write(pl_thread* t, size_t ab) {
   uint64_t h = pl_nat_u64_clamp(rp_want_nat(t, ARG(0)));
   rp_want_nat(t, ARG(1));
-  int fd = ax_fd_get((size_t)h);
-  if (fd < 0)
+  int fd;
+  if (ax_fd_acquire((size_t)h, &fd) < 0)
     pl_raise_msg(t, "Write: bad handle");
   size_t n;
   uint8_t* b = rp_nat_bytes(ARG(1), true, &n);
   int rc = rp_write_all(fd, b, n);
+  int write_errno = errno;
+  (void)ax_fd_release((size_t)h);
+  errno = write_errno;
   free(b);
   if (rc < 0)
     pl_raise_msg(t, "Write: write failed");

@@ -280,6 +280,16 @@ static void test_put64le(uint8_t bytes[8], uint64_t value) {
     bytes[i] = (uint8_t)(value >> (8u * i));
 }
 
+static size_t silo_last_txnid(const char* dir) {
+  MDB_env* env;
+  MDB_envinfo info;
+  cr_assert_eq(mdb_env_create(&env), 0);
+  cr_assert_eq(mdb_env_open(env, dir, MDB_RDONLY, 0), 0);
+  cr_assert_eq(mdb_env_info(env, &info), 0);
+  mdb_env_close(env);
+  return (size_t)info.me_last_txnid;
+}
+
 Test(store, lmdb_round_trip) {
   char dir[64];
   snprintf(dir, sizeof(dir), "/tmp/enki-test-store-%lu",
@@ -345,6 +355,190 @@ Test(store, silo_pin_defers_hash_and_io_until_save) {
   pl_thread_free(t);
   pl_heap_free(h);
   pl_store_free(s);
+  cleanup_store_dir(dir, true);
+}
+
+Test(store, silo_batches_closure_in_one_transaction) {
+  char dir[64];
+  snprintf(dir, sizeof(dir), "/tmp/enki-test-silo-batch-%lu",
+           (unsigned long)getpid());
+  cr_assert(mkdir(dir, 0700) == 0 || errno == EEXIST);
+
+  pl_store* initialized = mk_silo(dir);
+  cr_assert_not_null(initialized);
+  pl_store_free(initialized);
+  size_t before_txnid = silo_last_txnid(dir);
+
+  uint8_t root_hash[32];
+  pl_store* s = mk_silo(dir);
+  cr_assert_not_null(s);
+  pl_heap* h = pl_heap_new(1 << 16, s);
+  pl_thread* t = pl_thread_new(h);
+  pl_vpush(t, 0);
+  pl_val root = pl_pin(t, t->vstack[t->vsp - 1]);
+  for (uint64_t i = 1; i <= 32; i++) {
+    pl_vpush(t, test_app2(t, 0, root, i));
+    root = pl_pin(t, t->vstack[t->vsp - 1]);
+  }
+
+  char err[192] = {0};
+  cr_assert(pl_store_save_root(s, root, root_hash, err, sizeof(err)), "%s",
+            err);
+  char path[96];
+  snprintf(path, sizeof(path), "%s/pins.pack", dir);
+  struct stat first, second;
+  cr_assert_eq(stat(path, &first), 0);
+  cr_assert(pl_store_save_root(s, root, NULL, err, sizeof(err)), "%s", err);
+  cr_assert_eq(stat(path, &second), 0);
+  cr_assert_eq(second.st_size, first.st_size);
+
+  pl_thread_free(t);
+  pl_heap_free(h);
+  pl_store_free(s);
+  size_t after_txnid = silo_last_txnid(dir);
+  /* Reopening the backend may consume one no-op initialization transaction;
+   * the 33-object Save itself must consume only one more. */
+  cr_assert_geq(after_txnid, before_txnid + 1);
+  cr_assert_leq(after_txnid, before_txnid + 2);
+  cr_assert_not(silo_load_raises(dir, root_hash));
+  cleanup_store_dir(dir, true);
+}
+
+Test(store, silo_failed_batch_keeps_provisional_pins_retryable) {
+  char dir[64];
+  snprintf(dir, sizeof(dir), "/tmp/enki-test-silo-retry-%lu",
+           (unsigned long)getpid());
+  cr_assert(mkdir(dir, 0700) == 0 || errno == EEXIST);
+  pl_store* s = mk_silo(dir);
+  cr_assert_not_null(s);
+  pl_heap* h = pl_heap_new(1 << 16, s);
+  pl_thread* t = pl_thread_new(h);
+
+  pl_vpush(t, 42);
+  pl_vpush(t, 42);
+  pl_val first = pl_pin(t, t->vstack[t->vsp - 2]);
+  pl_val second = pl_pin(t, t->vstack[t->vsp - 1]);
+  pl_vpush(t, test_app2(t, 0, first, second));
+  size_t valid_at = t->vsp - 1;
+  pl_vpush(t, test_law(t, 0, 0, 1));
+  pl_vpush(t, test_law(t, 1, t->vstack[t->vsp - 1], t->vstack[valid_at]));
+  pl_val invalid = pl_pin(t, t->vstack[t->vsp - 1]);
+  cr_assert_eq(pl_pin_npins(pl_ptr(invalid)), 2);
+
+  char err[192] = {0};
+  cr_assert_not(pl_store_save_root(s, invalid, NULL, err, sizeof(err)));
+  cr_assert(strstr(err, "LAW arity") != NULL, "%s", err);
+  cr_assert_not(pl_pin_is_hashed(first));
+  cr_assert_not(pl_pin_is_hashed(second));
+  cr_assert_not(pl_pin_is_hashed(invalid));
+  cr_assert_eq(pl_pin_npins(pl_ptr(invalid)), 2);
+
+  pl_val retry = pl_pin(t, t->vstack[valid_at]);
+  cr_assert(pl_store_save_root(s, retry, NULL, err, sizeof(err)), "%s", err);
+  cr_assert(pl_pin_is_hashed(first));
+  cr_assert(pl_pin_is_hashed(second));
+  cr_assert_eq(memcmp(pl_pin_hash(first), pl_pin_hash(second), 32), 0);
+  cr_assert_eq(pl_pin_npins(pl_ptr(retry)), 1);
+
+  pl_thread_free(t);
+  pl_heap_free(h);
+  pl_store_free(s);
+  cleanup_store_dir(dir, true);
+}
+
+Test(store, silo_failed_batch_truncates_flushed_pack_tail) {
+  char dir[64];
+  snprintf(dir, sizeof(dir), "/tmp/enki-test-silo-rollback-%lu",
+           (unsigned long)getpid());
+  cr_assert(mkdir(dir, 0700) == 0 || errno == EEXIST);
+  pl_store* s = mk_silo(dir);
+  cr_assert_not_null(s);
+  pl_heap* h = pl_heap_new(1 << 18, s);
+  pl_thread* t = pl_thread_new(h);
+
+  const size_t byte_len = (size_t)128 * 1024 + 17;
+  uint8_t* bytes = malloc(byte_len);
+  cr_assert_not_null(bytes);
+  for (size_t i = 0; i < byte_len; i++)
+    bytes[i] = (uint8_t)(i * 29u + 5u);
+  bytes[byte_len - 1] = 1;
+  pl_vpush(t, pl_nat_from_bytes(t, bytes, byte_len));
+  pl_val large = pl_pin(t, t->vstack[t->vsp - 1]);
+  pl_vpush(t, test_law(t, 0, 0, large));
+  pl_val invalid = pl_pin(t, t->vstack[t->vsp - 1]);
+
+  char path[96];
+  snprintf(path, sizeof(path), "%s/pins.pack", dir);
+  struct stat before, after;
+  cr_assert_eq(stat(path, &before), 0);
+  char err[192] = {0};
+  cr_assert_not(pl_store_save_root(s, invalid, NULL, err, sizeof(err)));
+  cr_assert(strstr(err, "LAW arity") != NULL, "%s", err);
+  cr_assert_eq(stat(path, &after), 0);
+  cr_assert_eq(after.st_size, before.st_size);
+  cr_assert_not(pl_pin_is_hashed(large));
+  cr_assert_not(pl_pin_is_hashed(invalid));
+
+  cr_assert(pl_store_save_root(s, large, NULL, err, sizeof(err)), "%s", err);
+  cr_assert(pl_pin_is_hashed(large));
+
+  free(bytes);
+  pl_thread_free(t);
+  pl_heap_free(h);
+  pl_store_free(s);
+  cleanup_store_dir(dir, true);
+}
+
+Test(store, silo_buffered_write_and_mapped_read_cross_chunk_boundaries) {
+  char dir[64];
+  snprintf(dir, sizeof(dir), "/tmp/enki-test-silo-large-%lu",
+           (unsigned long)getpid());
+  cr_assert(mkdir(dir, 0700) == 0 || errno == EEXIST);
+  const size_t byte_len = (size_t)128 * 1024 + 17;
+  uint8_t* bytes = malloc(byte_len);
+  cr_assert_not_null(bytes);
+  for (size_t i = 0; i < byte_len; i++)
+    bytes[i] = (uint8_t)(i * 17u + 3u);
+  bytes[byte_len - 1] = 1;
+
+  uint8_t large_hash[32];
+  {
+    pl_store* s = mk_silo(dir);
+    cr_assert_not_null(s);
+    pl_heap* h = pl_heap_new(1 << 18, s);
+    pl_thread* t = pl_thread_new(h);
+
+    pl_vpush(t, 7);
+    pl_val prefix = pl_pin(t, t->vstack[t->vsp - 1]);
+    char err[192] = {0};
+    cr_assert(pl_store_save_root(s, prefix, NULL, err, sizeof(err)), "%s", err);
+
+    pl_vpush(t, pl_nat_from_bytes(t, bytes, byte_len));
+    pl_val large = pl_pin(t, t->vstack[t->vsp - 1]);
+    cr_assert(pl_store_save_root(s, large, large_hash, err, sizeof(err)), "%s",
+              err);
+    pl_thread_free(t);
+    pl_heap_free(h);
+    pl_store_free(s);
+  }
+
+  {
+    pl_store* s = mk_silo(dir);
+    cr_assert_not_null(s);
+    pl_heap* h = pl_heap_new(1 << 18, s);
+    pl_thread* t = pl_thread_new(h);
+    pl_val loaded = pl_store_load(t, large_hash);
+    pl_val body = pl_pin_body(pl_ptr(loaded));
+    cr_assert_eq(pl_nat_byte_len(body), byte_len);
+    cr_assert_eq(pl_nat_byte_at(body, 0), bytes[0]);
+    cr_assert_eq(pl_nat_byte_at(body, 65536), bytes[65536]);
+    cr_assert_eq(pl_nat_byte_at(body, byte_len - 1), bytes[byte_len - 1]);
+    pl_thread_free(t);
+    pl_heap_free(h);
+    pl_store_free(s);
+  }
+
+  free(bytes);
   cleanup_store_dir(dir, true);
 }
 

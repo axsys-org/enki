@@ -189,9 +189,16 @@ typedef struct enc_pin_idx {
 typedef struct silo_enc {
   pl_silo_writer* w;
   enc_pin_idx* pin_idx;
+  pl_silo_pin_hash_fn pin_hash;
+  void* pin_hash_ctx;
   char* err;
   size_t err_cap;
 } silo_enc;
+
+static const uint8_t* encode_pin_hash(silo_enc* e, pl_val pin) {
+  return e->pin_hash != NULL ? e->pin_hash(e->pin_hash_ctx, pin)
+                             : pl_pin_hash(pin);
+}
 
 typedef struct mnat_node {
   uint64_t start;
@@ -434,7 +441,7 @@ static bool encode_node(silo_enc* e, pl_val v, uint32_t depth) {
   pl_cell* p = pl_ptr(v);
   switch (pl_tag(v)) {
   case PL_TAG_PIN: {
-    const uint8_t* bytes = pl_pin_hash(v);
+    const uint8_t* bytes = encode_pin_hash(e, v);
     if (bytes == NULL)
       return silo_error(e->err, e->err_cap,
                         "cannot encode a provisional PIN reference");
@@ -471,19 +478,25 @@ static bool encode_node(silo_enc* e, pl_val v, uint32_t depth) {
   }
 }
 
-bool pl_silo_encode(pl_silo_writer* w, pl_val root, const pl_val* subpins,
-                    size_t nsub, char* err, size_t err_cap) {
+bool pl_silo_encode_resolved(pl_silo_writer* w, pl_val root,
+                             const pl_val* subpins, size_t nsub,
+                             pl_silo_pin_hash_fn pin_hash, void* pin_hash_ctx,
+                             char* err, size_t err_cap) {
   if (w == NULL || w->write == NULL)
     return silo_error(err, err_cap, "invalid Silo writer");
   if (nsub > PL_SILO_MAX_PIN_COUNT)
     return silo_error(err, err_cap, "too many Silo pins");
-  silo_enc e = {.w = w, .err = err, .err_cap = err_cap};
+  silo_enc e = {.w = w,
+                .pin_hash = pin_hash,
+                .pin_hash_ctx = pin_hash_ctx,
+                .err = err,
+                .err_cap = err_cap};
   for (size_t i = 0; i < nsub; i++) {
     if (pl_tag(subpins[i]) != PL_TAG_PIN) {
       ax_hmfree(e.pin_idx);
       return silo_error(err, err_cap, "non-PIN in Silo pin table");
     }
-    const uint8_t* bytes = pl_pin_hash(subpins[i]);
+    const uint8_t* bytes = encode_pin_hash(&e, subpins[i]);
     if (bytes == NULL) {
       ax_hmfree(e.pin_idx);
       return silo_error(err, err_cap, "provisional PIN in Silo pin table");
@@ -499,13 +512,57 @@ bool pl_silo_encode(pl_silo_writer* w, pl_val root, const pl_val* subpins,
   bool ok = swrite(w, silo_magic, sizeof(silo_magic), err, err_cap) &&
             swrite_varnat(w, nsub, err, err_cap);
   for (size_t i = 0; ok && i < nsub; i++) {
-    const uint8_t* hash = pl_pin_hash(subpins[i]);
+    const uint8_t* hash = encode_pin_hash(&e, subpins[i]);
     ok = hash != NULL && swrite(w, hash, 32, err, err_cap);
   }
   if (ok)
     ok = encode_node(&e, root, 0);
   ax_hmfree(e.pin_idx);
   return ok;
+}
+
+bool pl_silo_encode(pl_silo_writer* w, pl_val root, const pl_val* subpins,
+                    size_t nsub, char* err, size_t err_cap) {
+  return pl_silo_encode_resolved(w, root, subpins, nsub, NULL, NULL, err,
+                                 err_cap);
+}
+
+typedef struct silo_buffer_sink {
+  uint8_t* bytes;
+} silo_buffer_sink;
+
+static bool silo_buffer_write(void* ctx, const uint8_t* bytes, size_t len) {
+  silo_buffer_sink* sink = ctx;
+  if (len > (size_t)PTRDIFF_MAX ||
+      ax_arrlen(sink->bytes) > PTRDIFF_MAX - (ptrdiff_t)len)
+    return false;
+  memcpy(ax_arraddn(sink->bytes, (ptrdiff_t)len), bytes, len);
+  return true;
+}
+
+bool pl_silo_encode_buffer(pl_val root, const pl_val* subpins, size_t nsub,
+                           pl_silo_pin_hash_fn pin_hash, void* pin_hash_ctx,
+                           uint8_t** out_bytes, size_t* out_len,
+                           uint8_t out_hash[32], char* err, size_t err_cap) {
+  if (out_bytes == NULL || out_len == NULL || out_hash == NULL)
+    return silo_error(err, err_cap, "invalid Silo buffer output");
+  *out_bytes = NULL;
+  *out_len = 0;
+  silo_buffer_sink sink = {0};
+  pl_silo_writer writer = {.ctx = &sink, .write = silo_buffer_write};
+  if (!pl_silo_encode_resolved(&writer, root, subpins, nsub, pin_hash,
+                               pin_hash_ctx, err, err_cap)) {
+    ax_arrfree(sink.bytes);
+    return false;
+  }
+  if (writer.pos != (uint64_t)ax_arrlen(sink.bytes)) {
+    ax_arrfree(sink.bytes);
+    return silo_error(err, err_cap, "Silo buffer length mismatch");
+  }
+  ax_sha256(sink.bytes, (size_t)ax_arrlen(sink.bytes), out_hash);
+  *out_len = (size_t)ax_arrlen(sink.bytes);
+  *out_bytes = sink.bytes;
+  return true;
 }
 
 typedef struct silo_hash_sink {

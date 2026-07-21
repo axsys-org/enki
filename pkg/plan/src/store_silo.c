@@ -7,10 +7,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define SILO_INDEX_BYTES 24u
+#include "axsys/ds.h"
+
+#define SILO_INDEX_BYTES  24u
+#define PACK_BUFFER_BYTES (64u * 1024u)
 
 typedef struct silo_backend {
   MDB_env* env;
@@ -19,18 +23,31 @@ typedef struct silo_backend {
   int pack_fd;
 } silo_backend;
 
-typedef struct pack_writer {
-  int fd;
-  uint64_t start;
-  uint64_t written;
-} pack_writer;
-
 typedef struct pack_reader {
-  int fd;
-  uint64_t start;
-  uint64_t len;
-  uint64_t pos;
+  void* mapping;
+  size_t mapping_len;
+  const uint8_t* bytes;
+  size_t len;
+  size_t pos;
 } pack_reader;
+
+typedef struct batch_hash_entry {
+  pl_hash key;
+  uint8_t value;
+} batch_hash_entry;
+
+struct pl_silo_batch {
+  silo_backend* backend;
+  MDB_txn* txn;
+  uint64_t pack_start;
+  uint64_t pack_flushed;
+  uint64_t pack_end;
+  size_t buffered;
+  bool changed;
+  bool pack_dirty;
+  batch_hash_entry* pending;
+  uint8_t buffer[PACK_BUFFER_BYTES];
+};
 
 static const uint8_t index_magic[8] = {'p', 'i', 'n', 'p', 'a', 'c', 'k', 1};
 static const uint8_t format_key[] = "format";
@@ -78,16 +95,14 @@ static bool index_decode(const MDB_val* value, uint64_t* off, uint64_t* len) {
   return true;
 }
 
-static bool pack_writer_write(void* ctx, const uint8_t* bytes, size_t len) {
-  pack_writer* w = ctx;
-  uint64_t max_off = (uint64_t)INT64_MAX;
-  if (w->start > max_off || w->written > max_off - w->start ||
-      len > max_off - w->start - w->written)
+static bool pack_pwrite_exact(int fd, const uint8_t* bytes, size_t len,
+                              uint64_t start) {
+  if (start > (uint64_t)INT64_MAX || len > (uint64_t)INT64_MAX - start)
     return false;
   size_t done = 0;
   while (done < len) {
-    off_t off = (off_t)(w->start + w->written + done);
-    ssize_t n = pwrite(w->fd, bytes + done, len - done, off);
+    off_t off = (off_t)(start + done);
+    ssize_t n = pwrite(fd, bytes + done, len - done, off);
     if (n < 0) {
       if (errno == EINTR)
         continue;
@@ -97,7 +112,6 @@ static bool pack_writer_write(void* ctx, const uint8_t* bytes, size_t len) {
       return false;
     done += (size_t)n;
   }
-  w->written += len;
   return true;
 }
 
@@ -105,19 +119,7 @@ static bool pack_reader_read(void* ctx, uint8_t* bytes, size_t len) {
   pack_reader* r = ctx;
   if (r->pos > r->len || len > r->len - r->pos)
     return false;
-  size_t done = 0;
-  while (done < len) {
-    off_t off = (off_t)(r->start + r->pos + done);
-    ssize_t n = pread(r->fd, bytes + done, len - done, off);
-    if (n < 0) {
-      if (errno == EINTR)
-        continue;
-      return false;
-    }
-    if (n == 0)
-      return false;
-    done += (size_t)n;
-  }
+  memcpy(bytes, r->bytes + r->pos, len);
   r->pos += len;
   return true;
 }
@@ -212,70 +214,210 @@ static void silo_close(void* ctx) {
   free(b);
 }
 
-bool pl_store_silo_put(pl_store* store, const uint8_t hash[32], pl_val root,
-                       const pl_val* subpins, size_t nsub, char* err,
-                       size_t err_cap) {
+static bool batch_flush(pl_silo_batch* batch, char* err, size_t err_cap) {
+  if (batch->buffered == 0)
+    return true;
+  if (!pack_pwrite_exact(batch->backend->pack_fd, batch->buffer,
+                         batch->buffered, batch->pack_flushed))
+    return pack_error(err, err_cap, "cannot append pins.pack");
+  batch->pack_flushed += batch->buffered;
+  batch->buffered = 0;
+  batch->pack_dirty = true;
+  return true;
+}
+
+static bool batch_append(pl_silo_batch* batch, const uint8_t* bytes, size_t len,
+                         char* err, size_t err_cap) {
+  if (len > UINT64_MAX - batch->pack_end ||
+      len > (uint64_t)INT64_MAX - batch->pack_end)
+    return pack_error(err, err_cap, "pins.pack length overflow");
+  size_t left = len;
+  while (left != 0) {
+    size_t room = sizeof(batch->buffer) - batch->buffered;
+    if (room == 0) {
+      if (!batch_flush(batch, err, err_cap))
+        return false;
+      room = sizeof(batch->buffer);
+    }
+    size_t take = left < room ? left : room;
+    memcpy(batch->buffer + batch->buffered, bytes + (len - left), take);
+    batch->buffered += take;
+    batch->pack_end += take;
+    left -= take;
+  }
+  return true;
+}
+
+bool pl_store_silo_batch_begin(pl_store* store, pl_silo_batch** out, char* err,
+                               size_t err_cap) {
+  if (out == NULL)
+    return pack_error(err, err_cap, "invalid Silo batch output");
+  *out = NULL;
   if (store == NULL || store->format != PL_STORE_FORMAT_SILO_V1)
     return pack_error(err, err_cap, "store is not a Silo backend");
-  silo_backend* b = store->be.ctx;
-  MDB_txn* txn;
-  if (mdb_txn_begin(b->env, NULL, 0, &txn) != 0)
-    return pack_error(err, err_cap, "cannot begin Silo index transaction");
-  MDB_val key = {.mv_size = 32, .mv_data = (void*)hash};
-  MDB_val old;
-  int rc = mdb_get(txn, b->objects, &key, &old);
-  if (rc == 0) {
-    uint64_t off = 0, len = 0;
-    struct stat indexed;
-    bool valid = index_decode(&old, &off, &len) && len != 0 &&
-                 fstat(b->pack_fd, &indexed) == 0 && indexed.st_size >= 0 &&
-                 off <= (uint64_t)indexed.st_size &&
-                 len <= (uint64_t)indexed.st_size - off &&
-                 off <= (uint64_t)INT64_MAX && len <= (uint64_t)INT64_MAX - off;
-    mdb_txn_abort(txn);
-    return valid ? true
-                 : pack_error(err, err_cap,
-                              "existing Silo object index is invalid");
-  }
-  if (rc != MDB_NOTFOUND) {
-    mdb_txn_abort(txn);
-    return pack_error(err, err_cap, "cannot query Silo object index");
+  pl_silo_batch* batch = calloc(1, sizeof(*batch));
+  if (batch == NULL)
+    return pack_error(err, err_cap, "out of memory for Silo batch");
+  batch->backend = store->be.ctx;
+  if (mdb_txn_begin(batch->backend->env, NULL, 0, &batch->txn) != 0) {
+    free(batch);
+    return pack_error(err, err_cap, "cannot begin Silo save transaction");
   }
 
+  /* The LMDB write transaction is also the cross-process append lock.  It
+   * must be held before choosing the pack offset. */
   struct stat st;
-  if (fstat(b->pack_fd, &st) != 0 || st.st_size < 0) {
-    mdb_txn_abort(txn);
+  if (fstat(batch->backend->pack_fd, &st) != 0 || st.st_size < 0 ||
+      (uint64_t)st.st_size > (uint64_t)INT64_MAX) {
+    mdb_txn_abort(batch->txn);
+    free(batch);
     return pack_error(err, err_cap, "cannot determine pins.pack length");
   }
-  pack_writer pw = {.fd = b->pack_fd, .start = (uint64_t)st.st_size};
-  pl_silo_writer writer = {.ctx = &pw, .write = pack_writer_write};
-  if (!pl_silo_encode(&writer, root, subpins, nsub, err, err_cap)) {
-    mdb_txn_abort(txn);
+  batch->pack_start = (uint64_t)st.st_size;
+  batch->pack_flushed = batch->pack_start;
+  batch->pack_end = batch->pack_start;
+  *out = batch;
+  return true;
+}
+
+bool pl_store_silo_batch_contains(pl_silo_batch* batch, const uint8_t hash[32],
+                                  bool* out, char* err, size_t err_cap) {
+  if (batch == NULL || batch->txn == NULL || hash == NULL || out == NULL)
+    return pack_error(err, err_cap, "invalid Silo batch query");
+  MDB_val key = {.mv_size = 32, .mv_data = (void*)hash};
+  MDB_val value;
+  int rc = mdb_get(batch->txn, batch->backend->objects, &key, &value);
+  if (rc == MDB_NOTFOUND) {
+    *out = false;
+    return true;
+  }
+  if (rc != 0)
+    return pack_error(err, err_cap, "cannot query Silo object index");
+  pl_hash hash_key;
+  memcpy(hash_key.b, hash, sizeof(hash_key.b));
+  uint64_t extent = ax_hmgeti(batch->pending, hash_key) >= 0
+                        ? batch->pack_end
+                        : batch->pack_start;
+  uint64_t off = 0, len = 0;
+  if (!index_decode(&value, &off, &len) || len == 0 || off > extent ||
+      len > extent - off || off > (uint64_t)INT64_MAX ||
+      len > (uint64_t)INT64_MAX - off)
+    return pack_error(err, err_cap, "existing Silo object index is invalid");
+  *out = true;
+  return true;
+}
+
+bool pl_store_silo_batch_put(pl_silo_batch* batch, const uint8_t hash[32],
+                             const uint8_t* bytes, size_t len, char* err,
+                             size_t err_cap) {
+  if (batch == NULL || batch->txn == NULL || hash == NULL || bytes == NULL ||
+      len == 0)
+    return pack_error(err, err_cap, "invalid Silo batch object");
+  bool present;
+  if (!pl_store_silo_batch_contains(batch, hash, &present, err, err_cap))
+    return false;
+  if (present)
+    return true;
+
+  uint64_t off = batch->pack_end;
+  if (!batch_append(batch, bytes, len, err, err_cap))
+    return false;
+  uint8_t index[SILO_INDEX_BYTES];
+  index_encode(index, off, len);
+  MDB_val key = {.mv_size = 32, .mv_data = (void*)hash};
+  MDB_val value = {.mv_size = sizeof(index), .mv_data = index};
+  if (mdb_put(batch->txn, batch->backend->objects, &key, &value,
+              MDB_NOOVERWRITE) != 0)
+    return pack_error(err, err_cap, "cannot publish Silo object index");
+  pl_hash hash_key;
+  memcpy(hash_key.b, hash, sizeof(hash_key.b));
+  ax_hmput(batch->pending, hash_key, 1);
+  batch->changed = true;
+  return true;
+}
+
+void pl_store_silo_batch_abort(pl_silo_batch* batch) {
+  if (batch == NULL)
+    return;
+  if (batch->txn != NULL) {
+    /* The active LMDB write transaction still owns the cross-process append
+     * lock, so no cooperating writer can have appended behind this batch.
+     * Best-effort rollback prevents retryable failures from accumulating a
+     * full orphan closure; a failed truncate remains safe as an orphan tail. */
+    if (batch->pack_end > batch->pack_start)
+      (void)ftruncate(batch->backend->pack_fd, (off_t)batch->pack_start);
+    mdb_txn_abort(batch->txn);
+  }
+  ax_hmfree(batch->pending);
+  free(batch);
+}
+
+bool pl_store_silo_batch_commit(pl_silo_batch* batch,
+                                const uint8_t root_hash[32], char* err,
+                                size_t err_cap) {
+  if (batch == NULL || batch->txn == NULL || root_hash == NULL) {
+    pl_store_silo_batch_abort(batch);
+    return pack_error(err, err_cap, "invalid Silo batch commit");
+  }
+  bool root_present = false;
+  if (!pl_store_silo_batch_contains(batch, root_hash, &root_present, err,
+                                    err_cap)) {
+    pl_store_silo_batch_abort(batch);
     return false;
   }
-  if (writer.pos != pw.written) {
-    mdb_txn_abort(txn);
-    return pack_error(err, err_cap, "Silo pack writer length mismatch");
-  }
-#ifdef F_FULLFSYNC
-  if (fcntl(b->pack_fd, F_FULLFSYNC, 0) != 0) {
-#else
-  if (fsync(b->pack_fd) != 0) {
-#endif
-    mdb_txn_abort(txn);
-    return pack_error(err, err_cap, "cannot sync pins.pack");
+  if (!root_present) {
+    pl_store_silo_batch_abort(batch);
+    return pack_error(err, err_cap, "Silo root object is not indexed");
   }
 
-  uint8_t index[SILO_INDEX_BYTES];
-  index_encode(index, pw.start, writer.pos);
-  MDB_val value = {.mv_size = sizeof(index), .mv_data = index};
-  if (mdb_put(txn, b->objects, &key, &value, MDB_NOOVERWRITE) != 0) {
-    mdb_txn_abort(txn);
-    return pack_error(err, err_cap, "cannot publish Silo object index");
+  MDB_val root_k = {.mv_size = sizeof(root_key) - 1,
+                    .mv_data = (void*)root_key};
+  MDB_val old_root;
+  int root_rc = mdb_get(batch->txn, batch->backend->meta, &root_k, &old_root);
+  bool root_changed =
+      root_rc == MDB_NOTFOUND ||
+      (root_rc == 0 && (old_root.mv_size != 32 ||
+                        memcmp(old_root.mv_data, root_hash, 32) != 0));
+  if (root_rc != 0 && root_rc != MDB_NOTFOUND) {
+    pl_store_silo_batch_abort(batch);
+    return pack_error(err, err_cap, "cannot query Silo root");
   }
-  if (mdb_txn_commit(txn) != 0)
-    return pack_error(err, err_cap, "cannot commit Silo object index");
-  return true;
+
+  if (!batch->changed && !root_changed) {
+    pl_store_silo_batch_abort(batch);
+    return true;
+  }
+  if (!batch_flush(batch, err, err_cap)) {
+    pl_store_silo_batch_abort(batch);
+    return false;
+  }
+  if (batch->pack_dirty) {
+#ifdef F_FULLFSYNC
+    int sync_rc = fcntl(batch->backend->pack_fd, F_FULLFSYNC, 0);
+#else
+    int sync_rc = fsync(batch->backend->pack_fd);
+#endif
+    if (sync_rc != 0) {
+      pl_store_silo_batch_abort(batch);
+      return pack_error(err, err_cap, "cannot sync pins.pack");
+    }
+  }
+  if (root_changed) {
+    MDB_val root_v = {.mv_size = 32, .mv_data = (void*)root_hash};
+    if (mdb_put(batch->txn, batch->backend->meta, &root_k, &root_v, 0) != 0) {
+      pl_store_silo_batch_abort(batch);
+      return pack_error(err, err_cap, "cannot publish Silo root");
+    }
+  }
+
+  MDB_txn* txn = batch->txn;
+  batch->txn = NULL; /* mdb_txn_commit consumes the handle on every result. */
+  int rc = mdb_txn_commit(txn);
+  ax_hmfree(batch->pending);
+  free(batch);
+  return rc == 0
+             ? true
+             : pack_error(err, err_cap, "cannot commit Silo save transaction");
 }
 
 bool pl_store_silo_open(pl_store* store, const uint8_t hash[32],
@@ -301,10 +443,28 @@ bool pl_store_silo_open(pl_store* store, const uint8_t hash[32],
       off > (uint64_t)st.st_size || len > (uint64_t)st.st_size - off ||
       off > (uint64_t)INT64_MAX || len > (uint64_t)INT64_MAX - off)
     return pack_error(err, err_cap, "Silo object index is outside pins.pack");
+  long page_size = sysconf(_SC_PAGESIZE);
+  if (page_size <= 0)
+    return pack_error(err, err_cap, "cannot determine system page size");
+  uint64_t page = (uint64_t)page_size;
+  uint64_t map_off = off - off % page;
+  uint64_t delta = off - map_off;
+  if (len > SIZE_MAX || delta > SIZE_MAX - (size_t)len)
+    return pack_error(err, err_cap, "Silo object is too large to map");
+  size_t mapping_len = (size_t)delta + (size_t)len;
   pack_reader* pr = calloc(1, sizeof(*pr));
   if (pr == NULL)
     return pack_error(err, err_cap, "out of memory for Silo reader");
-  *pr = (pack_reader){.fd = b->pack_fd, .start = off, .len = len};
+  void* mapping = mmap(NULL, mapping_len, PROT_READ, MAP_SHARED, b->pack_fd,
+                       (off_t)map_off);
+  if (mapping == MAP_FAILED) {
+    free(pr);
+    return pack_error(err, err_cap, "cannot map Silo object");
+  }
+  *pr = (pack_reader){.mapping = mapping,
+                      .mapping_len = mapping_len,
+                      .bytes = (const uint8_t*)mapping + (size_t)delta,
+                      .len = (size_t)len};
   *out = (pl_silo_reader){.ctx = pr,
                           .read = pack_reader_read,
                           .rewind = pack_reader_rewind,
@@ -315,7 +475,11 @@ bool pl_store_silo_open(pl_store* store, const uint8_t hash[32],
 void pl_store_silo_close_reader(pl_silo_reader* r) {
   if (r == NULL)
     return;
-  free(r->ctx);
+  pack_reader* pr = r->ctx;
+  if (pr != NULL) {
+    (void)munmap(pr->mapping, pr->mapping_len);
+    free(pr);
+  }
   memset(r, 0, sizeof(*r));
 }
 

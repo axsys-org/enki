@@ -22,6 +22,7 @@ typedef struct er_msg {
 } er_msg;
 
 typedef struct er_http_xfer er_http_xfer; /* http.c */
+typedef struct er_mt_worker er_mt_worker;
 
 struct er_actor {
   er_scheduler* sys;
@@ -36,7 +37,9 @@ struct er_actor {
   er_actor** handle_v; /* dense handle table; NULL = closed; [0] = self */
   size_t handle_n;     /* next handle to mint (never reused) */
   size_t handle_cap;
-  er_http_xfer* http; /* non-NULL: parked on a Fetch, not on Recv */
+  er_http_xfer* http;  /* non-NULL: parked on a Fetch, not on Recv */
+  bool effectful;      /* has initiated an op-set >= 82 effect */
+  er_mt_worker* owner; /* dedicated MT worker after the first effect */
   er_actor* qnext;
   er_actor* all_next;
 };
@@ -91,15 +94,38 @@ struct er_scheduler {
   er_http_xfer* http_done_tail;
   size_t http_parked_n; /* actors awaiting a fetch (incl. replay) */
   bool http_pumping;    /* MT executors: single CURLM owner */
+  er_mt_executor* mt;   /* at most one persistent MT executor */
+};
+
+typedef enum {
+  ER_MT_GENERAL = 0, /* draws actors from the shared run queue */
+  ER_MT_BOUND,       /* runs exactly one effectful actor */
+  ER_MT_SPARE,       /* retained for the next general-worker replacement */
+} er_mt_worker_role;
+
+struct er_mt_worker {
+  er_mt_executor* ex;
+  pthread_t thread;
+  pthread_cond_t cv;
+  er_mt_worker_role role;
+  er_actor* actor;
+  bool ready;    /* bound actor is runnable but not in an active slice */
+  bool holds_mu; /* this worker currently owns ex->sys->mu */
+  er_mt_worker* next;
 };
 
 struct er_mt_executor {
   er_scheduler* sys;
   er_actor* root;
-  uint32_t workers;
-  pthread_t* thread_v;
-  size_t active;
-  bool stopping;
+  uint32_t workers;             /* target number of GENERAL workers */
+  pthread_cond_t controller_cv; /* run/drive caller; never a pool worker */
+  er_mt_worker* worker_head;
+  size_t general_workers;
+  size_t ready_bound;  /* runnable actors on private worker queues */
+  size_t busy_workers; /* outside sys->mu in an actor slice or CURLM pump */
+  bool entered;        /* a run/drive API call is in progress */
+  bool running;        /* workers may execute this generation */
+  bool shutdown;
   er_run_reason reason;
 };
 
