@@ -243,9 +243,17 @@ typedef struct save_visit {
   uint8_t value; /* 1 = active, 2 = complete */
 } save_visit;
 
+typedef struct save_hash {
+  pl_val key;
+  pl_hash value;
+} save_hash;
+
 typedef struct save_ctx {
   pl_store* store;
+  pl_silo_batch* batch;
   save_visit* visit;
+  save_hash* pending;       /* provisional PIN pointer -> computed hash */
+  pl_val* pins;             /* complete closure in postorder */
   pl_intern_entry* compile; /* unique finalized LAW hashes */
   char* err;
   size_t err_cap;
@@ -259,6 +267,15 @@ static bool save_error(save_ctx* c, const char* fmt, ...) {
     va_end(ap);
   }
   return false;
+}
+
+static const uint8_t* save_pin_hash(void* ctx, pl_val pin) {
+  save_ctx* c = ctx;
+  const uint8_t* persistent = pl_pin_hash(pin);
+  if (persistent != NULL)
+    return persistent;
+  ptrdiff_t at = ax_hmgeti(c->pending, pin);
+  return at >= 0 ? c->pending[at].value.b : NULL;
 }
 
 static bool save_silo_pin(save_ctx* c, pl_val pin, uint32_t depth) {
@@ -284,47 +301,65 @@ static bool save_silo_pin(save_ctx* c, pl_val pin, uint32_t depth) {
       return false;
 
   /* Provisional values may contain distinct, semantically equal PIN
-   * pointers.  Once their children have hashes, compact the direct table by
-   * hash while preserving first occurrence. */
+   * pointers. Build the canonical direct table separately; mutating the
+   * runtime table before commit would make a failed Save unsafe to retry. */
   pl_intern_entry* unique = NULL;
-  uint32_t out_n = 0;
+  pl_val* canonical_subpins = NULL;
   for (uint32_t i = 0; i < nsub; i++) {
-    const uint8_t* hash = pl_pin_hash(subpins[i]);
+    const uint8_t* hash = save_pin_hash(c, subpins[i]);
     if (hash == NULL) {
       ax_hmfree(unique);
-      return save_error(c, "Silo child PIN was not finalized");
+      ax_arrfree(canonical_subpins);
+      return save_error(c, "Silo child PIN hash was not prepared");
     }
     pl_hash key;
     memcpy(key.b, hash, 32);
     if (ax_hmgeti(unique, key) < 0) {
       ax_hmput(unique, key, subpins[i]);
-      subpins[out_n++] = subpins[i];
+      ax_arrpush(canonical_subpins, subpins[i]);
     }
   }
   ax_hmfree(unique);
-  p[0] = pl_hdr_set_meta(p[0], out_n);
 
-  uint8_t pending_hash[32];
-  const uint8_t* hash = pl_pin_hash(pin);
-  if (hash == NULL) {
-    if (!pl_silo_hash(pl_pin_body(p), subpins, out_n, pending_hash, c->err,
-                      c->err_cap))
-      return false;
-    hash = pending_hash;
+  const uint8_t* known_hash = pl_pin_hash(pin);
+  const uint8_t* hash = known_hash;
+  bool present = false;
+  if (known_hash != NULL &&
+      !pl_store_silo_batch_contains(c->batch, known_hash, &present, c->err,
+                                    c->err_cap)) {
+    ax_arrfree(canonical_subpins);
+    return false;
   }
 
-  /* pl_store_silo_put performs the second streaming encode only on an index
-   * miss.  Do not expose the hash on the runtime PIN until that record is
-   * durably indexed. */
-  if (!pl_store_silo_put(c->store, hash, pl_pin_body(p), subpins, out_n, c->err,
-                         c->err_cap))
-    return false;
+  uint8_t calculated_hash[32];
+  if (known_hash == NULL || !present) {
+    uint8_t* bytes = NULL;
+    size_t len = 0;
+    bool encoded = pl_silo_encode_buffer(
+        pl_pin_body(p), canonical_subpins, (size_t)ax_arrlen(canonical_subpins),
+        save_pin_hash, c, &bytes, &len, calculated_hash, c->err, c->err_cap);
+    ax_arrfree(canonical_subpins);
+    canonical_subpins = NULL;
+    if (!encoded)
+      return false;
+    if (known_hash != NULL && memcmp(known_hash, calculated_hash, 32) != 0) {
+      ax_arrfree(bytes);
+      return save_error(c, "runtime PIN hash does not match its Silo stream");
+    }
+    hash = known_hash != NULL ? known_hash : calculated_hash;
+    bool stored =
+        pl_store_silo_batch_put(c->batch, hash, bytes, len, c->err, c->err_cap);
+    ax_arrfree(bytes);
+    if (!stored)
+      return false;
+  } else {
+    ax_arrfree(canonical_subpins);
+  }
 
-  if (!pl_pin_is_hashed(pin)) {
-    memcpy(pl_pin_hash_bytes(p), pending_hash, 32);
-    p[0] = pl_hdr_set_flag(p[0], PL_F_PIN_HASHED);
-    if (pl_store_intern_get(c->store, pending_hash) == 0)
-      pl_store_intern_put(c->store, pending_hash, pin);
+  if (known_hash == NULL) {
+    pl_hash prepared;
+    memcpy(prepared.b, hash, sizeof(prepared.b));
+    ax_hmput(c->pending, pin, prepared);
   }
 
   /* A previous Save may have indexed and finalized this law before failing
@@ -341,7 +376,49 @@ static bool save_silo_pin(save_ctx* c, pl_val pin, uint32_t depth) {
   ptrdiff_t at = ax_hmgeti(c->visit, pin);
   ax_assume(at >= 0, "Silo Save visit disappeared");
   c->visit[at].value = 2;
+  ax_arrpush(c->pins, pin);
   return true;
+}
+
+static void save_finalize_runtime(save_ctx* c) {
+  /* Canonicalize every direct table before publishing any new hash flag.  The
+   * pending resolver lets this happen without making child hashes visible
+   * early, and keeps a hashed PIN from ever exposing its pre-save table. */
+  for (ptrdiff_t i = 0; i < ax_arrlen(c->pins); i++) {
+    pl_cell* p = pl_ptr(c->pins[i]);
+    uint32_t nsub = pl_pin_npins(p);
+    pl_val* subpins = pl_pin_subpins(p);
+    pl_intern_entry* unique = NULL;
+    uint32_t out_n = 0;
+    for (uint32_t j = 0; j < nsub; j++) {
+      const uint8_t* hash = save_pin_hash(c, subpins[j]);
+      ax_assume(hash != NULL, "committed Silo child has no hash");
+      pl_hash key;
+      memcpy(key.b, hash, sizeof(key.b));
+      if (ax_hmgeti(unique, key) < 0) {
+        ax_hmput(unique, key, subpins[j]);
+        subpins[out_n++] = subpins[j];
+      }
+    }
+    ax_hmfree(unique);
+    p[0] = pl_hdr_set_meta(p[0], out_n);
+  }
+
+  /* Publish runtime hash flags only after every object and the root are
+   * durable in the atomic backend transaction and every table is canonical.
+   * Postorder ensures child flags are published before their parents. */
+  for (ptrdiff_t i = 0; i < ax_arrlen(c->pins); i++) {
+    pl_val pin = c->pins[i];
+    if (pl_pin_is_hashed(pin))
+      continue;
+    const uint8_t* hash = save_pin_hash(c, pin);
+    ax_assume(hash != NULL, "committed Silo PIN has no prepared hash");
+    pl_cell* p = pl_ptr(pin);
+    memcpy(pl_pin_hash_bytes(p), hash, 32);
+    p[0] = pl_hdr_set_flag(p[0], PL_F_PIN_HASHED);
+    if (pl_store_intern_get(c->store, hash) == 0)
+      pl_store_intern_put(c->store, hash, pin);
+  }
 }
 
 bool pl_store_save_root(pl_store* s, pl_val pin, uint8_t out_hash[32],
@@ -354,20 +431,34 @@ bool pl_store_save_root(pl_store* s, pl_val pin, uint8_t out_hash[32],
 
   save_ctx c = {.store = s, .err = err, .err_cap = err_cap};
   pl_store_lock(s);
-  bool ok = save_silo_pin(&c, pin, 0);
-  const uint8_t* root_hash = ok ? pl_pin_hash(pin) : NULL;
+  bool ok = pl_store_silo_batch_begin(s, &c.batch, err, err_cap);
+  if (ok)
+    ok = save_silo_pin(&c, pin, 0);
+  const uint8_t* root_hash = ok ? save_pin_hash(&c, pin) : NULL;
   if (ok && root_hash == NULL)
-    ok = save_error(&c, "Silo root PIN was not finalized");
-  if (ok && !s->be.put_root(s->be.ctx, root_hash))
-    ok = save_error(&c, "cannot publish Silo root");
-  if (ok && out_hash != NULL)
-    memcpy(out_hash, root_hash, 32);
+    ok = save_error(&c, "Silo root PIN hash was not prepared");
+  if (ok) {
+    pl_silo_batch* batch = c.batch;
+    c.batch = NULL;
+    ok = pl_store_silo_batch_commit(batch, root_hash, err, err_cap);
+  }
+  if (!ok && c.batch != NULL) {
+    pl_store_silo_batch_abort(c.batch);
+    c.batch = NULL;
+  }
+  if (ok) {
+    save_finalize_runtime(&c);
+    if (out_hash != NULL)
+      memcpy(out_hash, root_hash, 32);
+  }
   bool compile = ok && s->compiler_f;
   pl_store_unlock(s);
 
   if (compile)
     for (ptrdiff_t i = 0; i < ax_hmlen(c.compile); i++)
       pl_store_put_code(s, c.compile[i].key.b);
+  ax_arrfree(c.pins);
+  ax_hmfree(c.pending);
   ax_hmfree(c.compile);
   ax_hmfree(c.visit);
   return ok;

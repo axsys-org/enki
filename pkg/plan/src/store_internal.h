@@ -23,9 +23,20 @@ bool pl_store_backend_put(pl_store* s, const uint8_t hash[32], const uint8_t* b,
 bool pl_store_backend_get(pl_store* s, const uint8_t hash[32], uint8_t** out_b,
                           size_t* out_s);
 
-bool pl_store_silo_put(pl_store* s, const uint8_t hash[32], pl_val root,
-                       const pl_val* subpins, size_t nsub, char* err,
-                       size_t err_cap);
+typedef struct pl_silo_batch pl_silo_batch;
+
+bool pl_store_silo_batch_begin(pl_store* s, pl_silo_batch** out, char* err,
+                               size_t err_cap);
+bool pl_store_silo_batch_contains(pl_silo_batch* batch, const uint8_t hash[32],
+                                  bool* out, char* err, size_t err_cap);
+bool pl_store_silo_batch_put(pl_silo_batch* batch, const uint8_t hash[32],
+                             const uint8_t* bytes, size_t len, char* err,
+                             size_t err_cap);
+/* Commit consumes batch on both success and failure. */
+bool pl_store_silo_batch_commit(pl_silo_batch* batch,
+                                const uint8_t root_hash[32], char* err,
+                                size_t err_cap);
+void pl_store_silo_batch_abort(pl_silo_batch* batch);
 bool pl_store_silo_open(pl_store* s, const uint8_t hash[32],
                         pl_silo_reader* out, char* err, size_t err_cap);
 void pl_store_silo_close_reader(pl_silo_reader* r);

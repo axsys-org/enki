@@ -36,10 +36,25 @@ typedef struct pl_silo_scan {
   size_t used_count;
 } pl_silo_scan;
 
+/* Save-time encoding can resolve hashes which are computed for a batch but
+ * are not persistently visible on their runtime PINs yet. */
+typedef const uint8_t* (*pl_silo_pin_hash_fn)(void* ctx, pl_val pin);
+
 /* Canonical revision-5 writer.  subpins must be the direct, unique,
  * first-occurrence pin list for root. */
 bool pl_silo_encode(pl_silo_writer* w, pl_val root, const pl_val* subpins,
                     size_t nsub, char* err, size_t err_cap);
+bool pl_silo_encode_resolved(pl_silo_writer* w, pl_val root,
+                             const pl_val* subpins, size_t nsub,
+                             pl_silo_pin_hash_fn pin_hash, void* pin_hash_ctx,
+                             char* err, size_t err_cap);
+
+/* Encode once into a growable byte buffer and hash those exact bytes.  The
+ * caller owns *out_bytes and releases it with ax_arrfree. */
+bool pl_silo_encode_buffer(pl_val root, const pl_val* subpins, size_t nsub,
+                           pl_silo_pin_hash_fn pin_hash, void* pin_hash_ctx,
+                           uint8_t** out_bytes, size_t* out_len,
+                           uint8_t out_hash[32], char* err, size_t err_cap);
 
 /* SHA-256 of the canonical stream produced by pl_silo_encode. */
 bool pl_silo_hash(pl_val root, const pl_val* subpins, size_t nsub,
