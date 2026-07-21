@@ -233,9 +233,15 @@ static bool save_discover_pin(save_ctx* c, pl_val input, uint32_t depth) {
   pl_cell* p = pl_as(PL_TAG_PIN, pin);
   if (p == NULL)
     return save_error(c, "Save encountered a non-PIN dependency");
-  if (!pl_pin_is_proxy(p) &&
-      (!pl_store_owns(c->store, pin) || pl_pin_hash(pin) == NULL))
-    return save_error(c, "Save encountered a noncanonical PIN");
+  if (!pl_pin_is_proxy(p)) {
+    if (!pl_store_owns(c->store, pin) || pl_pin_hash(pin) == NULL)
+      return save_error(c, "Save encountered a noncanonical PIN");
+    /* Canonical store PINs are durable closure boundaries: they were either
+     * loaded from this backend or published only after an earlier successful
+     * Save.  Their hash is sufficient for a provisional parent's direct table;
+     * rediscovering their bodies would rewalk the complete persisted graph. */
+    return true;
+  }
 
   ptrdiff_t at = ax_hmgeti(c->visit, pin);
   if (at >= 0) {
@@ -309,8 +315,18 @@ static pl_val save_canonical_pin(save_ctx* c, pl_val input) {
   pl_hash key;
   memcpy(key.b, hash, sizeof(key.b));
   ptrdiff_t at = ax_hmgeti(c->canonical, key);
-  ax_assume(at >= 0, "canonical child was not promoted");
-  return c->canonical[at].value;
+  if (at >= 0)
+    return c->canonical[at].value;
+
+  /* Discovery deliberately omits already-durable leaves.  On a map miss they
+   * are their own canonical representative.  Keep the hash-map lookup first:
+   * Legacy preparation may already have installed a Save-local representative
+   * for an equal provisional PIN, and both references must resolve to it. */
+  pl_cell* p = pl_as(PL_TAG_PIN, pin);
+  ax_assume(p != NULL && !pl_pin_is_proxy(p) && pl_store_owns(c->store, pin) &&
+                pl_pin_hash(pin) != NULL,
+            "canonical child was not promoted");
+  return pin;
 }
 
 static pl_cell* save_copy_alloc(save_ctx* c, size_t cells, bool transient) {

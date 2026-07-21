@@ -60,6 +60,20 @@ static void test_expect_no_op66(pl_thread* t, pl_val name, size_t n,
   cr_assert_str_eq(t->exn_msg, "no primop 66 (argc 1)");
 }
 
+static bool test_install_self_replacement_raises(pl_thread* t,
+                                                 pl_val compiler) {
+  pl_val args[1] = {compiler};
+  pl_catch c;
+  pl_catch_init(t, &c);
+  if (setjmp(c.jb) == 0) {
+    (void)test_op66(t, ax_s7('I', 'n', 's', 't', 'a', 'l', 'l'), 1, args);
+    pl_catch_pop(t, &c);
+    return false;
+  }
+  pl_catch_unwind(t, &c);
+  return true;
+}
+
 /* ── Application shapes ────────────────────────────────────────────────── */
 
 Test(apply, under_application_builds_app) {
@@ -401,16 +415,7 @@ Test(ops, install_rejects_compiler_self_replacement) {
   rt.store->compiler_f = hash[0] == 0 || memcmp(hash, hash + 1, 31) != 0;
   rt.store->compiler_t = t;
 
-  bool raised = false;
-  pl_val args[1] = {compiler};
-  pl_catch c;
-  pl_catch_init(t, &c);
-  if (setjmp(c.jb) == 0) {
-    (void)test_op66(t, ax_s7('I', 'n', 's', 't', 'a', 'l', 'l'), 1, args);
-  } else {
-    raised = true;
-  }
-  pl_catch_unwind(t, &c);
+  bool raised = test_install_self_replacement_raises(t, compiler);
 
   rt.store->compiler_t = NULL;
   rt.store->compiler_f = false;

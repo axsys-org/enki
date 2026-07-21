@@ -80,6 +80,30 @@ static void* store_try_both_locks_thread(void* arg) {
   return NULL;
 }
 
+static bool test_pin_raises(pl_thread* t, pl_val value) {
+  pl_catch c;
+  pl_catch_init(t, &c);
+  if (setjmp(c.jb) == 0) {
+    (void)pl_pin(t, value);
+    pl_catch_pop(t, &c);
+    return false;
+  }
+  pl_catch_unwind(t, &c);
+  return true;
+}
+
+static bool test_store_load_raises(pl_thread* t, const uint8_t hash[32]) {
+  pl_catch c;
+  pl_catch_init(t, &c);
+  if (setjmp(c.jb) == 0) {
+    (void)pl_store_load(t, hash);
+    pl_catch_pop(t, &c);
+    return false;
+  }
+  pl_catch_unwind(t, &c);
+  return true;
+}
+
 static bool save_probe_get(void* ctx, const uint8_t hash[32], uint8_t** out,
                            size_t* out_len) {
   save_probe_backend* backend = ctx;
@@ -399,6 +423,51 @@ Test(store,
 
 /* ── Interning ─────────────────────────────────────────────────────────── */
 
+Test(store, save_treats_canonical_descendants_as_opaque_leaves) {
+  save_probe_backend* backend;
+  pl_store* store = save_probe_store(&backend);
+  pl_heap* heap = pl_heap_new(1 << 16, store);
+  pl_thread* t = pl_thread_new(heap);
+  size_t base = t->vsp;
+
+  pl_vpush(t, 42);
+  t->vstack[base] = pl_pin(t, t->vstack[base]);
+  char err[192] = {0};
+  cr_assert(pl_store_save_root(store, t->vstack[base], NULL, err, sizeof(err)),
+            "%s", err);
+  pl_val known = pl_pin_proxy_target(pl_ptr(t->vstack[base]));
+  pl_cell* known_p = pl_ptr(known);
+  cr_assert_neq(known, 0);
+  cr_assert(pl_store_owns(store, known));
+  cr_assert_not_null(pl_pin_hash(known));
+  cr_assert(save_probe_has(backend, pl_pin_hash(known)));
+
+  /* A canonical child's body is outside a later Save's discovery domain.  Use
+   * an unsupported tag as a tripwire, then restore the immutable value before
+   * examining the newly promoted parent.  Descending into known_p would make
+   * Save report "non-normal tag" before the parent can be persisted. */
+  pl_val known_body = pl_pin_body(known_p);
+  known_p[5] = pl_make(PL_TAG_ENV, known_p);
+  pl_vpush(t, test_app2(t, 0, known, 7));
+  t->vstack[base + 1] = pl_pin(t, t->vstack[base + 1]);
+  bool saved =
+      pl_store_save_root(store, t->vstack[base + 1], NULL, err, sizeof(err));
+  known_p[5] = known_body;
+  cr_assert(saved, "%s", err);
+
+  pl_val parent = pl_pin_proxy_target(pl_ptr(t->vstack[base + 1]));
+  cr_assert_neq(parent, 0);
+  cr_assert_eq(pl_pin_npins(pl_ptr(parent)), 1);
+  cr_assert_eq(pl_pin_subpins(pl_ptr(parent))[0], known);
+  pl_cell* body = pl_as(PL_TAG_APP, pl_pin_body(pl_ptr(parent)));
+  cr_assert_not_null(body);
+  cr_assert_eq(pl_app_args(body)[0], known);
+
+  pl_thread_free(t);
+  pl_heap_free(heap);
+  pl_store_free(store);
+}
+
 Test(store, compiler_install_is_generation_idempotent) {
   pl_store* s = pl_store_new_mem();
   pl_heap* h = pl_heap_new(1 << 16, s);
@@ -589,15 +658,7 @@ Test(pin, normalization_raise_does_not_leak_store_lock) {
   pl_val thunk = pl_mk_thunk(t, env, 0);
   pl_env_slots(pl_ptr(env))[0] = thunk;
 
-  bool raised = false;
-  pl_catch c;
-  pl_catch_init(t, &c);
-  if (setjmp(c.jb) == 0) {
-    (void)pl_pin(t, thunk);
-  } else {
-    raised = true;
-  }
-  pl_catch_unwind(t, &c);
+  bool raised = test_pin_raises(t, thunk);
   cr_assert(raised, "expected pin normalization to raise");
   cr_assert_str_eq(t->exn_msg, "<<loop>>");
 
@@ -751,15 +812,7 @@ static bool silo_load_raises(const char* dir, const uint8_t hash[32]) {
   cr_assert_not_null(s);
   pl_heap* h = pl_heap_new(1 << 16, s);
   pl_thread* t = pl_thread_new(h);
-  pl_catch c;
-  bool raised = false;
-  pl_catch_init(t, &c);
-  if (setjmp(c.jb) == 0) {
-    (void)pl_store_load(t, hash);
-  } else {
-    raised = true;
-  }
-  pl_catch_unwind(t, &c);
+  bool raised = test_store_load_raises(t, hash);
   pl_thread_free(t);
   pl_heap_free(h);
   pl_store_free(s);
@@ -1564,15 +1617,7 @@ Test(store, legacy_nested_missing_pin_cleans_resources_and_locks) {
   parent[73] = 'p';
   cr_assert(pl_store_backend_put(store, parent_hash, parent, sizeof(parent)));
 
-  bool raised = false;
-  pl_catch c;
-  pl_catch_init(t, &c);
-  if (setjmp(c.jb) == 0) {
-    (void)pl_store_load(t, parent_hash);
-  } else {
-    raised = true;
-  }
-  pl_catch_unwind(t, &c);
+  bool raised = test_store_load_raises(t, parent_hash);
   cr_assert(raised, "expected nested missing PIN to raise");
   cr_assert_str_eq(t->exn_msg, "store_load: missing pin");
   cr_assert_eq(ax_arrlen(store->loading), 0);
@@ -1604,15 +1649,7 @@ Test(store, legacy_rejects_pin_table_larger_than_header_meta) {
   test_put64le(record + 1, (uint64_t)PL_HDR_META_MAX + 1);
   cr_assert(pl_store_backend_put(store, hash, record, sizeof(record)));
 
-  bool raised = false;
-  pl_catch c;
-  pl_catch_init(t, &c);
-  if (setjmp(c.jb) == 0) {
-    (void)pl_store_load(t, hash);
-  } else {
-    raised = true;
-  }
-  pl_catch_unwind(t, &c);
+  bool raised = test_store_load_raises(t, hash);
   cr_assert(raised, "expected oversized Legacy PIN table to raise");
   cr_assert_str_eq(t->exn_msg,
                    "store_load: PIN exceeds the direct PIN-table limit");
