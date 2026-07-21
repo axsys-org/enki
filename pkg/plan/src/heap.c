@@ -105,13 +105,55 @@ typedef struct pl_gc_ctx {
   pl_cell* target_free;
 } pl_gc_ctx;
 
+#ifndef NDEBUG
+/* Store values are collector terminals.  A store-resident proxy is therefore
+ * valid only when its unresolved body (or its published target) is itself a
+ * store value.  Checking the direct edge here catches the dangerous
+ * store-to-moving-heap case at the first collection that observes it. */
+static void pl_gc_check_store_pin(pl_gc_ctx* gc, pl_val v) {
+  pl_cell* p = pl_ptr(v);
+  if (pl_hdr_kind(p[0]) != PL_K_PIN || !pl_pin_is_proxy(p))
+    return;
+  ax_assume(pl_hdr_meta(p[0]) == 0 && pl_hdr_cells(p[0]) == PL_PIN_CELLS(0),
+            "store PIN proxy has a non-proxy layout");
+  pl_val target = pl_pin_proxy_target(p);
+  pl_val edge = target != 0 ? target : (pl_val)p[5];
+  ax_assume(pl_is_nat63(edge) || pl_store_owns(gc->h->store, edge),
+            "store PIN proxy points into a moving heap");
+  if (target != 0) {
+    ax_assume(pl_tag(target) == PL_TAG_PIN,
+              "store PIN proxy target is not a PIN");
+    pl_cell* canonical = pl_ptr(target);
+    ax_assume(pl_hdr_kind(canonical[0]) == PL_K_PIN &&
+                  !pl_pin_is_proxy(canonical) &&
+                  (pl_hdr_flags(canonical[0]) & PL_F_PIN_HASHED) != 0,
+              "store PIN proxy target is not canonical");
+  }
+}
+
+static void pl_gc_check_local_pointer(pl_gc_ctx* gc, pl_cell* p) {
+  uintptr_t addr = (uintptr_t)p;
+  uintptr_t lo = (uintptr_t)gc->h->from;
+  uintptr_t hi = (uintptr_t)gc->h->free;
+  ax_assume((addr & (sizeof(pl_cell) - 1u)) == 0 && addr >= lo && addr < hi,
+            "collector observed a pointer owned by another heap");
+}
+#endif
+
 static pl_val pl_forward(pl_gc_ctx* gc, pl_val v) {
   for (;;) {
     if (pl_is_nat63(v))
       return v;
-    if (gc->h->store != NULL && pl_store_owns(gc->h->store, v))
+    if (gc->h->store != NULL && pl_store_owns(gc->h->store, v)) {
+#ifndef NDEBUG
+      pl_gc_check_store_pin(gc, v);
+#endif
       return v; /* store region is non-moving and closed */
+    }
     pl_cell* p = pl_ptr(v);
+#ifndef NDEBUG
+    pl_gc_check_local_pointer(gc, p);
+#endif
     pl_cell hdr = p[0];
     pl_kind kind = pl_hdr_kind(hdr);
     if (kind == PL_K_FWD)
@@ -123,6 +165,12 @@ static pl_val pl_forward(pl_gc_ctx* gc, pl_val v) {
       continue;
     }
     uint32_t cells = pl_hdr_cells(hdr);
+#ifndef NDEBUG
+    ax_assume(cells != 0 &&
+                  (size_t)cells <=
+                      ((uintptr_t)gc->h->free - (uintptr_t)p) / sizeof(pl_cell),
+              "collector observed an invalid heap object size");
+#endif
     pl_cell* np = gc->target_free;
     gc->target_free += cells;
     memcpy(np, p, cells * sizeof(pl_cell));
@@ -176,7 +224,32 @@ static void pl_cheney_scan(pl_gc_ctx* gc) {
       first = 1;
       count = 1;
       break;
-    case PL_K_PIN: /* store-region only; never copied into the heap */
+    case PL_K_PIN: {
+      ax_assume(pl_pin_is_proxy(scan) && pl_hdr_meta(hdr) == 0 &&
+                    cells == PL_PIN_CELLS(0),
+                "canonical PIN appeared in a moving heap");
+      pl_val target = pl_pin_proxy_target(scan);
+      if (target == 0) {
+        /* The body is the proxy's only live edge until Save publishes a
+         * canonical target. */
+        pl_val* body = (pl_val*)&scan[5];
+        *body = pl_forward(gc, *body);
+      } else {
+        /* Resolved targets are canonical store PINs.  Check that forwarding
+         * treats the target as terminal, then discard the obsolete heap-body
+         * edge so it is not retained by this collection. */
+        ax_assume(gc->h->store != NULL && pl_tag(target) == PL_TAG_PIN &&
+                      pl_store_owns(gc->h->store, target),
+                  "resolved PIN proxy target is not store-resident");
+        pl_val stable = pl_forward(gc, target);
+        ax_assume(stable == target,
+                  "resolved PIN proxy target moved during collection");
+        scan[5] = 0;
+        pl_pin_set_target(scan, stable);
+      }
+      scan += cells;
+      continue;
+    }
     default:
       ax_abort("cheney_scan: bad kind %d", (int)kind);
     }
@@ -253,6 +326,21 @@ size_t pl_gc_headroom(pl_thread* t) {
 
 size_t pl_gc_live_cells(pl_heap* h) {
   return h->live_cells;
+}
+
+bool pl_gc_collect_if_pressure(pl_thread* t, size_t allocation_floor_cells) {
+  pl_heap* h = t->heap;
+  size_t used_cells = (size_t)(h->free - h->from);
+  ax_assume(used_cells >= h->live_cells,
+            "heap frontier precedes last live-set size");
+  size_t allocated_cells = used_cells - h->live_cells;
+  size_t threshold = h->live_cells > allocation_floor_cells
+                         ? h->live_cells
+                         : allocation_floor_cells;
+  if (allocated_cells == 0 || allocated_cells < threshold)
+    return false;
+  pl_gc_collect(h);
+  return true;
 }
 
 void pl_gc_collect_now(pl_thread* t) {

@@ -29,6 +29,9 @@ pl_val pl_mk_app_from(pl_thread* t, pl_val head, uint32_t n,
 
 pl_val pl_mk_law(pl_thread* t, uint64_t arity, pl_val name, pl_val body);
 pl_val pl_mk_env(pl_thread* t, uint32_t nslots); /* slots zeroed to nat 0 */
+/* Allocation-only ENV constructor.  The caller must overwrite every slot in
+ * a no-collect window before publishing the value or allowing a collection. */
+pl_val pl_mk_env_uninit(pl_thread* t, uint32_t nslots);
 pl_val pl_mk_thunk(pl_thread* t, pl_val env, pl_val expr);
 pl_val pl_mk_thke(pl_thread* t, pl_val env, pl_bane bane, uint32_t nargs,
                   pl_val* args);

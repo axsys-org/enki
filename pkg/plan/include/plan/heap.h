@@ -5,7 +5,7 @@
  * Semispace Cheney heap with safepoint + reserve discipline.
  *
  * Core invariants (violations abort in debug builds):
- *   I1  the collector runs only inside pl_gc_reserve, never elsewhere
+ *   I1  the collector runs only at reserve or an explicit safe host boundary
  *   I2  pl_bump never collects; it asserts previously reserved headroom
  *   I3  measure, then build: reserve before each no-collect window
  *   I4  no pl_val in a C local survives a reserve — re-fetch from a root
@@ -152,6 +152,13 @@ pl_cell* pl_bump(pl_thread* t, size_t cells);
 size_t pl_gc_headroom(pl_thread* t);
 /* Cells of live data after the last collection (diagnostics). */
 size_t pl_gc_live_cells(pl_heap* h);
+/*
+ * Collect at a safe host boundary only after enough allocation has happened
+ * to amortize copying the current live set.  The allocation floor prevents
+ * tiny heaps/live sets from collecting on every boundary.  Returns true when
+ * a collection ran; reserve remains the correctness-critical collector.
+ */
+bool pl_gc_collect_if_pressure(pl_thread* t, size_t allocation_floor_cells);
 void pl_gc_collect_now(pl_thread* t); /* for tests */
 
 /* ── No-collect windows (debug accounting) ─────────────────────────────── */

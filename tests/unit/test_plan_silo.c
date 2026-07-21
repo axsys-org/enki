@@ -269,7 +269,13 @@ Test(silo, direct_pin_table_is_canonical) {
   pl_thread* t = rt.t;
   size_t base = t->vsp;
   pl_vpush(t, 42);
-  pl_val pin = pl_pin(t, t->vstack[base]);
+  t->vstack[base] = pl_pin(t, t->vstack[base]);
+  char save_err[192] = {0};
+  cr_assert(pl_store_save_root(rt.store, t->vstack[base], NULL, save_err,
+                               sizeof(save_err)),
+            "%s", save_err);
+  pl_val pin = pl_pin_proxy_target(pl_ptr(t->vstack[base]));
+  cr_assert_neq(pin, 0);
   pl_val args[2] = {pin, pin};
   pl_gc_reserve(t, PL_APP_CELLS(2));
   PL_GC_FORBID(t);

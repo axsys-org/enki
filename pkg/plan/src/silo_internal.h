@@ -9,7 +9,7 @@
 #include "plan/value.h"
 
 #define PL_SILO_MAX_DEPTH     4096u
-#define PL_SILO_MAX_PIN_COUNT ((UINT32_C(1) << 20) - 1u)
+#define PL_SILO_MAX_PIN_COUNT PL_HDR_META_MAX
 #define PL_SILO_MAX_NAT_BYTES ((uint64_t)PL_SILO_MAX_PIN_COUNT * 8u)
 #define PL_SILO_LEAF_BYTES    1024u
 #define PL_SILO_PAGE_BYTES    65536u

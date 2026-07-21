@@ -2,6 +2,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <lmdb.h>
+#include <pthread.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10,23 +12,534 @@
 #include <unistd.h>
 
 #include "axsys/allocator.h"
+#include "axsys/ds.h"
 #include "axsys/sha256.h"
 #include "plan/canon.h"
+#include "../../pkg/plan/src/store_internal.h"
 #include "test_plan.h"
 
+typedef struct store_lock_probe {
+  pl_store* store;
+  bool acquired;
+} store_lock_probe;
+
+typedef struct store_both_lock_probe {
+  pl_store* store;
+  bool general_acquired;
+  bool save_acquired;
+} store_both_lock_probe;
+
+typedef struct save_probe_blob {
+  uint8_t* bytes;
+  size_t len;
+} save_probe_blob;
+
+typedef struct save_probe_entry {
+  pl_hash key;
+  save_probe_blob value;
+} save_probe_entry;
+
+typedef struct save_probe_backend {
+  pthread_mutex_t mu;
+  pthread_cond_t cv;
+  save_probe_entry* objects;
+  uint8_t root[32];
+  bool has_root;
+  bool block_put;
+  bool put_entered;
+  bool release_put;
+  bool fail_root;
+  unsigned active_puts;
+  unsigned max_active_puts;
+} save_probe_backend;
+
+typedef struct save_root_worker {
+  pl_store* store;
+  pl_val root;
+  uint8_t hash[32];
+  char err[192];
+  bool ok;
+} save_root_worker;
+
+static void* store_trylock_thread(void* arg) {
+  store_lock_probe* probe = arg;
+  probe->acquired = pthread_mutex_trylock(&probe->store->mu) == 0;
+  if (probe->acquired)
+    (void)pthread_mutex_unlock(&probe->store->mu);
+  return NULL;
+}
+
+static void* store_try_both_locks_thread(void* arg) {
+  store_both_lock_probe* probe = arg;
+  probe->general_acquired = pthread_mutex_trylock(&probe->store->mu) == 0;
+  if (probe->general_acquired)
+    (void)pthread_mutex_unlock(&probe->store->mu);
+  probe->save_acquired = pthread_mutex_trylock(&probe->store->save_mu) == 0;
+  if (probe->save_acquired)
+    (void)pthread_mutex_unlock(&probe->store->save_mu);
+  return NULL;
+}
+
+static bool save_probe_get(void* ctx, const uint8_t hash[32], uint8_t** out,
+                           size_t* out_len) {
+  save_probe_backend* backend = ctx;
+  pl_hash key;
+  memcpy(key.b, hash, sizeof(key.b));
+  (void)pthread_mutex_lock(&backend->mu);
+  ptrdiff_t at = ax_hmgeti(backend->objects, key);
+  if (at < 0) {
+    (void)pthread_mutex_unlock(&backend->mu);
+    return false;
+  }
+  size_t len = backend->objects[at].value.len;
+  uint8_t* bytes = malloc(len != 0 ? len : 1);
+  if (bytes == NULL) {
+    (void)pthread_mutex_unlock(&backend->mu);
+    return false;
+  }
+  memcpy(bytes, backend->objects[at].value.bytes, len);
+  (void)pthread_mutex_unlock(&backend->mu);
+  *out = bytes;
+  *out_len = len;
+  return true;
+}
+
+static bool save_probe_put(void* ctx, const uint8_t hash[32], const uint8_t* b,
+                           size_t len) {
+  save_probe_backend* backend = ctx;
+  pl_hash key;
+  memcpy(key.b, hash, sizeof(key.b));
+  (void)pthread_mutex_lock(&backend->mu);
+  backend->active_puts++;
+  if (backend->active_puts > backend->max_active_puts)
+    backend->max_active_puts = backend->active_puts;
+  backend->put_entered = true;
+  (void)pthread_cond_broadcast(&backend->cv);
+  while (backend->block_put && !backend->release_put)
+    (void)pthread_cond_wait(&backend->cv, &backend->mu);
+
+  bool ok = true;
+  if (ax_hmgeti(backend->objects, key) < 0) {
+    uint8_t* copy = malloc(len != 0 ? len : 1);
+    if (copy == NULL) {
+      ok = false;
+    } else {
+      memcpy(copy, b, len);
+      ax_hmput(backend->objects, key,
+               ((save_probe_blob){.bytes = copy, .len = len}));
+    }
+  }
+  backend->active_puts--;
+  (void)pthread_cond_broadcast(&backend->cv);
+  (void)pthread_mutex_unlock(&backend->mu);
+  return ok;
+}
+
+static bool save_probe_has(void* ctx, const uint8_t hash[32]) {
+  save_probe_backend* backend = ctx;
+  pl_hash key;
+  memcpy(key.b, hash, sizeof(key.b));
+  (void)pthread_mutex_lock(&backend->mu);
+  bool found = ax_hmgeti(backend->objects, key) >= 0;
+  (void)pthread_mutex_unlock(&backend->mu);
+  return found;
+}
+
+static bool save_probe_put_root(void* ctx, const uint8_t hash[32]) {
+  save_probe_backend* backend = ctx;
+  (void)pthread_mutex_lock(&backend->mu);
+  bool ok = !backend->fail_root;
+  if (ok) {
+    memcpy(backend->root, hash, sizeof(backend->root));
+    backend->has_root = true;
+  }
+  (void)pthread_mutex_unlock(&backend->mu);
+  return ok;
+}
+
+static bool save_probe_get_root(void* ctx, uint8_t hash[32]) {
+  save_probe_backend* backend = ctx;
+  (void)pthread_mutex_lock(&backend->mu);
+  bool ok = backend->has_root;
+  if (ok)
+    memcpy(hash, backend->root, sizeof(backend->root));
+  (void)pthread_mutex_unlock(&backend->mu);
+  return ok;
+}
+
+static void save_probe_close(void* ctx) {
+  save_probe_backend* backend = ctx;
+  for (ptrdiff_t i = 0; i < ax_hmlen(backend->objects); i++)
+    free(backend->objects[i].value.bytes);
+  ax_hmfree(backend->objects);
+  (void)pthread_cond_destroy(&backend->cv);
+  (void)pthread_mutex_destroy(&backend->mu);
+  free(backend);
+}
+
+static pl_store* save_probe_store(save_probe_backend** out_backend) {
+  save_probe_backend* backend = calloc(1, sizeof(*backend));
+  cr_assert_not_null(backend);
+  cr_assert_eq(pthread_mutex_init(&backend->mu, NULL), 0);
+  cr_assert_eq(pthread_cond_init(&backend->cv, NULL), 0);
+  *out_backend = backend;
+  return pl_store_new((pl_store_backend){
+      .ctx = backend,
+      .get = save_probe_get,
+      .put = save_probe_put,
+      .has = save_probe_has,
+      .put_root = save_probe_put_root,
+      .get_root = save_probe_get_root,
+      .close = save_probe_close,
+  });
+}
+
+static void* save_root_thread(void* arg) {
+  save_root_worker* worker = arg;
+  worker->ok = pl_store_save_root(worker->store, worker->root, worker->hash,
+                                  worker->err, sizeof(worker->err));
+  return NULL;
+}
+
+Test(store, save_persistence_does_not_hold_general_store_lock) {
+  save_probe_backend* backend;
+  pl_store* store = save_probe_store(&backend);
+  pl_heap* heap = pl_heap_new(1 << 16, store);
+  pl_thread* t = pl_thread_new(heap);
+  pl_vpush(t, test_law(t, 1, 7, 42));
+  pl_val root = pl_pin(t, t->vstack[t->vsp - 1]);
+
+  backend->block_put = true;
+  save_root_worker worker = {.store = store, .root = root};
+  pthread_t thread;
+  cr_assert_eq(pthread_create(&thread, NULL, save_root_thread, &worker), 0);
+
+  (void)pthread_mutex_lock(&backend->mu);
+  while (!backend->put_entered)
+    (void)pthread_cond_wait(&backend->cv, &backend->mu);
+  (void)pthread_mutex_unlock(&backend->mu);
+
+  int general_rc = pthread_mutex_trylock(&store->mu);
+  if (general_rc == 0)
+    (void)pthread_mutex_unlock(&store->mu);
+  int save_rc = pthread_mutex_trylock(&store->save_mu);
+  if (save_rc == 0)
+    (void)pthread_mutex_unlock(&store->save_mu);
+
+  (void)pthread_mutex_lock(&backend->mu);
+  backend->release_put = true;
+  (void)pthread_cond_broadcast(&backend->cv);
+  (void)pthread_mutex_unlock(&backend->mu);
+  cr_assert_eq(pthread_join(thread, NULL), 0);
+
+  cr_assert_eq(general_rc, 0,
+               "backend persistence retained the general store lock");
+  cr_assert_eq(save_rc, EBUSY, "Save did not retain its persistence mutex");
+  cr_assert(worker.ok, "%s", worker.err);
+  cr_assert_eq(backend->max_active_puts, 1);
+
+  pl_thread_free(t);
+  pl_heap_free(heap);
+  pl_store_free(store);
+}
+
+Test(store, legacy_failed_root_is_arena_and_publication_rollback) {
+  save_probe_backend* backend;
+  pl_store* store = save_probe_store(&backend);
+  pl_heap* heap = pl_heap_new(1 << 16, store);
+  pl_thread* t = pl_thread_new(heap);
+  size_t base = t->vsp;
+  pl_vpush(t, 42);
+  t->vstack[base] = pl_pin(t, t->vstack[base]);
+  pl_vpush(t, test_app2(t, 0, t->vstack[base], 7));
+  t->vstack[base + 1] = pl_pin(t, t->vstack[base + 1]);
+  pl_val child = t->vstack[base];
+  pl_val parent = t->vstack[base + 1];
+
+  size_t mark = pl_store_mark(store);
+  ptrdiff_t intern_count = ax_hmlen(store->intern);
+  ptrdiff_t pin_count = ax_arrlen(store->pins);
+  backend->fail_root = true;
+  char err[192] = {0};
+  cr_assert_not(pl_store_save_root(store, parent, NULL, err, sizeof(err)), "%s",
+                err);
+  cr_assert_str_eq(err, "Legacy root publication failed");
+  cr_assert_eq(pl_store_mark(store), mark);
+  cr_assert_eq(ax_hmlen(store->intern), intern_count);
+  cr_assert_eq(ax_arrlen(store->pins), pin_count);
+  cr_assert_eq(pl_pin_proxy_target(pl_ptr(child)), 0);
+  cr_assert_eq(pl_pin_proxy_target(pl_ptr(parent)), 0);
+  cr_assert_null(pl_pin_hash(child));
+  cr_assert_null(pl_pin_hash(parent));
+
+  backend->fail_root = false;
+  cr_assert(pl_store_save_root(store, parent, NULL, err, sizeof(err)), "%s",
+            err);
+  cr_assert_neq(pl_pin_proxy_target(pl_ptr(child)), 0);
+  cr_assert_neq(pl_pin_proxy_target(pl_ptr(parent)), 0);
+
+  pl_thread_free(t);
+  pl_heap_free(heap);
+  pl_store_free(store);
+}
+
+Test(store, legacy_parent_hash_includes_pinned_nat_body) {
+  pl_store* store = pl_store_new_mem();
+  pl_heap* heap = pl_heap_new(1 << 16, store);
+  pl_thread* t = pl_thread_new(heap);
+  size_t base = t->vsp;
+  pl_vpush(t, 42);
+  t->vstack[base] = pl_pin(t, t->vstack[base]);
+  pl_vpush(t, test_app2(t, 0, t->vstack[base], 7));
+  t->vstack[base + 1] = pl_pin(t, t->vstack[base + 1]);
+  pl_val child = t->vstack[base];
+  pl_val parent = t->vstack[base + 1];
+
+  uint8_t saved_hash[32];
+  char err[192] = {0};
+  cr_assert(pl_store_save_root(store, parent, saved_hash, err, sizeof(err)),
+            "%s", err);
+  pl_val canonical_child = pl_pin_proxy_target(pl_ptr(child));
+  pl_val canonical_parent = pl_pin_proxy_target(pl_ptr(parent));
+  cr_assert_neq(canonical_child, 0);
+  cr_assert_neq(canonical_parent, 0);
+  cr_assert_eq(pl_pin_body(pl_ptr(canonical_child)), 42);
+  pl_val parent_body = pl_pin_body(pl_ptr(canonical_parent));
+  pl_cell* body = pl_as(PL_TAG_APP, parent_body);
+  cr_assert_not_null(body);
+  cr_assert_eq(pl_app_args(body)[0], canonical_child);
+
+  size_t text_len = 0;
+  char* text = pl_canonize(ax_allocator_system(), parent_body, &text_len);
+  uint8_t expected_hash[32];
+  ax_sha256((const uint8_t*)text, text_len, expected_hash);
+  ax_free(ax_allocator_system(), text);
+  cr_assert_eq(memcmp(saved_hash, expected_hash, sizeof(saved_hash)), 0);
+
+  pl_thread_free(t);
+  pl_heap_free(heap);
+  pl_store_free(store);
+}
+
+Test(store,
+     legacy_mixed_known_and_provisional_equal_children_share_wire_entry) {
+  save_probe_backend* backend;
+  pl_store* store = save_probe_store(&backend);
+  pl_heap* heap = pl_heap_new(1 << 16, store);
+  pl_thread* t = pl_thread_new(heap);
+  size_t base = t->vsp;
+
+  pl_vpush(t, 42);
+  t->vstack[base] = pl_pin(t, t->vstack[base]);
+  uint8_t child_hash[32];
+  char err[192] = {0};
+  cr_assert(
+      pl_store_save_root(store, t->vstack[base], child_hash, err, sizeof(err)),
+      "%s", err);
+  pl_val known = pl_pin_proxy_target(pl_ptr(t->vstack[base]));
+  cr_assert_neq(known, 0);
+
+  pl_vpush(t, 42);
+  t->vstack[base + 1] = pl_pin(t, t->vstack[base + 1]);
+  pl_vpush(t, test_app2(t, 0, t->vstack[base + 1], known));
+  t->vstack[base + 2] = pl_pin(t, t->vstack[base + 2]);
+
+  uint8_t parent_hash[32];
+  cr_assert(pl_store_save_root(store, t->vstack[base + 2], parent_hash, err,
+                               sizeof(err)),
+            "%s", err);
+  pl_val fresh = pl_pin_proxy_target(pl_ptr(t->vstack[base + 1]));
+  pl_val parent = pl_pin_proxy_target(pl_ptr(t->vstack[base + 2]));
+  cr_assert_eq(fresh, known);
+  cr_assert_neq(parent, 0);
+  cr_assert_eq(pl_pin_npins(pl_ptr(parent)), 1);
+  pl_cell* parent_body = pl_as(PL_TAG_APP, pl_pin_body(pl_ptr(parent)));
+  cr_assert_not_null(parent_body);
+  cr_assert_eq(pl_app_args(parent_body)[0], known);
+  cr_assert_eq(pl_app_args(parent_body)[1], known);
+
+  uint8_t* wire = NULL;
+  size_t wire_len = 0;
+  cr_assert(save_probe_get(backend, parent_hash, &wire, &wire_len));
+  cr_assert_geq(wire_len, 41);
+  cr_assert_eq(wire[0], 1);
+  cr_assert_eq(wire[1], 1);
+  for (size_t i = 2; i < 9; i++)
+    cr_assert_eq(wire[i], 0);
+  cr_assert_eq(memcmp(wire + 9, child_hash, sizeof(child_hash)), 0);
+  free(wire);
+
+  pl_store* reload = pl_store_new((pl_store_backend){
+      .ctx = backend,
+      .get = save_probe_get,
+      .put = save_probe_put,
+      .has = save_probe_has,
+      .put_root = save_probe_put_root,
+      .get_root = save_probe_get_root,
+  });
+  pl_heap* reload_heap = pl_heap_new(1 << 16, reload);
+  pl_thread* reload_t = pl_thread_new(reload_heap);
+  pl_val loaded = pl_store_load(reload_t, parent_hash);
+  cr_assert_eq(pl_pin_npins(pl_ptr(loaded)), 1);
+  pl_cell* loaded_body = pl_as(PL_TAG_APP, pl_pin_body(pl_ptr(loaded)));
+  cr_assert_not_null(loaded_body);
+  cr_assert_eq(pl_app_args(loaded_body)[0], pl_app_args(loaded_body)[1]);
+  cr_assert_eq(pl_pin_subpins(pl_ptr(loaded))[0], pl_app_args(loaded_body)[0]);
+  cr_assert_eq(memcmp(pl_pin_hash(pl_pin_subpins(pl_ptr(loaded))[0]),
+                      child_hash, sizeof(child_hash)),
+               0);
+
+  pl_thread_free(reload_t);
+  pl_heap_free(reload_heap);
+  pl_store_free(reload);
+  pl_thread_free(t);
+  pl_heap_free(heap);
+  pl_store_free(store);
+}
+
 /* ── Interning ─────────────────────────────────────────────────────────── */
+
+Test(store, compiler_install_is_generation_idempotent) {
+  pl_store* s = pl_store_new_mem();
+  pl_heap* h = pl_heap_new(1 << 16, s);
+  pl_thread* t = pl_thread_new(h);
+  pl_vpush(t, test_law(t, 1, 7, 1));
+  pl_val pin = pl_pin(t, t->vstack[t->vsp - 1]);
+  char save_err[192] = {0};
+  cr_assert(pl_store_save_root(s, pin, NULL, save_err, sizeof(save_err)), "%s",
+            save_err);
+  pl_hash law_key;
+  memcpy(law_key.b, pl_pin_hash(pin), sizeof(law_key.b));
+
+  uint8_t enabled[32];
+  for (size_t i = 0; i < sizeof(enabled); i++)
+    enabled[i] = (uint8_t)i;
+
+  cr_assert(pl_store_put_compiler(s, enabled));
+  pl_thread* installed_t = s->compiler_t;
+  pl_heap* installed_h = s->compiler_h;
+  cr_assert_not_null(installed_t);
+  cr_assert_not_null(installed_h);
+  cr_assert_not(pl_store_put_compiler(s, enabled));
+  cr_assert_eq(s->compiler_t, installed_t);
+  cr_assert_eq(s->compiler_h, installed_h);
+
+  pl_code* code = calloc(1, sizeof(*code));
+  cr_assert_not_null(code);
+  code->ops = calloc(1, sizeof(*code->ops));
+  cr_assert_not_null(code->ops);
+  ax_arrpush(s->codes, code);
+  ax_hmput(s->code_cache, law_key, code);
+  cr_assert_null(pl_pin_code(pl_ptr(pin)));
+  pl_store_put_code(s, law_key.b);
+  cr_assert_eq(pl_pin_code(pl_ptr(pin)), code);
+  pl_store_put_code(s, law_key.b);
+  cr_assert_eq(ax_arrlen(s->codes), 1);
+  cr_assert_eq(ax_hmlen(s->code_cache), 1);
+
+  uint8_t disabled[32];
+  memset(disabled, 0xff, sizeof(disabled));
+  cr_assert(pl_store_put_compiler(s, disabled));
+  cr_assert_null(pl_pin_code(pl_ptr(pin)));
+  /* A suspended PL_F_EXEC frame may still point at the old generation.  The
+   * store owns retired code until teardown rather than freeing it here. */
+  cr_assert_eq(ax_arrlen(s->codes), 1);
+  cr_assert_eq(s->codes[0], code);
+  cr_assert_eq(ax_hmlen(s->code_cache), 0);
+  cr_assert_null(s->compiler_t);
+  cr_assert_null(s->compiler_h);
+  cr_assert_not(pl_store_put_compiler(s, disabled));
+  pl_thread_free(t);
+  pl_heap_free(h);
+  pl_store_free(s);
+}
+
+static void assert_sigabrt(pid_t child) {
+  cr_assert_gt(child, 0);
+  int status = 0;
+  cr_assert_eq(waitpid(child, &status, 0), child);
+  cr_assert(WIFSIGNALED(status));
+  cr_assert_eq(WTERMSIG(status), SIGABRT);
+}
+
+Test(store, registries_reject_resolved_moving_pin_proxies) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  pl_vpush(t, test_law(t, 1, 7, 1));
+  pl_val proxy = pl_pin(t, t->vstack[t->vsp - 1]);
+  char save_err[192] = {0};
+  cr_assert(
+      pl_store_save_root(rt.store, proxy, NULL, save_err, sizeof(save_err)),
+      "%s", save_err);
+  cr_assert_neq(pl_pin_proxy_target(pl_ptr(proxy)), 0);
+  const uint8_t* hash = pl_pin_hash(proxy);
+  cr_assert_not_null(hash);
+
+  pid_t child = fork();
+  if (child == 0) {
+    pl_store_index_hashed_law(rt.store, proxy);
+    _exit(0);
+  }
+  assert_sigabrt(child);
+
+  child = fork();
+  if (child == 0) {
+    pl_store_intern_put(rt.store, hash, proxy);
+    _exit(0);
+  }
+  assert_sigabrt(child);
+
+  pl_val canonical = pl_pin_proxy_target(pl_ptr(proxy));
+  uint8_t wrong_hash[32];
+  memcpy(wrong_hash, hash, sizeof(wrong_hash));
+  wrong_hash[0] ^= 1;
+  child = fork();
+  if (child == 0) {
+    pl_store_intern_put(rt.store, wrong_hash, canonical);
+    _exit(0);
+  }
+  assert_sigabrt(child);
+
+  pl_vpush(t, 42);
+  pl_val nat_proxy = pl_pin(t, t->vstack[t->vsp - 1]);
+  cr_assert(
+      pl_store_save_root(rt.store, nat_proxy, NULL, save_err, sizeof(save_err)),
+      "%s", save_err);
+  pl_val nat_canonical = pl_pin_proxy_target(pl_ptr(nat_proxy));
+  cr_assert_neq(nat_canonical, 0);
+  child = fork();
+  if (child == 0) {
+    pl_store_index_hashed_law(rt.store, nat_canonical);
+    _exit(0);
+  }
+  assert_sigabrt(child);
+
+  test_rt_free(&rt);
+}
 
 Test(pin, dedup_is_semantic) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
   size_t base = t->vsp;
-  /* two structurally equal but distinct graphs intern to the same pin */
+  /* Pin is allocation-only. Save later gives equal proxies one canonical
+   * representative without changing their public identities. */
   pl_vpush(t, test_app2(t, 0, 7, test_law(t, 1, 0, 1)));
   pl_vpush(t, test_app2(t, 0, 7, test_law(t, 1, 0, 1)));
-  pl_val p1 = pl_pin(t, t->vstack[base]);
-  pl_val p2 = pl_pin(t, t->vstack[base + 1]);
-  cr_assert_eq(p1, p2);
+  t->vstack[base] = pl_pin(t, t->vstack[base]);
+  t->vstack[base + 1] = pl_pin(t, t->vstack[base + 1]);
+  pl_val p1 = t->vstack[base];
+  pl_val p2 = t->vstack[base + 1];
+  cr_assert_neq(p1, p2);
+  cr_assert_null(pl_pin_hash(p1));
+  cr_assert_null(pl_pin_hash(p2));
+  char err[192] = {0};
+  cr_assert(pl_store_save_root(rt.store, p1, NULL, err, sizeof(err)), "%s",
+            err);
+  cr_assert(pl_store_save_root(rt.store, p2, NULL, err, sizeof(err)), "%s",
+            err);
   cr_assert_eq(memcmp(pl_pin_hash(p1), pl_pin_hash(p2), 32), 0);
+  cr_assert_eq(pl_pin_proxy_target(pl_ptr(p1)),
+               pl_pin_proxy_target(pl_ptr(p2)));
   test_rt_free(&rt);
 }
 
@@ -35,13 +548,19 @@ Test(pin, sub_pins_collected_shallow) {
   pl_thread* t = rt.t;
   size_t base = t->vsp;
   pl_vpush(t, 42);
-  pl_val inner = pl_pin(t, t->vstack[base]);
-  pl_vpush(t, test_app2(t, 0, inner, inner));
-  pl_val outer = pl_pin(t, t->vstack[base + 1]);
+  t->vstack[base] = pl_pin(t, t->vstack[base]);
+  pl_vpush(t, test_app2(t, 0, t->vstack[base], t->vstack[base]));
+  t->vstack[base + 1] = pl_pin(t, t->vstack[base + 1]);
+  pl_val inner = t->vstack[base];
+  pl_val outer = t->vstack[base + 1];
   pl_cell* p = pl_as(PL_TAG_PIN, outer);
   cr_assert_not_null(p);
+  cr_assert_eq(pl_pin_npins(p), 0); /* proxies never carry inline tables */
+  char err[192] = {0};
+  cr_assert(pl_store_save_root(rt.store, outer, NULL, err, sizeof(err)), "%s",
+            err);
   cr_assert_eq(pl_pin_npins(p), 1); /* deduplicated, shallow */
-  cr_assert_eq(pl_pin_subpins(p)[0], inner);
+  cr_assert_eq(pl_pin_subpins(p)[0], pl_pin_proxy_target(pl_ptr(inner)));
   test_rt_free(&rt);
 }
 
@@ -60,6 +579,39 @@ Test(pin, pinning_normalizes) {
   test_rt_free(&rt);
 }
 
+Test(pin, normalization_raise_does_not_leak_store_lock) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+
+  /* A thunk whose expression resolves to its own blackholed env slot. */
+  pl_gc_reserve(t, PL_ENV_CELLS(1) + PL_THUNK_CELLS);
+  pl_val env = pl_mk_env(t, 1);
+  pl_val thunk = pl_mk_thunk(t, env, 0);
+  pl_env_slots(pl_ptr(env))[0] = thunk;
+
+  bool raised = false;
+  pl_catch c;
+  pl_catch_init(t, &c);
+  if (setjmp(c.jb) == 0) {
+    (void)pl_pin(t, thunk);
+  } else {
+    raised = true;
+  }
+  pl_catch_unwind(t, &c);
+  cr_assert(raised, "expected pin normalization to raise");
+  cr_assert_str_eq(t->exn_msg, "<<loop>>");
+
+  store_lock_probe probe = {.store = rt.store, .acquired = false};
+  pthread_t worker;
+  cr_assert_eq(pthread_create(&worker, NULL, store_trylock_thread, &probe), 0);
+  cr_assert_eq(pthread_join(worker, NULL), 0);
+  if (!probe.acquired)
+    (void)pthread_mutex_unlock(&rt.store->mu); /* clean up a regressed build */
+  cr_assert(probe.acquired, "pl_pin leaked the store lock after pl_nf raised");
+
+  test_rt_free(&rt);
+}
+
 /* ── Round trips through the backend ───────────────────────────────────── */
 
 static void roundtrip_via(pl_store* (*mk)(const char* dir), const char* dir) {
@@ -73,18 +625,14 @@ static void roundtrip_via(pl_store* (*mk)(const char* dir), const char* dir) {
     pl_thread* t = pl_thread_new(h);
     size_t base = t->vsp;
     pl_vpush(t, 42);
-    pl_val inner = pl_pin(t, t->vstack[base]);
+    t->vstack[base] = pl_pin(t, t->vstack[base]);
     pl_vpush(t, test_law(t, 2, ax_s2('h', 'i'), 1));
-    pl_vpush(t, test_app2(t, 0, inner, t->vstack[base + 1]));
-    pl_val pin = pl_pin(t, t->vstack[base + 2]);
-    if (s->format == PL_STORE_FORMAT_SILO_V1) {
-      char err[192] = {0};
-      cr_assert_null(pl_pin_hash(pin));
-      cr_assert(pl_store_save_root(s, pin, hash, err, sizeof(err)), "%s", err);
-    } else {
-      memcpy(hash, pl_pin_hash(pin), 32);
-      cr_assert(pl_store_put_root(s, hash));
-    }
+    pl_vpush(t, test_app2(t, 0, t->vstack[base], t->vstack[base + 1]));
+    t->vstack[base + 2] = pl_pin(t, t->vstack[base + 2]);
+    pl_val pin = t->vstack[base + 2];
+    char err[192] = {0};
+    cr_assert_null(pl_pin_hash(pin));
+    cr_assert(pl_store_save_root(s, pin, hash, err, sizeof(err)), "%s", err);
     pl_thread_free(t);
     pl_heap_free(h);
     pl_store_free(s);
@@ -122,17 +670,14 @@ static void roundtrip_via(pl_store* (*mk)(const char* dir), const char* dir) {
     size_t base = t->vsp;
     pl_vpush(t, pl_pin_body(p));
     pl_val again = pl_pin(t, t->vstack[base]);
-    if (s->format == PL_STORE_FORMAT_SILO_V1) {
-      char err[192] = {0};
-      uint8_t again_hash[32];
-      cr_assert_neq(again, pin);
-      cr_assert_null(pl_pin_hash(again));
-      cr_assert(pl_store_save_root(s, again, again_hash, err, sizeof(err)),
-                "%s", err);
-      cr_assert_eq(memcmp(again_hash, hash, 32), 0);
-    } else {
-      cr_assert_eq(again, pin);
-    }
+    char err[192] = {0};
+    uint8_t again_hash[32];
+    cr_assert_neq(again, pin);
+    cr_assert_null(pl_pin_hash(again));
+    cr_assert(pl_store_save_root(s, again, again_hash, err, sizeof(err)), "%s",
+              err);
+    cr_assert_eq(memcmp(again_hash, hash, 32), 0);
+    cr_assert_eq(pl_pin_proxy_target(pl_ptr(again)), pin);
 
     pl_thread_free(t);
     pl_heap_free(h);
@@ -182,12 +727,8 @@ static void pin_sample(pl_store* s, uint8_t hash[32]) {
   pl_vpush(t, test_law(t, 2, ax_s2('h', 'i'), 1));
   pl_vpush(t, test_app2(t, 0, t->vstack[t->vsp - 1], 42));
   pl_val pin = pl_pin(t, t->vstack[t->vsp - 1]);
-  if (s->format == PL_STORE_FORMAT_SILO_V1) {
-    char err[192] = {0};
-    cr_assert(pl_store_save_root(s, pin, hash, err, sizeof(err)), "%s", err);
-  } else {
-    memcpy(hash, pl_pin_hash(pin), 32);
-  }
+  char err[192] = {0};
+  cr_assert(pl_store_save_root(s, pin, hash, err, sizeof(err)), "%s", err);
   pl_thread_free(t);
   pl_heap_free(h);
 }
@@ -290,6 +831,88 @@ static size_t silo_last_txnid(const char* dir) {
   return (size_t)info.me_last_txnid;
 }
 
+static void exercise_repeated_canonical_save(pl_store* s,
+                                             const char* pack_path) {
+  pl_heap* h = pl_heap_new(1 << 16, s);
+  pl_thread* t = pl_thread_new(h);
+  size_t base = t->vsp;
+
+  pl_vpush(t, 41);
+  t->vstack[base] = pl_pin(t, t->vstack[base]);
+  pl_vpush(t, test_app2(t, 0, t->vstack[base], 7));
+  t->vstack[base + 1] = pl_pin(t, t->vstack[base + 1]);
+
+  char err[192] = {0};
+  uint8_t first_hash[32], second_hash[32], repeated_hash[32], root_hash[32];
+  cr_assert(
+      pl_store_save_root(s, t->vstack[base + 1], first_hash, err, sizeof(err)),
+      "%s", err);
+  pl_val first = pl_pin_proxy_target(pl_ptr(t->vstack[base + 1]));
+  cr_assert_neq(first, 0);
+
+  pl_vpush(t, 99);
+  t->vstack[base + 2] = pl_pin(t, t->vstack[base + 2]);
+  cr_assert(
+      pl_store_save_root(s, t->vstack[base + 2], second_hash, err, sizeof(err)),
+      "%s", err);
+  pl_val second = pl_pin_proxy_target(pl_ptr(t->vstack[base + 2]));
+  cr_assert_neq(second, 0);
+  cr_assert_neq(memcmp(first_hash, second_hash, sizeof(first_hash)), 0);
+
+  struct stat before = {0};
+  if (pack_path != NULL)
+    cr_assert_eq(stat(pack_path, &before), 0);
+  size_t arena_before = pl_store_mark(s);
+
+  /* Exercise both public aliases and canonical values.  Neither call may
+   * revisit or rematerialize the already-persisted closure. */
+  cr_assert(pl_store_save_root(s, t->vstack[base + 1], repeated_hash, err,
+                               sizeof(err)),
+            "%s", err);
+  cr_assert_eq(memcmp(repeated_hash, first_hash, sizeof(first_hash)), 0);
+  cr_assert(pl_store_get_root(s, root_hash));
+  cr_assert_eq(memcmp(root_hash, first_hash, sizeof(first_hash)), 0);
+
+  pl_thread_free(t);
+  pl_heap_free(h);
+  cr_assert(pl_store_save_root(s, second, repeated_hash, err, sizeof(err)),
+            "%s", err);
+  cr_assert_eq(memcmp(repeated_hash, second_hash, sizeof(second_hash)), 0);
+  cr_assert(pl_store_get_root(s, root_hash));
+  cr_assert_eq(memcmp(root_hash, second_hash, sizeof(second_hash)), 0);
+  cr_assert_eq(pl_store_mark(s), arena_before);
+
+  if (pack_path != NULL) {
+    struct stat after;
+    cr_assert_eq(stat(pack_path, &after), 0);
+    cr_assert_eq(after.st_size, before.st_size);
+  }
+
+  /* Keep the first canonical representative observably valid after its
+   * source heap has gone away. */
+  cr_assert_eq(memcmp(pl_pin_hash(first), first_hash, sizeof(first_hash)), 0);
+}
+
+Test(store, legacy_repeated_save_republishes_canonical_root) {
+  pl_store* s = pl_store_new_mem();
+  exercise_repeated_canonical_save(s, NULL);
+  pl_store_free(s);
+}
+
+Test(store, silo_repeated_save_republishes_root_without_pack_writes) {
+  char dir[64];
+  snprintf(dir, sizeof(dir), "/tmp/enki-test-silo-resave-%lu",
+           (unsigned long)getpid());
+  cr_assert(mkdir(dir, 0700) == 0 || errno == EEXIST);
+  pl_store* s = mk_silo(dir);
+  cr_assert_not_null(s);
+  char pack_path[96];
+  snprintf(pack_path, sizeof(pack_path), "%s/pins.pack", dir);
+  exercise_repeated_canonical_save(s, pack_path);
+  pl_store_free(s);
+  cleanup_store_dir(dir, true);
+}
+
 Test(store, lmdb_round_trip) {
   char dir[64];
   snprintf(dir, sizeof(dir), "/tmp/enki-test-store-%lu",
@@ -329,10 +952,13 @@ Test(store, silo_pin_defers_hash_and_io_until_save) {
   pl_heap* h = pl_heap_new(1 << 16, s);
   pl_thread* t = pl_thread_new(h);
 
+  size_t base = t->vsp;
   pl_vpush(t, 42);
-  pl_val unreachable = pl_pin(t, t->vstack[t->vsp - 1]);
+  t->vstack[base] = pl_pin(t, t->vstack[base]);
   pl_vpush(t, 43);
-  pl_val root = pl_pin(t, t->vstack[t->vsp - 1]);
+  t->vstack[base + 1] = pl_pin(t, t->vstack[base + 1]);
+  pl_val unreachable = t->vstack[base];
+  pl_val root = t->vstack[base + 1];
   cr_assert_null(pl_pin_hash(unreachable));
   cr_assert_null(pl_pin_hash(root));
 
@@ -414,31 +1040,37 @@ Test(store, silo_failed_batch_keeps_provisional_pins_retryable) {
   pl_heap* h = pl_heap_new(1 << 16, s);
   pl_thread* t = pl_thread_new(h);
 
+  size_t base = t->vsp;
   pl_vpush(t, 42);
   pl_vpush(t, 42);
-  pl_val first = pl_pin(t, t->vstack[t->vsp - 2]);
-  pl_val second = pl_pin(t, t->vstack[t->vsp - 1]);
-  pl_vpush(t, test_app2(t, 0, first, second));
+  t->vstack[base] = pl_pin(t, t->vstack[base]);
+  t->vstack[base + 1] = pl_pin(t, t->vstack[base + 1]);
+  pl_vpush(t, test_app2(t, 0, t->vstack[base], t->vstack[base + 1]));
   size_t valid_at = t->vsp - 1;
   pl_vpush(t, test_law(t, 0, 0, 1));
   pl_vpush(t, test_law(t, 1, t->vstack[t->vsp - 1], t->vstack[valid_at]));
-  pl_val invalid = pl_pin(t, t->vstack[t->vsp - 1]);
-  cr_assert_eq(pl_pin_npins(pl_ptr(invalid)), 2);
+  size_t invalid_at = t->vsp - 1;
+  t->vstack[invalid_at] = pl_pin(t, t->vstack[invalid_at]);
+  cr_assert_eq(pl_pin_npins(pl_ptr(t->vstack[invalid_at])), 0);
 
   char err[192] = {0};
-  cr_assert_not(pl_store_save_root(s, invalid, NULL, err, sizeof(err)));
+  cr_assert_not(
+      pl_store_save_root(s, t->vstack[invalid_at], NULL, err, sizeof(err)));
   cr_assert(strstr(err, "LAW arity") != NULL, "%s", err);
-  cr_assert_not(pl_pin_is_hashed(first));
-  cr_assert_not(pl_pin_is_hashed(second));
-  cr_assert_not(pl_pin_is_hashed(invalid));
-  cr_assert_eq(pl_pin_npins(pl_ptr(invalid)), 2);
+  cr_assert_not(pl_pin_is_hashed(t->vstack[base]));
+  cr_assert_not(pl_pin_is_hashed(t->vstack[base + 1]));
+  cr_assert_not(pl_pin_is_hashed(t->vstack[invalid_at]));
+  cr_assert_eq(pl_pin_npins(pl_ptr(t->vstack[invalid_at])), 0);
 
-  pl_val retry = pl_pin(t, t->vstack[valid_at]);
-  cr_assert(pl_store_save_root(s, retry, NULL, err, sizeof(err)), "%s", err);
-  cr_assert(pl_pin_is_hashed(first));
-  cr_assert(pl_pin_is_hashed(second));
-  cr_assert_eq(memcmp(pl_pin_hash(first), pl_pin_hash(second), 32), 0);
-  cr_assert_eq(pl_pin_npins(pl_ptr(retry)), 1);
+  t->vstack[valid_at] = pl_pin(t, t->vstack[valid_at]);
+  cr_assert(pl_store_save_root(s, t->vstack[valid_at], NULL, err, sizeof(err)),
+            "%s", err);
+  cr_assert(pl_pin_is_hashed(t->vstack[base]));
+  cr_assert(pl_pin_is_hashed(t->vstack[base + 1]));
+  cr_assert_eq(memcmp(pl_pin_hash(t->vstack[base]),
+                      pl_pin_hash(t->vstack[base + 1]), 32),
+               0);
+  cr_assert_eq(pl_pin_npins(pl_ptr(t->vstack[valid_at])), 1);
 
   pl_thread_free(t);
   pl_heap_free(h);
@@ -462,25 +1094,28 @@ Test(store, silo_failed_batch_truncates_flushed_pack_tail) {
   for (size_t i = 0; i < byte_len; i++)
     bytes[i] = (uint8_t)(i * 29u + 5u);
   bytes[byte_len - 1] = 1;
+  size_t base = t->vsp;
   pl_vpush(t, pl_nat_from_bytes(t, bytes, byte_len));
-  pl_val large = pl_pin(t, t->vstack[t->vsp - 1]);
-  pl_vpush(t, test_law(t, 0, 0, large));
-  pl_val invalid = pl_pin(t, t->vstack[t->vsp - 1]);
+  t->vstack[base] = pl_pin(t, t->vstack[base]);
+  pl_vpush(t, test_law(t, 0, 0, t->vstack[base]));
+  t->vstack[base + 1] = pl_pin(t, t->vstack[base + 1]);
 
   char path[96];
   snprintf(path, sizeof(path), "%s/pins.pack", dir);
   struct stat before, after;
   cr_assert_eq(stat(path, &before), 0);
   char err[192] = {0};
-  cr_assert_not(pl_store_save_root(s, invalid, NULL, err, sizeof(err)));
+  cr_assert_not(
+      pl_store_save_root(s, t->vstack[base + 1], NULL, err, sizeof(err)));
   cr_assert(strstr(err, "LAW arity") != NULL, "%s", err);
   cr_assert_eq(stat(path, &after), 0);
   cr_assert_eq(after.st_size, before.st_size);
-  cr_assert_not(pl_pin_is_hashed(large));
-  cr_assert_not(pl_pin_is_hashed(invalid));
+  cr_assert_not(pl_pin_is_hashed(t->vstack[base]));
+  cr_assert_not(pl_pin_is_hashed(t->vstack[base + 1]));
 
-  cr_assert(pl_store_save_root(s, large, NULL, err, sizeof(err)), "%s", err);
-  cr_assert(pl_pin_is_hashed(large));
+  cr_assert(pl_store_save_root(s, t->vstack[base], NULL, err, sizeof(err)),
+            "%s", err);
+  cr_assert(pl_pin_is_hashed(t->vstack[base]));
 
   free(bytes);
   pl_thread_free(t);
@@ -552,21 +1187,36 @@ Test(store, silo_equal_provisional_pins_share_wire_identity) {
   pl_heap* h = pl_heap_new(1 << 16, s);
   pl_thread* t = pl_thread_new(h);
 
-  pl_vpush(t, 42);
-  pl_vpush(t, 42);
-  pl_val first = pl_pin(t, t->vstack[t->vsp - 2]);
-  pl_val second = pl_pin(t, t->vstack[t->vsp - 1]);
+  size_t base = t->vsp;
+  pl_vpush(t, test_law(t, 1, 7, 1));
+  pl_vpush(t, test_law(t, 1, 7, 1));
+  t->vstack[base] = pl_pin(t, t->vstack[base]);
+  t->vstack[base + 1] = pl_pin(t, t->vstack[base + 1]);
+  pl_val first = t->vstack[base];
+  pl_val second = t->vstack[base + 1];
   cr_assert_neq(first, second);
   cr_assert_eq(test_op66_2(t, ax_s5('E', 'q', 'u', 'a', 'l'), first, second),
                1);
-  pl_vpush(t, test_app2(t, 0, first, second));
-  pl_val outer = pl_pin(t, t->vstack[t->vsp - 1]);
-  cr_assert_eq(pl_pin_npins(pl_ptr(outer)), 2);
+  pl_vpush(t, test_app2(t, 0, t->vstack[base], t->vstack[base + 1]));
+  t->vstack[base + 2] = pl_pin(t, t->vstack[base + 2]);
+  first = t->vstack[base];
+  second = t->vstack[base + 1];
+  pl_val outer = t->vstack[base + 2];
+  cr_assert_eq(pl_pin_npins(pl_ptr(outer)), 0);
 
   char err[192] = {0};
   cr_assert(pl_store_save_root(s, outer, NULL, err, sizeof(err)), "%s", err);
   cr_assert_eq(memcmp(pl_pin_hash(first), pl_pin_hash(second), 32), 0);
+  cr_assert_eq(pl_pin_proxy_target(pl_ptr(first)),
+               pl_pin_proxy_target(pl_ptr(second)));
   cr_assert_eq(pl_pin_npins(pl_ptr(outer)), 1);
+  pl_hash key;
+  memcpy(key.b, pl_pin_hash(first), sizeof(key.b));
+  ptrdiff_t at = ax_hmgeti(s->code_targets, key);
+  cr_assert_geq(at, 0);
+  cr_assert_eq(ax_arrlen(s->code_targets[at].value), 1);
+  memcpy(key.b, pl_pin_hash(outer), sizeof(key.b));
+  cr_assert_lt(ax_hmgeti(s->code_targets, key), 0);
 
   pl_thread_free(t);
   pl_heap_free(h);
@@ -726,14 +1376,17 @@ Test(store, silo_reports_missing_referents) {
     cr_assert_not_null(s);
     pl_heap* h = pl_heap_new(1 << 16, s);
     pl_thread* t = pl_thread_new(h);
+    size_t base = t->vsp;
     pl_vpush(t, 42);
-    pl_val inner = pl_pin(t, t->vstack[t->vsp - 1]);
-    pl_vpush(t, test_app2(t, 0, inner, 7));
-    pl_val outer = pl_pin(t, t->vstack[t->vsp - 1]);
+    t->vstack[base] = pl_pin(t, t->vstack[base]);
+    pl_vpush(t, test_app2(t, 0, t->vstack[base], 7));
+    t->vstack[base + 1] = pl_pin(t, t->vstack[base + 1]);
     char err[192] = {0};
-    cr_assert(pl_store_save_root(s, outer, NULL, err, sizeof(err)), "%s", err);
-    memcpy(inner_hash, pl_pin_hash(inner), 32);
-    memcpy(outer_hash, pl_pin_hash(outer), 32);
+    cr_assert(
+        pl_store_save_root(s, t->vstack[base + 1], NULL, err, sizeof(err)),
+        "%s", err);
+    memcpy(inner_hash, pl_pin_hash(t->vstack[base]), 32);
+    memcpy(outer_hash, pl_pin_hash(t->vstack[base + 1]), 32);
     pl_thread_free(t);
     pl_heap_free(h);
     pl_store_free(s);
@@ -754,14 +1407,17 @@ Test(store, silo_rejects_cyclic_referent_loads) {
     cr_assert_not_null(s);
     pl_heap* h = pl_heap_new(1 << 16, s);
     pl_thread* t = pl_thread_new(h);
+    size_t base = t->vsp;
     pl_vpush(t, 42);
-    pl_val inner = pl_pin(t, t->vstack[t->vsp - 1]);
-    pl_vpush(t, test_app2(t, 0, inner, 7));
-    pl_val outer = pl_pin(t, t->vstack[t->vsp - 1]);
+    t->vstack[base] = pl_pin(t, t->vstack[base]);
+    pl_vpush(t, test_app2(t, 0, t->vstack[base], 7));
+    t->vstack[base + 1] = pl_pin(t, t->vstack[base + 1]);
     char err[192] = {0};
-    cr_assert(pl_store_save_root(s, outer, NULL, err, sizeof(err)), "%s", err);
-    memcpy(inner_hash, pl_pin_hash(inner), 32);
-    memcpy(outer_hash, pl_pin_hash(outer), 32);
+    cr_assert(
+        pl_store_save_root(s, t->vstack[base + 1], NULL, err, sizeof(err)),
+        "%s", err);
+    memcpy(inner_hash, pl_pin_hash(t->vstack[base]), 32);
+    memcpy(outer_hash, pl_pin_hash(t->vstack[base + 1]), 32);
     pl_thread_free(t);
     pl_heap_free(h);
     pl_store_free(s);
@@ -881,4 +1537,88 @@ Test(store, missing_pin_raises) {
   pl_catch_unwind(t, &c);
   cr_assert_not_null(t->exn_msg);
   test_rt_free(&rt);
+}
+
+Test(store, legacy_nested_missing_pin_cleans_resources_and_locks) {
+  save_probe_backend* backend;
+  pl_store* store = save_probe_store(&backend);
+  pl_heap* heap = pl_heap_new(1 << 16, store);
+  pl_thread* t = pl_thread_new(heap);
+  uint8_t child_hash[32] = {0x11};
+  uint8_t missing_hash[32] = {0x22};
+  uint8_t parent_hash[32] = {0x33};
+
+  uint8_t child[19] = {0};
+  child[0] = 1; /* PL_CANON_VERSION */
+  test_put64le(child + 1, 0);
+  child[9] = 'n';
+  test_put64le(child + 10, 1);
+  child[18] = 42;
+  cr_assert(pl_store_backend_put(store, child_hash, child, sizeof(child)));
+
+  uint8_t parent[78] = {0};
+  parent[0] = 1; /* PL_CANON_VERSION */
+  test_put64le(parent + 1, 2);
+  memcpy(parent + 9, child_hash, sizeof(child_hash));
+  memcpy(parent + 41, missing_hash, sizeof(missing_hash));
+  parent[73] = 'p';
+  cr_assert(pl_store_backend_put(store, parent_hash, parent, sizeof(parent)));
+
+  bool raised = false;
+  pl_catch c;
+  pl_catch_init(t, &c);
+  if (setjmp(c.jb) == 0) {
+    (void)pl_store_load(t, parent_hash);
+  } else {
+    raised = true;
+  }
+  pl_catch_unwind(t, &c);
+  cr_assert(raised, "expected nested missing PIN to raise");
+  cr_assert_str_eq(t->exn_msg, "store_load: missing pin");
+  cr_assert_eq(ax_arrlen(store->loading), 0);
+
+  store_both_lock_probe probe = {.store = store};
+  pthread_t worker;
+  cr_assert_eq(
+      pthread_create(&worker, NULL, store_try_both_locks_thread, &probe), 0);
+  cr_assert_eq(pthread_join(worker, NULL), 0);
+  if (!probe.general_acquired)
+    (void)pthread_mutex_unlock(&store->mu);
+  if (!probe.save_acquired)
+    (void)pthread_mutex_unlock(&store->save_mu);
+  cr_assert(probe.general_acquired, "nested Legacy load leaked store mu");
+  cr_assert(probe.save_acquired, "nested Legacy load leaked save_mu");
+
+  pl_thread_free(t);
+  pl_heap_free(heap);
+  pl_store_free(store);
+}
+
+Test(store, legacy_rejects_pin_table_larger_than_header_meta) {
+  save_probe_backend* backend;
+  pl_store* store = save_probe_store(&backend);
+  pl_heap* heap = pl_heap_new(1 << 16, store);
+  pl_thread* t = pl_thread_new(heap);
+  uint8_t hash[32] = {0x44};
+  uint8_t record[9] = {1}; /* PL_CANON_VERSION */
+  test_put64le(record + 1, (uint64_t)PL_HDR_META_MAX + 1);
+  cr_assert(pl_store_backend_put(store, hash, record, sizeof(record)));
+
+  bool raised = false;
+  pl_catch c;
+  pl_catch_init(t, &c);
+  if (setjmp(c.jb) == 0) {
+    (void)pl_store_load(t, hash);
+  } else {
+    raised = true;
+  }
+  pl_catch_unwind(t, &c);
+  cr_assert(raised, "expected oversized Legacy PIN table to raise");
+  cr_assert_str_eq(t->exn_msg,
+                   "store_load: PIN exceeds the direct PIN-table limit");
+  cr_assert_eq(ax_arrlen(store->loading), 0);
+
+  pl_thread_free(t);
+  pl_heap_free(heap);
+  pl_store_free(store);
 }

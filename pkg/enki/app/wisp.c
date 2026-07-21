@@ -29,12 +29,13 @@
  * loadAssembly / runRepl drivers.
  */
 
-#define BOOT_HEAP_CELLS        ((size_t)1 << 26) /* 32 MiB per semispace, grows */
+#define BOOT_HEAP_CELLS                ((size_t)1 << 26) /* 512 MiB per semispace, grows */
+#define BOOT_GC_ALLOCATION_FLOOR_CELLS ((size_t)1 << 20) /* 8 MiB */
 // ./build/release/bin/wisp --file-root ../reaver/src ../reaver/src/plan
 // main  35.43s user 0.55s system 99% cpu 36.136 total
-#define BOOT_DEFAULT_FILE_ROOT "./reaver/src"
-#define BOOT_DEFAULT_STORE_DIR "./snap"
-#define BOOT_STORE_MAP_SIZE    ((size_t)1 << 30)
+#define BOOT_DEFAULT_FILE_ROOT         "./reaver/src"
+#define BOOT_DEFAULT_STORE_DIR         "./snap"
+#define BOOT_STORE_MAP_SIZE            ((size_t)1 << 30)
 
 typedef struct boot_module {
   pl_val key_v;
@@ -78,8 +79,15 @@ static void boot_env_root_push(boot_ctx* ctx, en_env_entry* env) {
   ctx->tmp_env_v[ctx->tmp_env_s++] = env;
 }
 
-static void boot_collect_after_invocation(boot_ctx* ctx) {
-  pl_gc_collect_now(ctx->w->t);
+static void boot_collect_after_form(boot_ctx* ctx) {
+  /*
+   * A form boundary is a convenient safe point for dropping its temporary
+   * graph, but copying the complete, growing module environment after every
+   * form makes assembly quadratic.  Wait until new allocation can pay for
+   * copying the prior live set (with a floor for small live sets).  Reserve
+   * still collects on exhaustion, so this is a space/throughput policy only.
+   */
+  (void)pl_gc_collect_if_pressure(ctx->w->t, BOOT_GC_ALLOCATION_FLOOR_CELLS);
 }
 
 /* ── Environment list helpers (host-side, allocator-backed) ────────────── */
@@ -267,7 +275,7 @@ static bool boot_process_form(boot_ctx* ctx, pl_val form) {
   en_wisp* w = ctx->w;
   pl_val exp = en_wisp_macroexpand(w, form);
   if (exp == 0) {
-    boot_collect_after_invocation(ctx);
+    boot_collect_after_form(ctx);
     return true;
   }
   pl_val out = en_wisp_thunk(w, exp);
@@ -280,7 +288,7 @@ static bool boot_process_form(boot_ctx* ctx, pl_val form) {
     fprintf(stderr, "%s\n", out_c);
     ax_free(ctx->loc_a, out_c);
   }
-  boot_collect_after_invocation(ctx);
+  boot_collect_after_form(ctx);
   return true;
 }
 
@@ -436,7 +444,6 @@ static bool boot_run_function(boot_ctx* ctx, pl_val fun, int argc,
                                     : "PLAN exception");
     return false;
   }
-  boot_collect_after_invocation(ctx);
   return true;
 }
 

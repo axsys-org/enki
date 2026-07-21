@@ -17,6 +17,7 @@
 #include "plan/value.h"
 #include "plan/nat.h"
 #include "plan/store.h"
+#include "store_internal.h"
 
 /*
  * Primops, normative semantics from the Haskell reference (Plan.hs).
@@ -482,6 +483,10 @@ static pl_val op_slice(pl_thread* t, size_t ab) {
   uint64_t rsz = sz - o < n ? sz - o : n;
   if (rsz == 0)
     return 0;
+  /* Slice resets the result head to 0.  A complete slice of a row that
+   * already has that head is therefore the exact result. */
+  if (o == 0 && rsz == sz && pl_app_head(p) == 0)
+    return ARG(2);
   pl_gc_reserve(t, PL_APP_CELLS(rsz));
   PL_GC_FORBID(t);
   pl_val r =
@@ -707,9 +712,12 @@ static pl_val op_install(pl_thread* t, size_t ab) {
   if (hash == NULL)
     pl_raise_msg(t, "Install: compiler PIN must be saved first");
   pl_store* s = pl_heap_store(t->heap);
-  s->compiler_h = pl_heap_new(((size_t)1 << 26), s);
-  s->compiler_t = pl_thread_new(s->compiler_h);
-  pl_store_put_compiler(s, hash);
+  pl_store_lock(s);
+  bool replacing_self = t == s->compiler_t;
+  pl_store_unlock(s);
+  if (replacing_self)
+    pl_raise_msg(t, "Install: compiler cannot replace its own machine");
+  (void)pl_store_put_compiler(s, hash);
   return 1;
 }
 
@@ -765,11 +773,10 @@ static pl_val op_save(pl_thread* t, size_t ab) {
   if (pp == NULL)
     pl_raise_msg(t, "Save: expected a pin");
   pl_store* store = pl_heap_store(t->heap);
+  char err[192] = {0};
+  if (!pl_store_save_root(store, ARG(0), NULL, err, sizeof(err)))
+    pl_raise_msgf(t, "Save: %s", err[0] != '\0' ? err : "store failure");
   if (store->format == PL_STORE_FORMAT_SILO_V1) {
-    char err[192] = {0};
-    if (!pl_store_save_root(store, ARG(0), NULL, err, sizeof(err)))
-      pl_raise_msgf(t, "Save: %s", err[0] != '\0' ? err : "Silo failure");
-    pl_gc_collect_now(t);
     return 0;
   }
 
@@ -784,7 +791,6 @@ static pl_val op_save(pl_thread* t, size_t ab) {
   fprintf(f, "@%s\n", b58);
   if (fclose(f) != 0)
     pl_raise_msg(t, "Save: short write");
-  pl_gc_collect_now(t);
   return 0;
 }
 

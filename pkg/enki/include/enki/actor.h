@@ -24,7 +24,7 @@
  * headers still describe the wire form.
  *
  * Messaging: payloads cross actors only as store-resident
- * values — the sender pins at send, the mailbox holds store addresses,
+ * values — the sender snapshots at send, the mailbox holds store addresses,
  * the receiver's heap points into the shared immutable store.  PLAN
  * code addresses actors through per-actor handle tables; handle 0 is
  * self, fresh handles are minted by Spawn and by cap transfer in Recv.
@@ -47,12 +47,16 @@ typedef enum {
 } er_actor_status;
 
 typedef struct er_config {
-  uint64_t quantum;        /* fuel per slice (>= 2); 0 = default */
+  /* Worker/deterministic fuel per slice (>= 2); zero uses the default. */
+  uint64_t quantum;
   size_t heap_cells;       /* per-actor semispace cells; 0 = default (8192) */
   const char* file_root_c; /* spawned actors' ReadFile/ReadFolder jail */
   /* HTTP driver (op 83 Fetch) */
   long http_max_total_connections;  /* CURLM connection cap; 0 = curl default */
   uint64_t http_connect_default_ms; /* connectMs None default; 0 = 10000 */
+  /* MT adopted-root fuel per slice (>= 2).  Zero reads ENKI_ROOT_QUANTUM,
+   * then conservatively inherits quantum when the variable is unset. */
+  uint64_t root_quantum;
 } er_config;
 
 er_scheduler* er_scheduler_new(pl_store* store, er_config cfg);
@@ -128,10 +132,10 @@ er_drive_status er_mt_executor_drive(er_mt_executor* ex, er_actor* root);
 /*
  * Host injection: append a message to an actor's mailbox (waking it if
  * receive-blocked).  The payload must already be shareable — a nat63 or
- * a store-resident value (e.g. obtained via pl_pin) — since it enters
- * the actor's heap without copying.  Host threads may inject concurrently
- * with an active MT run/drive call.  With the deterministic executor, inject
- * only between run/drive calls.
+ * a store-resident value (e.g. loaded or explicitly snapshotted) — since it
+ * enters the actor's heap without copying.  Host threads may inject
+ * concurrently with an active MT run/drive call.  With the deterministic
+ * executor, inject only between run/drive calls.
  */
 void er_scheduler_inject(er_scheduler* sys, er_actor* to, pl_val payload);
 

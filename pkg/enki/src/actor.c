@@ -40,11 +40,11 @@ static _Thread_local er_mt_worker* er_current_worker;
  * before the serviced sender resumes.
  *
  * Semantics follow the reaver reference (the semantic oracle):
- *   - Payloads (message bodies, spawn fns) are forced and pinned at
+ *   - Payloads (message bodies, spawn fns) are forced and snapshotted at
  *     initiation, in the sender/parent; reaver shares its heap and
  *     forces lazily at the receiver — an accepted divergence.
  *   - Send/SendCaps to an invalid handle, or a PLAN exception while
- *     pinning a payload, crashes the *sender* (reaver: host `error`).
+ *     normalizing a payload, crashes the *sender* (reaver: host `error`).
  *   - CloseHandle of an unknown handle is a silent no-op (IntMap.delete).
  *   - Recv responds [msg, capsRow]; the empty row is nat 0 (valRow []).
  *   - Cap rows drop non-nat63 elements silently (reaver loadCap), but a
@@ -73,6 +73,13 @@ er_scheduler* er_scheduler_new(pl_store* store, er_config cfg) {
     if (sys->cfg.quantum == 0)
       sys->cfg.quantum = ER_DEFAULT_QUANTUM;
   }
+  if (sys->cfg.root_quantum == 0) {
+    const char* q_c = getenv("ENKI_ROOT_QUANTUM");
+    sys->cfg.root_quantum =
+        q_c != NULL && q_c[0] != '\0' ? strtoull(q_c, NULL, 10) : 0;
+    if (sys->cfg.root_quantum == 0)
+      sys->cfg.root_quantum = sys->cfg.quantum;
+  }
   if (sys->cfg.heap_cells == 0) {
     const char* h_c = getenv("ENKI_ACTOR_HEAP_CELLS");
     sys->cfg.heap_cells =
@@ -81,6 +88,8 @@ er_scheduler* er_scheduler_new(pl_store* store, er_config cfg) {
       sys->cfg.heap_cells = ER_DEFAULT_HEAP_CELLS;
   }
   ax_assume(sys->cfg.quantum >= 2, "er_scheduler_new: quantum must be >= 2");
+  ax_assume(sys->cfg.root_quantum >= 2,
+            "er_scheduler_new: root quantum must be >= 2");
   return sys;
 }
 
@@ -314,40 +323,21 @@ void er_actor_start(er_actor* a, pl_val fn) {
 }
 
 /*
- * Snapshot a payload out of the sender's moving heap: nat63s and
- * pins are already shareable; anything else is pinned via a [v] row so
- * the store copy is unambiguous even when v is itself a pin.  Payloads
- * arrive deeply normalized — the coordination ops carry deep masks, so
- * forcing (and any effects or exceptions inside it)
- * happened at initiation as the sender's own execution — which makes
- * the pin here a pure store copy.  false means the sender crashed.
+ * Snapshot a payload out of the sender's moving heap.  Payloads arrive deeply
+ * normalized — the coordination ops carry deep masks, so forcing (and any
+ * effects or exceptions inside it) happened at initiation as the sender's own
+ * execution.  The explicit snapshot is therefore a pure store copy: it never
+ * hashes, persists, or publishes a root.  In particular, an unresolved heap
+ * PIN becomes a closed store proxy rather than leaking an edge into this
+ * actor's heap.  The bool return is retained for the service-call contract;
+ * normalization failures have already been delivered before this point.
  */
 static bool er_pin_payload(er_actor* a, pl_val v, pl_val* out) {
-  if (pl_is_nat63(v)) {
-    *out = v;
-    return true;
-  }
-  if (pl_tag(v) == PL_TAG_PIN) {
-    *out = v; /* pins are store-resident by construction (S8) */
-    return true;
-  }
   pl_thread* t = a->t;
-  pl_catch c;
-  pl_catch_init(t, &c);
-  if (setjmp(c.jb) != 0) {
-    pl_catch_unwind(t, &c);
-    return false;
-  }
   size_t base = t->vsp;
   pl_vpush(t, v);
-  pl_gc_reserve(t, PL_APP_CELLS(1));
-  PL_GC_FORBID(t);
-  t->vstack[base] = pl_mk_app_from(t, 0, 1, &t->vstack[base]);
-  PL_GC_ALLOW(t);
-  pl_val pin = pl_pin(t, t->vstack[base]);
-  *out = pl_app_args(pl_ptr(pl_pin_body(pl_ptr(pin))))[0];
+  *out = pl_store_snapshot_normal(t, t->vstack[base]);
   t->vsp = base;
-  pl_catch_pop(t, &c);
   return true;
 }
 
@@ -736,8 +726,12 @@ static void er_mt_wake_all_locked(er_mt_executor* ex) {
     pthread_cond_signal(&w->cv);
 }
 
-static void er_mt_notify_locked(er_mt_executor* ex) {
-  pthread_cond_broadcast(&ex->sys->cv);
+/* A worker state transition may unblock the drive caller, but runnable work
+ * already signals its exact destination in er_enqueue (the shared cv for a
+ * general actor, the private cv for a bound actor).  Broadcasting the shared
+ * cv here woke every general worker after every slice with no additional work.
+ */
+static void er_mt_notify_controller_locked(er_mt_executor* ex) {
   pthread_cond_signal(&ex->controller_cv);
 }
 
@@ -882,7 +876,7 @@ static void* er_mt_worker_main(void* arg) {
         ex->busy_workers--;
         if (pumped) {
           er_mt_maybe_complete_locked(ex);
-          er_mt_notify_locked(ex);
+          er_mt_notify_controller_locked(ex);
           continue;
         }
         er_mt_maybe_complete_locked(ex);
@@ -909,7 +903,7 @@ static void* er_mt_worker_main(void* arg) {
         (a->status == ER_ACTOR_HALTED || a->status == ER_ACTOR_CRASHED))
       er_mt_release_bound_locked(w);
     er_mt_maybe_complete_locked(ex);
-    er_mt_notify_locked(ex);
+    er_mt_notify_controller_locked(ex);
   }
   w->holds_mu = false;
   pthread_mutex_unlock(&sys->mu);
@@ -1084,7 +1078,7 @@ er_drive_status er_mt_executor_drive(er_mt_executor* ex, er_actor* root) {
     if (root->status == ER_ACTOR_RUNNABLE) {
       (void)er_remove_from_queue(sys, root);
       pthread_mutex_unlock(&sys->mu);
-      pl_run_status s = pl_thread_run(root->t, sys->cfg.quantum);
+      pl_run_status s = pl_thread_run(root->t, sys->cfg.root_quantum);
       pthread_mutex_lock(&sys->mu);
       switch (s) {
       case PL_RUN_YIELDED:

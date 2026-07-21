@@ -152,11 +152,16 @@ pl_val pl_mk_law(pl_thread* t, uint64_t arity, pl_val name, pl_val body) {
   return pl_make(PL_TAG_LAW, p);
 }
 
-pl_val pl_mk_env(pl_thread* t, uint32_t nslots) {
+pl_val pl_mk_env_uninit(pl_thread* t, uint32_t nslots) {
   pl_cell* p = pl_bump(t, PL_ENV_CELLS(nslots));
   p[0] = pl_hdr_make(PL_K_ENV, 0, 0, PL_ENV_CELLS(nslots));
-  memset(p + 1, 0, nslots * sizeof(pl_cell));
   return pl_make(PL_TAG_ENV, p);
+}
+
+pl_val pl_mk_env(pl_thread* t, uint32_t nslots) {
+  pl_val env = pl_mk_env_uninit(t, nslots);
+  memset(pl_env_slots(pl_ptr(env)), 0, nslots * sizeof(pl_cell));
+  return env;
 }
 
 pl_val pl_mk_thunk(pl_thread* t, pl_val env, pl_val expr) {

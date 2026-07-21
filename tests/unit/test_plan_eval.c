@@ -36,6 +36,17 @@ static pl_val test_app1_thunk_to(pl_thread* t, pl_val value) {
   return out;
 }
 
+static bool growing_enter_hook(pl_thread* t, size_t hbase, uint32_t argc,
+                               pl_val* out) {
+  (void)hbase;
+  (void)argc;
+  (void)out;
+  /* Larger than test_rt's initial semispace: this collects, grows, and frees
+   * both old spaces while the entered unresolved PIN remains stack-rooted. */
+  pl_gc_reserve(t, (size_t)1 << 17);
+  return false;
+}
+
 static void test_expect_no_op66(pl_thread* t, pl_val name, size_t n,
                                 const pl_val* args) {
   pl_catch c;
@@ -205,6 +216,26 @@ Test(apply, slow_thke_splices_partial_app_head) {
   test_rt_free(&rt);
 }
 
+Test(apply, enter_hook_growth_refreshes_unresolved_pin_body) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  pl_vpush(t, test_law(t, 1, ax_s4('M', 'o', 'v', 'e'), 1));
+  t->vstack[base] = pl_pin(t, t->vstack[base]);
+
+  pl_set_enter_hook(growing_enter_hook);
+  pl_val result = pl_apply(t, t->vstack[base], 42);
+  pl_set_enter_hook(NULL);
+
+  cr_assert_eq(result, 42);
+  pl_cell* proxy = pl_as(PL_TAG_PIN, t->vstack[base]);
+  cr_assert_not_null(proxy);
+  cr_assert(pl_pin_is_proxy(proxy));
+  cr_assert_eq(pl_pin_proxy_target(proxy), 0);
+  cr_assert_not_null(pl_as(PL_TAG_LAW, pl_pin_body(proxy)));
+  test_rt_free(&rt);
+}
+
 Test(apply, tailcall_loops_in_constant_frame_space) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
@@ -212,7 +243,15 @@ Test(apply, tailcall_loops_in_constant_frame_space) {
   /* loop x = loop x, as fused tail-call bytecode: must run in constant
    * frame space AND stay preemptable (the tail path takes a fuel step) */
   pl_vpush(t, test_law(t, 1, 0, 0));
-  pl_val pin = pl_pin(t, t->vstack[base]); /* store-resident: GC-stable */
+  t->vstack[base] = pl_pin(t, t->vstack[base]);
+  char err[192] = {0};
+  cr_assert(
+      pl_store_save_root(rt.store, t->vstack[base], NULL, err, sizeof(err)),
+      "%s", err);
+  pl_cell* proxy = pl_as(PL_TAG_PIN, t->vstack[base]);
+  cr_assert_not_null(proxy);
+  pl_val pin = pl_pin_proxy_target(proxy);
+  cr_assert_neq(pin, 0); /* static bytecode literals must be non-moving */
   t->vsp = base;
   pl_cell* pp = pl_as(PL_TAG_PIN, pin);
   cr_assert_not_null(pp);
@@ -263,6 +302,19 @@ Test(apply, slow_thke_over_applied_order) {
 }
 
 /* ── Recursive-let knots ───────────────────────────────────────────────── */
+
+Test(judge, environment_populates_self_slot) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  pl_vpush(t, test_law(t, 1, 0, 0)); /* f x = f */
+
+  pl_val result = pl_apply(t, t->vstack[base], 9);
+  cr_assert_eq(result, t->vstack[base]);
+
+  t->vsp = base;
+  test_rt_free(&rt);
+}
 
 /*
  * f x = let b1 = b2; b2 = x in b1
@@ -328,6 +380,44 @@ Test(ops, lookup_segregates_opcode_set_and_argc) {
   pl_val arg1[1] = {0};
   test_expect_no_op66(t, ax_s3('A', 'd', 'd'), 1, arg1);
   test_expect_no_op66(t, ax_s4('R', 'e', 'c', 'v'), 1, arg1);
+  test_rt_free(&rt);
+}
+
+Test(ops, install_rejects_compiler_self_replacement) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  pl_vpush(t, pl_pin(t, 42));
+  char err[192] = {0};
+  cr_assert(
+      pl_store_save_root(rt.store, t->vstack[base], NULL, err, sizeof(err)),
+      "%s", err);
+  pl_val compiler = t->vstack[base];
+  const uint8_t* hash = pl_pin_hash(compiler);
+
+  /* Make the old, unguarded path idempotent so this test fails safely
+   * instead of freeing the active machine out from under op_install. */
+  memcpy(rt.store->compiler, hash, sizeof(rt.store->compiler));
+  rt.store->compiler_f = hash[0] == 0 || memcmp(hash, hash + 1, 31) != 0;
+  rt.store->compiler_t = t;
+
+  bool raised = false;
+  pl_val args[1] = {compiler};
+  pl_catch c;
+  pl_catch_init(t, &c);
+  if (setjmp(c.jb) == 0) {
+    (void)test_op66(t, ax_s7('I', 'n', 's', 't', 'a', 'l', 'l'), 1, args);
+  } else {
+    raised = true;
+  }
+  pl_catch_unwind(t, &c);
+
+  rt.store->compiler_t = NULL;
+  rt.store->compiler_f = false;
+  memset(rt.store->compiler, 0, sizeof(rt.store->compiler));
+  cr_assert(raised, "expected a compiler self-install to raise");
+  cr_assert_str_eq(t->exn_msg,
+                   "Install: compiler cannot replace its own machine");
   test_rt_free(&rt);
 }
 
@@ -486,10 +576,14 @@ Test(ops, equal_deep_and_pin_identity) {
   cr_assert_eq(test_op66_2(t, ax_s5('E', 'q', 'u', 'a', 'l'), t->vstack[base],
                            t->vstack[base + 1]),
                1);
-  /* pins dedup to pointer identity */
-  pl_val p1 = pl_pin(t, t->vstack[base]);
-  pl_val p2 = pl_pin(t, t->vstack[base + 1]);
-  cr_assert_eq(p1, p2);
+  /* Pin construction is lazy: equal values get distinct proxies while PLAN
+   * equality remains structural until Save gives them canonical hashes. */
+  pl_vpush(t, pl_pin(t, t->vstack[base]));
+  pl_vpush(t, pl_pin(t, t->vstack[base + 1]));
+  cr_assert_neq(t->vstack[base + 2], t->vstack[base + 3]);
+  cr_assert_eq(test_op66_2(t, ax_s5('E', 'q', 'u', 'a', 'l'),
+                           t->vstack[base + 2], t->vstack[base + 3]),
+               1);
   test_rt_free(&rt);
 }
 
@@ -524,6 +618,35 @@ Test(ops, row_elements_stay_lazy) {
   cr_assert_not_null(rp);
   pl_val e = pl_whnf(t, pl_app_args(rp)[0]);
   cr_assert_eq(e, 5);
+  test_rt_free(&rt);
+}
+
+Test(ops, whole_row_slice_reuses_only_exact_result) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  pl_val items[3] = {11, 22, 33};
+  pl_vpush(t, test_app(t, 0, 3, items));
+
+  pl_val exact_args[3] = {0, 3, t->vstack[base]};
+  pl_val exact = test_op66(t, ax_s5('S', 'l', 'i', 'c', 'e'), 3, exact_args);
+  cr_assert_eq(exact, t->vstack[base]);
+
+  pl_val oversized_args[3] = {0, 99, t->vstack[base]};
+  pl_val oversized =
+      test_op66(t, ax_s5('S', 'l', 'i', 'c', 'e'), 3, oversized_args);
+  cr_assert_eq(oversized, t->vstack[base]);
+
+  pl_vpush(t, test_app(t, 7, 3, items));
+  pl_val rehead_args[3] = {0, 3, t->vstack[base + 1]};
+  pl_val reheaded =
+      test_op66(t, ax_s5('S', 'l', 'i', 'c', 'e'), 3, rehead_args);
+  cr_assert_neq(reheaded, t->vstack[base + 1]);
+  pl_cell* p = pl_as(PL_TAG_APP, reheaded);
+  cr_assert_not_null(p);
+  cr_assert_eq(pl_app_head(p), 0);
+  cr_assert_eq(pl_app_n(p), 3);
+
   test_rt_free(&rt);
 }
 

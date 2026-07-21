@@ -833,10 +833,13 @@ static pl_val en_pin(en_wisp* w, pl_val val) {
     pl_catch_unwind(w->t, &c);
     en_fail_exn(w);
   }
-  pl_val pin = pl_pin(w->t, w->tmp_v[mark]);
+  w->tmp_v[mark] = pl_pin(w->t, w->tmp_v[mark]);
   pl_catch_pop(w->t, &c);
+  /* A provisional PIN is an ordinary moving value.  Keep it in the Wisp
+   * root set while en_quote reserves space for the wrapper application. */
+  pl_val out = en_quote(w, w->tmp_v[mark]);
   en_root_pop(w, mark);
-  return en_quote(w, pin);
+  return out;
 }
 
 static pl_val en_bind(en_wisp* w, pl_val nam, pl_val val, bool mac_f) {

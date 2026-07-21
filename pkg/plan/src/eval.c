@@ -900,6 +900,10 @@ judge: {
       v = out;
       goto eval;
     }
+    /* An enter hook is a C-entry region and may allocate or collect.  The
+     * head itself is rooted at hbase, but an unresolved PIN's LAW body moves
+     * with its heap, so never retain the raw body pointer across the hook. */
+    lp = pl_lawp(t->vstack[hbase]);
   }
   /*
    * JUDGE: the recursive-let prelude.  Scan the body for the (1 v k)
@@ -1139,7 +1143,9 @@ judge_scan:
     uint32_t nslots = 1 + jargc + m;
     pl_gc_reserve(t, PL_ENV_CELLS(nslots) + (size_t)(m + 1) * PL_THUNK_CELLS);
     PL_GC_FORBID(t);
-    pl_val envv = pl_mk_env(t, nslots);
+    /* Every slot is written below before the no-collect window closes.  Avoid
+     * zeroing what JUDGE immediately overwrites on every law entry. */
+    pl_val envv = pl_mk_env_uninit(t, nslots);
     pl_val* slots = pl_env_slots(pl_ptr(envv));
     slots[0] = t->vstack[jbase];
     for (uint32_t i = 0; i < jargc; i++)

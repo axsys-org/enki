@@ -120,3 +120,10 @@ failed:
     fprintf(stderr, "Failed to decode bytecode: %s\r\n", msg);
   return NULL;
 }
+
+void pl_bytecode_free(pl_code* code) {
+  if (code == NULL)
+    return;
+  free(code->ops);
+  free(code);
+}

@@ -1,6 +1,8 @@
 #include <criterion/criterion.h>
 #include <string.h>
 
+#include "axsys/ds.h"
+#include "../../pkg/plan/src/store_internal.h"
 #include "test_plan.h"
 
 /* ── Value representation ──────────────────────────────────────────────── */
@@ -56,6 +58,20 @@ Test(value, app_need_cache) {
   /* inert app: nat head has arity 0 */
   pl_val row = test_app2(t, 0, 1, 2);
   cr_assert_eq(pl_arity(row), 0);
+
+  test_rt_free(&rt);
+}
+
+Test(value, env_constructor_zeroes_slots) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+
+  pl_gc_reserve(t, PL_ENV_CELLS(4));
+  pl_val env = pl_mk_env(t, 4);
+  pl_cell* p = pl_as(PL_TAG_ENV, env);
+  cr_assert_not_null(p);
+  for (uint32_t i = 0; i < 4; i++)
+    cr_assert_eq(pl_env_slots(p)[i], 0);
 
   test_rt_free(&rt);
 }
@@ -234,6 +250,60 @@ Test(nat, from_decimal_roundtrip) {
 
 /* ── Heap / collector ──────────────────────────────────────────────────── */
 
+static pl_val test_pin_proxy(pl_thread* t, pl_val body) {
+  size_t base = t->vsp;
+  pl_vpush(t, body);
+  pl_gc_reserve(t, PL_PIN_CELLS(0));
+  PL_GC_FORBID(t);
+  pl_cell* p = pl_bump(t, PL_PIN_CELLS(0));
+  p[0] =
+      pl_hdr_make(PL_K_PIN, PL_F_NORMAL | PL_F_PIN_PROXY, 0, PL_PIN_CELLS(0));
+  memset(p + 1, 0, 4 * sizeof(pl_cell));
+  p[5] = t->vstack[base];
+  __atomic_store_n(&p[6], 0, __ATOMIC_RELAXED);
+  pl_val proxy = pl_make(PL_TAG_PIN, p);
+  PL_GC_ALLOW(t);
+  t->vsp = base;
+  return proxy;
+}
+
+#ifndef PL_GC_STRESS
+Test(gc, pressure_collection_is_amortized) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+
+  cr_assert_not(pl_gc_collect_if_pressure(t, 8));
+
+  pl_gc_reserve(t, 8);
+  (void)pl_bump(t, 8); /* unreachable allocation */
+  cr_assert_not(pl_gc_collect_if_pressure(t, 9));
+  cr_assert(pl_gc_collect_if_pressure(t, 8));
+  cr_assert_eq(pl_gc_live_cells(rt.heap), 0);
+
+  /* Once there is a live set, require at least that much new allocation
+   * before copying it again, even when the caller supplies a tiny floor. */
+  pl_val args[14] = {0};
+  pl_val row = test_app(t, 0, 14, args); /* 16 cells */
+  pl_vpush(t, row);
+  pl_gc_collect_now(t);
+  cr_assert_eq(pl_gc_live_cells(rt.heap), 16);
+
+  pl_gc_reserve(t, 15);
+  (void)pl_bump(t, 15);
+  cr_assert_not(pl_gc_collect_if_pressure(t, 1));
+  pl_gc_reserve(t, 1);
+  (void)pl_bump(t, 1);
+  cr_assert(pl_gc_collect_if_pressure(t, 1));
+
+  pl_cell* p = pl_as(PL_TAG_APP, t->vstack[t->vsp - 1]);
+  cr_assert_not_null(p);
+  cr_assert_eq(pl_app_n(p), 14);
+  cr_assert_eq(pl_gc_live_cells(rt.heap), 16);
+
+  test_rt_free(&rt);
+}
+#endif
+
 Test(gc, values_survive_collection) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
@@ -260,19 +330,125 @@ Test(gc, values_survive_collection) {
   test_rt_free(&rt);
 }
 
-Test(gc, store_values_are_terminal) {
+Test(gc, unresolved_pin_proxy_keeps_its_moving_body) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
 
   size_t base = t->vsp;
-  pl_vpush(t, test_app2(t, 0, 1, 2));
-  pl_val pin = pl_pin(t, t->vstack[base]);
+  pl_vpush(t, test_app2(t, 0, 17, 23));
+  t->vstack[base] = test_pin_proxy(t, t->vstack[base]);
+  pl_val before = t->vstack[base];
+  cr_assert(pl_pin_is_proxy(pl_ptr(before)));
+  cr_assert_eq(pl_pin_proxy_target(pl_ptr(before)), 0);
+
+  pl_gc_collect_now(t);
+
+  pl_val after = t->vstack[base];
+  cr_assert_neq(after, before);
+  pl_cell* proxy = pl_as(PL_TAG_PIN, after);
+  cr_assert_not_null(proxy);
+  cr_assert(pl_pin_is_proxy(proxy));
+  cr_assert_eq(pl_pin_proxy_target(proxy), 0);
+  pl_cell* body = pl_as(PL_TAG_APP, pl_pin_body(proxy));
+  cr_assert_not_null(body);
+  cr_assert_eq(pl_app_args(body)[0], 17);
+  cr_assert_eq(pl_app_args(body)[1], 23);
+  cr_assert_eq(pl_gc_live_cells(rt.heap), PL_PIN_CELLS(0) + PL_APP_CELLS(2));
+
+  test_rt_free(&rt);
+}
+
+Test(gc, public_pin_needs_no_store) {
+  pl_heap* h = pl_heap_new(4096, NULL);
+  pl_thread* t = pl_thread_new(h);
+
+  size_t base = t->vsp;
+  pl_vpush(t, test_app2(t, 0, 17, 23));
+  t->vstack[base] = pl_pin(t, t->vstack[base]);
+
+  pl_cell* proxy = pl_as(PL_TAG_PIN, t->vstack[base]);
+  cr_assert_not_null(proxy);
+  cr_assert(pl_pin_is_proxy(proxy));
+  cr_assert_eq(pl_pin_proxy_target(proxy), 0);
+  cr_assert_null(pl_pin_hash(t->vstack[base]));
+
+  pl_gc_collect_now(t);
+  proxy = pl_as(PL_TAG_PIN, t->vstack[base]);
+  cr_assert_not_null(proxy);
+  pl_cell* body = pl_as(PL_TAG_APP, pl_pin_body(proxy));
+  cr_assert_not_null(body);
+  cr_assert_eq(pl_app_args(body)[0], 17);
+  cr_assert_eq(pl_app_args(body)[1], 23);
+
+  pl_thread_free(t);
+  pl_heap_free(h);
+}
+
+Test(gc, dropped_unsaved_pins_do_not_reach_the_store) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t arena_before = pl_store_mark(rt.store);
+  ptrdiff_t pins_before = ax_arrlen(rt.store->pins);
+  ptrdiff_t intern_before = ax_hmlen(rt.store->intern);
+
+  for (uint64_t i = 0; i < 10000; i++)
+    (void)pl_pin(t, i);
+  pl_gc_collect_now(t);
+
+  cr_assert_eq(pl_gc_live_cells(rt.heap), 0);
+  cr_assert_eq(pl_store_mark(rt.store), arena_before);
+  cr_assert_eq(ax_arrlen(rt.store->pins), pins_before);
+  cr_assert_eq(ax_hmlen(rt.store->intern), intern_before);
+  test_rt_free(&rt);
+}
+
+Test(gc, resolved_pin_proxy_retains_only_its_canonical_target) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  uint8_t hash[32] = {1};
+  pl_val canonical = pl_store_mk_pin(rt.store, hash, 99, 0, NULL);
+  pl_cell* canonical_p = pl_ptr(canonical);
+
+  size_t base = t->vsp;
+  pl_vpush(t, test_app2(t, 0, 17, 23));
+  t->vstack[base] = test_pin_proxy(t, t->vstack[base]);
+  pl_cell* proxy = pl_ptr(t->vstack[base]);
+  pl_pin_set_target(proxy, canonical);
+
+  pl_code code = {0};
+  pl_pin_set_code(canonical_p, &code);
+  cr_assert_eq(pl_pin_body(proxy), 99);
+  cr_assert_eq(pl_pin_code(proxy), &code);
+  cr_assert_eq(pl_pin_hash_bytes(proxy), pl_pin_hash_bytes(canonical_p));
+  cr_assert_eq(pl_pin_subpins(proxy), pl_pin_subpins(canonical_p));
+
+  pl_gc_collect_now(t);
+
+  proxy = pl_ptr(t->vstack[base]);
+  cr_assert(pl_pin_is_proxy(proxy));
+  cr_assert_eq(pl_pin_proxy_target(proxy), canonical);
+  cr_assert_eq(proxy[5], 0); /* obsolete moving body is no longer an edge */
+  cr_assert_eq(pl_pin_body(proxy), 99);
+  cr_assert_eq(pl_pin_code(proxy), &code);
+  cr_assert_eq(pl_gc_live_cells(rt.heap), PL_PIN_CELLS(0));
+
+  pl_pin_set_code(canonical_p, NULL);
+  test_rt_free(&rt);
+}
+
+Test(gc, store_values_are_terminal) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+
+  uint8_t hash[32] = {1};
+  pl_val pin = pl_store_mk_pin(rt.store, hash, 42, 0, NULL);
+  size_t base = t->vsp;
   pl_vpush(t, pin);
   cr_assert(pl_store_owns(rt.store, pin));
 
   pl_gc_collect_now(t);
   /* the pin val must be unchanged (non-moving store region) */
-  cr_assert_eq(t->vstack[base + 1], pin);
+  cr_assert_eq(t->vstack[base], pin);
 
   test_rt_free(&rt);
 }

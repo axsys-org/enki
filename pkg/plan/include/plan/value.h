@@ -63,15 +63,19 @@ typedef enum {
  *   [ kind:8 | flags:4 | meta:20 | cells:32 ]
  * cells is the total size in 8-byte cells including the header.
  */
+#define PL_HDR_META_MAX UINT32_C(0xFFFFF)
+
 #define PL_F_NORMAL 0x1u /* deep normal form reached (§ nf) */
 #define PL_F_HOLE   0x2u /* currently evaluating */
 #define PL_F_PIN_HASHED                                                        \
   0x4u /* PIN hash is finalized and persistently indexed */
+#define PL_F_PIN_PROXY                                                         \
+  0x8u /* PIN cell 6 is an atomic canonical-target pl_val, not code */
 
 static inline pl_cell pl_hdr_make(pl_kind kind, uint32_t flags, uint32_t meta,
                                   uint32_t cells) {
   return (pl_cell)(kind & 0xFFu) | ((pl_cell)(flags & 0xFu) << 8) |
-         ((pl_cell)(meta & 0xFFFFFu) << 12) | ((pl_cell)cells << 32);
+         ((pl_cell)(meta & PL_HDR_META_MAX) << 12) | ((pl_cell)cells << 32);
 }
 
 static inline pl_kind pl_hdr_kind(pl_cell hdr) {
@@ -88,12 +92,12 @@ static inline pl_cell pl_hdr_set_flag(pl_cell hdr, uint32_t flags) {
 }
 
 static inline pl_cell pl_hdr_set_meta(pl_cell hdr, uint32_t meta) {
-  return (hdr & ~((pl_cell)0xFFFFFu << 12)) |
-         ((pl_cell)(meta & 0xFFFFFu) << 12);
+  return (hdr & ~((pl_cell)PL_HDR_META_MAX << 12)) |
+         ((pl_cell)(meta & PL_HDR_META_MAX) << 12);
 }
 
 static inline uint32_t pl_hdr_meta(pl_cell hdr) {
-  return (uint32_t)(hdr >> 12) & 0xFFFFFu;
+  return (uint32_t)(hdr >> 12) & PL_HDR_META_MAX;
 }
 static inline uint32_t pl_hdr_cells(pl_cell hdr) {
   return (uint32_t)(hdr >> 32);
@@ -205,26 +209,80 @@ static inline pl_val pl_law_body(pl_cell* p) {
   return (pl_val)p[3];
 }
 
-/* K_PIN { hdr(meta=npins); u8 hash[32]; body; code; pin[npins] } — store
- * only.  code caches the pin's compiled bytecode (a pl_code*, owned by
- * the store; NULL when uncompiled) so JUDGE dispatch needs no table
- * lookup. */
+/* K_PIN has two representations with the same leading seven cells:
+ *
+ *   proxy:     { hdr(PROXY, meta=0, cells=7); zero hash; body; target }
+ *   canonical: { hdr(HASHED, meta=npins); hash; body; code; pin[npins] }
+ *
+ * A proxy target is atomically published as a tagged pl_val referring to a
+ * canonical PIN.  It is initially zero.  Canonical targets never form chains,
+ * and only canonical PINs use cell 6 as the compiled-code cache.  Accessors
+ * below transparently delegate through a published target. */
+static inline bool pl_pin_is_proxy(pl_cell* p) {
+  return (pl_hdr_flags(p[0]) & PL_F_PIN_PROXY) != 0;
+}
+
+/* Acquire pairs with pl_pin_set_target's release publication.  Returning zero
+ * for a canonical PIN makes this helper safe for generic PIN paths too. */
+static inline pl_val pl_pin_proxy_target(pl_cell* p) {
+  if (!pl_pin_is_proxy(p))
+    return 0;
+  return (pl_val)__atomic_load_n(&p[6], __ATOMIC_ACQUIRE);
+}
+
+static inline pl_cell* pl_pin_resolved(pl_cell* p) {
+  pl_val target = pl_pin_proxy_target(p);
+  if (target == 0)
+    return p;
+  ax_assume(pl_tag(target) == PL_TAG_PIN, "PIN proxy target is not a PIN");
+  pl_cell* canonical = pl_ptr(target);
+  ax_assume(pl_hdr_kind(canonical[0]) == PL_K_PIN &&
+                !pl_pin_is_proxy(canonical) &&
+                (pl_hdr_flags(canonical[0]) & PL_F_PIN_HASHED) != 0,
+            "PIN proxy target is not canonical");
+  return canonical;
+}
+
+static inline void pl_pin_set_target(pl_cell* p, pl_val canonical) {
+  ax_assume(pl_hdr_kind(p[0]) == PL_K_PIN && pl_pin_is_proxy(p) &&
+                pl_hdr_meta(p[0]) == 0 && pl_hdr_cells(p[0]) == PL_PIN_CELLS(0),
+            "pl_pin_set_target on a non-proxy PIN");
+  ax_assume(pl_tag(canonical) == PL_TAG_PIN, "PIN proxy target is not a PIN");
+  pl_cell* target = pl_ptr(canonical);
+  ax_assume(pl_hdr_kind(target[0]) == PL_K_PIN && !pl_pin_is_proxy(target) &&
+                (pl_hdr_flags(target[0]) & PL_F_PIN_HASHED) != 0,
+            "PIN proxy target is not canonical");
+  pl_val old = (pl_val)__atomic_load_n(&p[6], __ATOMIC_ACQUIRE);
+  ax_assume(old == 0 || old == canonical,
+            "PIN proxy target cannot be replaced");
+  __atomic_store_n(&p[6], (pl_cell)canonical, __ATOMIC_RELEASE);
+}
+
 static inline uint8_t* pl_pin_hash_bytes(pl_cell* p) {
+  p = pl_pin_resolved(p);
   return (uint8_t*)(p + 1);
 }
 static inline pl_val pl_pin_body(pl_cell* p) {
+  p = pl_pin_resolved(p);
   return (pl_val)p[5];
 }
 static inline void* pl_pin_code(pl_cell* p) {
-  return (void*)(uintptr_t)p[6];
+  p = pl_pin_resolved(p);
+  if (pl_pin_is_proxy(p))
+    return NULL;
+  return (void*)(uintptr_t)__atomic_load_n(&p[6], __ATOMIC_ACQUIRE);
 }
 static inline void pl_pin_set_code(pl_cell* p, void* code) {
-  p[6] = (pl_cell)(uintptr_t)code;
+  p = pl_pin_resolved(p);
+  ax_assume(!pl_pin_is_proxy(p), "pl_pin_set_code on an unresolved PIN proxy");
+  __atomic_store_n(&p[6], (pl_cell)(uintptr_t)code, __ATOMIC_RELEASE);
 }
 static inline uint32_t pl_pin_npins(pl_cell* p) {
+  p = pl_pin_resolved(p);
   return pl_hdr_meta(p[0]);
 }
 static inline pl_val* pl_pin_subpins(pl_cell* p) {
+  p = pl_pin_resolved(p);
   return (pl_val*)(p + 7);
 }
 
