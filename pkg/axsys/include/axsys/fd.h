@@ -15,6 +15,7 @@
 
 typedef struct ax_fd_slot {
   bool live;
+  bool closing;
   int fd;
   size_t refs;
 } ax_fd_slot;
@@ -28,6 +29,10 @@ extern ax_fd_table ax_global_fd_table;
 
 size_t ax_fd_add(int fd);
 int ax_fd_get(size_t hdl);
+/* Atomically borrow a live descriptor until the matching ax_fd_release.
+ * CloseFd invalidates the handle immediately but defers the OS close while
+ * an in-flight blocking operation holds a borrow. */
+int ax_fd_acquire(size_t hdl, int* out_fd);
 int ax_fd_close(size_t hdl);
 int ax_fd_retain(size_t hdl);
 int ax_fd_release(size_t hdl);

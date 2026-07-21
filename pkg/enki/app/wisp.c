@@ -8,6 +8,7 @@
 #include <sys/stat.h>
 
 #include "axsys/allocator.h"
+#include "axsys/assume.h"
 #include "axsys/profile.h"
 #include "axsys/util.h"
 #include "enki/actor.h"
@@ -417,10 +418,14 @@ static bool boot_run_function(boot_ctx* ctx, pl_val fun, int argc,
   w->tmp_v[mark + 1] = boot_make_row(ctx, argc, argv);
 
   /* the reference runRepl: force (fun % args), in the root actor so
-   * the program may spawn, send, and block on Recv */
+   * the program may spawn, send, and block on Recv.  Assembly deliberately
+   * leaves w->exec NULL and uses the deterministic scheduler; create the
+   * persistent worker pool only at this final-program boundary. */
+  ax_assume(w->exec == NULL, "boot assembly must be single-threaded");
+  er_mt_executor* exec = er_mt_executor_new(w->sched, (er_mt_config){0});
   pl_thread_start_call_nf(w->t, w->tmp_v[mark], w->tmp_v[mark + 1]);
-  er_drive_status ds = w->exec != NULL ? er_mt_executor_drive(w->exec, w->self)
-                                       : er_scheduler_drive(w->sched, w->self);
+  er_drive_status ds = er_mt_executor_drive(exec, w->self);
+  er_mt_executor_free(exec);
   en_root_pop(w, mark);
   w->env = old_env;
   ctx->tmp_env_s = env_mark;
@@ -600,8 +605,6 @@ int main(int argc, char** argv) {
       er_scheduler_new(store, (er_config){.file_root_c = file_root_c});
   w->sched = sched;
   w->self = er_scheduler_adopt(sched, w->t);
-  er_mt_executor* exec = er_mt_executor_new(sched, (er_mt_config){0});
-  w->exec = exec;
 
   boot_ctx ctx = {
       .loc_a = ax_allocator_system(),
@@ -631,7 +634,6 @@ int main(int argc, char** argv) {
     ax_free(ctx.loc_a, mod);
     mod = next;
   }
-  er_mt_executor_free(exec);
   er_scheduler_free(sched); /* leftover actors die with the program */
   en_wisp_free(w);
   pl_heap_free(heap);

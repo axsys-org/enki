@@ -26,6 +26,11 @@ static void er_vals_hash(const pl_val* args, uint32_t argc, uint8_t out[32]);
 static uint8_t* er_folder_result_encode(pl_val row, uint64_t* out_n);
 static pl_val er_folder_result_build(pl_thread* t, const uint8_t* data,
                                      uint64_t data_n);
+static void er_actor_rplan_effect(pl_thread* t);
+
+/* The currently executing pool worker, if this OS thread is one.  The
+ * adopted root runs on the caller thread and deliberately has no worker. */
+static _Thread_local er_mt_worker* er_current_worker;
 
 /*
  * Deterministic single-OS-thread executor.  Everything
@@ -88,6 +93,7 @@ static er_actor* er_register(er_scheduler* sys, pl_heap* heap, pl_thread* t,
   a->heap = heap;
   a->t = t;
   a->t->host = a; /* effect attribution for the pl_io_hook */
+  a->t->rplan_effect_f = er_actor_rplan_effect;
   a->adopted = adopted;
   a->handle_cap = 8;
   a->handle_v = calloc(a->handle_cap, sizeof(er_actor*));
@@ -119,6 +125,8 @@ er_actor* er_scheduler_adopt(er_scheduler* sys, pl_thread* t) {
 void er_scheduler_free(er_scheduler* sys) {
   if (sys == NULL)
     return;
+  ax_assume(sys->mt == NULL,
+            "er_scheduler_free: free the MT executor before the scheduler");
   er_http_teardown(sys); /* before the actors: transfers reference them */
   for (er_actor* a = sys->all_head; a != NULL;) {
     er_actor* next = a->all_next;
@@ -129,6 +137,7 @@ void er_scheduler_free(er_scheduler* sys) {
     }
     free(a->handle_v);
     a->t->host = NULL; /* the backpointer dies with the actor */
+    a->t->rplan_effect_f = NULL;
     if (!a->adopted) { /* adopted threads/heaps stay with the embedder */
       pl_thread_free(a->t);
       pl_heap_free(a->heap);
@@ -177,6 +186,18 @@ static bool er_trace(void) {
 }
 
 void er_enqueue(er_actor* a) {
+  if (a->owner != NULL) {
+    if (er_trace())
+      fprintf(stderr, "[trace] wake-bound actor=%llu\n",
+              (unsigned long long)a->id);
+    ax_assume(a->qnext == NULL, "er_enqueue: bound actor is globally queued");
+    if (!a->owner->ready) {
+      a->owner->ready = true;
+      a->owner->ex->ready_bound++;
+    }
+    pthread_cond_signal(&a->owner->cv);
+    return;
+  }
   if (er_trace())
     fprintf(stderr, "[trace] enqueue actor=%llu\n", (unsigned long long)a->id);
   a->qnext = NULL;
@@ -186,6 +207,9 @@ void er_enqueue(er_actor* a) {
     a->sys->qhead = a;
   a->sys->qtail = a;
   pthread_cond_signal(&a->sys->cv);
+  er_mt_executor* ex = a->sys->mt;
+  if (ex != NULL && ex->root == a)
+    pthread_cond_signal(&ex->controller_cv);
 }
 
 static er_actor* er_dequeue(er_scheduler* sys) {
@@ -449,10 +473,36 @@ static int64_t er_load_caps(er_actor* a, size_t capslot, er_actor*** out) {
   return ncaps;
 }
 
+/* An MT service begins under the scheduler mutex so it can mutate actor and
+ * queue state.  Actor-private evaluation/store work may block, though, and
+ * the actor already owns this worker; drop the global mutex around that work
+ * so the replacement pool can keep scheduling unrelated actors. */
+static void er_service_unlock(er_scheduler* sys, bool locked) {
+  if (!locked)
+    return;
+  if (er_current_worker != NULL) {
+    ax_assume(er_current_worker->holds_mu,
+              "service worker does not hold scheduler mutex");
+    er_current_worker->holds_mu = false;
+  }
+  pthread_mutex_unlock(&sys->mu);
+}
+
+static void er_service_relock(er_scheduler* sys, bool locked) {
+  if (!locked)
+    return;
+  pthread_mutex_lock(&sys->mu);
+  if (er_current_worker != NULL) {
+    ax_assume(!er_current_worker->holds_mu,
+              "service worker already holds scheduler mutex");
+    er_current_worker->holds_mu = true;
+  }
+}
+
 /* Service the request parked by PL_RUN_BLOCKED.  The request spine and
  * its args live in the actor's heap: every arg used across a reserve or
  * an evaluation is copied to the actor's vstack (rooted) first. */
-static void er_service(er_scheduler* sys, er_actor* a) {
+static void er_service(er_scheduler* sys, er_actor* a, bool locked) {
   pl_thread* t = a->t;
   pl_val req = pl_thread_request(t);
   pl_cell* p = pl_as(PL_TAG_APP, req);
@@ -478,7 +528,11 @@ static void er_service(er_scheduler* sys, er_actor* a) {
       return;
     }
     pl_val payload;
-    if (!er_pin_payload(a, args[1], &payload)) {
+    pl_val payload_arg = args[1];
+    er_service_unlock(sys, locked);
+    bool ok = er_pin_payload(a, payload_arg, &payload);
+    er_service_relock(sys, locked);
+    if (!ok) {
       er_crash(a);
       return;
     }
@@ -501,15 +555,16 @@ static void er_service(er_scheduler* sys, er_actor* a) {
     pl_vpush(t, args[1]);
     pl_vpush(t, args[2]);
     er_actor** caps;
+    er_service_unlock(sys, locked);
     int64_t ncaps = er_load_caps(a, base + 1, &caps);
+    pl_val payload;
+    bool ok = ncaps >= 0 && er_pin_payload(a, t->vstack[base], &payload);
+    er_service_relock(sys, locked);
+    t->vsp = base;
     if (ncaps < 0) {
-      t->vsp = base;
       er_crash(a);
       return;
     }
-    pl_val payload;
-    bool ok = er_pin_payload(a, t->vstack[base], &payload);
-    t->vsp = base;
     if (!ok) {
       free(caps);
       er_crash(a);
@@ -526,7 +581,11 @@ static void er_service(er_scheduler* sys, er_actor* a) {
   if (er_op_is(name, "Spawn")) {
     ax_assume(argc == 1, "Spawn arity");
     pl_val fn;
-    if (!er_pin_payload(a, args[0], &fn)) {
+    pl_val fn_arg = args[0];
+    er_service_unlock(sys, locked);
+    bool ok = er_pin_payload(a, fn_arg, &fn);
+    er_service_relock(sys, locked);
+    if (!ok) {
       er_crash(a);
       return;
     }
@@ -560,7 +619,9 @@ static void er_service(er_scheduler* sys, er_actor* a) {
        * spine may move during collection. */
       size_t base = t->vsp;
       pl_vpush(t, args[0]);
+      er_service_unlock(sys, locked);
       result = pl_rplan_read_folder(t, t->vstack[base]);
+      er_service_relock(sys, locked);
       t->vsp = base;
       if (sys->mode == ER_MODE_RECORD) {
         er_event e = {.kind = ER_EV_FOLDER, .actor = a->id};
@@ -584,8 +645,10 @@ static void er_service(er_scheduler* sys, er_actor* a) {
     if (sys->mode != ER_MODE_REPLAY) {
       uint64_t secs = pl_nat_u64_clamp(args[0]);
       struct timespec ts = {.tv_sec = (time_t)secs, .tv_nsec = 0}, rem;
+      er_service_unlock(sys, locked);
       while (nanosleep(&ts, &rem) == -1 && errno == EINTR)
         ts = rem;
+      er_service_relock(sys, locked);
     }
     pl_thread_deposit(t, 0);
     a->status = ER_ACTOR_RUNNABLE;
@@ -617,7 +680,8 @@ static void er_service(er_scheduler* sys, er_actor* a) {
 /* ── The executor loop ─────────────────────────────────────────────────── */
 
 /* One scheduling step of a spawned (scheduler-owned) actor. */
-static void er_step(er_scheduler* sys, er_actor* a, pl_run_status s) {
+static void er_step(er_scheduler* sys, er_actor* a, pl_run_status s,
+                    bool locked) {
   switch (s) {
   case PL_RUN_YIELDED:
     er_enqueue(a); /* round-robin fairness */
@@ -629,12 +693,14 @@ static void er_step(er_scheduler* sys, er_actor* a, pl_run_status s) {
     er_crash(a);
     break;
   case PL_RUN_BLOCKED:
-    er_service(sys, a);
+    er_service(sys, a, locked);
     break;
   }
 }
 
 er_run_reason er_scheduler_run(er_scheduler* sys) {
+  ax_assume(sys->mt == NULL,
+            "er_scheduler_run: MT executor is attached; use it or free it");
   for (;;) {
     er_http_pump(sys);
     er_actor* a = er_dequeue(sys);
@@ -648,62 +714,207 @@ er_run_reason er_scheduler_run(er_scheduler* sys) {
     }
     ax_assume(!a->adopted,
               "er_scheduler_run: adopted actors run under er_scheduler_drive");
-    er_step(sys, a, pl_thread_run(a->t, sys->cfg.quantum));
+    er_step(sys, a, pl_thread_run(a->t, sys->cfg.quantum), false);
   }
 }
 
 static er_run_reason er_run_reason_locked(er_scheduler* sys) {
   for (er_actor* it = sys->all_head; it != NULL; it = it->all_next)
-    if (it->status == ER_ACTOR_BLOCKED)
+    if (!it->adopted && it->started && it->status == ER_ACTOR_BLOCKED)
       return ER_RUN_QUIESCENT;
   return ER_RUN_IDLE;
 }
 
-static void* er_mt_worker(void* arg) {
-  er_mt_executor* ex = arg;
-  er_scheduler* sys = ex->sys;
-  for (;;) {
-    pthread_mutex_lock(&sys->mu);
-    er_actor* a = NULL;
-    for (;;) {
-      if (ex->stopping) {
-        pthread_mutex_unlock(&sys->mu);
-        return NULL;
-      }
-      a = ex->root == NULL ? er_dequeue(sys) : er_dequeue_spawned(sys);
-      if (a != NULL)
-        break;
-      if (er_http_mt_pump(sys))
-        continue; /* pumped the CURLM: completions may have enqueued */
-      if (ex->root == NULL && ex->active == 0 && !er_http_outstanding(sys)) {
-        ex->reason = er_run_reason_locked(sys);
-        ex->stopping = true;
-        pthread_cond_broadcast(&sys->cv);
-        pthread_mutex_unlock(&sys->mu);
-        return NULL;
-      }
-      pthread_cond_wait(&sys->cv, &sys->mu);
-    }
-    ax_assume(!a->adopted, "er_mt_executor_run: adopted actors run under "
-                           "er_scheduler_drive");
-    ex->active++;
-    pthread_mutex_unlock(&sys->mu);
+static bool er_mt_has_runnable_spawned_locked(er_mt_executor* ex) {
+  return ex->sys->qhead != NULL || ex->ready_bound != 0;
+}
 
-    pl_run_status s = pl_thread_run(a->t, sys->cfg.quantum);
+static void er_mt_wake_all_locked(er_mt_executor* ex) {
+  pthread_cond_broadcast(&ex->sys->cv);
+  pthread_cond_broadcast(&ex->controller_cv);
+  for (er_mt_worker* w = ex->worker_head; w != NULL; w = w->next)
+    pthread_cond_signal(&w->cv);
+}
 
-    pthread_mutex_lock(&sys->mu);
-    er_step(sys, a, s);
-    ex->active--;
-    if (ex->root == NULL && sys->qhead == NULL && ex->active == 0 &&
-        !er_http_outstanding(sys)) {
-      ex->reason = er_run_reason_locked(sys);
-      ex->stopping = true;
-      pthread_cond_broadcast(&sys->cv);
-    } else {
-      pthread_cond_broadcast(&sys->cv);
-    }
-    pthread_mutex_unlock(&sys->mu);
+static void er_mt_notify_locked(er_mt_executor* ex) {
+  pthread_cond_broadcast(&ex->sys->cv);
+  pthread_cond_signal(&ex->controller_cv);
+}
+
+static void* er_mt_worker_main(void* arg);
+
+static void er_mt_spawn_general_locked(er_mt_executor* ex) {
+  er_mt_worker* w = calloc(1, sizeof(*w));
+  ax_assume(w != NULL, "oom");
+  w->ex = ex;
+  w->role = ER_MT_GENERAL;
+  ax_assume(pthread_cond_init(&w->cv, NULL) == 0, "pthread_cond_init");
+  w->next = ex->worker_head;
+  ex->worker_head = w;
+  ex->general_workers++;
+  ax_assume(pthread_create(&w->thread, NULL, er_mt_worker_main, w) == 0,
+            "pthread_create");
+}
+
+/* Restore the configured shared-pool width after a GENERAL worker becomes
+ * dedicated.  Reuse a parked spare before growing to a new peak. */
+static void er_mt_promote_general_locked(er_mt_executor* ex) {
+  for (er_mt_worker* w = ex->worker_head; w != NULL; w = w->next) {
+    if (w->role != ER_MT_SPARE)
+      continue;
+    w->role = ER_MT_GENERAL;
+    ex->general_workers++;
+    pthread_cond_signal(&w->cv);
+    return;
   }
+  er_mt_spawn_general_locked(ex);
+}
+
+static void er_mt_bind_locked(er_mt_worker* w, er_actor* a) {
+  er_mt_executor* ex = w->ex;
+  ax_assume(a->sys == ex->sys, "effect actor belongs to another scheduler");
+  if (a->owner != NULL) {
+    ax_assume(a->owner == w && w->actor == a && w->role == ER_MT_BOUND,
+              "effect actor has two executor owners");
+    return;
+  }
+  ax_assume(!a->adopted, "the adopted root owns the caller thread");
+  ax_assume(w->role == ER_MT_GENERAL && w->actor == NULL,
+            "only a general worker can bind an actor");
+  ax_assume(!w->ready, "general worker has a private runnable actor");
+  ax_assume(ex->general_workers > 0, "general worker count underflow");
+  ex->general_workers--;
+  w->role = ER_MT_BOUND;
+  w->actor = a;
+  a->owner = w;
+  er_mt_promote_general_locked(ex);
+  ax_assume(ex->general_workers == ex->workers,
+            "effect binding failed to replenish the shared pool");
+}
+
+/* The plan evaluator calls this immediately before every RPLAN effect body.
+ * A spawned actor permanently claims its current worker before a direct
+ * handler can enter a blocking syscall.  The root already owns its caller. */
+static void er_actor_rplan_effect(pl_thread* t) {
+  er_actor* a = t->host;
+  if (a == NULL)
+    return;
+  a->effectful = true;
+  er_mt_worker* w = er_current_worker;
+  if (w == NULL || a->adopted || a->owner == w)
+    return;
+  er_scheduler* sys = a->sys;
+  if (w->holds_mu) {
+    er_mt_bind_locked(w, a);
+    return;
+  }
+  pthread_mutex_lock(&sys->mu);
+  er_mt_bind_locked(w, a);
+  pthread_mutex_unlock(&sys->mu);
+}
+
+static void er_mt_release_bound_locked(er_mt_worker* w) {
+  er_actor* a = w->actor;
+  ax_assume(w->role == ER_MT_BOUND && a != NULL && a->owner == w,
+            "releasing an unbound worker");
+  ax_assume(!w->ready, "releasing a runnable bound actor");
+  ax_assume(a->status == ER_ACTOR_HALTED || a->status == ER_ACTOR_CRASHED,
+            "effectful actor released before termination");
+  a->owner = NULL;
+  w->actor = NULL;
+  w->role = ER_MT_SPARE;
+}
+
+static void er_mt_maybe_complete_locked(er_mt_executor* ex) {
+  if (!ex->running || ex->root != NULL || ex->busy_workers != 0 ||
+      er_mt_has_runnable_spawned_locked(ex) || er_http_outstanding(ex->sys))
+    return;
+  ex->reason = er_run_reason_locked(ex->sys);
+  ex->running = false;
+  er_mt_wake_all_locked(ex);
+}
+
+static void* er_mt_worker_main(void* arg) {
+  er_mt_worker* w = arg;
+  er_mt_executor* ex = w->ex;
+  er_scheduler* sys = ex->sys;
+  er_current_worker = w;
+  pthread_mutex_lock(&sys->mu);
+  w->holds_mu = true;
+  for (;;) {
+    if (ex->shutdown)
+      break;
+    if (!ex->running) {
+      if (w->role == ER_MT_GENERAL)
+        pthread_cond_wait(&sys->cv, &sys->mu);
+      else
+        pthread_cond_wait(&w->cv, &sys->mu);
+      continue;
+    }
+
+    er_actor* a = NULL;
+    if (w->role == ER_MT_BOUND) {
+      a = w->actor;
+      if (a->status == ER_ACTOR_HALTED || a->status == ER_ACTOR_CRASHED) {
+        er_mt_release_bound_locked(w);
+        continue;
+      }
+      if (a->status != ER_ACTOR_RUNNABLE) {
+        er_mt_maybe_complete_locked(ex);
+        if (ex->running)
+          pthread_cond_wait(&w->cv, &sys->mu);
+        continue;
+      }
+      ax_assume(w->ready && ex->ready_bound > 0,
+                "bound runnable actor is not on its private queue");
+      w->ready = false;
+      ex->ready_bound--;
+    } else if (w->role == ER_MT_SPARE) {
+      pthread_cond_wait(&w->cv, &sys->mu);
+      continue;
+    } else {
+      a = ex->root == NULL ? er_dequeue(sys) : er_dequeue_spawned(sys);
+      if (a == NULL) {
+        ex->busy_workers++;
+        w->holds_mu = false; /* er_http_mt_pump drops and reacquires mu */
+        bool pumped = er_http_mt_pump(sys);
+        w->holds_mu = true;
+        ex->busy_workers--;
+        if (pumped) {
+          er_mt_maybe_complete_locked(ex);
+          er_mt_notify_locked(ex);
+          continue;
+        }
+        er_mt_maybe_complete_locked(ex);
+        if (ex->running)
+          pthread_cond_wait(&sys->cv, &sys->mu);
+        continue;
+      }
+      ax_assume(!a->adopted, "er_mt_executor_run: adopted actors run under "
+                             "er_mt_executor_drive");
+      ax_assume(a->owner == NULL, "bound actor entered the global run queue");
+      if (a->effectful)
+        er_mt_bind_locked(w, a);
+    }
+
+    ex->busy_workers++;
+    w->holds_mu = false;
+    pthread_mutex_unlock(&sys->mu);
+    pl_run_status s = pl_thread_run(a->t, sys->cfg.quantum);
+    pthread_mutex_lock(&sys->mu);
+    w->holds_mu = true;
+    er_step(sys, a, s, true);
+    ex->busy_workers--;
+    if (w->role == ER_MT_BOUND && w->actor == a &&
+        (a->status == ER_ACTOR_HALTED || a->status == ER_ACTOR_CRASHED))
+      er_mt_release_bound_locked(w);
+    er_mt_maybe_complete_locked(ex);
+    er_mt_notify_locked(ex);
+  }
+  w->holds_mu = false;
+  pthread_mutex_unlock(&sys->mu);
+  er_current_worker = NULL;
+  return NULL;
 }
 
 static uint32_t er_default_worker_count(void) {
@@ -722,15 +933,60 @@ er_mt_executor* er_mt_executor_new(er_scheduler* sys, er_mt_config cfg) {
   ex->sys = sys;
   ex->workers = cfg.workers == 0 ? er_default_worker_count() : cfg.workers;
   ax_assume(ex->workers > 0, "er_mt_executor_new: workers required");
-  ex->thread_v = calloc(ex->workers, sizeof(*ex->thread_v));
-  ax_assume(ex->thread_v != NULL, "oom");
+  ax_assume(pthread_cond_init(&ex->controller_cv, NULL) == 0,
+            "pthread_cond_init");
+
+  pthread_mutex_lock(&sys->mu);
+  ax_assume(sys->mt == NULL,
+            "er_mt_executor_new: scheduler already has an MT executor");
+  sys->mt = ex;
+  for (uint32_t i = 0; i < ex->workers; i++)
+    er_mt_spawn_general_locked(ex);
+  pthread_mutex_unlock(&sys->mu);
   return ex;
 }
 
 void er_mt_executor_free(er_mt_executor* ex) {
   if (ex == NULL)
     return;
-  free(ex->thread_v);
+  er_scheduler* sys = ex->sys;
+  pthread_mutex_lock(&sys->mu);
+  ax_assume(!ex->entered && !ex->running && ex->busy_workers == 0,
+            "er_mt_executor_free: executor is running");
+  ex->shutdown = true;
+  er_mt_wake_all_locked(ex);
+  pthread_mutex_unlock(&sys->mu);
+
+  for (er_mt_worker* w = ex->worker_head; w != NULL; w = w->next)
+    ax_assume(pthread_join(w->thread, NULL) == 0, "pthread_join");
+
+  pthread_mutex_lock(&sys->mu);
+  for (er_mt_worker* w = ex->worker_head; w != NULL; w = w->next) {
+    if (w->actor == NULL)
+      continue;
+    er_actor* a = w->actor;
+    ax_assume(a->owner == w, "executor teardown lost actor ownership");
+    a->owner = NULL;
+    w->actor = NULL;
+    if (w->ready) {
+      ax_assume(ex->ready_bound > 0, "bound-ready count underflow");
+      ex->ready_bound--;
+      w->ready = false;
+    }
+    if (a->status == ER_ACTOR_RUNNABLE)
+      er_enqueue(a);
+  }
+  ax_assume(sys->mt == ex, "executor detached from scheduler");
+  sys->mt = NULL;
+  pthread_mutex_unlock(&sys->mu);
+
+  for (er_mt_worker* w = ex->worker_head; w != NULL;) {
+    er_mt_worker* next = w->next;
+    pthread_cond_destroy(&w->cv);
+    free(w);
+    w = next;
+  }
+  pthread_cond_destroy(&ex->controller_cv);
   free(ex);
 }
 
@@ -740,16 +996,21 @@ er_run_reason er_mt_executor_run(er_mt_executor* ex) {
   ax_assume(sys->mode == ER_MODE_LIVE,
             "er_mt_executor_run: record/replay requires the deterministic "
             "executor");
+  pthread_mutex_lock(&sys->mu);
+  ax_assume(!ex->entered && !ex->running,
+            "er_mt_executor_run: executor already running");
+  ex->entered = true;
   ex->root = NULL;
-  ex->active = 0;
-  ex->stopping = false;
   ex->reason = ER_RUN_IDLE;
-  for (uint32_t i = 0; i < ex->workers; i++)
-    ax_assume(pthread_create(&ex->thread_v[i], NULL, er_mt_worker, ex) == 0,
-              "pthread_create");
-  for (uint32_t i = 0; i < ex->workers; i++)
-    ax_assume(pthread_join(ex->thread_v[i], NULL) == 0, "pthread_join");
-  return ex->reason;
+  ex->running = true;
+  er_mt_wake_all_locked(ex);
+  er_mt_maybe_complete_locked(ex);
+  while (ex->running)
+    pthread_cond_wait(&ex->controller_cv, &sys->mu);
+  er_run_reason out = ex->reason;
+  ex->entered = false;
+  pthread_mutex_unlock(&sys->mu);
+  return out;
 }
 
 /* Abandon the root's parked continuation: unwind to the watermarks the
@@ -762,6 +1023,8 @@ static void er_root_unwind(er_actor* root) {
 
 er_drive_status er_scheduler_drive(er_scheduler* sys, er_actor* root) {
   ax_assume(root->adopted, "er_scheduler_drive: actor is not adopted");
+  ax_assume(sys->mt == NULL,
+            "er_scheduler_drive: MT executor is attached; use it or free it");
   root->status = ER_ACTOR_RUNNABLE;
   er_enqueue(root);
   for (;;) {
@@ -775,7 +1038,7 @@ er_drive_status er_scheduler_drive(er_scheduler* sys, er_actor* root) {
       return ER_DRIVE_DEADLOCK;
     }
     if (a != root) {
-      er_step(sys, a, pl_thread_run(a->t, sys->cfg.quantum));
+      er_step(sys, a, pl_thread_run(a->t, sys->cfg.quantum), false);
       continue;
     }
     switch (pl_thread_run(a->t, sys->cfg.quantum)) {
@@ -787,7 +1050,7 @@ er_drive_status er_scheduler_drive(er_scheduler* sys, er_actor* root) {
     case PL_RUN_EXN:
       return ER_DRIVE_EXN; /* pl_thread_run unwound to the watermarks */
     case PL_RUN_BLOCKED:
-      er_service(sys, a);
+      er_service(sys, a, false);
       if (a->status == ER_ACTOR_CRASHED) {
         er_root_unwind(root); /* the embedder owns its fate */
         return ER_DRIVE_EXN;  /* exn slots set by the service */
@@ -807,17 +1070,16 @@ er_drive_status er_mt_executor_drive(er_mt_executor* ex, er_actor* root) {
             "er_mt_executor_drive: record/replay requires the deterministic "
             "executor");
 
-  ex->root = root;
-  ex->active = 0;
-  ex->stopping = false;
-  ex->reason = ER_RUN_IDLE;
-  for (uint32_t i = 0; i < ex->workers; i++)
-    ax_assume(pthread_create(&ex->thread_v[i], NULL, er_mt_worker, ex) == 0,
-              "pthread_create");
-
   er_drive_status out = ER_DRIVE_DEADLOCK;
   pthread_mutex_lock(&sys->mu);
+  ax_assume(!ex->entered && !ex->running,
+            "er_mt_executor_drive: executor already running");
+  ex->entered = true;
+  ex->root = root;
+  ex->running = true;
+  (void)er_remove_from_queue(sys, root);
   root->status = ER_ACTOR_RUNNABLE;
+  er_mt_wake_all_locked(ex);
   for (;;) {
     if (root->status == ER_ACTOR_RUNNABLE) {
       (void)er_remove_from_queue(sys, root);
@@ -830,21 +1092,15 @@ er_drive_status er_mt_executor_drive(er_mt_executor* ex, er_actor* root) {
         break;
       case PL_RUN_DONE:
         out = ER_DRIVE_DONE;
-        ex->stopping = true;
-        pthread_cond_broadcast(&sys->cv);
         goto done;
       case PL_RUN_EXN:
         out = ER_DRIVE_EXN;
-        ex->stopping = true;
-        pthread_cond_broadcast(&sys->cv);
         goto done;
       case PL_RUN_BLOCKED:
-        er_service(sys, root);
+        er_service(sys, root, true);
         if (root->status == ER_ACTOR_CRASHED) {
           er_root_unwind(root);
           out = ER_DRIVE_EXN;
-          ex->stopping = true;
-          pthread_cond_broadcast(&sys->cv);
           goto done;
         }
         break;
@@ -852,23 +1108,24 @@ er_drive_status er_mt_executor_drive(er_mt_executor* ex, er_actor* root) {
       continue;
     }
 
-    if (root->status == ER_ACTOR_BLOCKED && sys->qhead == NULL &&
-        ex->active == 0 && !er_http_outstanding(sys)) {
+    if (root->status == ER_ACTOR_BLOCKED && ex->busy_workers == 0 &&
+        !er_mt_has_runnable_spawned_locked(ex) && !er_http_outstanding(sys)) {
       er_root_unwind(root);
       out = ER_DRIVE_DEADLOCK;
-      ex->stopping = true;
-      pthread_cond_broadcast(&sys->cv);
       goto done;
     }
 
-    pthread_cond_wait(&sys->cv, &sys->mu);
+    pthread_cond_wait(&ex->controller_cv, &sys->mu);
   }
 
 done:
-  pthread_mutex_unlock(&sys->mu);
-  for (uint32_t i = 0; i < ex->workers; i++)
-    ax_assume(pthread_join(ex->thread_v[i], NULL) == 0, "pthread_join");
+  ex->running = false;
+  er_mt_wake_all_locked(ex);
+  while (ex->busy_workers != 0 || sys->http_pumping)
+    pthread_cond_wait(&ex->controller_cv, &sys->mu);
   ex->root = NULL;
+  ex->entered = false;
+  pthread_mutex_unlock(&sys->mu);
   return out;
 }
 
@@ -1122,10 +1379,15 @@ static uint64_t er_inject_encode(pl_val payload, uint8_t buf[33]) {
 }
 
 void er_scheduler_inject(er_scheduler* sys, er_actor* to, pl_val payload) {
+  ax_assume(to != NULL && to->sys == sys,
+            "er_scheduler_inject: actor belongs to another scheduler");
   ax_assume(pl_is_nat63(payload) || pl_store_owns(sys->store, payload),
             "er_scheduler_inject: payload must be a nat63 or store-resident");
-  if (to->status == ER_ACTOR_HALTED || to->status == ER_ACTOR_CRASHED)
+  pthread_mutex_lock(&sys->mu);
+  if (to->status == ER_ACTOR_HALTED || to->status == ER_ACTOR_CRASHED) {
+    pthread_mutex_unlock(&sys->mu);
     return; /* a Chan nobody reads (reaver: send succeeds silently) */
+  }
   if (sys->mode == ER_MODE_RECORD) {
     uint8_t buf[33];
     er_event e = {.kind = ER_EV_INJECT, .actor = to->id};
@@ -1143,6 +1405,7 @@ void er_scheduler_inject(er_scheduler* sys, er_actor* to, pl_val payload) {
               "er_log: replay divergence at a host injection");
   }
   er_deliver(to, payload, 0, NULL);
+  pthread_mutex_unlock(&sys->mu);
 }
 
 /* ── Log file round trip ───────────────────────────────────────────────── */

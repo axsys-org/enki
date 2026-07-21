@@ -122,6 +122,11 @@ struct pl_thread {
    * to this root and refuse paths whose canonical target escapes it. */
   const char* rplan_file_root_c;
 
+  /* Called immediately before an op-set >= 82 body begins.  Embedders use
+   * this to move an effectful green thread onto a syscall-safe executor;
+   * the plan layer otherwise treats it as opaque. */
+  void (*rplan_effect_f)(struct pl_thread* t);
+
   /* Opaque embedder slot (the actor runtime stores its er_actor here so
    * the pl_io_hook can attribute effects); never touched by the plan
    * layer. */
