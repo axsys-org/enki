@@ -38,7 +38,7 @@ struct er_actor {
   size_t handle_n;     /* next handle to mint (never reused) */
   size_t handle_cap;
   er_http_xfer* http;  /* non-NULL: parked on a Fetch, not on Recv */
-  bool effectful;      /* has initiated an op-set >= 82 effect */
+  bool effectful;      /* has initiated a descriptor-marked host effect */
   er_mt_worker* owner; /* dedicated MT worker after the first effect */
   er_actor* qnext;
   er_actor* all_next;

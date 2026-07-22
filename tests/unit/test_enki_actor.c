@@ -111,6 +111,25 @@ static pl_val sleep_code(pl_thread* t, uint64_t seconds) {
   return code_effect83(t, ax_s5('S', 'l', 'e', 'e', 'p'), 1, args);
 }
 
+static pl_val zone_start_code(pl_thread* t, pl_val label) {
+  size_t base = t->vsp;
+  pl_vpush(t, label);
+  pl_vpush(t, pl_nat_from_bytes(t, (const uint8_t*)"ZoneStart", 9));
+  pl_val args[1] = {t->vstack[base]};
+  pl_val out = code_effect83(t, t->vstack[base + 1], 1, args);
+  t->vsp = base;
+  return out;
+}
+
+/* Arm an adopted root to deep-normalize (actor_fn body % 0). */
+static void root_start_body(pl_thread* t, pl_val body) {
+  size_t base = t->vsp;
+  pl_vpush(t, body);
+  pl_val fn = actor_fn(t, t->vstack[base]);
+  t->vsp = base;
+  pl_thread_start_call_nf(t, fn, 0);
+}
+
 static double monotonic_seconds(void) {
   struct timespec ts;
   cr_assert_eq(clock_gettime(CLOCK_MONOTONIC, &ts), 0);
@@ -309,6 +328,33 @@ Test(actor, mt_multiple_actors_halt) {
   cr_assert_eq(er_actor_result(a), 7);
   cr_assert_eq(er_actor_state(b), ER_ACTOR_HALTED);
   cr_assert_eq(er_actor_result(b), 9);
+  er_mt_executor_free(ex);
+  er_scheduler_free(sys);
+  test_rt_free(&rt);
+}
+
+Test(actor, mt_profile_only_actor_does_not_bind_worker) {
+  test_rt rt = test_rt_new();
+  er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
+  er_actor* a = er_scheduler_actor(sys);
+  pl_thread* t = er_actor_thread(a);
+  size_t base = t->vsp;
+  pl_vpush(t, zone_start_code(t, 21));
+  pl_val fn = actor_fn(t, t->vstack[base]);
+  t->vsp = base;
+  er_actor_start(a, fn);
+
+  er_mt_executor* ex = er_mt_executor_new(sys, (er_mt_config){.workers = 1});
+  cr_assert_eq(er_mt_executor_run(ex), ER_RUN_IDLE);
+  cr_assert_eq(er_actor_state(a), ER_ACTOR_HALTED);
+  cr_assert_not(a->effectful);
+
+  size_t worker_n = 0;
+  for (er_mt_worker* w = ex->worker_head; w != NULL; w = w->next)
+    worker_n++;
+  cr_assert_eq(worker_n, 1,
+               "profiling-only actor grew the executor worker pool");
+
   er_mt_executor_free(ex);
   er_scheduler_free(sys);
   test_rt_free(&rt);
@@ -514,6 +560,80 @@ Test(actor, mt_recv_blocks_until_injection) {
   er_mt_executor_free(ex);
   er_scheduler_free(sys);
   test_rt_free(&rt);
+}
+
+static er_drive_status drive_adopted(er_scheduler* sys, er_mt_executor* ex,
+                                     er_actor* root) {
+  return ex == NULL ? er_scheduler_drive(sys, root)
+                    : er_mt_executor_drive(ex, root);
+}
+
+static void run_adopted_root_abandon_zones(bool mt) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  t->rplan_f = true;
+  er_scheduler* sys =
+      er_scheduler_new(rt.store, (er_config){.quantum = 2, .root_quantum = 2});
+  er_mt_executor* ex =
+      mt ? er_mt_executor_new(sys, (er_mt_config){.workers = 1}) : NULL;
+  er_actor* root = er_scheduler_adopt(sys, t);
+
+  /* A zone from a completed run is host-scoped and must survive abandoning
+   * either of the later runs.  Root its handle across all allocations. */
+  size_t outer_slot = t->vsp;
+  root_start_body(t, zone_start_code(t, 11));
+  cr_assert_eq(drive_adopted(sys, ex, root), ER_DRIVE_DONE);
+  pl_vpush(t, pl_thread_result(t));
+  cr_assert_eq(t->profile_zone_n, 1);
+  cr_assert_eq(t->profile_zones[0].handle, t->vstack[outer_slot]);
+
+  /* Deadlock abandons a continuation parked on Recv. */
+  size_t run_vsp = t->vsp;
+  size_t run_fsp = t->fsp;
+  pl_vpush(t, zone_start_code(t, 12));
+  pl_vpush(t, recv_code(t));
+  pl_val body = code_seq(t, t->vstack[run_vsp], t->vstack[run_vsp + 1]);
+  t->vsp = run_vsp;
+  root_start_body(t, body);
+  cr_assert_eq(drive_adopted(sys, ex, root), ER_DRIVE_DEADLOCK);
+  cr_assert_eq(t->vsp, run_vsp);
+  cr_assert_eq(t->fsp, run_fsp);
+  cr_assert_eq(t->profile_zone_n, 1);
+  cr_assert_eq(t->profile_zones[0].handle, t->vstack[outer_slot]);
+
+  /* A service-detected crash abandons the same kind of parked continuation. */
+  pl_vpush(t, zone_start_code(t, 13));
+  pl_val send_args[2] = {99, 7};
+  pl_vpush(t, code_effect(t, ax_s4('S', 'e', 'n', 'd'), 2, send_args));
+  body = code_seq(t, t->vstack[run_vsp], t->vstack[run_vsp + 1]);
+  t->vsp = run_vsp;
+  root_start_body(t, body);
+  cr_assert_eq(drive_adopted(sys, ex, root), ER_DRIVE_EXN);
+  cr_assert_str_eq(t->exn_msg, "invalid actor handle");
+  cr_assert_eq(t->vsp, run_vsp);
+  cr_assert_eq(t->fsp, run_fsp);
+  cr_assert_eq(t->profile_zone_n, 1);
+  cr_assert_eq(t->profile_zones[0].handle, t->vstack[outer_slot]);
+
+  /* The embedder can immediately re-arm the adopted root after either
+   * abandonment path; no discarded zone may reopen on this run. */
+  pl_thread_start(t, 42);
+  cr_assert_eq(drive_adopted(sys, ex, root), ER_DRIVE_DONE);
+  cr_assert_eq(pl_thread_result(t), 42);
+  cr_assert_eq(t->profile_zone_n, 1);
+  cr_assert_eq(t->profile_zones[0].handle, t->vstack[outer_slot]);
+
+  er_mt_executor_free(ex);
+  er_scheduler_free(sys);
+  test_rt_free(&rt);
+}
+
+Test(actor, adopted_root_abandon_drops_current_run_zones) {
+  run_adopted_root_abandon_zones(false);
+}
+
+Test(actor, mt_adopted_root_abandon_drops_current_run_zones, .timeout = 10) {
+  run_adopted_root_abandon_zones(true);
 }
 
 Test(actor, mt_free_detaches_bound_actor) {

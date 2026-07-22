@@ -20,6 +20,10 @@
  * the stack.  Bodies may push F_APPLY/F_SEQ/F_NF frames and return a
  * value that the machine continues to evaluate.
  *
+ * host_effect marks operations that may enter embedder-controlled work;
+ * the evaluator calls rplan_effect_f before their bodies begin.  Profiling
+ * operations remain ordinary evaluator work even though they share op set 83.
+ *
  * coord marks a coordination effect: the body only validates the forced
  * args and returns the request spine [name, args…]; the machine parks
  * it in t->blocked_on and suspends with PL_RUN_BLOCKED instead of
@@ -33,6 +37,7 @@ typedef struct pl_opdesc {
   uint8_t argc;
   uint32_t strict_mask;
   uint32_t deep_mask;
+  bool host_effect;
   bool coord;
   pl_val (*body)(pl_thread* t, size_t ab);
 } pl_opdesc;

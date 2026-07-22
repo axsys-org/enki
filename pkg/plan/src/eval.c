@@ -1380,7 +1380,7 @@ op_body:
     t->fsp--;          /* pop before the body so its frames take this slot */
     t->centry_depth++; /* op bodies are C-entry regions */
     pl_val r;
-    if (ax_unlikely(d->opset >= 82 && t->rplan_effect_f != NULL))
+    if (ax_unlikely(d->host_effect && t->rplan_effect_f != NULL))
       t->rplan_effect_f(t);
     /* direct op-82 effects route through the record/replay seam */
     if (!(d->opset == 82 && !d->coord && pl_io != NULL &&
@@ -1484,6 +1484,13 @@ static pl_run_status pl_run_caught(pl_thread* t, pl_val v0, size_t base,
 
 /* ── Suspendable execution ─────────────────────────────────────────────── */
 
+static void pl_thread_unwind_run(pl_thread* t) {
+  pl_profile_pause_all(t);
+  t->vsp = t->base_vsp;
+  t->fsp = t->base_fsp;
+  pl_profile_drop_since_paused(t, t->profile_run_mark);
+}
+
 void pl_thread_start(pl_thread* t, pl_val v) {
   ax_assume(!t->suspendable && t->centry_depth == 0,
             "pl_thread_start: thread is running");
@@ -1508,6 +1515,14 @@ void pl_thread_start_call_nf(pl_thread* t, pl_val f, pl_val x) {
   pl_frame* fr = pl_fpush(t); /* applied first, then the NF descent */
   fr->kind = PL_F_APPLY;
   fr->b = x;
+}
+
+void pl_thread_abandon(pl_thread* t) {
+  ax_assume(!t->suspendable && t->centry_depth == 0,
+            "pl_thread_abandon: thread is running");
+  ax_assume(t->status == PL_RUN_BLOCKED,
+            "pl_thread_abandon: thread is not blocked");
+  pl_thread_unwind_run(t);
 }
 
 void pl_thread_deposit(pl_thread* t, pl_val response) {
@@ -1555,10 +1570,7 @@ pl_run_status pl_thread_run(pl_thread* t, uint64_t fuel) {
     /* uncaught at thread top level: unwind to the entry watermarks;
      * t->exn / t->exn_msg carry the payload */
     t->handler = c.prev;
-    pl_profile_pause_all(t);
-    t->vsp = t->base_vsp;
-    t->fsp = t->base_fsp;
-    pl_profile_drop_since_paused(t, t->profile_run_mark);
+    pl_thread_unwind_run(t);
     t->centry_depth = 0;
     t->suspendable = false;
     t->fuel = UINT64_MAX;

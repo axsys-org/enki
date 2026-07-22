@@ -786,7 +786,7 @@ static void er_mt_bind_locked(er_mt_worker* w, er_actor* a) {
             "effect binding failed to replenish the shared pool");
 }
 
-/* The plan evaluator calls this immediately before every RPLAN effect body.
+/* The plan evaluator calls this immediately before every host-effect body.
  * A spawned actor permanently claims its current worker before a direct
  * handler can enter a blocking syscall.  The root already owns its caller. */
 static void er_actor_rplan_effect(pl_thread* t) {
@@ -1010,8 +1010,7 @@ er_run_reason er_mt_executor_run(er_mt_executor* ex) {
 /* Abandon the root's parked continuation: unwind to the watermarks the
  * arming recorded, so the embedder can re-arm the thread cleanly. */
 static void er_root_unwind(er_actor* root) {
-  root->t->vsp = root->t->base_vsp;
-  root->t->fsp = root->t->base_fsp;
+  pl_thread_abandon(root->t);
   root->status = ER_ACTOR_RUNNABLE;
 }
 
