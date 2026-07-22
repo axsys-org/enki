@@ -125,7 +125,8 @@ typedef struct pl_catch {
   jmp_buf jb;
   jmp_buf* prev;
   size_t vsp, fsp;
-  uint32_t centry; /* centry_depth watermark; restored on unwind */
+  uint32_t centry;       /* centry_depth watermark; restored on unwind */
+  uint64_t profile_mark; /* ZoneStart generation watermark */
 } pl_catch;
 
 void pl_catch_init(pl_thread* t, pl_catch* c);

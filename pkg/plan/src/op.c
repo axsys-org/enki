@@ -639,6 +639,7 @@ static pl_val op_try(pl_thread* t, size_t ab) {
   pl_frame* fr = pl_fpush(t);
   fr->kind = PL_F_TRY;
   fr->argbase = (uint32_t)(ab - 1); /* vsp to restore on exn delivery */
+  fr->profile_mark = t->profile_next_generation;
   pl_push_nf(t);
   pl_push_apply(t, ARG(1));
   return ARG(0);
@@ -809,8 +810,9 @@ static pl_val op_load(pl_thread* t, size_t ab) {
  * deep is the initiation-time payload normalization */
 #define OP82C(name, argc, mask, deep, body)                                    \
   {82, 0, name, argc, mask, deep, true, body}
-/* op 83 is the provisional-primop staging area; its current entries are
- * coordination effects serviced in pkg/enki. */
+/* op 83 is the provisional-primop staging area. */
+#define OP83(name, argc, mask, body) {83, 0, name, argc, mask, 0, false, body}
+/* Coordination effects are serviced in pkg/enki. */
 #define OP83C(name, argc, mask, deep, body)                                    \
   {83, 0, name, argc, mask, deep, true, body}
 
@@ -965,6 +967,8 @@ const pl_opdesc pl_ops[] = {
      * appended last so op indices and the buckets below do not shift;
      * Sleep is index 126. */
     OP83C("Sleep", 1, 0b1, 0, pl_op83_sleep),
+    OP83("ZoneStart", 1, 0b1, pl_op83_zone_start),
+    OP83("ZoneEnd", 1, 0b1, pl_op83_zone_end),
 };
 
 const size_t pl_nops = sizeof(pl_ops) / sizeof(pl_ops[0]);
@@ -1009,7 +1013,7 @@ static const uint16_t pl_op82_argc1[] = {105, 106, 107, 108, 110, 111, 112,
 static const uint16_t pl_op82_argc2[] = {109, 116, 117, 119};
 static const uint16_t pl_op82_argc3[] = {120, 123};
 
-static const uint16_t pl_op83_argc1[] = {124, 126};
+static const uint16_t pl_op83_argc1[] = {124, 126, 127, 128};
 static const uint16_t pl_op83_argc2[] = {125};
 
 static pl_opbucket pl_op_lookup_bucket(uint64_t opset, uint32_t argc) {

@@ -449,6 +449,8 @@ static bool save_prepare_legacy(save_ctx* c, pl_val root) {
         save_copy_promoted(c, &copies, pl_pin_body(pl_ptr(item->source)), true);
     ax_hmfree(copies);
 
+    pl_store_profile_scope profile = pl_store_profile_begin(
+        "store.serialize", sizeof("store.serialize") - 1);
     canon_ctx encoded = {0};
     collect_subpins(&encoded, body);
     serialize(&encoded, body);
@@ -456,6 +458,7 @@ static bool save_prepare_legacy(save_ctx* c, pl_val root) {
     char* text = pl_canonize(ax_allocator_system(), body, &text_n);
     ax_sha256((const uint8_t*)text, text_n, item->hash.b);
     ax_free(ax_allocator_system(), text);
+    pl_store_profile_end(&profile);
     item->hash_ready = true;
 
     ptrdiff_t local_at = ax_hmgeti(c->canonical, item->hash);
@@ -508,10 +511,13 @@ static bool save_prepare_silo(save_ctx* c, pl_val root) {
       uint8_t* bytes = NULL;
       size_t len = 0;
       uint8_t calculated[32];
+      pl_store_profile_scope profile = pl_store_profile_begin(
+          "store.serialize", sizeof("store.serialize") - 1);
       bool encoded = pl_silo_encode_buffer(
           pl_pin_body(pl_ptr(item->source)), item->table,
           (size_t)ax_arrlen(item->table), save_pin_hash, c, &bytes, &len,
           calculated, c->err, c->err_cap);
+      pl_store_profile_end(&profile);
       if (!encoded) {
         ax_arrfree(bytes);
         goto failed;
@@ -871,7 +877,12 @@ static bool load_silo_pin(pl_thread* t, pl_store* s, const uint8_t hash[32],
   mark = pl_store_mark(s);
   marked = true;
   pl_val body;
-  if (!pl_silo_build_stream(&reader, s, &scan, resolved, &body, err, err_cap)) {
+  pl_store_profile_scope profile = pl_store_profile_begin(
+      "store.deserialize", sizeof("store.deserialize") - 1);
+  bool built =
+      pl_silo_build_stream(&reader, s, &scan, resolved, &body, err, err_cap);
+  pl_store_profile_end(&profile);
+  if (!built) {
     ok = false;
     goto done;
   }
@@ -982,9 +993,12 @@ static bool load_legacy_pin(pl_thread* t, pl_store* s, const uint8_t hash[32],
   if (hit != 0) {
     *out = hit;
   } else {
+    pl_store_profile_scope profile = pl_store_profile_begin(
+        "store.deserialize", sizeof("store.deserialize") - 1);
     pl_val body = deser(s, &d);
     *out = pl_store_mk_pin(s, hash, body, (uint32_t)d.nsub, subs);
     compile = pl_tag(body) == PL_TAG_LAW;
+    pl_store_profile_end(&profile);
   }
   pl_store_unlock(s);
   ok = true;

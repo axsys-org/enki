@@ -13,6 +13,7 @@
 
 #include "axsys/allocator.h"
 #include "axsys/ds.h"
+#include "axsys/profile.h"
 #include "axsys/sha256.h"
 #include "plan/canon.h"
 #include "../../pkg/plan/src/store_internal.h"
@@ -419,6 +420,29 @@ Test(store,
   pl_thread_free(t);
   pl_heap_free(heap);
   pl_store_free(store);
+}
+
+static char* store_test_read_file(const char* path) {
+  FILE* f = fopen(path, "rb");
+  cr_assert_not_null(f);
+  cr_assert_eq(fseek(f, 0, SEEK_END), 0);
+  long end = ftell(f);
+  cr_assert_geq(end, 0);
+  cr_assert_eq(fseek(f, 0, SEEK_SET), 0);
+  char* data = malloc((size_t)end + 1);
+  cr_assert_not_null(data);
+  cr_assert_eq(fread(data, 1, (size_t)end, f), (size_t)end);
+  data[end] = '\0';
+  cr_assert_eq(fclose(f), 0);
+  return data;
+}
+
+static size_t store_test_count(const char* haystack, const char* needle) {
+  size_t count = 0;
+  size_t needle_n = strlen(needle);
+  for (const char* p = haystack; (p = strstr(p, needle)) != NULL; p += needle_n)
+    count++;
+  return count;
 }
 
 /* ── Interning ─────────────────────────────────────────────────────────── */
@@ -1658,4 +1682,40 @@ Test(store, legacy_rejects_pin_table_larger_than_header_meta) {
   pl_thread_free(t);
   pl_heap_free(heap);
   pl_store_free(store);
+}
+
+Test(store, chrome_json_profiles_slow_store_operations) {
+  char path[] = "/tmp/enki-profile-store-XXXXXX";
+  int fd = mkstemp(path);
+  cr_assert_geq(fd, 0);
+  cr_assert_eq(close(fd), 0);
+  cr_assert(ax_profile_json_start(path));
+
+  char dir[] = "/tmp/enki-profile-store-db-XXXXXX";
+  cr_assert_not_null(mkdtemp(dir));
+  roundtrip_via(mk_lmdb, dir);
+
+  cr_assert(ax_profile_json_finish());
+  char* json = store_test_read_file(path);
+  cr_assert_not_null(strstr(json, "\"cat\":\"splan.store\""));
+  cr_assert_not_null(strstr(json, "\"name\":\"store.open\""));
+  cr_assert_not_null(strstr(json, "\"name\":\"store.backend.put\""));
+  cr_assert_not_null(strstr(json, "\"name\":\"store.backend.get\""));
+  cr_assert_not_null(strstr(json, "\"name\":\"store.serialize\""));
+  cr_assert_not_null(strstr(json, "\"name\":\"store.deserialize\""));
+  cr_assert_not_null(strstr(json, "\"name\":\"store.root.put\""));
+  cr_assert_not_null(strstr(json, "\"name\":\"store.root.get\""));
+  cr_assert_not_null(strstr(json, "\"name\":\"store.close\""));
+  cr_assert_not_null(strstr(json, "\"args\":{\"span\":"));
+  cr_assert_not_null(strstr(json, "Store thread "));
+  cr_assert_eq(store_test_count(json, "\"ph\":\"B\""),
+               store_test_count(json, "\"ph\":\"E\""));
+  free(json);
+  cr_assert_eq(unlink(path), 0);
+  char db_path[96];
+  snprintf(db_path, sizeof(db_path), "%s/data.mdb", dir);
+  cr_assert_eq(unlink(db_path), 0);
+  snprintf(db_path, sizeof(db_path), "%s/lock.mdb", dir);
+  cr_assert_eq(unlink(db_path), 0);
+  cr_assert_eq(rmdir(dir), 0);
 }

@@ -16,6 +16,10 @@
 #include "plan/nat.h"
 #include "plan/store.h"
 
+static void pl_profile_pause_all(pl_thread* t);
+static void pl_profile_resume_all(pl_thread* t);
+static void pl_profile_drop_since_paused(pl_thread* t, uint64_t mark);
+
 /* pl_run dispatches with computed gotos (labels-as-values), a GNU
  * extension.  Clang suppresses the diagnostic with the targeted
  * -Wno-gnu-label-as-value (Makefile); gcc has no specific flag — the
@@ -58,6 +62,7 @@ void pl_catch_init(pl_thread* t, pl_catch* c) {
   c->vsp = t->vsp;
   c->fsp = t->fsp;
   c->centry = t->centry_depth;
+  c->profile_mark = t->profile_next_generation;
   t->handler = &c->jb;
 }
 
@@ -67,9 +72,13 @@ void pl_catch_pop(pl_thread* t, pl_catch* c) {
 
 void pl_catch_unwind(pl_thread* t, pl_catch* c) {
   t->handler = c->prev;
+  pl_profile_pause_all(t);
   t->vsp = c->vsp;
   t->fsp = c->fsp;
+  pl_profile_drop_since_paused(t, c->profile_mark);
   t->centry_depth = c->centry; /* longjmp skipped the region epilogues */
+  if (t->centry_depth > 0 || t->suspendable)
+    pl_profile_resume_all(t);
 }
 
 /* ── Enter hook seam ───────────────────────────────────────────────────── */
@@ -247,6 +256,179 @@ static void pl_profile_reopen_above(pl_thread* t, size_t base) {
 }
 #endif
 
+/* ── Explicit SPLAN profiling zones ───────────────────────────────────── */
+
+static _Thread_local uint64_t pl_profile_active_lane;
+
+uint64_t pl_profile_current_lane(void) {
+  return pl_profile_active_lane;
+}
+
+static bool pl_profile_physical_enabled(void) {
+#ifdef TRACY_ENABLE
+  return true;
+#else
+  return ax_profile_json_enabled();
+#endif
+}
+
+static void pl_profile_json_name_thread(pl_thread* t) {
+  if (!ax_profile_json_enabled() || t->profile_json_named)
+    return;
+  char name[64];
+  int n = snprintf(name, sizeof(name), "PLAN thread %" PRIu64, t->profile_lane);
+  if (n < 0)
+    return;
+  size_t name_n = (size_t)n < sizeof(name) ? (size_t)n : sizeof(name) - 1;
+  ax_profile_json_thread_name(t->profile_lane, name, name_n);
+  t->profile_json_named = true;
+}
+
+static void pl_profile_zone_begin(pl_thread* t, pl_profile_zone* zone) {
+  if (zone->live || !pl_profile_physical_enabled())
+    return;
+#ifdef TRACY_ENABLE
+  AX_PROFILE_ZONE_BEGIN_ALLOC_NAME(zone->tracy_ctx, (const char*)zone->name,
+                                   zone->name_n);
+#endif
+  if (ax_profile_json_enabled()) {
+    pl_profile_json_name_thread(t);
+    ax_profile_json_zone_begin(t->profile_lane, zone->generation, zone->name,
+                               zone->name_n);
+  }
+  zone->live = true;
+}
+
+static void pl_profile_zone_end(pl_thread* t, pl_profile_zone* zone) {
+  if (!zone->live)
+    return;
+  if (ax_profile_json_enabled())
+    ax_profile_json_zone_end(t->profile_lane, zone->generation, zone->name,
+                             zone->name_n);
+#ifdef TRACY_ENABLE
+  AX_PROFILE_ZONE_END(zone->tracy_ctx);
+#endif
+  zone->live = false;
+}
+
+static void pl_profile_pause_all(pl_thread* t) {
+  /* Explicit zones are always outside law-attribution zones. */
+  pl_profile_close_above(t, 0);
+  for (size_t i = t->profile_zone_n; i > 0; i--)
+    pl_profile_zone_end(t, &t->profile_zones[i - 1]);
+}
+
+static void pl_profile_resume_all(pl_thread* t) {
+  for (size_t i = 0; i < t->profile_zone_n; i++)
+    pl_profile_zone_begin(t, &t->profile_zones[i]);
+  pl_profile_reopen_above(t, 0);
+}
+
+static void pl_profile_zone_release(pl_profile_zone* zone) {
+  free(zone->name);
+  *zone = (pl_profile_zone){0};
+}
+
+/* The zone list remains in generation order even after non-LIFO removals, so
+ * every zone created since a catch/run watermark is a suffix. */
+static void pl_profile_drop_since_paused(pl_thread* t, uint64_t mark) {
+  while (t->profile_zone_n > 0 &&
+         t->profile_zones[t->profile_zone_n - 1].generation >= mark) {
+    pl_profile_zone_release(&t->profile_zones[t->profile_zone_n - 1]);
+    t->profile_zone_n--;
+  }
+}
+
+void pl_profile_thread_free(pl_thread* t) {
+  pl_profile_pause_all(t);
+  while (t->profile_zone_n > 0) {
+    pl_profile_zone_release(&t->profile_zones[t->profile_zone_n - 1]);
+    t->profile_zone_n--;
+  }
+  free(t->profile_zones);
+  t->profile_zones = NULL;
+  t->profile_zone_cap = 0;
+}
+
+static void pl_profile_zone_grow(pl_thread* t) {
+  if (t->profile_zone_n < t->profile_zone_cap)
+    return;
+  size_t next = t->profile_zone_cap == 0 ? 8 : t->profile_zone_cap * 2;
+  ax_assume(next > t->profile_zone_cap &&
+                next <= SIZE_MAX / sizeof(*t->profile_zones),
+            "profile zone stack overflow");
+  pl_profile_zone* zones =
+      realloc(t->profile_zones, next * sizeof(*t->profile_zones));
+  ax_assume(zones != NULL, "oom");
+  t->profile_zones = zones;
+  t->profile_zone_cap = next;
+}
+
+pl_val pl_op83_zone_start(pl_thread* t, size_t ab) {
+  pl_val label = t->vstack[ab];
+  if (!pl_is_nat(label))
+    pl_raise_msg(t, "ZoneStart: expected nat label");
+  if (t->profile_next_generation > PL_NAT63_MAX)
+    pl_raise_msg(t, "ZoneStart: handle space exhausted");
+
+  size_t name_n = pl_nat_byte_len(label);
+  uint8_t* name = malloc(name_n == 0 ? 1 : name_n);
+  ax_assume(name != NULL, "oom");
+  for (size_t i = 0; i < name_n; i++)
+    name[i] = pl_nat_byte_at(label, i);
+
+  pl_profile_zone_grow(t);
+  uint64_t generation = t->profile_next_generation;
+  pl_val handle_arg = generation;
+  pl_gc_reserve(t, PL_APP_CELLS(1));
+  PL_GC_FORBID(t);
+  pl_val handle = pl_mk_app_from(t, 0, 1, &handle_arg);
+  PL_GC_ALLOW(t);
+
+  /* Re-parent the currently live law zones beneath the new explicit zone. */
+  pl_profile_close_above(t, 0);
+  pl_profile_zone* zone = &t->profile_zones[t->profile_zone_n++];
+  *zone = (pl_profile_zone){
+      .handle = handle,
+      .name = name,
+      .name_n = name_n,
+      .generation = generation,
+  };
+  t->profile_next_generation++;
+  pl_profile_zone_begin(t, zone);
+  pl_profile_reopen_above(t, 0);
+  return handle;
+}
+
+pl_val pl_op83_zone_end(pl_thread* t, size_t ab) {
+  pl_val handle = t->vstack[ab];
+  size_t found = t->profile_zone_n;
+  for (size_t i = 0; i < t->profile_zone_n; i++) {
+    if (t->profile_zones[i].handle == handle) {
+      found = i;
+      break;
+    }
+  }
+  if (found == t->profile_zone_n)
+    pl_raise_msg(t, "ZoneEnd: invalid handle");
+
+  /* Tracy and Chrome B/E events are properly nested.  Temporarily close
+   * younger zones when removing an older handle, then reopen the survivors. */
+  pl_profile_close_above(t, 0);
+  for (size_t i = t->profile_zone_n; i > found; i--)
+    pl_profile_zone_end(t, &t->profile_zones[i - 1]);
+  pl_profile_zone_release(&t->profile_zones[found]);
+  if (found + 1 < t->profile_zone_n) {
+    memmove(&t->profile_zones[found], &t->profile_zones[found + 1],
+            (t->profile_zone_n - found - 1) * sizeof(*t->profile_zones));
+  }
+  t->profile_zone_n--;
+  for (size_t i = found; i < t->profile_zone_n; i++)
+    pl_profile_zone_begin(t, &t->profile_zones[i]);
+  pl_profile_reopen_above(t, 0);
+  return 0;
+}
+
 /* ── Suspension slow path ──────────────────────────────────────────────── */
 
 /*
@@ -337,7 +519,7 @@ eval:
   if (ax_unlikely(--t->fuel == 0) && pl_yield_now(t)) {
     t->resume_kind = PL_RES_EVAL;
     t->resume_val = v;
-    pl_profile_close_above(t, base);
+    pl_profile_pause_all(t);
     return PL_RUN_YIELDED;
   }
   if (pl_is_whnf(v))
@@ -1225,7 +1407,7 @@ op_body:
         pl_raise_msg(t, "actor op with no executor");
       }
       t->blocked_on = r;
-      pl_profile_close_above(t, base);
+      pl_profile_pause_all(t);
       return PL_RUN_BLOCKED;
     }
     v = r;
@@ -1271,9 +1453,13 @@ static pl_run_status pl_run_caught(pl_thread* t, pl_val v0, size_t base,
         i--;
       if (i > base) {
         /* unwind to the barrier and deliver (1 exn) */
-        pl_profile_close_above(t, i);
+        uint64_t profile_mark = t->fstack[i - 1].profile_mark;
+        uint32_t argbase = t->fstack[i - 1].argbase;
+        pl_profile_pause_all(t);
         t->fsp = i - 1;
-        t->vsp = t->fstack[i - 1].argbase;
+        t->vsp = argbase;
+        pl_profile_drop_since_paused(t, profile_mark);
+        pl_profile_resume_all(t);
         pl_gc_reserve(t, PL_APP_CELLS(1));
         PL_GC_FORBID(t);
         v = pl_mk_app_from(t, 1, 1, &t->exn);
@@ -1284,9 +1470,12 @@ static pl_run_status pl_run_caught(pl_thread* t, pl_val v0, size_t base,
       }
     }
     /* uncaught within this entry: unwind it and propagate */
-    pl_profile_close_above(t, base);
+    pl_profile_pause_all(t);
     t->vsp = c.vsp;
     t->fsp = c.fsp;
+    pl_profile_drop_since_paused(t, c.profile_mark);
+    if (c.centry > 0)
+      pl_profile_resume_all(t);
     if (t->exn_msg != NULL)
       pl_raise_msg(t, t->exn_msg);
     pl_raise(t, t->exn);
@@ -1304,6 +1493,7 @@ void pl_thread_start(pl_thread* t, pl_val v) {
   t->resume_val = v;
   t->blocked_on = 0;
   t->pending_yield = false;
+  t->profile_run_mark = t->profile_next_generation;
   t->status = PL_RUN_YIELDED;
 }
 
@@ -1356,6 +1546,8 @@ pl_run_status pl_thread_run(pl_thread* t, uint64_t fuel) {
   t->fuel = fuel;
   t->pending_yield = false;
   t->suspendable = true;
+  uint64_t previous_profile_lane = pl_profile_active_lane;
+  pl_profile_active_lane = t->profile_lane;
 
   pl_catch c;
   pl_catch_init(t, &c);
@@ -1363,32 +1555,36 @@ pl_run_status pl_thread_run(pl_thread* t, uint64_t fuel) {
     /* uncaught at thread top level: unwind to the entry watermarks;
      * t->exn / t->exn_msg carry the payload */
     t->handler = c.prev;
+    pl_profile_pause_all(t);
     t->vsp = t->base_vsp;
     t->fsp = t->base_fsp;
+    pl_profile_drop_since_paused(t, t->profile_run_mark);
     t->centry_depth = 0;
     t->suspendable = false;
     t->fuel = UINT64_MAX;
     t->status = PL_RUN_EXN;
+    pl_profile_active_lane = previous_profile_lane;
     return PL_RUN_EXN;
   }
 
+  pl_profile_resume_all(t);
   pl_run_status s;
   switch (t->resume_kind) {
   case PL_RES_EVAL:
-    pl_profile_reopen_above(t, t->base_fsp);
     s = pl_run_caught(t, t->resume_val, t->base_fsp, false);
     break;
   case PL_RES_RETURN:
-    pl_profile_reopen_above(t, t->base_fsp);
     s = pl_run_caught(t, t->resume_val, t->base_fsp, true);
     break;
   default:
     ax_abort("pl_thread_run: bad resume kind %d", (int)t->resume_kind);
   }
   pl_catch_pop(t, &c);
+  pl_profile_pause_all(t);
   t->suspendable = false;
   t->fuel = UINT64_MAX;
   t->status = (uint8_t)s;
+  pl_profile_active_lane = previous_profile_lane;
   return s;
 }
 
@@ -1400,9 +1596,14 @@ pl_run_status pl_thread_run(pl_thread* t, uint64_t fuel) {
  * and can therefore never suspend.
  */
 static pl_val pl_run_centry(pl_thread* t, pl_val v, size_t base) {
+  bool outermost = t->centry_depth == 0 && !t->suspendable;
+  if (outermost)
+    pl_profile_resume_all(t);
   t->centry_depth++;
   pl_run_status s = pl_run_caught(t, v, base, false);
   t->centry_depth--;
+  if (outermost)
+    pl_profile_pause_all(t);
   ax_assume(s == PL_RUN_DONE, "C-entry run cannot suspend");
   return t->result;
 }
@@ -1419,6 +1620,7 @@ static pl_val pl_stress_drive(pl_thread* t, pl_val v, size_t base) {
   /* save any armed-but-not-running suspension state; vals stay rooted */
   size_t save_bvsp = t->base_vsp, save_bfsp = t->base_fsp;
   uint8_t save_kind = t->resume_kind, save_status = t->status;
+  uint64_t save_profile_mark = t->profile_run_mark;
   size_t mark = t->vsp;
   pl_vpush(t, t->resume_val);
   pl_vpush(t, t->blocked_on);
@@ -1430,6 +1632,7 @@ static pl_val pl_stress_drive(pl_thread* t, pl_val v, size_t base) {
   t->resume_val = v;
   t->blocked_on = 0;
   t->pending_yield = false;
+  t->profile_run_mark = t->profile_next_generation;
   t->status = PL_RUN_YIELDED;
 
   pl_run_status s;
@@ -1446,6 +1649,7 @@ static pl_val pl_stress_drive(pl_thread* t, pl_val v, size_t base) {
   t->base_fsp = save_bfsp;
   t->resume_kind = save_kind;
   t->status = save_status;
+  t->profile_run_mark = save_profile_mark;
 
   if (s == PL_RUN_EXN) {
     /* re-raise to the caller's handler, as the direct path would */

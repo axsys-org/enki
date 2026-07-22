@@ -1,10 +1,12 @@
 #include "plan/heap.h"
 
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "axsys/assume.h"
 #include "axsys/perf.h"
+#include "internal.h"
 #include "plan/store.h"
 
 typedef struct pl_root_entry {
@@ -349,6 +351,8 @@ void pl_gc_collect_now(pl_thread* t) {
 
 /* ── Thread ────────────────────────────────────────────────────────────── */
 
+static _Atomic uint64_t pl_next_profile_lane = 1;
+
 static void pl_thread_roots(pl_root_visit visit, void* gc_ctx, void* src_ctx) {
   pl_thread* t = src_ctx;
   for (size_t i = 0; i < t->vsp; i++)
@@ -361,6 +365,8 @@ static void pl_thread_roots(pl_root_visit visit, void* gc_ctx, void* src_ctx) {
   visit(&t->resume_val, gc_ctx);
   visit(&t->blocked_on, gc_ctx);
   visit(&t->result, gc_ctx);
+  for (size_t i = 0; i < t->profile_zone_n; i++)
+    visit(&t->profile_zones[i].handle, gc_ctx);
 }
 
 pl_thread* pl_thread_new(pl_heap* h) {
@@ -373,6 +379,10 @@ pl_thread* pl_thread_new(pl_heap* h) {
   t->fstack = malloc(t->fcap * sizeof(pl_frame));
   ax_assume(t->vstack != NULL && t->fstack != NULL, "oom");
   t->fuel = UINT64_MAX; /* fuel is inert outside pl_thread_run */
+  t->profile_next_generation = 1;
+  t->profile_lane =
+      atomic_fetch_add_explicit(&pl_next_profile_lane, 1, memory_order_relaxed);
+  ax_assume(t->profile_lane != 0, "profile lane id exhausted");
   pl_gc_add_root_source(h, pl_thread_roots, t);
   return t;
 }
@@ -380,6 +390,7 @@ pl_thread* pl_thread_new(pl_heap* h) {
 void pl_thread_free(pl_thread* t) {
   if (t == NULL)
     return;
+  pl_profile_thread_free(t);
   pl_gc_del_root_source(t->heap, pl_thread_roots, t);
   free(t->vstack);
   free(t->fstack);

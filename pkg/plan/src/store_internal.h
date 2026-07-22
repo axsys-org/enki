@@ -7,6 +7,18 @@
 #include "plan/value.h"
 #include "silo_internal.h"
 
+typedef struct pl_store_profile_scope {
+  uint64_t lane;
+  uint64_t span;
+  const uint8_t* name;
+  size_t name_n;
+  bool active;
+} pl_store_profile_scope;
+
+/* Chrome Trace span shared by store.c and the serializer in pin.c. */
+pl_store_profile_scope pl_store_profile_begin(const char* name, size_t name_n);
+void pl_store_profile_end(pl_store_profile_scope* scope);
+
 pl_cell* pl_store_alloc(pl_store* s, size_t cells);
 size_t pl_store_mark(pl_store* s);
 void pl_store_release(pl_store* s, size_t mark);
