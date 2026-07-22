@@ -7,6 +7,18 @@
 #include "plan/value.h"
 #include "silo_internal.h"
 
+typedef struct pl_store_profile_scope {
+  uint64_t lane;
+  uint64_t span;
+  const uint8_t* name;
+  size_t name_n;
+  bool active;
+} pl_store_profile_scope;
+
+/* Chrome Trace span shared by store.c and the serializer in pin.c. */
+pl_store_profile_scope pl_store_profile_begin(const char* name, size_t name_n);
+void pl_store_profile_end(pl_store_profile_scope* scope);
+
 pl_cell* pl_store_alloc(pl_store* s, size_t cells);
 size_t pl_store_mark(pl_store* s);
 void pl_store_release(pl_store* s, size_t mark);
@@ -14,6 +26,8 @@ void pl_store_release(pl_store* s, size_t mark);
 void pl_store_lock(pl_store* s);
 void pl_store_unlock(pl_store* s);
 bool pl_store_trylock(pl_store* s);
+void pl_store_save_lock(pl_store* s);
+void pl_store_save_unlock(pl_store* s);
 
 pl_val pl_store_intern_get(pl_store* s, const uint8_t hash[32]);
 void pl_store_intern_put(pl_store* s, const uint8_t hash[32], pl_val pin);
@@ -43,6 +57,13 @@ void pl_store_silo_close_reader(pl_silo_reader* r);
 
 pl_val pl_store_mk_pin(pl_store* s, const uint8_t* hash, pl_val body,
                        uint32_t npins, const pl_val* subpins);
+
+/* Fixed-size, closed, non-persistent PIN proxy.  Store proxies are deliberately
+ * absent from the intern table, canonical PIN list, and code indexes. */
+pl_val pl_store_mk_proxy(pl_store* s, pl_val body);
+
+/* Publish a fully initialized canonical store PIN in the runtime indexes. */
+void pl_store_register_canonical(pl_store* s, pl_val pin);
 
 /* Intern the pin of a small nat (used for the op-66 row exprs). */
 pl_val pl_store_pin_of_nat(pl_store* s, uint64_t n);

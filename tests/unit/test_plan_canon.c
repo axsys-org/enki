@@ -83,6 +83,12 @@ Test(canon, pin_of_nat) {
   pl_vpush(t, 42);
   pl_val pin = pl_pin(t, t->vstack[base]);
   char* s = pl_show_val(ax_allocator_system(), pin, NULL);
+  cr_assert_str_eq(s, "liquid");
+  ax_free(ax_allocator_system(), s);
+  char err[192] = {0};
+  cr_assert(pl_store_save_root(rt.store, pin, NULL, err, sizeof(err)), "%s",
+            err);
+  s = pl_show_val(ax_allocator_system(), pin, NULL);
   cr_assert_str_eq(s, "(#pin 42)");
   ax_free(ax_allocator_system(), s);
   test_rt_free(&rt);
@@ -95,6 +101,9 @@ Test(canon, canonize_module_text) {
   /* pin a law with no sub-pins: the snapshot has no imports. */
   pl_vpush(t, test_law(t, 1, (pl_val)'h', test_app2(t, 0, 1, 1)));
   pl_val pin = pl_pin(t, t->vstack[base]);
+  char err[192] = {0};
+  cr_assert(pl_store_save_root(rt.store, pin, NULL, err, sizeof(err)), "%s",
+            err);
   char* s = pl_canonize(ax_allocator_system(), pin, NULL);
   cr_assert_str_eq(s,
                    "(#bind _ (#pin (#law \"h\" (h a) (a a))))\n(#export _)\n");
@@ -102,16 +111,30 @@ Test(canon, canonize_module_text) {
   test_rt_free(&rt);
 }
 
-Test(canon, pin_hash_is_canonical_text) {
-  /* The legacy memory-store pin hash is SHA-256 of canonical text:
-   * re-pinning a structurally identical graph interns to the same pin. */
+Test(canon, saved_pin_hash_is_canonical_text) {
+  /* Save hashes legacy PINs from canonical text and aliases structurally equal
+   * proxies to the same canonical store representative. */
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
   size_t base = t->vsp;
   pl_vpush(t, test_law(t, 1, (pl_val)'h', test_app2(t, 0, 1, 1)));
   pl_vpush(t, test_law(t, 1, (pl_val)'h', test_app2(t, 0, 1, 1)));
-  pl_val p1 = pl_pin(t, t->vstack[base]);
-  pl_val p2 = pl_pin(t, t->vstack[base + 1]);
-  cr_assert_eq(p1, p2);
+  /* Public PINs move with the heap until Save resolves them.  Keep the first
+   * proxy rooted while constructing the second, especially in GC_STRESS. */
+  t->vstack[base] = pl_pin(t, t->vstack[base]);
+  t->vstack[base + 1] = pl_pin(t, t->vstack[base + 1]);
+  pl_val p1 = t->vstack[base];
+  pl_val p2 = t->vstack[base + 1];
+  cr_assert_neq(p1, p2);
+  cr_assert_null(pl_pin_hash(p1));
+  cr_assert_null(pl_pin_hash(p2));
+  char err[192] = {0};
+  cr_assert(pl_store_save_root(rt.store, p1, NULL, err, sizeof(err)), "%s",
+            err);
+  cr_assert(pl_store_save_root(rt.store, p2, NULL, err, sizeof(err)), "%s",
+            err);
+  cr_assert_eq(memcmp(pl_pin_hash(p1), pl_pin_hash(p2), 32), 0);
+  cr_assert_eq(pl_pin_proxy_target(pl_ptr(p1)),
+               pl_pin_proxy_target(pl_ptr(p2)));
   test_rt_free(&rt);
 }

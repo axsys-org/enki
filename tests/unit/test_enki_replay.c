@@ -94,6 +94,26 @@ static pl_val recv_code(pl_thread* t) {
   return code_effect(t, ax_s4('R', 'e', 'c', 'v'), 1, args);
 }
 
+static er_actor* start_recv_actor(er_scheduler* sys) {
+  er_actor* a = er_scheduler_actor(sys);
+  pl_thread* t = er_actor_thread(a);
+  size_t base = t->vsp;
+  pl_vpush(t, recv_code(t));
+  pl_val fn = actor_fn(t, t->vstack[base]);
+  t->vsp = base;
+  er_actor_start(a, fn);
+  return a;
+}
+
+static pl_val recv_result_payload(er_actor* a) {
+  cr_assert_eq(er_actor_state(a), ER_ACTOR_HALTED);
+  pl_cell* row = pl_as(PL_TAG_APP, er_actor_result(a));
+  cr_assert_not_null(row);
+  cr_assert_eq(pl_app_head(row), 0);
+  cr_assert_eq(pl_app_n(row), 2);
+  return pl_app_args(row)[0];
+}
+
 /* An actor whose result is the ReadFile bar of `path`. */
 static void start_readfile_actor(er_scheduler* sys, const char* path) {
   er_actor* a = er_scheduler_actor(sys);
@@ -343,6 +363,92 @@ Test(replay, injections_are_logged_and_verified) {
     cr_assert_eq(er_scheduler_log_cursor(sys), 1);
     er_scheduler_free(sys);
   }
+  er_log_free(log);
+  test_rt_free(&rt);
+}
+
+Test(replay, live_injection_accepts_non_pin_store_snapshot) {
+  test_rt rt = test_rt_new();
+  pl_thread* host = rt.t;
+  size_t base = host->vsp;
+  pl_vpush(host, test_app2(host, 0, 17, 23));
+  host->vstack[base] = pl_nf(host, host->vstack[base]);
+  pl_val payload = pl_store_snapshot_normal(host, host->vstack[base]);
+  host->vsp = base;
+  cr_assert_eq(pl_tag(payload), PL_TAG_APP);
+  cr_assert(pl_store_owns(rt.store, payload));
+
+  er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
+  er_actor* a = start_recv_actor(sys);
+  cr_assert_eq(er_scheduler_run(sys), ER_RUN_QUIESCENT);
+  er_scheduler_inject(sys, a, payload);
+  cr_assert_eq(er_scheduler_run(sys), ER_RUN_IDLE);
+
+  pl_val received = recv_result_payload(a);
+  cr_assert_eq(received, payload);
+  pl_cell* pair = pl_as(PL_TAG_APP, received);
+  cr_assert_not_null(pair);
+  cr_assert_eq(pl_app_head(pair), 0);
+  cr_assert_eq(pl_app_n(pair), 2);
+  cr_assert_eq(pl_app_args(pair)[0], 17);
+  cr_assert_eq(pl_app_args(pair)[1], 23);
+
+  er_scheduler_free(sys);
+  test_rt_free(&rt);
+}
+
+Test(replay, hashed_canonical_pin_injection_records_and_replays) {
+  test_rt rt = test_rt_new();
+  pl_thread* host = rt.t;
+  size_t base = host->vsp;
+  pl_vpush(host, test_app2(host, 0, 31, 37));
+  host->vstack[base] = pl_pin(host, host->vstack[base]);
+  uint8_t hash[32];
+  char err[192] = {0};
+  cr_assert(
+      pl_store_save_root(rt.store, host->vstack[base], hash, err, sizeof(err)),
+      "%s", err);
+  pl_val recorded_payload = pl_store_snapshot_normal(host, host->vstack[base]);
+  host->vsp = base;
+  cr_assert_eq(pl_tag(recorded_payload), PL_TAG_PIN);
+  cr_assert(pl_store_owns(rt.store, recorded_payload));
+  cr_assert(pl_pin_is_hashed(recorded_payload));
+  cr_assert_eq(memcmp(pl_pin_hash(recorded_payload), hash, sizeof(hash)), 0);
+
+  er_log* log = er_log_new();
+  {
+    er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
+    er_scheduler_record(sys, log);
+    er_actor* a = start_recv_actor(sys);
+    cr_assert_eq(er_scheduler_run(sys), ER_RUN_QUIESCENT);
+    er_scheduler_inject(sys, a, recorded_payload);
+    cr_assert_eq(er_scheduler_run(sys), ER_RUN_IDLE);
+    pl_val received = recv_result_payload(a);
+    cr_assert_eq(pl_tag(received), PL_TAG_PIN);
+    cr_assert_eq(memcmp(pl_pin_hash(received), hash, sizeof(hash)), 0);
+    er_scheduler_free(sys);
+  }
+  cr_assert_eq(er_log_events(log), 1);
+
+  {
+    pl_val replay_payload = pl_store_load(host, hash);
+    cr_assert_eq(pl_tag(replay_payload), PL_TAG_PIN);
+    cr_assert(pl_store_owns(rt.store, replay_payload));
+    cr_assert(pl_pin_is_hashed(replay_payload));
+
+    er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
+    er_scheduler_replay(sys, log);
+    er_actor* a = start_recv_actor(sys);
+    cr_assert_eq(er_scheduler_run(sys), ER_RUN_QUIESCENT);
+    er_scheduler_inject(sys, a, replay_payload);
+    cr_assert_eq(er_scheduler_run(sys), ER_RUN_IDLE);
+    pl_val received = recv_result_payload(a);
+    cr_assert_eq(pl_tag(received), PL_TAG_PIN);
+    cr_assert_eq(memcmp(pl_pin_hash(received), hash, sizeof(hash)), 0);
+    cr_assert_eq(er_scheduler_log_cursor(sys), 1);
+    er_scheduler_free(sys);
+  }
+
   er_log_free(log);
   test_rt_free(&rt);
 }

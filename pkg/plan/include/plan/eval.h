@@ -68,6 +68,11 @@ void pl_thread_start_call_nf(pl_thread* t, pl_val f, pl_val x);
  */
 pl_run_status pl_thread_run(pl_thread* t, uint64_t fuel);
 
+/* Abandon a stopped PL_RUN_BLOCKED computation and unwind its stacks and
+ * run-local profiling zones to the entry watermarks.  The thread remains
+ * blocked and must be re-armed with pl_thread_start before it can run again. */
+void pl_thread_abandon(pl_thread* t);
+
 /* Deposit an effect response into a PL_RUN_BLOCKED thread: the
  * machine resumes by RETURNing the response (a WHNF) to the pending
  * frame.  Coordination ops (op 82 Spawn/Send/SendCaps/Recv/CloseHandle)
@@ -125,7 +130,8 @@ typedef struct pl_catch {
   jmp_buf jb;
   jmp_buf* prev;
   size_t vsp, fsp;
-  uint32_t centry; /* centry_depth watermark; restored on unwind */
+  uint32_t centry;       /* centry_depth watermark; restored on unwind */
+  uint64_t profile_mark; /* ZoneStart generation watermark */
 } pl_catch;
 
 void pl_catch_init(pl_thread* t, pl_catch* c);

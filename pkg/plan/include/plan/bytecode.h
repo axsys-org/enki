@@ -23,5 +23,6 @@ typedef enum pl_op {
 } pl_op;
 
 pl_code* pl_bytecode_from_val(pl_val val);
+void pl_bytecode_free(pl_code* code);
 
 #endif

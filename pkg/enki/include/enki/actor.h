@@ -24,7 +24,7 @@
  * headers still describe the wire form.
  *
  * Messaging: payloads cross actors only as store-resident
- * values — the sender pins at send, the mailbox holds store addresses,
+ * values — the sender snapshots at send, the mailbox holds store addresses,
  * the receiver's heap points into the shared immutable store.  PLAN
  * code addresses actors through per-actor handle tables; handle 0 is
  * self, fresh handles are minted by Spawn and by cap transfer in Recv.
@@ -47,12 +47,16 @@ typedef enum {
 } er_actor_status;
 
 typedef struct er_config {
-  uint64_t quantum;        /* fuel per slice (>= 2); 0 = default */
+  /* Worker/deterministic fuel per slice (>= 2); zero uses the default. */
+  uint64_t quantum;
   size_t heap_cells;       /* per-actor semispace cells; 0 = default (8192) */
   const char* file_root_c; /* spawned actors' ReadFile/ReadFolder jail */
   /* HTTP driver (op 83 Fetch) */
   long http_max_total_connections;  /* CURLM connection cap; 0 = curl default */
   uint64_t http_connect_default_ms; /* connectMs None default; 0 = 10000 */
+  /* MT adopted-root fuel per slice (>= 2).  Zero reads ENKI_ROOT_QUANTUM,
+   * then conservatively inherits quantum when the variable is unset. */
+  uint64_t root_quantum;
 } er_config;
 
 er_scheduler* er_scheduler_new(pl_store* store, er_config cfg);
@@ -84,8 +88,10 @@ typedef enum {
 } er_drive_status;
 
 /* Run the system until the adopted actor's armed computation leaves the
- * runnable set; spawned actors are scheduled and serviced along the
- * way and survive (parked or runnable) across drives. */
+ * runnable set; spawned actors are scheduled and serviced along the way and
+ * survive (parked or runnable) across drives.  After ER_DRIVE_EXN or
+ * ER_DRIVE_DEADLOCK the current continuation and its run-local profiling zones
+ * are discarded; re-arm the adopted thread before driving it again. */
 er_drive_status er_scheduler_drive(er_scheduler* sys, er_actor* root);
 
 typedef enum {
@@ -105,20 +111,23 @@ typedef struct er_mt_config {
  * objects created by the API above but may run different scheduler-owned
  * actors on different OS threads.  er_mt_executor_drive keeps the adopted
  * root actor on the caller thread while a persistent worker pool runs spawned
- * actors in parallel.  The first RPLAN effect (any op set >= 82) permanently
- * binds a spawned actor to its current worker.  That worker runs no other
- * actor; the executor replaces it in the shared pool so a blocking syscall
- * cannot strand unrelated actors.  Finished dedicated workers are retained
- * as spares and reused by later effectful actors.
+ * actors in parallel.  The first descriptor-marked host effect permanently
+ * binds a spawned actor to its current worker.  Profiling-only op-83 work does
+ * not bind.  That worker runs no other actor; the executor replaces it in the
+ * shared pool so a blocking syscall cannot strand unrelated actors.  Finished
+ * dedicated workers are retained as spares and reused by later effectful
+ * actors.
  *
  * One executor may be attached to a scheduler at a time.  Its threads persist
  * across run/drive calls and are joined by er_mt_executor_free; free the
  * executor before the scheduler.  While it is attached, use its run/drive
  * functions exclusively; effectful actors retain worker affinity between
- * calls.  The deterministic er_scheduler_run / er_scheduler_drive paths
- * remain the replay-capable reference executor after the MT executor is freed;
- * record/replay mode is intentionally rejected here because concurrent
- * direct-effect ordering is nondeterministic.
+ * calls.  er_mt_executor_drive has the same adopted-root completion and
+ * abandonment contract as er_scheduler_drive.  The deterministic
+ * er_scheduler_run / er_scheduler_drive paths remain the replay-capable
+ * reference executor after the MT executor is freed; record/replay mode is
+ * intentionally rejected here because concurrent direct-effect ordering is
+ * nondeterministic.
  */
 er_mt_executor* er_mt_executor_new(er_scheduler* sys, er_mt_config cfg);
 void er_mt_executor_free(er_mt_executor* ex);
@@ -127,11 +136,14 @@ er_drive_status er_mt_executor_drive(er_mt_executor* ex, er_actor* root);
 
 /*
  * Host injection: append a message to an actor's mailbox (waking it if
- * receive-blocked).  The payload must already be shareable — a nat63 or
- * a store-resident value (e.g. obtained via pl_pin) — since it enters
- * the actor's heap without copying.  Host threads may inject concurrently
- * with an active MT run/drive call.  With the deterministic executor, inject
- * only between run/drive calls.
+ * receive-blocked).  In live mode the payload must already be shareable — a
+ * nat63 or any value owned by the scheduler's store (e.g. loaded or explicitly
+ * snapshotted) — since it enters the actor's heap without copying.  Recorded
+ * and replayed injections have a narrower portable encoding: the payload must
+ * be a nat63 or a persistently hashed canonical store PIN.  Unhashed PINs and
+ * non-PIN store snapshots cannot be recorded or replayed.  Host threads may
+ * inject concurrently with an active MT run/drive call.  With the
+ * deterministic executor, inject only between run/drive calls.
  */
 void er_scheduler_inject(er_scheduler* sys, er_actor* to, pl_val payload);
 
@@ -171,9 +183,11 @@ pl_val er_actor_result(er_actor* a);
  * same store contents, same embedder script); direct effects
  * perform no syscalls — the logged result is substituted after the
  * (actor, op, args-hash) of the site is verified against the log, and
- * er_scheduler_inject verifies injections likewise.  Any mismatch is a
- * divergence and aborts.  Replay reproduces state, not side effects:
- * Output/Print/Warn write nothing.
+ * er_scheduler_inject verifies injections likewise.  Injection events encode
+ * a nat63 by value or a persistently hashed canonical store PIN by hash;
+ * arbitrary store snapshots accepted in live mode are not record/replay
+ * payloads.  Any mismatch is a divergence and aborts.  Replay reproduces
+ * state, not side effects: Output/Print/Warn write nothing.
  *
  * Limitation: a direct effect that raises a host error (bad handle,
  * failed socket) crashes its actor before a record is appended, so a

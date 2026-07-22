@@ -12,6 +12,10 @@
 #include "enki/actor.h"
 #include "test_plan.h"
 
+/* Configuration assertions intentionally inspect the scheduler's resolved
+ * values; execution behavior remains covered through the public API below. */
+#include "../../pkg/enki/src/actor_internal.h"
+
 /*
  * Actor runtime: er_scheduler drives er_actors — each one
  * deep normalization of (fn 0) — servicing the op-82 coordination
@@ -107,10 +111,40 @@ static pl_val sleep_code(pl_thread* t, uint64_t seconds) {
   return code_effect83(t, ax_s5('S', 'l', 'e', 'e', 'p'), 1, args);
 }
 
+static pl_val zone_start_code(pl_thread* t, pl_val label) {
+  size_t base = t->vsp;
+  pl_vpush(t, label);
+  pl_vpush(t, pl_nat_from_bytes(t, (const uint8_t*)"ZoneStart", 9));
+  pl_val args[1] = {t->vstack[base]};
+  pl_val out = code_effect83(t, t->vstack[base + 1], 1, args);
+  t->vsp = base;
+  return out;
+}
+
+/* Arm an adopted root to deep-normalize (actor_fn body % 0). */
+static void root_start_body(pl_thread* t, pl_val body) {
+  size_t base = t->vsp;
+  pl_vpush(t, body);
+  pl_val fn = actor_fn(t, t->vstack[base]);
+  t->vsp = base;
+  pl_thread_start_call_nf(t, fn, 0);
+}
+
 static double monotonic_seconds(void) {
   struct timespec ts;
   cr_assert_eq(clock_gettime(CLOCK_MONOTONIC, &ts), 0);
   return (double)ts.tv_sec + (double)ts.tv_nsec / 1000000000.0;
+}
+
+typedef struct mt_run_task {
+  er_mt_executor* ex;
+  er_run_reason reason;
+} mt_run_task;
+
+static void* mt_run_task_main(void* arg) {
+  mt_run_task* task = arg;
+  task->reason = er_mt_executor_run(task->ex);
+  return NULL;
 }
 
 static bool nat_text_eq(pl_val value, const char* text) {
@@ -299,6 +333,142 @@ Test(actor, mt_multiple_actors_halt) {
   test_rt_free(&rt);
 }
 
+Test(actor, mt_profile_only_actor_does_not_bind_worker) {
+  test_rt rt = test_rt_new();
+  er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
+  er_actor* a = er_scheduler_actor(sys);
+  pl_thread* t = er_actor_thread(a);
+  size_t base = t->vsp;
+  pl_vpush(t, zone_start_code(t, 21));
+  pl_val fn = actor_fn(t, t->vstack[base]);
+  t->vsp = base;
+  er_actor_start(a, fn);
+
+  er_mt_executor* ex = er_mt_executor_new(sys, (er_mt_config){.workers = 1});
+  cr_assert_eq(er_mt_executor_run(ex), ER_RUN_IDLE);
+  cr_assert_eq(er_actor_state(a), ER_ACTOR_HALTED);
+  cr_assert_not(a->effectful);
+
+  size_t worker_n = 0;
+  for (er_mt_worker* w = ex->worker_head; w != NULL; w = w->next)
+    worker_n++;
+  cr_assert_eq(worker_n, 1,
+               "profiling-only actor grew the executor worker pool");
+
+  er_mt_executor_free(ex);
+  er_scheduler_free(sys);
+  test_rt_free(&rt);
+}
+
+Test(actor, mt_bound_spawn_wakes_general_worker_without_broadcast,
+     .timeout = 4) {
+  int pipe_fd[2];
+  cr_assert_eq(pipe(pipe_fd), 0);
+  size_t read_handle = ax_fd_add(pipe_fd[0]);
+  size_t write_handle = ax_fd_add(pipe_fd[1]);
+  cr_assert_neq(read_handle, AX_FD_INVALID);
+  cr_assert_neq(write_handle, AX_FD_INVALID);
+
+  test_rt rt = test_rt_new();
+  er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
+  er_actor* parent = er_scheduler_actor(sys);
+  pl_thread* t = er_actor_thread(parent);
+  size_t base = t->vsp;
+  pl_vpush(t, recv_code(t));
+  pl_val read_args[2] = {read_handle, 1};
+  pl_vpush(t, code_effect(t, ax_s4('R', 'e', 'a', 'd'), 2, read_args));
+  pl_vpush(t, actor_fn(t, 7));
+  pl_val spawn_args[1] = {t->vstack[base + 2]};
+  pl_vpush(t, code_effect(t, ax_s5('S', 'p', 'a', 'w', 'n'), 1, spawn_args));
+  pl_vpush(t, code_seq(t, t->vstack[base + 1], t->vstack[base + 3]));
+  pl_val body = code_seq(t, t->vstack[base], t->vstack[base + 4]);
+  t->vsp = base;
+  er_actor_start(parent, actor_fn(t, body));
+
+  /* Recv binds the parent to the only original worker and leaves the
+   * replacement general worker parked between executor generations. */
+  er_mt_executor* ex = er_mt_executor_new(sys, (er_mt_config){.workers = 1});
+  cr_assert_eq(er_mt_executor_run(ex), ER_RUN_QUIESCENT);
+  cr_assert_eq(er_actor_state(parent), ER_ACTOR_BLOCKED);
+
+  /* On the second generation the replacement runs sentinel while the bound
+   * parent waits in Read.  The general worker holds sys->mu continuously from
+   * marking sentinel HALTED until it waits on sys->cv, so observing HALTED
+   * under that mutex proves the worker has reached the shared-cv wait. */
+  er_actor* sentinel = er_scheduler_actor(sys);
+  er_actor_start(sentinel, actor_fn(er_actor_thread(sentinel), 9));
+  er_scheduler_inject(sys, parent, 123);
+  mt_run_task task = {.ex = ex};
+  pthread_t runner;
+  cr_assert_eq(pthread_create(&runner, NULL, mt_run_task_main, &task), 0);
+
+  for (;;) {
+    pthread_mutex_lock(&sys->mu);
+    if (sentinel->status == ER_ACTOR_HALTED)
+      break;
+    pthread_mutex_unlock(&sys->mu);
+    struct timespec pause = {.tv_sec = 0, .tv_nsec = 1000000};
+    (void)nanosleep(&pause, NULL);
+  }
+  cr_assert(ex->running);
+  cr_assert_null(sys->qhead);
+  uint8_t byte = 42;
+  cr_assert_eq(write(pipe_fd[1], &byte, 1), 1);
+  pthread_mutex_unlock(&sys->mu);
+
+  cr_assert_eq(pthread_join(runner, NULL), 0);
+  cr_assert_eq(task.reason, ER_RUN_IDLE);
+  cr_assert_eq(er_actor_state(parent), ER_ACTOR_HALTED);
+  cr_assert_eq(er_actor_result(parent), 1);
+  cr_assert_eq(er_actor_state(sentinel), ER_ACTOR_HALTED);
+  cr_assert_eq(er_actor_result(sentinel), 9);
+  er_actor* child = er_scheduler_actor_by_id(sys, 2);
+  cr_assert_not_null(child);
+  cr_assert_eq(er_actor_state(child), ER_ACTOR_HALTED);
+  cr_assert_eq(er_actor_result(child), 7);
+
+  er_mt_executor_free(ex);
+  er_scheduler_free(sys);
+  test_rt_free(&rt);
+  cr_assert_eq(ax_fd_close(read_handle), 0);
+  cr_assert_eq(ax_fd_close(write_handle), 0);
+}
+
+Test(actor, root_quantum_config_environment_and_precedence) {
+  const char* old_c = getenv("ENKI_ROOT_QUANTUM");
+  char* old = old_c == NULL ? NULL : strdup(old_c);
+  cr_assert(old_c == NULL || old != NULL);
+  cr_assert_eq(unsetenv("ENKI_ROOT_QUANTUM"), 0);
+
+  test_rt rt = test_rt_new();
+  er_scheduler* inherited =
+      er_scheduler_new(rt.store, (er_config){.quantum = 17});
+  cr_assert_eq(inherited->cfg.quantum, 17);
+  cr_assert_eq(inherited->cfg.root_quantum, 17);
+  er_scheduler_free(inherited);
+
+  cr_assert_eq(setenv("ENKI_ROOT_QUANTUM", "257", 1), 0);
+  er_scheduler* from_env =
+      er_scheduler_new(rt.store, (er_config){.quantum = 17});
+  cr_assert_eq(from_env->cfg.quantum, 17);
+  cr_assert_eq(from_env->cfg.root_quantum, 257);
+  er_scheduler_free(from_env);
+
+  er_scheduler* explicit = er_scheduler_new(
+      rt.store, (er_config){.quantum = 17, .root_quantum = 33});
+  cr_assert_eq(explicit->cfg.quantum, 17);
+  cr_assert_eq(explicit->cfg.root_quantum, 33);
+  er_scheduler_free(explicit);
+  test_rt_free(&rt);
+
+  if (old != NULL) {
+    cr_assert_eq(setenv("ENKI_ROOT_QUANTUM", old, 1), 0);
+    free(old);
+  } else {
+    cr_assert_eq(unsetenv("ENKI_ROOT_QUANTUM"), 0);
+  }
+}
+
 Test(actor, mt_blocking_effect_replenishes_shared_pool, .timeout = 4) {
   test_rt rt = test_rt_new();
   er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
@@ -390,6 +560,80 @@ Test(actor, mt_recv_blocks_until_injection) {
   er_mt_executor_free(ex);
   er_scheduler_free(sys);
   test_rt_free(&rt);
+}
+
+static er_drive_status drive_adopted(er_scheduler* sys, er_mt_executor* ex,
+                                     er_actor* root) {
+  return ex == NULL ? er_scheduler_drive(sys, root)
+                    : er_mt_executor_drive(ex, root);
+}
+
+static void run_adopted_root_abandon_zones(bool mt) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  t->rplan_f = true;
+  er_scheduler* sys =
+      er_scheduler_new(rt.store, (er_config){.quantum = 2, .root_quantum = 2});
+  er_mt_executor* ex =
+      mt ? er_mt_executor_new(sys, (er_mt_config){.workers = 1}) : NULL;
+  er_actor* root = er_scheduler_adopt(sys, t);
+
+  /* A zone from a completed run is host-scoped and must survive abandoning
+   * either of the later runs.  Root its handle across all allocations. */
+  size_t outer_slot = t->vsp;
+  root_start_body(t, zone_start_code(t, 11));
+  cr_assert_eq(drive_adopted(sys, ex, root), ER_DRIVE_DONE);
+  pl_vpush(t, pl_thread_result(t));
+  cr_assert_eq(t->profile_zone_n, 1);
+  cr_assert_eq(t->profile_zones[0].handle, t->vstack[outer_slot]);
+
+  /* Deadlock abandons a continuation parked on Recv. */
+  size_t run_vsp = t->vsp;
+  size_t run_fsp = t->fsp;
+  pl_vpush(t, zone_start_code(t, 12));
+  pl_vpush(t, recv_code(t));
+  pl_val body = code_seq(t, t->vstack[run_vsp], t->vstack[run_vsp + 1]);
+  t->vsp = run_vsp;
+  root_start_body(t, body);
+  cr_assert_eq(drive_adopted(sys, ex, root), ER_DRIVE_DEADLOCK);
+  cr_assert_eq(t->vsp, run_vsp);
+  cr_assert_eq(t->fsp, run_fsp);
+  cr_assert_eq(t->profile_zone_n, 1);
+  cr_assert_eq(t->profile_zones[0].handle, t->vstack[outer_slot]);
+
+  /* A service-detected crash abandons the same kind of parked continuation. */
+  pl_vpush(t, zone_start_code(t, 13));
+  pl_val send_args[2] = {99, 7};
+  pl_vpush(t, code_effect(t, ax_s4('S', 'e', 'n', 'd'), 2, send_args));
+  body = code_seq(t, t->vstack[run_vsp], t->vstack[run_vsp + 1]);
+  t->vsp = run_vsp;
+  root_start_body(t, body);
+  cr_assert_eq(drive_adopted(sys, ex, root), ER_DRIVE_EXN);
+  cr_assert_str_eq(t->exn_msg, "invalid actor handle");
+  cr_assert_eq(t->vsp, run_vsp);
+  cr_assert_eq(t->fsp, run_fsp);
+  cr_assert_eq(t->profile_zone_n, 1);
+  cr_assert_eq(t->profile_zones[0].handle, t->vstack[outer_slot]);
+
+  /* The embedder can immediately re-arm the adopted root after either
+   * abandonment path; no discarded zone may reopen on this run. */
+  pl_thread_start(t, 42);
+  cr_assert_eq(drive_adopted(sys, ex, root), ER_DRIVE_DONE);
+  cr_assert_eq(pl_thread_result(t), 42);
+  cr_assert_eq(t->profile_zone_n, 1);
+  cr_assert_eq(t->profile_zones[0].handle, t->vstack[outer_slot]);
+
+  er_mt_executor_free(ex);
+  er_scheduler_free(sys);
+  test_rt_free(&rt);
+}
+
+Test(actor, adopted_root_abandon_drops_current_run_zones) {
+  run_adopted_root_abandon_zones(false);
+}
+
+Test(actor, mt_adopted_root_abandon_drops_current_run_zones, .timeout = 10) {
+  run_adopted_root_abandon_zones(true);
 }
 
 Test(actor, mt_free_detaches_bound_actor) {

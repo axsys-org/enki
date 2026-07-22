@@ -17,6 +17,7 @@
 #include "plan/value.h"
 #include "plan/nat.h"
 #include "plan/store.h"
+#include "store_internal.h"
 
 /*
  * Primops, normative semantics from the Haskell reference (Plan.hs).
@@ -482,6 +483,10 @@ static pl_val op_slice(pl_thread* t, size_t ab) {
   uint64_t rsz = sz - o < n ? sz - o : n;
   if (rsz == 0)
     return 0;
+  /* Slice resets the result head to 0.  A complete slice of a row that
+   * already has that head is therefore the exact result. */
+  if (o == 0 && rsz == sz && pl_app_head(p) == 0)
+    return ARG(2);
   pl_gc_reserve(t, PL_APP_CELLS(rsz));
   PL_GC_FORBID(t);
   pl_val r =
@@ -634,6 +639,7 @@ static pl_val op_try(pl_thread* t, size_t ab) {
   pl_frame* fr = pl_fpush(t);
   fr->kind = PL_F_TRY;
   fr->argbase = (uint32_t)(ab - 1); /* vsp to restore on exn delivery */
+  fr->profile_mark = t->profile_next_generation;
   pl_push_nf(t);
   pl_push_apply(t, ARG(1));
   return ARG(0);
@@ -707,9 +713,12 @@ static pl_val op_install(pl_thread* t, size_t ab) {
   if (hash == NULL)
     pl_raise_msg(t, "Install: compiler PIN must be saved first");
   pl_store* s = pl_heap_store(t->heap);
-  s->compiler_h = pl_heap_new(((size_t)1 << 26), s);
-  s->compiler_t = pl_thread_new(s->compiler_h);
-  pl_store_put_compiler(s, hash);
+  pl_store_lock(s);
+  bool replacing_self = t == s->compiler_t;
+  pl_store_unlock(s);
+  if (replacing_self)
+    pl_raise_msg(t, "Install: compiler cannot replace its own machine");
+  (void)pl_store_put_compiler(s, hash);
   return 1;
 }
 
@@ -765,11 +774,10 @@ static pl_val op_save(pl_thread* t, size_t ab) {
   if (pp == NULL)
     pl_raise_msg(t, "Save: expected a pin");
   pl_store* store = pl_heap_store(t->heap);
+  char err[192] = {0};
+  if (!pl_store_save_root(store, ARG(0), NULL, err, sizeof(err)))
+    pl_raise_msgf(t, "Save: %s", err[0] != '\0' ? err : "store failure");
   if (store->format == PL_STORE_FORMAT_SILO_V1) {
-    char err[192] = {0};
-    if (!pl_store_save_root(store, ARG(0), NULL, err, sizeof(err)))
-      pl_raise_msgf(t, "Save: %s", err[0] != '\0' ? err : "Silo failure");
-    pl_gc_collect_now(t);
     return 0;
   }
 
@@ -784,7 +792,6 @@ static pl_val op_save(pl_thread* t, size_t ab) {
   fprintf(f, "@%s\n", b58);
   if (fclose(f) != 0)
     pl_raise_msg(t, "Save: short write");
-  pl_gc_collect_now(t);
   return 0;
 }
 
@@ -797,22 +804,25 @@ static pl_val op_load(pl_thread* t, size_t ab) {
 
 #define M2(a, b) ax_s2(a, b)
 #define OP66(name, argc, mask, deep, body)                                     \
-  {66, name, NULL, argc, mask, deep, false, body}
-#define OP82(name, argc, mask, body) {82, 0, name, argc, mask, 0, false, body}
+  {66, name, NULL, argc, mask, deep, false, false, body}
+#define OP82(name, argc, mask, body)                                           \
+  {82, 0, name, argc, mask, 0, true, false, body}
 /* coordination effects: the machine blocks instead of executing;
  * deep is the initiation-time payload normalization */
 #define OP82C(name, argc, mask, deep, body)                                    \
-  {82, 0, name, argc, mask, deep, true, body}
-/* op 83 is the provisional-primop staging area; its current entries are
- * coordination effects serviced in pkg/enki. */
+  {82, 0, name, argc, mask, deep, true, true, body}
+/* Evaluator-local op 83 entries: no host-effect worker affinity. */
+#define OP83_LOCAL(name, argc, mask, body)                                     \
+  {83, 0, name, argc, mask, 0, false, false, body}
+/* Coordination effects are serviced in pkg/enki. */
 #define OP83C(name, argc, mask, deep, body)                                    \
-  {83, 0, name, argc, mask, deep, true, body}
+  {83, 0, name, argc, mask, deep, true, true, body}
 
 const pl_opdesc pl_ops[] = {
     /* op 0: core PLAN */
-    {0, 0, NULL, 1, 0b1, 0b1, false, op_pin},
-    {0, 1, NULL, 3, 0b111, 0, false, op_law},
-    {0, 2, NULL, 6, 0b100000, 0, false, op_elim},
+    {0, 0, NULL, 1, 0b1, 0b1, false, false, op_pin},
+    {0, 1, NULL, 3, 0b111, 0, false, false, op_law},
+    {0, 2, NULL, 6, 0b100000, 0, false, false, op_elim},
 
     OP66(ax_s3('P', 'i', 'n'), 1, 0b1, 0b1, op_pin),
     OP66(ax_s3('L', 'a', 'w'), 3, 0b111, 0, op_law),
@@ -947,18 +957,21 @@ const pl_opdesc pl_ops[] = {
     OP82("Connect", 3, 0b111, pl_op82_connect),
 
     /* op 83: provisional primops; their PLAN-level semantics are deliberately
-     * not yet committed.  The current staging implementations are executor-
-     * serviced and mode-gated like op 82.  ReadFolder returns an arbitrary
-     * row, so it cannot use op 82's nat-only direct-effect replay seam.
-     * Fetch args deep-normalize at initiation: the request/config rows are
-     * consumed from C at service time, and effects inside them run as the
-     * caller's own execution before the request parks. */
+     * not yet committed.  Coordination operations are executor-serviced and
+     * mode-gated like op 82; profiling operations stay evaluator-local.
+     * ReadFolder returns an arbitrary row, so it cannot use op 82's nat-only
+     * direct-effect replay seam.  Fetch args deep-normalize at initiation: the
+     * request/config rows are consumed from C at service time, and effects
+     * inside them run as the caller's own execution before the request parks.
+     */
     OP83C("ReadFolder", 1, 0b1, 0, pl_op83_read_folder),
     OP83C("Fetch", 2, 0b11, 0b11, pl_op83_fetch),
     /* provisional: a blocking sleep, serviced synchronously in pkg/enki.
      * appended last so op indices and the buckets below do not shift;
      * Sleep is index 126. */
     OP83C("Sleep", 1, 0b1, 0, pl_op83_sleep),
+    OP83_LOCAL("ZoneStart", 1, 0b1, pl_op83_zone_start),
+    OP83_LOCAL("ZoneEnd", 1, 0b1, pl_op83_zone_end),
 };
 
 const size_t pl_nops = sizeof(pl_ops) / sizeof(pl_ops[0]);
@@ -1003,7 +1016,7 @@ static const uint16_t pl_op82_argc1[] = {105, 106, 107, 108, 110, 111, 112,
 static const uint16_t pl_op82_argc2[] = {109, 116, 117, 119};
 static const uint16_t pl_op82_argc3[] = {120, 123};
 
-static const uint16_t pl_op83_argc1[] = {124, 126};
+static const uint16_t pl_op83_argc1[] = {124, 126, 127, 128};
 static const uint16_t pl_op83_argc2[] = {125};
 
 static pl_opbucket pl_op_lookup_bucket(uint64_t opset, uint32_t argc) {

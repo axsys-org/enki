@@ -158,6 +158,26 @@ make pgo PGO_CC=/path/to/clang LLVM_PROFDATA=/path/to/llvm-profdata
 make pgo PGO_WORKLOAD="--file-root ./reaver/src ../reaver/src/plan reaver main"
 ```
 
+## SPLAN Profiling Zones
+
+RPLAN code can mark explicit spans with the direct op-83 primops
+`["ZoneStart", label]`, which returns an opaque handle, and
+`["ZoneEnd", handle]`. Handles belong to the logical PLAN thread that created
+them; zones may be ended out of nesting order, but duplicate, unknown, and
+cross-thread handles are runtime errors.
+
+Export those spans as a Chrome Trace JSON file with either CLI spelling:
+
+```sh
+wisp --profile-json trace.json DIR MODULE [FUNCTION ARGS...]
+wisp --profile-json=trace.json DIR MODULE [FUNCTION ARGS...]
+```
+
+Open the resulting file in `chrome://tracing`. Each logical PLAN thread is a
+separate lane, and spans are paused while an actor is yielded or blocked. The
+JSON export contains explicit zones only; automatic law attribution remains a
+Tracy-only feature.
+
 ## Formatting And Analysis
 
 ```sh

@@ -20,7 +20,8 @@
 #include "plan/store.h"
 
 /*
- * wisp [--text-hash] [--file-root DIR] DIR MODULE [FUNCTION ARGS...]
+ * wisp [--text-hash] [--file-root DIR] [--profile-json FILE]
+ *      DIR MODULE [FUNCTION ARGS...]
  *
  * Loads MODULE (and its @includes) from DIR, then optionally applies the
  * binding FUNCTION to a row of the remaining arguments.  Pins and the
@@ -29,12 +30,13 @@
  * loadAssembly / runRepl drivers.
  */
 
-#define BOOT_HEAP_CELLS        ((size_t)1 << 26) /* 32 MiB per semispace, grows */
+#define BOOT_HEAP_CELLS                ((size_t)1 << 26) /* 512 MiB per semispace, grows */
+#define BOOT_GC_ALLOCATION_FLOOR_CELLS ((size_t)1 << 20) /* 8 MiB */
 // ./build/release/bin/wisp --file-root ../reaver/src ../reaver/src/plan
 // main  35.43s user 0.55s system 99% cpu 36.136 total
-#define BOOT_DEFAULT_FILE_ROOT "./reaver/src"
-#define BOOT_DEFAULT_STORE_DIR "./snap"
-#define BOOT_STORE_MAP_SIZE    ((size_t)1 << 30)
+#define BOOT_DEFAULT_FILE_ROOT         "./reaver/src"
+#define BOOT_DEFAULT_STORE_DIR         "./snap"
+#define BOOT_STORE_MAP_SIZE            ((size_t)1 << 30)
 
 typedef struct boot_module {
   pl_val key_v;
@@ -78,8 +80,15 @@ static void boot_env_root_push(boot_ctx* ctx, en_env_entry* env) {
   ctx->tmp_env_v[ctx->tmp_env_s++] = env;
 }
 
-static void boot_collect_after_invocation(boot_ctx* ctx) {
-  pl_gc_collect_now(ctx->w->t);
+static void boot_collect_after_form(boot_ctx* ctx) {
+  /*
+   * A form boundary is a convenient safe point for dropping its temporary
+   * graph, but copying the complete, growing module environment after every
+   * form makes assembly quadratic.  Wait until new allocation can pay for
+   * copying the prior live set (with a floor for small live sets).  Reserve
+   * still collects on exhaustion, so this is a space/throughput policy only.
+   */
+  (void)pl_gc_collect_if_pressure(ctx->w->t, BOOT_GC_ALLOCATION_FLOOR_CELLS);
 }
 
 /* ── Environment list helpers (host-side, allocator-backed) ────────────── */
@@ -267,7 +276,7 @@ static bool boot_process_form(boot_ctx* ctx, pl_val form) {
   en_wisp* w = ctx->w;
   pl_val exp = en_wisp_macroexpand(w, form);
   if (exp == 0) {
-    boot_collect_after_invocation(ctx);
+    boot_collect_after_form(ctx);
     return true;
   }
   pl_val out = en_wisp_thunk(w, exp);
@@ -280,7 +289,7 @@ static bool boot_process_form(boot_ctx* ctx, pl_val form) {
     fprintf(stderr, "%s\n", out_c);
     ax_free(ctx->loc_a, out_c);
   }
-  boot_collect_after_invocation(ctx);
+  boot_collect_after_form(ctx);
   return true;
 }
 
@@ -436,7 +445,6 @@ static bool boot_run_function(boot_ctx* ctx, pl_val fun, int argc,
                                     : "PLAN exception");
     return false;
   }
-  boot_collect_after_invocation(ctx);
   return true;
 }
 
@@ -498,7 +506,7 @@ static void boot_usage(const char* argv0_c) {
   fprintf(stderr,
           "usage: %s [--text-hash] [--file-root DIR] "
           "[--wait-for-tracy[=SECONDS]] "
-          "DIR MODULE [FUNCTION ARGS...]\n",
+          "[--profile-json FILE] DIR MODULE [FUNCTION ARGS...]\n",
           argv0_c);
 }
 
@@ -509,6 +517,7 @@ static const char* boot_env_file_root(void) {
 
 int main(int argc, char** argv) {
   const char* file_root_c = boot_env_file_root();
+  const char* profile_json_c = NULL;
   double tracy_wait_s = 0.0;
   bool text_hash_f = false;
   volatile int argi = 1;
@@ -535,6 +544,26 @@ int main(int argc, char** argv) {
     size_t prefix_s = sizeof(prefix_c) - 1;
     if (strncmp(argv[argi], prefix_c, prefix_s) == 0) {
       file_root_c = argv[argi] + prefix_s;
+      argi++;
+      continue;
+    }
+    if (strcmp(argv[argi], "--profile-json") == 0) {
+      if (argi + 1 >= argc || argv[argi + 1][0] == '\0') {
+        boot_usage(argv[0]);
+        return 2;
+      }
+      profile_json_c = argv[argi + 1];
+      argi += 2;
+      continue;
+    }
+    const char json_prefix_c[] = "--profile-json=";
+    size_t json_prefix_s = sizeof(json_prefix_c) - 1;
+    if (strncmp(argv[argi], json_prefix_c, json_prefix_s) == 0) {
+      profile_json_c = argv[argi] + json_prefix_s;
+      if (profile_json_c[0] == '\0') {
+        boot_usage(argv[0]);
+        return 2;
+      }
       argi++;
       continue;
     }
@@ -573,6 +602,12 @@ int main(int argc, char** argv) {
     return 2;
   }
 
+  if (profile_json_c != NULL && !ax_profile_json_start(profile_json_c)) {
+    fprintf(stderr, "wisp: cannot open profile JSON `%s`: %s\n", profile_json_c,
+            strerror(errno));
+    return 1;
+  }
+
   ax_wait_for_tracy(tracy_wait_s);
 
   pl_store* store;
@@ -582,12 +617,14 @@ int main(int argc, char** argv) {
     if (mkdir(BOOT_DEFAULT_STORE_DIR, 0777) != 0 && errno != EEXIST) {
       fprintf(stderr, "wisp: cannot create Silo store %s\n",
               BOOT_DEFAULT_STORE_DIR);
+      (void)ax_profile_json_finish();
       return 1;
     }
     store = pl_store_new_silo(BOOT_DEFAULT_STORE_DIR, BOOT_STORE_MAP_SIZE);
     if (store == NULL) {
       fprintf(stderr, "wisp: cannot open Silo store %s\n",
               BOOT_DEFAULT_STORE_DIR);
+      (void)ax_profile_json_finish();
       return 1;
     }
   }
@@ -595,6 +632,10 @@ int main(int argc, char** argv) {
   en_wisp* w = en_wisp_new(heap);
   if (w == NULL) {
     fprintf(stderr, "wisp: oom\n");
+    pl_heap_free(heap);
+    pl_store_free(store);
+    if (!ax_profile_json_finish())
+      fprintf(stderr, "wisp: failed to finalize profile JSON\n");
     return 1;
   }
   w->t->rplan_file_root_c = file_root_c;
@@ -606,37 +647,45 @@ int main(int argc, char** argv) {
   w->sched = sched;
   w->self = er_scheduler_adopt(sched, w->t);
 
-  boot_ctx ctx = {
+  boot_ctx* ctx = malloc(sizeof(*ctx));
+  ax_assume(ctx != NULL, "oom");
+  *ctx = (boot_ctx){
       .loc_a = ax_allocator_system(),
       .w = w,
       .src_dir_c = argv[argi],
       .mod_v = NULL,
       .emit_top_level_f = true,
   };
-  pl_gc_add_root_source(heap, boot_roots, &ctx);
+  pl_gc_add_root_source(heap, boot_roots, ctx);
 
+  volatile int exit_code = 1;
   w->err_f = true;
   if (setjmp(w->errjmp) != 0) {
     fprintf(stderr, "wisp: %s\n",
             w->msg_c == NULL ? "unknown error" : w->msg_c);
-    return 1;
+  } else {
+    const char* fn_c = argc - argi >= 3 ? argv[argi + 2] : NULL;
+    int run_argc = argc - argi >= 4 ? argc - argi - 3 : 0;
+    char** run_argv = argc - argi >= 4 ? argv + argi + 3 : NULL;
+    bool ok = boot_load_assembly(ctx, argv[argi + 1], fn_c, run_argc, run_argv);
+    exit_code = ok ? 0 : 1;
   }
 
-  const char* fn_c = argc - argi >= 3 ? argv[argi + 2] : NULL;
-  int run_argc = argc - argi >= 4 ? argc - argi - 3 : 0;
-  char** run_argv = argc - argi >= 4 ? argv + argi + 3 : NULL;
-  bool ok = boot_load_assembly(&ctx, argv[argi + 1], fn_c, run_argc, run_argv);
-
-  pl_gc_del_root_source(heap, boot_roots, &ctx);
-  for (boot_module* mod = ctx.mod_v; mod != NULL;) {
+  pl_gc_del_root_source(heap, boot_roots, ctx);
+  for (boot_module* mod = ctx->mod_v; mod != NULL;) {
     boot_module* next = mod->next;
-    boot_env_free(&ctx, mod->env);
-    ax_free(ctx.loc_a, mod);
+    boot_env_free(ctx, mod->env);
+    ax_free(ctx->loc_a, mod);
     mod = next;
   }
+  free(ctx);
   er_scheduler_free(sched); /* leftover actors die with the program */
   en_wisp_free(w);
   pl_heap_free(heap);
   pl_store_free(store);
-  return ok ? 0 : 1;
+  if (!ax_profile_json_finish()) {
+    fprintf(stderr, "wisp: failed to finalize profile JSON\n");
+    exit_code = 1;
+  }
+  return exit_code;
 }
