@@ -5,11 +5,20 @@
 #define GREATEST_USE_LONGJMP 1
 #include "greatest.h"
 
+#include <signal.h>
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+
+#ifndef ENKI_TEST_TIMEOUT_SECONDS
+#define ENKI_TEST_TIMEOUT_SECONDS 60
+#endif
+
+#define ENKI_TEST_STRINGIFY_(VALUE) #VALUE
+#define ENKI_TEST_STRINGIFY(VALUE)  ENKI_TEST_STRINGIFY_(VALUE)
 
 enum {
   ENKI_TEST_MAX_SUITES = 16,
@@ -184,6 +193,15 @@ static void enki_test_skip(const char* message) {
 
 GREATEST_MAIN_DEFS();
 
+static void enki_test_timeout(int signal_number) {
+  (void)signal_number;
+  static const char message[] =
+      "\ngreatest: test process timed out after " ENKI_TEST_STRINGIFY(
+          ENKI_TEST_TIMEOUT_SECONDS) " seconds\n";
+  (void)write(STDERR_FILENO, message, sizeof(message) - 1);
+  _exit(124);
+}
+
 static void enki_test_teardown(void* data) {
   (void)data;
   enki_test_suite* suite = &enki_test_suites[enki_test_active_suite];
@@ -215,11 +233,17 @@ static void enki_test_run_suite(void) {
 }
 
 int main(int argc, char** argv) {
+  if (signal(SIGALRM, enki_test_timeout) == SIG_ERR) {
+    perror("greatest: cannot install test timeout");
+    return EXIT_FAILURE;
+  }
+  (void)alarm(ENKI_TEST_TIMEOUT_SECONDS);
   GREATEST_MAIN_BEGIN();
   for (size_t i = 0; i < enki_test_suite_count; i++) {
     enki_test_active_suite = i;
     greatest_run_suite(enki_test_run_suite, enki_test_suites[i].name);
   }
+  (void)alarm(0);
   GREATEST_MAIN_END();
 }
 

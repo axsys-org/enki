@@ -97,7 +97,7 @@ make BUILD_TYPE=tsan test
 ```
 
 TSan runs the full Greatest suite plus the focused multithreaded stress tests
-in `tests/unit/*_tsan.c`.
+in `tests/unit/*_tsan.c`. Each Greatest test process has a 60-second timeout.
 
 Property tests use a fixed seed in CI. Override it locally with:
 
