@@ -1,4 +1,4 @@
-#include <criterion/criterion.h>
+#include "test.h"
 
 #include "test_plan.h"
 
@@ -50,16 +50,16 @@ static pl_val test_throwing(pl_thread* t, uint64_t code) {
   return test_thunk(t, expr);
 }
 
-Test(thread, run_to_done_with_ample_fuel) {
+TEST(thread, run_to_done_with_ample_fuel) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
   pl_thread_start(t, test_k_thunk(t));
-  cr_assert_eq(pl_thread_run(t, 1u << 20), PL_RUN_DONE);
-  cr_assert_eq(pl_thread_result(t), 7);
+  ASSERT_EQ(pl_thread_run(t, 1u << 20), PL_RUN_DONE);
+  ASSERT_EQ(pl_thread_result(t), 7);
   test_rt_free(&rt);
 }
 
-Test(thread, yields_on_fuel_and_resumes_to_same_result) {
+TEST(thread, yields_on_fuel_and_resumes_to_same_result) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
   size_t vsp0 = t->vsp, fsp0 = t->fsp;
@@ -69,18 +69,18 @@ Test(thread, yields_on_fuel_and_resumes_to_same_result) {
   do {
     s = pl_thread_run(t, 2); /* exactly one machine step per quantum */
     quanta++;
-    cr_assert_lt(quanta, 1 << 20, "runaway resume loop");
+    ASSERT_LT(quanta, 1 << 20, "runaway resume loop");
   } while (s == PL_RUN_YIELDED);
-  cr_assert_eq(s, PL_RUN_DONE);
-  cr_assert_eq(pl_thread_result(t), 7);
-  cr_assert_gt(quanta, 1, "expected at least one yield");
+  ASSERT_EQ(s, PL_RUN_DONE);
+  ASSERT_EQ(pl_thread_result(t), 7);
+  ASSERT_GT(quanta, 1, "expected at least one yield");
   /* completion restores the entry watermarks */
-  cr_assert_eq(t->vsp, vsp0);
-  cr_assert_eq(t->fsp, fsp0);
+  ASSERT_EQ(t->vsp, vsp0);
+  ASSERT_EQ(t->fsp, fsp0);
   test_rt_free(&rt);
 }
 
-Test(thread, yield_points_are_deterministic) {
+TEST(thread, yield_points_are_deterministic) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
   int counts[2];
@@ -89,15 +89,15 @@ Test(thread, yield_points_are_deterministic) {
     int quanta = 0;
     while (pl_thread_run(t, 2) == PL_RUN_YIELDED)
       quanta++;
-    cr_assert_eq(t->status, PL_RUN_DONE);
-    cr_assert_eq(pl_thread_result(t), 7);
+    ASSERT_EQ(t->status, PL_RUN_DONE);
+    ASSERT_EQ(pl_thread_result(t), 7);
     counts[i] = quanta;
   }
-  cr_assert_eq(counts[0], counts[1]);
+  ASSERT_EQ(counts[0], counts[1]);
   test_rt_free(&rt);
 }
 
-Test(thread, exception_unwinds_to_watermarks) {
+TEST(thread, exception_unwinds_to_watermarks) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
   size_t vsp0 = t->vsp, fsp0 = t->fsp;
@@ -106,19 +106,19 @@ Test(thread, exception_unwinds_to_watermarks) {
   do
     s = pl_thread_run(t, 2);
   while (s == PL_RUN_YIELDED);
-  cr_assert_eq(s, PL_RUN_EXN);
-  cr_assert_null(t->exn_msg);
-  cr_assert_eq(t->exn, 7);
-  cr_assert_eq(t->vsp, vsp0);
-  cr_assert_eq(t->fsp, fsp0);
+  ASSERT_EQ(s, PL_RUN_EXN);
+  ASSERT_NULL(t->exn_msg);
+  ASSERT_EQ(t->exn, 7);
+  ASSERT_EQ(t->vsp, vsp0);
+  ASSERT_EQ(t->fsp, fsp0);
   /* the thread object remains usable for a fresh run */
   pl_thread_start(t, test_k_thunk(t));
-  cr_assert_eq(pl_thread_run(t, 1u << 20), PL_RUN_DONE);
-  cr_assert_eq(pl_thread_result(t), 7);
+  ASSERT_EQ(pl_thread_run(t, 1u << 20), PL_RUN_DONE);
+  ASSERT_EQ(pl_thread_result(t), 7);
   test_rt_free(&rt);
 }
 
-Test(thread, suspended_continuation_survives_gc) {
+TEST(thread, suspended_continuation_survives_gc) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
   pl_thread_start(t, test_k_thunk(t));
@@ -127,12 +127,12 @@ Test(thread, suspended_continuation_survives_gc) {
     pl_gc_collect_now(t); /* moves everything the continuation roots */
     s = pl_thread_run(t, 2);
   } while (s == PL_RUN_YIELDED);
-  cr_assert_eq(s, PL_RUN_DONE);
-  cr_assert_eq(pl_thread_result(t), 7);
+  ASSERT_EQ(s, PL_RUN_DONE);
+  ASSERT_EQ(pl_thread_result(t), 7);
   test_rt_free(&rt);
 }
 
-Test(thread, start_nf_normalizes_deeply) {
+TEST(thread, start_nf_normalizes_deeply) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
   size_t base = t->vsp;
@@ -147,15 +147,15 @@ Test(thread, start_nf_normalizes_deeply) {
   do
     s = pl_thread_run(t, 2);
   while (s == PL_RUN_YIELDED);
-  cr_assert_eq(s, PL_RUN_DONE);
+  ASSERT_EQ(s, PL_RUN_DONE);
   pl_val r = pl_thread_result(t);
   pl_cell* p = pl_as(PL_TAG_APP, r);
-  cr_assert_not_null(p);
-  cr_assert_eq(pl_whnf(t, pl_app_args(p)[0]), 7);
+  ASSERT_NOT_NULL(p);
+  ASSERT_EQ(pl_whnf(t, pl_app_args(p)[0]), 7);
   test_rt_free(&rt);
 }
 
-Test(thread, deposit_resumes_with_response) {
+TEST(thread, deposit_resumes_with_response) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
   /* Simulate a blocked effect at thread top level: the deposited
@@ -165,8 +165,8 @@ Test(thread, deposit_resumes_with_response) {
   t->status = PL_RUN_BLOCKED;
   t->blocked_on = 42;
   pl_thread_deposit(t, 9);
-  cr_assert_eq(t->blocked_on, 0);
-  cr_assert_eq(pl_thread_run(t, 1u << 10), PL_RUN_DONE);
-  cr_assert_eq(pl_thread_result(t), 9);
+  ASSERT_EQ(t->blocked_on, 0);
+  ASSERT_EQ(pl_thread_run(t, 1u << 10), PL_RUN_DONE);
+  ASSERT_EQ(pl_thread_result(t), 9);
   test_rt_free(&rt);
 }

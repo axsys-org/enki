@@ -1,4 +1,4 @@
-#include <criterion/criterion.h>
+#include "test.h"
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -76,8 +76,8 @@ static ax_allocator* make_test_allocator(test_allocator_state* state,
 static void init_builder(ax_sb* sb, test_allocator_state* state) {
   ax_sb_init(sb, make_test_allocator(state, 1));
 
-  cr_assert(!ax_sb_failed(sb));
-  cr_assert_eq(ax_sb_piece_count(sb), 0);
+  ASSERT(!ax_sb_failed(sb));
+  ASSERT_EQ(ax_sb_piece_count(sb), 0);
 }
 
 static void assert_build_bytes(ax_sb* sb, const char* expected,
@@ -85,10 +85,10 @@ static void assert_build_bytes(ax_sb* sb, const char* expected,
   size_t got_len = 777;
   char* got = ax_sb_build(sb, &got_len);
 
-  cr_assert_not_null(got);
-  cr_assert_eq(got_len, expected_len);
-  cr_assert_eq(memcmp(got, expected, expected_len), 0);
-  cr_assert_eq(got[expected_len], '\0');
+  ASSERT_NOT_NULL(got);
+  ASSERT_EQ(got_len, expected_len);
+  ASSERT_EQ(memcmp(got, expected, expected_len), 0);
+  ASSERT_EQ(got[expected_len], '\0');
 
   sb->allocator->free(sb->allocator->ctx, got);
 }
@@ -97,7 +97,7 @@ static void assert_build_cstr(ax_sb* sb, const char* expected) {
   assert_build_bytes(sb, expected, strlen(expected));
 }
 
-Test(ax_sb, empty_builder_builds_empty_string) {
+TEST(ax_sb, empty_builder_builds_empty_string) {
   test_allocator_state state;
   ax_sb sb;
   size_t len = 999;
@@ -105,43 +105,43 @@ Test(ax_sb, empty_builder_builds_empty_string) {
 
   init_builder(&sb, &state);
 
-  cr_assert(ax_sb_measure(&sb, &len));
-  cr_assert_eq(len, 0);
+  ASSERT(ax_sb_measure(&sb, &len));
+  ASSERT_EQ(len, 0);
 
   out = ax_sb_build(&sb, &len);
-  cr_assert_not_null(out);
-  cr_assert_eq(len, 0);
-  cr_assert_eq(out[0], '\0');
+  ASSERT_NOT_NULL(out);
+  ASSERT_EQ(len, 0);
+  ASSERT_EQ(out[0], '\0');
 
   sb.allocator->free(sb.allocator->ctx, out);
   ax_sb_free(&sb);
 }
 
-Test(ax_sb, appends_refs_cstrings_literals_and_chars) {
+TEST(ax_sb, appends_refs_cstrings_literals_and_chars) {
   test_allocator_state state;
   ax_sb sb;
   const char* world = "world";
 
   init_builder(&sb, &state);
 
-  cr_assert(ax_sb_append_lit(&sb, "hello"));
-  cr_assert(ax_sb_append_char(&sb, ' '));
-  cr_assert(ax_sb_append_cstr(&sb, world));
-  cr_assert(ax_sb_append_char(&sb, '!'));
+  ASSERT(ax_sb_append_lit(&sb, "hello"));
+  ASSERT(ax_sb_append_char(&sb, ' '));
+  ASSERT(ax_sb_append_cstr(&sb, world));
+  ASSERT(ax_sb_append_char(&sb, '!'));
 
   assert_build_cstr(&sb, "hello world!");
 
   ax_sb_free(&sb);
 }
 
-Test(ax_sb, cstr_captures_length_but_not_bytes) {
+TEST(ax_sb, cstr_captures_length_but_not_bytes) {
   test_allocator_state state;
   ax_sb sb;
   char mutable_text[] = "abcdef";
 
   init_builder(&sb, &state);
 
-  cr_assert(ax_sb_append_cstr(&sb, mutable_text));
+  ASSERT(ax_sb_append_cstr(&sb, mutable_text));
 
   /*
       append_cstr captured length 6, but the builder still references the
@@ -154,7 +154,7 @@ Test(ax_sb, cstr_captures_length_but_not_bytes) {
   ax_sb_free(&sb);
 }
 
-Test(ax_sb, supports_embedded_nuls) {
+TEST(ax_sb, supports_embedded_nuls) {
   test_allocator_state state;
   ax_sb sb;
 
@@ -163,34 +163,34 @@ Test(ax_sb, supports_embedded_nuls) {
 
   init_builder(&sb, &state);
 
-  cr_assert(ax_sb_append_char(&sb, 'x'));
-  cr_assert(ax_sb_append_ref(&sb, chunk, sizeof(chunk)));
-  cr_assert(ax_sb_append_char(&sb, 'y'));
+  ASSERT(ax_sb_append_char(&sb, 'x'));
+  ASSERT(ax_sb_append_ref(&sb, chunk, sizeof(chunk)));
+  ASSERT(ax_sb_append_char(&sb, 'y'));
 
   assert_build_bytes(&sb, expected, sizeof(expected));
 
   ax_sb_free(&sb);
 }
 
-Test(ax_sb, formats_signed_and_unsigned_integers) {
+TEST(ax_sb, formats_signed_and_unsigned_integers) {
   test_allocator_state state;
   ax_sb sb;
 
   init_builder(&sb, &state);
 
-  cr_assert(ax_sb_append_i64(&sb, 0));
-  cr_assert(ax_sb_append_lit(&sb, ","));
-  cr_assert(ax_sb_append_i64(&sb, -123));
-  cr_assert(ax_sb_append_lit(&sb, ","));
-  cr_assert(ax_sb_append_i64(&sb, INT64_MIN));
-  cr_assert(ax_sb_append_lit(&sb, ","));
-  cr_assert(ax_sb_append_u64(&sb, UINT64_MAX));
-  cr_assert(ax_sb_append_lit(&sb, ","));
-  cr_assert(ax_sb_append_u64_base(&sb, 255, 16, 0));
-  cr_assert(ax_sb_append_lit(&sb, ","));
-  cr_assert(ax_sb_append_u64_base(&sb, 255, 16, 1));
-  cr_assert(ax_sb_append_lit(&sb, ","));
-  cr_assert(ax_sb_append_u64_base(&sb, 5, 2, 0));
+  ASSERT(ax_sb_append_i64(&sb, 0));
+  ASSERT(ax_sb_append_lit(&sb, ","));
+  ASSERT(ax_sb_append_i64(&sb, -123));
+  ASSERT(ax_sb_append_lit(&sb, ","));
+  ASSERT(ax_sb_append_i64(&sb, INT64_MIN));
+  ASSERT(ax_sb_append_lit(&sb, ","));
+  ASSERT(ax_sb_append_u64(&sb, UINT64_MAX));
+  ASSERT(ax_sb_append_lit(&sb, ","));
+  ASSERT(ax_sb_append_u64_base(&sb, 255, 16, 0));
+  ASSERT(ax_sb_append_lit(&sb, ","));
+  ASSERT(ax_sb_append_u64_base(&sb, 255, 16, 1));
+  ASSERT(ax_sb_append_lit(&sb, ","));
+  ASSERT(ax_sb_append_u64_base(&sb, 5, 2, 0));
 
   assert_build_cstr(
       &sb, "0,-123,-9223372036854775808,18446744073709551615,ff,FF,101");
@@ -198,24 +198,24 @@ Test(ax_sb, formats_signed_and_unsigned_integers) {
   ax_sb_free(&sb);
 }
 
-Test(ax_sb, reserve_pieces_grows_metadata_storage) {
+TEST(ax_sb, reserve_pieces_grows_metadata_storage) {
   test_allocator_state state;
   ax_sb sb;
 
   init_builder(&sb, &state);
 
-  cr_assert(ax_sb_reserve_pieces(&sb, 32));
-  cr_assert(sb.capacity >= 32);
-  cr_assert(state.alloc_calls > 0);
+  ASSERT(ax_sb_reserve_pieces(&sb, 32));
+  ASSERT(sb.capacity >= 32);
+  ASSERT(state.alloc_calls > 0);
 
-  cr_assert(ax_sb_append_lit(&sb, "after reserve"));
+  ASSERT(ax_sb_append_lit(&sb, "after reserve"));
 
   assert_build_cstr(&sb, "after reserve");
 
   ax_sb_free(&sb);
 }
 
-Test(ax_sb, growth_uses_realloc_when_available) {
+TEST(ax_sb, growth_uses_realloc_when_available) {
   test_allocator_state state;
   ax_sb sb;
   char expected[21];
@@ -225,19 +225,19 @@ Test(ax_sb, growth_uses_realloc_when_available) {
 
   for (i = 0; i < 20; ++i) {
     expected[i] = (char)('a' + (int)i);
-    cr_assert(ax_sb_append_char(&sb, expected[i]));
+    ASSERT(ax_sb_append_char(&sb, expected[i]));
   }
   expected[20] = '\0';
 
-  cr_assert(state.alloc_calls > 0);
-  // cr_assert(state.realloc_calls > 0);
+  ASSERT(state.alloc_calls > 0);
+  // ASSERT(state.realloc_calls > 0);
 
   assert_build_cstr(&sb, expected);
 
   ax_sb_free(&sb);
 }
 
-Test(ax_sb, growth_falls_back_to_alloc_copy_free_without_realloc) {
+TEST(ax_sb, growth_falls_back_to_alloc_copy_free_without_realloc) {
   test_allocator_state state;
   ax_allocator* allocator;
   ax_sb sb;
@@ -247,23 +247,23 @@ Test(ax_sb, growth_falls_back_to_alloc_copy_free_without_realloc) {
   allocator = make_test_allocator(&state, 0);
   ax_sb_init(&sb, allocator);
 
-  cr_assert(!ax_sb_failed(&sb));
+  ASSERT(!ax_sb_failed(&sb));
 
   for (i = 0; i < 20; ++i) {
     expected[i] = (char)('A' + (int)i);
-    cr_assert(ax_sb_append_char(&sb, expected[i]));
+    ASSERT(ax_sb_append_char(&sb, expected[i]));
   }
   expected[20] = '\0';
 
-  cr_assert_eq(state.realloc_calls, 0);
-  cr_assert(state.alloc_calls > 0);
+  ASSERT_EQ(state.realloc_calls, 0);
+  ASSERT(state.alloc_calls > 0);
 
   assert_build_cstr(&sb, expected);
 
   ax_sb_free(&sb);
 }
 
-Test(ax_sb, appends_another_builder_as_metadata_only) {
+TEST(ax_sb, appends_another_builder_as_metadata_only) {
   test_allocator_state left_state;
   test_allocator_state right_state;
   ax_sb left;
@@ -274,10 +274,10 @@ Test(ax_sb, appends_another_builder_as_metadata_only) {
   init_builder(&left, &left_state);
   init_builder(&right, &right_state);
 
-  cr_assert(ax_sb_append_lit(&left, "prefix:"));
-  cr_assert(ax_sb_append_ref(&right, referenced, 3));
+  ASSERT(ax_sb_append_lit(&left, "prefix:"));
+  ASSERT(ax_sb_append_ref(&right, referenced, 3));
 
-  cr_assert(ax_sb_append_builder(&left, &right));
+  ASSERT(ax_sb_append_builder(&left, &right));
 
   /*
       append_builder copied the reference piece, not the pointed-to bytes.
@@ -291,21 +291,21 @@ Test(ax_sb, appends_another_builder_as_metadata_only) {
   ax_sb_free(&left);
 }
 
-Test(ax_sb, supports_self_append) {
+TEST(ax_sb, supports_self_append) {
   test_allocator_state state;
   ax_sb sb;
 
   init_builder(&sb, &state);
 
-  cr_assert(ax_sb_append_lit(&sb, "ab"));
-  cr_assert(ax_sb_append_builder(&sb, &sb));
+  ASSERT(ax_sb_append_lit(&sb, "ab"));
+  ASSERT(ax_sb_append_builder(&sb, &sb));
 
   assert_build_cstr(&sb, "abab");
 
   ax_sb_free(&sb);
 }
 
-Test(ax_sb, measure_and_write_report_required_length) {
+TEST(ax_sb, measure_and_write_report_required_length) {
   test_allocator_state state;
   ax_sb sb;
 
@@ -315,41 +315,41 @@ Test(ax_sb, measure_and_write_report_required_length) {
 
   init_builder(&sb, &state);
 
-  cr_assert(ax_sb_append_lit(&sb, "abc"));
-  cr_assert(ax_sb_append_u64(&sb, 42));
+  ASSERT(ax_sb_append_lit(&sb, "abc"));
+  ASSERT(ax_sb_append_u64(&sb, 42));
 
-  cr_assert(ax_sb_measure(&sb, &len));
-  cr_assert_eq(len, 5);
-
-  len = 999;
-  cr_assert(!ax_sb_write(&sb, too_small, sizeof(too_small), &len));
-  cr_assert_eq(len, 5);
+  ASSERT(ax_sb_measure(&sb, &len));
+  ASSERT_EQ(len, 5);
 
   len = 999;
-  cr_assert(ax_sb_write(&sb, exact, sizeof(exact), &len));
-  cr_assert_eq(len, 5);
-  cr_assert_str_eq(exact, "abc42");
+  ASSERT(!ax_sb_write(&sb, too_small, sizeof(too_small), &len));
+  ASSERT_EQ(len, 5);
+
+  len = 999;
+  ASSERT(ax_sb_write(&sb, exact, sizeof(exact), &len));
+  ASSERT_EQ(len, 5);
+  ASSERT_STR_EQ(exact, "abc42");
 
   ax_sb_free(&sb);
 }
 
-Test(ax_sb, zero_length_null_ref_is_allowed) {
+TEST(ax_sb, zero_length_null_ref_is_allowed) {
   test_allocator_state state;
   ax_sb sb;
 
   init_builder(&sb, &state);
 
-  cr_assert(ax_sb_append_ref(&sb, NULL, 0));
-  cr_assert(!ax_sb_failed(&sb));
+  ASSERT(ax_sb_append_ref(&sb, NULL, 0));
+  ASSERT(!ax_sb_failed(&sb));
 
-  cr_assert(ax_sb_append_lit(&sb, "ok"));
+  ASSERT(ax_sb_append_lit(&sb, "ok"));
 
   assert_build_cstr(&sb, "ok");
 
   ax_sb_free(&sb);
 }
 
-Test(ax_sb, null_nonempty_ref_marks_builder_failed) {
+TEST(ax_sb, null_nonempty_ref_marks_builder_failed) {
   test_allocator_state state;
   ax_sb sb;
   size_t len = 999;
@@ -357,41 +357,41 @@ Test(ax_sb, null_nonempty_ref_marks_builder_failed) {
 
   init_builder(&sb, &state);
 
-  cr_assert(!ax_sb_append_ref(&sb, NULL, 1));
-  cr_assert(ax_sb_failed(&sb));
+  ASSERT(!ax_sb_append_ref(&sb, NULL, 1));
+  ASSERT(ax_sb_failed(&sb));
 
   out = ax_sb_build(&sb, &len);
-  cr_assert_null(out);
-  cr_assert_eq(len, 0);
+  ASSERT_NULL(out);
+  ASSERT_EQ(len, 0);
 
   ax_sb_free(&sb);
 }
 
-Test(ax_sb, null_cstr_marks_builder_failed) {
+TEST(ax_sb, null_cstr_marks_builder_failed) {
   test_allocator_state state;
   ax_sb sb;
 
   init_builder(&sb, &state);
 
-  cr_assert(!ax_sb_append_cstr(&sb, NULL));
-  cr_assert(ax_sb_failed(&sb));
+  ASSERT(!ax_sb_append_cstr(&sb, NULL));
+  ASSERT(ax_sb_failed(&sb));
 
   ax_sb_free(&sb);
 }
 
-Test(ax_sb, invalid_integer_base_marks_builder_failed) {
+TEST(ax_sb, invalid_integer_base_marks_builder_failed) {
   test_allocator_state state;
   ax_sb sb;
 
   init_builder(&sb, &state);
 
-  cr_assert(!ax_sb_append_u64_base(&sb, 10, 1, 0));
-  cr_assert(ax_sb_failed(&sb));
+  ASSERT(!ax_sb_append_u64_base(&sb, 10, 1, 0));
+  ASSERT(ax_sb_failed(&sb));
 
   ax_sb_free(&sb);
 }
 
-Test(ax_sb, allocation_failure_during_growth_marks_builder_failed) {
+TEST(ax_sb, allocation_failure_during_growth_marks_builder_failed) {
   test_allocator_state state;
   ax_sb sb;
   size_t i;
@@ -407,20 +407,20 @@ Test(ax_sb, allocation_failure_during_growth_marks_builder_failed) {
   state.fail_after = 0;
 
   for (i = 0; i < AX_SB_INLINE_PIECES; ++i)
-    cr_assert(ax_sb_append_char(&sb, 'x'));
+    ASSERT(ax_sb_append_char(&sb, 'x'));
 
-  cr_assert(!ax_sb_append_char(&sb, 'y'));
-  cr_assert(ax_sb_failed(&sb));
-  cr_assert_eq(state.alloc_calls, 1);
+  ASSERT(!ax_sb_append_char(&sb, 'y'));
+  ASSERT(ax_sb_failed(&sb));
+  ASSERT_EQ(state.alloc_calls, 1);
 
   out = ax_sb_build(&sb, &len);
-  cr_assert_null(out);
-  cr_assert_eq(len, 0);
+  ASSERT_NULL(out);
+  ASSERT_EQ(len, 0);
 
   ax_sb_free(&sb);
 }
 
-Test(ax_sb, failed_realloc_does_not_prevent_freeing_builder) {
+TEST(ax_sb, failed_realloc_does_not_prevent_freeing_builder) {
   test_allocator_state state;
   ax_sb sb;
   size_t i;
@@ -434,21 +434,21 @@ Test(ax_sb, failed_realloc_does_not_prevent_freeing_builder) {
   state.fail_after = 1;
 
   for (i = 0; i < AX_SB_INLINE_PIECES * 2; ++i)
-    cr_assert(ax_sb_append_char(&sb, 'x'));
+    ASSERT(ax_sb_append_char(&sb, 'x'));
 
-  cr_assert(!ax_sb_append_char(&sb, 'y'));
-  cr_assert(ax_sb_failed(&sb));
-  cr_assert(state.realloc_calls > 0);
+  ASSERT(!ax_sb_append_char(&sb, 'y'));
+  ASSERT(ax_sb_failed(&sb));
+  ASSERT(state.realloc_calls > 0);
 
   ax_sb_free(&sb);
 
   /*
       The original heap metadata allocation should still have been released.
   */
-  cr_assert(state.free_calls > 0);
+  ASSERT(state.free_calls > 0);
 }
 
-Test(ax_sb, reset_clears_content_and_recovers_from_allocator_failure) {
+TEST(ax_sb, reset_clears_content_and_recovers_from_allocator_failure) {
   test_allocator_state state;
   ax_sb sb;
   size_t i;
@@ -458,25 +458,25 @@ Test(ax_sb, reset_clears_content_and_recovers_from_allocator_failure) {
   state.fail_after = 0;
 
   for (i = 0; i < AX_SB_INLINE_PIECES; ++i)
-    cr_assert(ax_sb_append_char(&sb, 'x'));
+    ASSERT(ax_sb_append_char(&sb, 'x'));
 
-  cr_assert(!ax_sb_append_char(&sb, 'y'));
-  cr_assert(ax_sb_failed(&sb));
+  ASSERT(!ax_sb_append_char(&sb, 'y'));
+  ASSERT(ax_sb_failed(&sb));
 
   state.fail_after = -1;
   ax_sb_reset(&sb);
 
-  cr_assert(!ax_sb_failed(&sb));
-  cr_assert_eq(ax_sb_piece_count(&sb), 0);
+  ASSERT(!ax_sb_failed(&sb));
+  ASSERT_EQ(ax_sb_piece_count(&sb), 0);
 
-  cr_assert(ax_sb_append_lit(&sb, "recovered"));
+  ASSERT(ax_sb_append_lit(&sb, "recovered"));
 
   assert_build_cstr(&sb, "recovered");
 
   ax_sb_free(&sb);
 }
 
-Test(ax_sb, build_allocation_failure_returns_null_without_failing_builder) {
+TEST(ax_sb, build_allocation_failure_returns_null_without_failing_builder) {
   test_allocator_state state;
   ax_sb sb;
   size_t len = 999;
@@ -484,15 +484,15 @@ Test(ax_sb, build_allocation_failure_returns_null_without_failing_builder) {
 
   init_builder(&sb, &state);
 
-  cr_assert(ax_sb_append_lit(&sb, "abc"));
+  ASSERT(ax_sb_append_lit(&sb, "abc"));
 
   state.fail_after = 0;
 
   out = ax_sb_build(&sb, &len);
 
-  cr_assert_null(out);
-  cr_assert_eq(len, 0);
-  cr_assert(!ax_sb_failed(&sb));
+  ASSERT_NULL(out);
+  ASSERT_EQ(len, 0);
+  ASSERT(!ax_sb_failed(&sb));
 
   state.fail_after = -1;
 
@@ -501,7 +501,7 @@ Test(ax_sb, build_allocation_failure_returns_null_without_failing_builder) {
   ax_sb_free(&sb);
 }
 
-Test(ax_sb, build_with_allocator_uses_requested_output_allocator) {
+TEST(ax_sb, build_with_allocator_uses_requested_output_allocator) {
   test_allocator_state builder_state;
   test_allocator_state output_state;
 
@@ -515,21 +515,21 @@ Test(ax_sb, build_with_allocator_uses_requested_output_allocator) {
 
   output_allocator = make_test_allocator(&output_state, 1);
 
-  cr_assert(ax_sb_append_lit(&sb, "separate output allocator"));
+  ASSERT(ax_sb_append_lit(&sb, "separate output allocator"));
 
   out = ax_sb_build_with_allocator(&sb, output_allocator, &len);
 
-  cr_assert_not_null(out);
-  cr_assert_eq(len, strlen("separate output allocator"));
-  cr_assert_str_eq(out, "separate output allocator");
+  ASSERT_NOT_NULL(out);
+  ASSERT_EQ(len, strlen("separate output allocator"));
+  ASSERT_STR_EQ(out, "separate output allocator");
 
-  cr_assert_eq(output_state.alloc_calls, 1);
+  ASSERT_EQ(output_state.alloc_calls, 1);
 
   output_allocator->free(output_allocator->ctx, out);
   ax_sb_free(&sb);
 }
 
-Test(ax_sb, bad_allocator_initializes_as_failed) {
+TEST(ax_sb, bad_allocator_initializes_as_failed) {
   ax_allocator bad_allocator;
   ax_sb sb;
   size_t len = 999;
@@ -538,15 +538,15 @@ Test(ax_sb, bad_allocator_initializes_as_failed) {
 
   ax_sb_init(&sb, &bad_allocator);
 
-  cr_assert(ax_sb_failed(&sb));
-  cr_assert(!ax_sb_append_lit(&sb, "nope"));
-  cr_assert(!ax_sb_measure(&sb, &len));
-  cr_assert_eq(len, 0);
+  ASSERT(ax_sb_failed(&sb));
+  ASSERT(!ax_sb_append_lit(&sb, "nope"));
+  ASSERT(!ax_sb_measure(&sb, &len));
+  ASSERT_EQ(len, 0);
 
   ax_sb_free(&sb);
 }
 
-Test(ax_sb, measure_detects_size_overflow) {
+TEST(ax_sb, measure_detects_size_overflow) {
   test_allocator_state state;
   ax_sb sb;
   const char one_byte = 'x';
@@ -557,11 +557,11 @@ Test(ax_sb, measure_detects_size_overflow) {
   /*
       No bytes are copied here; the huge length only exercises accounting.
   */
-  cr_assert(ax_sb_append_ref(&sb, &one_byte, SIZE_MAX));
-  cr_assert(ax_sb_append_char(&sb, 'y'));
+  ASSERT(ax_sb_append_ref(&sb, &one_byte, SIZE_MAX));
+  ASSERT(ax_sb_append_char(&sb, 'y'));
 
-  cr_assert(!ax_sb_measure(&sb, &len));
-  cr_assert_eq(len, 0);
+  ASSERT(!ax_sb_measure(&sb, &len));
+  ASSERT_EQ(len, 0);
 
   ax_sb_free(&sb);
 }

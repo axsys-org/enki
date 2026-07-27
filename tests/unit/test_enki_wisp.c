@@ -1,4 +1,4 @@
-#include <criterion/criterion.h>
+#include "test.h"
 #include <setjmp.h>
 #include <stdlib.h>
 #include <string.h>
@@ -39,34 +39,34 @@ static char* eval_str(wisp_fixture* f, const char* src) {
 #define ASSERT_EVALS(f, src, expect)                                           \
   do {                                                                         \
     char* got_c = eval_str(f, src);                                            \
-    cr_assert_str_eq(got_c, expect, "%s evaluated to %s", src, got_c);         \
+    ASSERT_STR_EQ(got_c, expect, "%s evaluated to %s", src, got_c);            \
     free(got_c);                                                               \
   } while (0)
 
-Test(wisp, literals_and_rows) {
+TEST(wisp, literals_and_rows) {
   wisp_fixture f = fix_new();
   if (setjmp(f.w->errjmp) != 0)
-    cr_assert_fail("wisp error: %s", f.w->msg_c);
+    FAIL_TEST("wisp error: %s", f.w->msg_c);
   ASSERT_EVALS(&f, "42", "42");
   ASSERT_EVALS(&f, "(#app 0 1 2 3)", "(0 1 2 3)");
   ASSERT_EVALS(&f, "\"hello\"", "\"hello\"");
   fix_free(&f);
 }
 
-Test(wisp, op_application) {
+TEST(wisp, op_application) {
   wisp_fixture f = fix_new();
   if (setjmp(f.w->errjmp) != 0)
-    cr_assert_fail("wisp error: %s", f.w->msg_c);
+    FAIL_TEST("wisp error: %s", f.w->msg_c);
   ASSERT_EVALS(&f, "(#app (#pin 66) (\"Add\" 2 3))", "5");
   ASSERT_EVALS(&f, "(#app (#pin 66) (\"Mul\" 6 7))", "42");
   ASSERT_EVALS(&f, "(#app (#pin 0) (0 42))", "<42>");
   fix_free(&f);
 }
 
-Test(wisp, laws_and_letrec) {
+TEST(wisp, laws_and_letrec) {
   wisp_fixture f = fix_new();
   if (setjmp(f.w->errjmp) != 0)
-    cr_assert_fail("wisp error: %s", f.w->msg_c);
+    FAIL_TEST("wisp error: %s", f.w->msg_c);
   pl_val forms[3];
   const char* srcs[3] = {
       "(#bind id (#law \"id\" (id x) x))",
@@ -90,10 +90,10 @@ Test(wisp, laws_and_letrec) {
   fix_free(&f);
 }
 
-Test(wisp, macros_expand) {
+TEST(wisp, macros_expand) {
   wisp_fixture f = fix_new();
   if (setjmp(f.w->errjmp) != 0)
-    cr_assert_fail("wisp error: %s", f.w->msg_c);
+    FAIL_TEST("wisp error: %s", f.w->msg_c);
   /* a user macro that rewrites (twice e) to (#app (#pin 66)
    * ("Add" e e)) is overkill here; instead check the simpler #app and
    * juxt machinery used by the assembler front end */
@@ -102,17 +102,17 @@ Test(wisp, macros_expand) {
   fix_free(&f);
 }
 
-Test(wisp, error_reporting) {
+TEST(wisp, error_reporting) {
   wisp_fixture f = fix_new();
   volatile bool failed = false;
   if (setjmp(f.w->errjmp) != 0) {
     failed = true;
-    cr_assert_not_null(f.w->msg_c);
+    ASSERT_NOT_NULL(f.w->msg_c);
   } else {
     char* cur = (char*)"unbound-symbol-xyz";
     pl_val form = en_wisp_parse(f.w, &cur);
     (void)en_wisp_eval(f.w, form);
   }
-  cr_assert(failed);
+  ASSERT(failed);
   fix_free(&f);
 }

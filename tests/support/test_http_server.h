@@ -53,7 +53,9 @@ typedef struct test_http_server {
   uint16_t xorigin_port; /* /xorigin redirect target (0: self) */
   pthread_t thread;
   pthread_mutex_t mu;
+  pthread_cond_t handlers_idle;
   bool stopping;
+  size_t active_handlers;
   test_http_req reqs[TEST_HTTP_MAX_REQS];
   size_t nreqs;
 } test_http_server;
@@ -91,6 +93,15 @@ static void test_http_printf(int fd, bool* failed, const char* fmt, ...) {
     *failed = true;
 }
 
+static void test_http_handler_done(test_http_server* srv, int fd) {
+  close(fd);
+  pthread_mutex_lock(&srv->mu);
+  srv->active_handlers--;
+  if (srv->active_handlers == 0)
+    pthread_cond_signal(&srv->handlers_idle);
+  pthread_mutex_unlock(&srv->mu);
+}
+
 static void* test_http_handle(void* arg) {
   test_http_conn* c = arg;
   test_http_server* srv = c->srv;
@@ -112,7 +123,7 @@ static void* test_http_handle(void* arg) {
       break;
   }
   if (body_start == NULL) {
-    close(fd);
+    test_http_handler_done(srv, fd);
     return NULL;
   }
   body_start += 4;
@@ -241,7 +252,7 @@ static void* test_http_handle(void* arg) {
     cap->write_failed = true;
     pthread_mutex_unlock(&srv->mu);
   }
-  close(fd);
+  test_http_handler_done(srv, fd);
   return NULL;
 }
 
@@ -251,17 +262,20 @@ static void* test_http_accept_loop(void* arg) {
     int fd = accept(srv->listen_fd, NULL, NULL);
     if (fd < 0)
       return NULL; /* listener closed: stop */
-    pthread_mutex_lock(&srv->mu);
-    bool stopping = srv->stopping;
-    pthread_mutex_unlock(&srv->mu);
-    if (stopping) {
-      close(fd);
-      return NULL;
-    }
     test_http_conn* c = malloc(sizeof(*c));
     if (c == NULL) {
       close(fd);
       continue;
+    }
+    pthread_mutex_lock(&srv->mu);
+    bool stopping = srv->stopping;
+    if (!stopping)
+      srv->active_handlers++;
+    pthread_mutex_unlock(&srv->mu);
+    if (stopping) {
+      close(fd);
+      free(c);
+      return NULL;
     }
     c->srv = srv;
     c->fd = fd;
@@ -270,8 +284,8 @@ static void* test_http_accept_loop(void* arg) {
     pthread_attr_init(&at);
     pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
     if (pthread_create(&th, &at, test_http_handle, c) != 0) {
-      close(fd);
       free(c);
+      test_http_handler_done(srv, fd);
     }
     pthread_attr_destroy(&at);
   }
@@ -300,9 +314,18 @@ static bool test_http_server_start(test_http_server* srv) {
     return false;
   }
   srv->port = ntohs(addr.sin_port);
-  pthread_mutex_init(&srv->mu, NULL);
+  if (pthread_mutex_init(&srv->mu, NULL) != 0) {
+    close(srv->listen_fd);
+    return false;
+  }
+  if (pthread_cond_init(&srv->handlers_idle, NULL) != 0) {
+    pthread_mutex_destroy(&srv->mu);
+    close(srv->listen_fd);
+    return false;
+  }
   if (pthread_create(&srv->thread, NULL, test_http_accept_loop, srv) != 0) {
     close(srv->listen_fd);
+    pthread_cond_destroy(&srv->handlers_idle);
     pthread_mutex_destroy(&srv->mu);
     return false;
   }
@@ -331,6 +354,11 @@ static void test_http_server_stop(test_http_server* srv) {
   }
   pthread_join(srv->thread, NULL);
   close(srv->listen_fd);
+  pthread_mutex_lock(&srv->mu);
+  while (srv->active_handlers != 0)
+    pthread_cond_wait(&srv->handlers_idle, &srv->mu);
+  pthread_mutex_unlock(&srv->mu);
+  pthread_cond_destroy(&srv->handlers_idle);
   pthread_mutex_destroy(&srv->mu);
 }
 

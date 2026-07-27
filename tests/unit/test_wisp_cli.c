@@ -1,4 +1,4 @@
-#include <criterion/criterion.h>
+#include "test.h"
 
 #include <stdbool.h>
 #include <stdio.h>
@@ -25,14 +25,14 @@ static void reaver_src_dir(char* out, size_t out_cap) {
   const char* env_c = getenv("ENKI_REAVER_SRC_DIR");
   if (env_c != NULL && env_c[0] != '\0') {
     int s = snprintf(out, out_cap, "%s", env_c);
-    cr_assert(s >= 0 && (size_t)s < out_cap, "ENKI_REAVER_SRC_DIR too long");
+    ASSERT(s >= 0 && (size_t)s < out_cap, "ENKI_REAVER_SRC_DIR too long");
     return;
   }
 
   char cwd[2048];
-  cr_assert_not_null(getcwd(cwd, sizeof(cwd)), "failed to get cwd");
+  ASSERT_NOT_NULL(getcwd(cwd, sizeof(cwd)), "failed to get cwd");
   int s = snprintf(out, out_cap, "%s/reaver/src", cwd);
-  cr_assert(s >= 0 && (size_t)s < out_cap, "reaver src path too long");
+  ASSERT(s >= 0 && (size_t)s < out_cap, "reaver src path too long");
 }
 
 static const char* wisp_bin(void) {
@@ -40,21 +40,21 @@ static const char* wisp_bin(void) {
   return env_c != NULL && env_c[0] != '\0' ? env_c : ENKI_WISP_BIN;
 }
 
-Test(wisp_cli, reaver_module_exits_zero) {
+TEST(wisp_cli, reaver_module_exits_zero) {
   char command_c[4096];
   int command_s = snprintf(command_c, sizeof(command_c), "%s %s reaver",
                            wisp_bin(), reaver_plan_dir());
 
-  cr_assert(command_s >= 0 && (size_t)command_s < sizeof(command_c),
-            "failed to build wisp command");
+  ASSERT(command_s >= 0 && (size_t)command_s < sizeof(command_c),
+         "failed to build wisp command");
 
   int status = system(command_c);
 
-  cr_assert_neq(status, -1, "failed to run `%s`", command_c);
-  cr_assert(WIFEXITED(status), "`%s` did not exit normally: status=%d",
-            command_c, status);
-  cr_assert_eq(WEXITSTATUS(status), 0, "`%s` exited with %d", command_c,
-               WEXITSTATUS(status));
+  ASSERT_NEQ(status, -1, "failed to run `%s`", command_c);
+  ASSERT(WIFEXITED(status), "`%s` did not exit normally: status=%d", command_c,
+         status);
+  ASSERT_EQ(WEXITSTATUS(status), 0, "`%s` exited with %d", command_c,
+            WEXITSTATUS(status));
 }
 
 /*
@@ -78,7 +78,7 @@ static int run_cmd(const char* cmd, char* out, size_t out_cap) {
 
 static bool file_contains(const char* path, const char* needle) {
   FILE* f = fopen(path, "r");
-  cr_assert_not_null(f, "failed to open `%s`", path);
+  ASSERT_NOT_NULL(f, "failed to open `%s`", path);
 
   bool found = false;
   size_t needle_n = strlen(needle);
@@ -99,14 +99,14 @@ static bool file_contains(const char* path, const char* needle) {
   return found;
 }
 
-Test(wisp_cli, save_silo_snapshot_round_trip) {
+TEST(wisp_cli, save_silo_snapshot_round_trip) {
   char dir[] = "/tmp/enki-snaptest-XXXXXX";
-  cr_assert_not_null(mkdtemp(dir), "failed to make temp dir");
+  ASSERT_NOT_NULL(mkdtemp(dir), "failed to make temp dir");
 
   char path[512];
   (void)snprintf(path, sizeof(path), "%s/save1.plan", dir);
   FILE* f = fopen(path, "w");
-  cr_assert_not_null(f);
+  ASSERT_NOT_NULL(f);
   /* Print writes the raw bytes of a plain string nat (op 82, RPLAN). */
   fprintf(f,
           "(#bind Print\n"
@@ -128,28 +128,28 @@ Test(wisp_cli, save_silo_snapshot_round_trip) {
   (void)snprintf(cmd, sizeof(cmd), "cd %s && %s %s save1 >/dev/null 2>&1", dir,
                  wisp_bin(), dir);
   int st = system(cmd);
-  cr_assert(WIFEXITED(st) && WEXITSTATUS(st) == 0, "assemble failed");
+  ASSERT(WIFEXITED(st) && WEXITSTATUS(st) == 0, "assemble failed");
 
   (void)snprintf(path, sizeof(path), "%s/snap/pins.pack", dir);
-  cr_assert_eq(access(path, F_OK), 0, "snap/pins.pack not written");
+  ASSERT_EQ(access(path, F_OK), 0, "snap/pins.pack not written");
 
   /* RPLAN resume: run the saved program, which prints "snap-ok" */
   (void)snprintf(cmd, sizeof(cmd), "cd %s && %s snap root _ 2>/dev/null", dir,
                  wisp_bin());
   st = run_cmd(cmd, out, sizeof(out));
-  cr_assert(WIFEXITED(st) && WEXITSTATUS(st) == 0, "resume failed");
-  cr_assert_not_null(strstr(out, "snap-ok"),
-                     "resumed program did not print; got `%s`", out);
+  ASSERT(WIFEXITED(st) && WEXITSTATUS(st) == 0, "resume failed");
+  ASSERT_NOT_NULL(strstr(out, "snap-ok"),
+                  "resumed program did not print; got `%s`", out);
 }
 
-Test(wisp_cli, save_text_hash_snapshot_round_trip) {
+TEST(wisp_cli, save_text_hash_snapshot_round_trip) {
   char dir[] = "/tmp/enki-text-snaptest-XXXXXX";
-  cr_assert_not_null(mkdtemp(dir), "failed to make temp dir");
+  ASSERT_NOT_NULL(mkdtemp(dir), "failed to make temp dir");
 
   char path[512];
   (void)snprintf(path, sizeof(path), "%s/save1.plan", dir);
   FILE* f = fopen(path, "w");
-  cr_assert_not_null(f);
+  ASSERT_NOT_NULL(f);
   fprintf(f,
           "(#bind Print\n"
           "  (#pin (#law \"Print\" (Print x) ((#pin \"R\") (\"Print\" x)))))\n"
@@ -167,28 +167,28 @@ Test(wisp_cli, save_text_hash_snapshot_round_trip) {
                  "cd %s && %s --text-hash %s save1 >/dev/null 2>&1", dir,
                  wisp_bin(), dir);
   int st = system(cmd);
-  cr_assert(WIFEXITED(st) && WEXITSTATUS(st) == 0, "assemble failed");
+  ASSERT(WIFEXITED(st) && WEXITSTATUS(st) == 0, "assemble failed");
 
   (void)snprintf(path, sizeof(path), "%s/snap/root.plan", dir);
-  cr_assert_eq(access(path, F_OK), 0, "snap/root.plan not written");
+  ASSERT_EQ(access(path, F_OK), 0, "snap/root.plan not written");
 
   (void)snprintf(cmd, sizeof(cmd),
                  "cd %s && %s --text-hash snap root _ 2>/dev/null", dir,
                  wisp_bin());
   st = run_cmd(cmd, out, sizeof(out));
-  cr_assert(WIFEXITED(st) && WEXITSTATUS(st) == 0, "resume failed");
-  cr_assert_not_null(strstr(out, "text-ok"),
-                     "resumed program did not print; got `%s`", out);
+  ASSERT(WIFEXITED(st) && WEXITSTATUS(st) == 0, "resume failed");
+  ASSERT_NOT_NULL(strstr(out, "text-ok"),
+                  "resumed program did not print; got `%s`", out);
 }
 
-Test(wisp_cli, rplan_op_rejected_in_bplan) {
+TEST(wisp_cli, rplan_op_rejected_in_bplan) {
   char dir[] = "/tmp/enki-bplan-XXXXXX";
-  cr_assert_not_null(mkdtemp(dir));
+  ASSERT_NOT_NULL(mkdtemp(dir));
 
   char path[512];
   (void)snprintf(path, sizeof(path), "%s/bad.plan", dir);
   FILE* f = fopen(path, "w");
-  cr_assert_not_null(f);
+  ASSERT_NOT_NULL(f);
   /* calling an op-82 (rplan) op at top level in BPLAN mode must fail */
   fprintf(f, "((#pin \"R\") (\"Print\" \"nope\"))\n");
   fclose(f);
@@ -197,18 +197,18 @@ Test(wisp_cli, rplan_op_rejected_in_bplan) {
   (void)snprintf(cmd, sizeof(cmd), "%s %s bad >/dev/null 2>&1", wisp_bin(),
                  dir);
   int st = system(cmd);
-  cr_assert(WIFEXITED(st) && WEXITSTATUS(st) != 0,
-            "RPLAN op should be rejected outside RPLAN mode");
+  ASSERT(WIFEXITED(st) && WEXITSTATUS(st) != 0,
+         "RPLAN op should be rejected outside RPLAN mode");
 }
 
-Test(wisp_cli, profile_json_accepts_both_flag_spellings) {
+TEST(wisp_cli, profile_json_accepts_both_flag_spellings) {
   char dir[] = "/tmp/enki-profile-cli-XXXXXX";
-  cr_assert_not_null(mkdtemp(dir));
+  ASSERT_NOT_NULL(mkdtemp(dir));
 
   char module_path[512];
   (void)snprintf(module_path, sizeof(module_path), "%s/ok.plan", dir);
   FILE* f = fopen(module_path, "w");
-  cr_assert_not_null(f);
+  ASSERT_NOT_NULL(f);
   fputs("0\n", f);
   fclose(f);
 
@@ -227,19 +227,19 @@ Test(wisp_cli, profile_json_accepts_both_flag_spellings) {
                      trace_path, dir);
     }
     int st = system(cmd);
-    cr_assert(WIFEXITED(st) && WEXITSTATUS(st) == 0,
-              "profile JSON invocation failed for equals=%d", equals);
-    cr_assert(file_contains(trace_path, "\"cat\":\"splan.store\""),
-              "store trace events were not emitted for equals=%d", equals);
-    cr_assert(file_contains(trace_path, "],\"displayTimeUnit\":\"ms\"}"),
-              "trace was not finalized for equals=%d", equals);
+    ASSERT(WIFEXITED(st) && WEXITSTATUS(st) == 0,
+           "profile JSON invocation failed for equals=%d", equals);
+    ASSERT(file_contains(trace_path, "\"cat\":\"splan.store\""),
+           "store trace events were not emitted for equals=%d", equals);
+    ASSERT(file_contains(trace_path, "],\"displayTimeUnit\":\"ms\"}"),
+           "trace was not finalized for equals=%d", equals);
   }
 }
 
-Test(wisp_cli, profile_json_open_failure_exits_early) {
+TEST(wisp_cli, profile_json_open_failure_exits_early) {
   char dir[] = "/tmp/enki-profile-missing-XXXXXX";
-  cr_assert_not_null(mkdtemp(dir));
-  cr_assert_eq(rmdir(dir), 0);
+  ASSERT_NOT_NULL(mkdtemp(dir));
+  ASSERT_EQ(rmdir(dir), 0);
 
   char trace_path[512];
   (void)snprintf(trace_path, sizeof(trace_path), "%s/trace.json", dir);
@@ -248,19 +248,19 @@ Test(wisp_cli, profile_json_open_failure_exits_early) {
                  "%s --profile-json %s %s reaver >/dev/null 2>&1", wisp_bin(),
                  trace_path, reaver_plan_dir());
   int st = system(cmd);
-  cr_assert(WIFEXITED(st) && WEXITSTATUS(st) != 0,
-            "unopenable profile destination should fail");
-  cr_assert_neq(access(trace_path, F_OK), 0);
+  ASSERT(WIFEXITED(st) && WEXITSTATUS(st) != 0,
+         "unopenable profile destination should fail");
+  ASSERT_NEQ(access(trace_path, F_OK), 0);
 }
 
-Test(wisp_cli, profile_json_finalizes_after_runtime_error) {
+TEST(wisp_cli, profile_json_finalizes_after_runtime_error) {
   char dir[] = "/tmp/enki-profile-error-XXXXXX";
-  cr_assert_not_null(mkdtemp(dir));
+  ASSERT_NOT_NULL(mkdtemp(dir));
 
   char module_path[512];
   (void)snprintf(module_path, sizeof(module_path), "%s/bad.plan", dir);
   FILE* f = fopen(module_path, "w");
-  cr_assert_not_null(f);
+  ASSERT_NOT_NULL(f);
   fputs("((#pin \"R\") (\"Print\" \"nope\"))\n", f);
   fclose(f);
 
@@ -271,10 +271,10 @@ Test(wisp_cli, profile_json_finalizes_after_runtime_error) {
                  "%s --profile-json %s %s bad >/dev/null 2>&1", wisp_bin(),
                  trace_path, dir);
   int st = system(cmd);
-  cr_assert(WIFEXITED(st) && WEXITSTATUS(st) != 0,
-            "runtime error should remain nonzero");
-  cr_assert(file_contains(trace_path, "],\"displayTimeUnit\":\"ms\"}"),
-            "runtime-error trace was not finalized");
+  ASSERT(WIFEXITED(st) && WEXITSTATUS(st) != 0,
+         "runtime error should remain nonzero");
+  ASSERT(file_contains(trace_path, "],\"displayTimeUnit\":\"ms\"}"),
+         "runtime-error trace was not finalized");
 }
 
 /*
@@ -292,83 +292,81 @@ static int run_scenario(const char* bin, const char* fn, char* out,
   return run_cmd(cmd, out, cap);
 }
 
-Test(wisp_cli, actor_ping_echo) {
+TEST(wisp_cli, actor_ping_echo) {
   char out[256];
   int st = run_scenario(wisp_bin(), "ping", out, sizeof(out));
-  cr_assert(WIFEXITED(st) && WEXITSTATUS(st) == 0, "ping run failed");
-  cr_assert_str_eq(out, "hello-via-echo");
+  ASSERT(WIFEXITED(st) && WEXITSTATUS(st) == 0, "ping run failed");
+  ASSERT_STR_EQ(out, "hello-via-echo");
 }
 
-Test(wisp_cli, actor_counter_holds_state) {
+TEST(wisp_cli, actor_counter_holds_state) {
   char out[256];
   int st = run_scenario(wisp_bin(), "count", out, sizeof(out));
-  cr_assert(WIFEXITED(st) && WEXITSTATUS(st) == 0, "count run failed");
-  cr_assert_str_eq(out, "3");
+  ASSERT(WIFEXITED(st) && WEXITSTATUS(st) == 0, "count run failed");
+  ASSERT_STR_EQ(out, "3");
 }
 
-Test(wisp_cli, actor_deadlock_is_reported) {
+TEST(wisp_cli, actor_deadlock_is_reported) {
   char out[256];
   int st = run_scenario(wisp_bin(), "stuck", out, sizeof(out));
-  cr_assert(WIFEXITED(st) && WEXITSTATUS(st) != 0,
-            "an unanswerable Recv must fail the run");
+  ASSERT(WIFEXITED(st) && WEXITSTATUS(st) != 0,
+         "an unanswerable Recv must fail the run");
 }
 
-Test(wisp_cli, actor_recv_under_try) {
+TEST(wisp_cli, actor_recv_under_try) {
   char out[256];
   int st = run_scenario(wisp_bin(), "tryrecv", out, sizeof(out));
-  cr_assert(WIFEXITED(st) && WEXITSTATUS(st) == 0, "tryrecv run failed");
-  cr_assert_str_eq(out, "tm");
+  ASSERT(WIFEXITED(st) && WEXITSTATUS(st) == 0, "tryrecv run failed");
+  ASSERT_STR_EQ(out, "tm");
 }
 
 /* Differential vs the reaver oracle (a local Haskell reference build);
  * skipped where the binary is absent (e.g. the nix sandbox). */
-Test(wisp_cli, actor_differential_vs_reaver) {
+TEST(wisp_cli, actor_differential_vs_reaver) {
   const char* oracle = getenv("ENKI_REAVER_BIN");
   if (oracle == NULL || oracle[0] == '\0')
     oracle = "./reaver/dist-newstyle/build/aarch64-osx/ghc-9.10.3/"
              "plan-assembler-0.1.0.0/x/plan-assembler/build/plan-assembler/"
              "plan-assembler";
   if (access(oracle, X_OK) != 0)
-    cr_skip_test("reaver oracle binary not available");
+    SKIP_TEST("reaver oracle binary not available");
 
   static const char* const fns[] = {"ping", "count", "tryrecv"};
   for (size_t i = 0; i < sizeof(fns) / sizeof(fns[0]); i++) {
     char ours[256], theirs[256];
     int st1 = run_scenario(wisp_bin(), fns[i], ours, sizeof(ours));
     int st2 = run_scenario(oracle, fns[i], theirs, sizeof(theirs));
-    cr_assert(WIFEXITED(st1) && WEXITSTATUS(st1) == 0, "wisp %s failed",
-              fns[i]);
-    cr_assert(WIFEXITED(st2) && WEXITSTATUS(st2) == 0, "reaver %s failed",
-              fns[i]);
-    cr_assert_str_eq(ours, theirs, "differential mismatch on %s", fns[i]);
+    ASSERT(WIFEXITED(st1) && WEXITSTATUS(st1) == 0, "wisp %s failed", fns[i]);
+    ASSERT(WIFEXITED(st2) && WEXITSTATUS(st2) == 0, "reaver %s failed", fns[i]);
+    ASSERT_STR_EQ(ours, theirs, "differential mismatch on %s", fns[i]);
   }
 }
 
-Test(wisp_cli, read_file_honors_file_root) {
+TEST(wisp_cli, read_file_honors_file_root) {
   char dir[] = "/tmp/enki-fileroot-XXXXXX";
-  cr_assert_not_null(mkdtemp(dir));
+  ASSERT_NOT_NULL(mkdtemp(dir));
 
   char path[512];
   (void)snprintf(path, sizeof(path), "%s/snap", dir);
-  cr_assert_eq(mkdir(path, 0700), 0);
+  ASSERT_EQ(mkdir(path, 0700), 0);
   (void)snprintf(path, sizeof(path), "%s/files", dir);
-  cr_assert_eq(mkdir(path, 0700), 0);
+  ASSERT_EQ(mkdir(path, 0700), 0);
 
   (void)snprintf(path, sizeof(path), "%s/files/allowed.txt", dir);
   FILE* f = fopen(path, "w");
-  cr_assert_not_null(f);
+  ASSERT_NOT_NULL(f);
   fputs("inside-ok", f);
   fclose(f);
 
   (void)snprintf(path, sizeof(path), "%s/secret.txt", dir);
   f = fopen(path, "w");
-  cr_assert_not_null(f);
+  ASSERT_NOT_NULL(f);
   fputs("outside-secret", f);
   fclose(f);
 
   (void)snprintf(path, sizeof(path), "%s/snap/root.plan", dir);
   f = fopen(path, "w");
-  cr_assert_not_null(f);
+  ASSERT_NOT_NULL(f);
   fprintf(f, "(#bind Output\n"
              "  (#pin (#law \"Output\" (Output x) ((#pin \"R\") (\"Output\" "
              "x)))))\n"
@@ -391,39 +389,38 @@ Test(wisp_cli, read_file_honors_file_root) {
                  "2>/dev/null",
                  dir, wisp_bin());
   int st = run_cmd(cmd, out, sizeof(out));
-  cr_assert(WIFEXITED(st) && WEXITSTATUS(st) == 0, "inside run failed");
-  cr_assert_not_null(strstr(out, "inside-ok"), "got `%s`", out);
+  ASSERT(WIFEXITED(st) && WEXITSTATUS(st) == 0, "inside run failed");
+  ASSERT_NOT_NULL(strstr(out, "inside-ok"), "got `%s`", out);
 
   (void)snprintf(cmd, sizeof(cmd),
                  "cd %s && %s --text-hash --file-root files snap root escape "
                  "2>/dev/null",
                  dir, wisp_bin());
   st = run_cmd(cmd, out, sizeof(out));
-  cr_assert(WIFEXITED(st) && WEXITSTATUS(st) == 0, "escape run failed");
-  cr_assert_null(strstr(out, "outside-secret"), "escaped file root: `%s`", out);
+  ASSERT(WIFEXITED(st) && WEXITSTATUS(st) == 0, "escape run failed");
+  ASSERT_NULL(strstr(out, "outside-secret"), "escaped file root: `%s`", out);
 }
 
-Test(wisp_cli, boot_reset_imports_stdlib_primitives) {
+TEST(wisp_cli, boot_reset_imports_stdlib_primitives) {
   char dir[] = "/tmp/enki-boot-XXXXXX";
-  cr_assert_not_null(mkdtemp(dir), "failed to make temp dir");
+  ASSERT_NOT_NULL(mkdtemp(dir), "failed to make temp dir");
 
   char src_dir[4096];
   reaver_src_dir(src_dir, sizeof(src_dir));
 
   char plan_dir[4096];
   int s = snprintf(plan_dir, sizeof(plan_dir), "%s/plan", src_dir);
-  cr_assert(s >= 0 && (size_t)s < sizeof(plan_dir),
-            "reaver plan path too long");
+  ASSERT(s >= 0 && (size_t)s < sizeof(plan_dir), "reaver plan path too long");
 
   char cmd[16384];
   s = snprintf(cmd, sizeof(cmd),
                "cd %s && %s --file-root %s %s reaver main "
                ">reset.out 2>&1",
                dir, wisp_bin(), src_dir, plan_dir);
-  cr_assert(s >= 0 && (size_t)s < sizeof(cmd), "reset command too long");
+  ASSERT(s >= 0 && (size_t)s < sizeof(cmd), "reset command too long");
   int st = system(cmd);
-  cr_assert(WIFEXITED(st) && WEXITSTATUS(st) == 0,
-            "boot reset failed; see %s/reset.out", dir);
+  ASSERT(WIFEXITED(st) && WEXITSTATUS(st) == 0,
+         "boot reset failed; see %s/reset.out", dir);
 
   s = snprintf(cmd, sizeof(cmd),
                "cd %s && %s --file-root %s snap root _ "
@@ -433,10 +430,10 @@ Test(wisp_cli, boot_reset_imports_stdlib_primitives) {
                ":*app-todo\n"
                "EOF\n",
                dir, wisp_bin(), src_dir);
-  cr_assert(s >= 0 && (size_t)s < sizeof(cmd), "load command too long");
+  ASSERT(s >= 0 && (size_t)s < sizeof(cmd), "load command too long");
   st = system(cmd);
-  cr_assert(WIFEXITED(st) && WEXITSTATUS(st) == 0,
-            "stdlib import failed; see %s/load.out", dir);
+  ASSERT(WIFEXITED(st) && WEXITSTATUS(st) == 0,
+         "stdlib import failed; see %s/load.out", dir);
 
   s = snprintf(cmd, sizeof(cmd),
                "cd %s && %s --file-root %s snap root _ "
@@ -444,17 +441,17 @@ Test(wisp_cli, boot_reset_imports_stdlib_primitives) {
                "(Add 1 2)\n"
                "EOF\n",
                dir, wisp_bin(), src_dir);
-  cr_assert(s >= 0 && (size_t)s < sizeof(cmd), "query command too long");
+  ASSERT(s >= 0 && (size_t)s < sizeof(cmd), "query command too long");
   st = system(cmd);
-  cr_assert(WIFEXITED(st) && WEXITSTATUS(st) == 0,
-            "query failed; see %s/query.out", dir);
+  ASSERT(WIFEXITED(st) && WEXITSTATUS(st) == 0,
+         "query failed; see %s/query.out", dir);
 
   char query_path[512];
   s = snprintf(query_path, sizeof(query_path), "%s/query.out", dir);
-  cr_assert(s >= 0 && (size_t)s < sizeof(query_path),
-            "query output path too long");
-  cr_assert_not(file_contains(query_path, "(\"ERROR\""),
-                "booted REPL returned an error; see %s", query_path);
-  cr_assert(file_contains(query_path, "\n3\n"),
-            "booted REPL did not evaluate (Add 1 2) to 3; see %s", query_path);
+  ASSERT(s >= 0 && (size_t)s < sizeof(query_path),
+         "query output path too long");
+  ASSERT_FALSE(file_contains(query_path, "(\"ERROR\""),
+               "booted REPL returned an error; see %s", query_path);
+  ASSERT(file_contains(query_path, "\n3\n"),
+         "booted REPL did not evaluate (Add 1 2) to 3; see %s", query_path);
 }

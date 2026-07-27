@@ -1,4 +1,4 @@
-#include <criterion/criterion.h>
+#include "test.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -106,11 +106,11 @@ static er_actor* start_recv_actor(er_scheduler* sys) {
 }
 
 static pl_val recv_result_payload(er_actor* a) {
-  cr_assert_eq(er_actor_state(a), ER_ACTOR_HALTED);
+  ASSERT_EQ(er_actor_state(a), ER_ACTOR_HALTED);
   pl_cell* row = pl_as(PL_TAG_APP, er_actor_result(a));
-  cr_assert_not_null(row);
-  cr_assert_eq(pl_app_head(row), 0);
-  cr_assert_eq(pl_app_n(row), 2);
+  ASSERT_NOT_NULL(row);
+  ASSERT_EQ(pl_app_head(row), 0);
+  ASSERT_EQ(pl_app_n(row), 2);
   return pl_app_args(row)[0];
 }
 
@@ -142,11 +142,11 @@ static void start_readfolder_actor(er_scheduler* sys, const char* path) {
 
 static void assert_bar(pl_val v, const char* s) {
   size_t n = strlen(s);
-  cr_assert(pl_is_nat(v), "expected a bar nat");
-  cr_assert_eq(pl_nat_byte_len(v), n + 1);
+  ASSERT(pl_is_nat(v), "expected a bar nat");
+  ASSERT_EQ(pl_nat_byte_len(v), n + 1);
   for (size_t i = 0; i < n; i++)
-    cr_assert_eq(pl_nat_byte_at(v, i), (uint8_t)s[i]);
-  cr_assert_eq(pl_nat_byte_at(v, n), 1); /* bar terminator */
+    ASSERT_EQ(pl_nat_byte_at(v, i), (uint8_t)s[i]);
+  ASSERT_EQ(pl_nat_byte_at(v, n), 1); /* bar terminator */
 }
 
 static bool nat_text_eq(pl_val value, const char* text) {
@@ -172,14 +172,14 @@ static pl_cell* folder_entry(pl_val row, const char* name) {
   return NULL;
 }
 
-Test(replay, readfile_substitutes_without_syscall) {
+TEST(replay, readfile_substitutes_without_syscall) {
   char dir[] = "/tmp/enki-replay-XXXXXX";
-  cr_assert_not_null(mkdtemp(dir));
+  ASSERT_NOT_NULL(mkdtemp(dir));
   char path[256], logpath[256];
   (void)snprintf(path, sizeof(path), "%s/data.txt", dir);
   (void)snprintf(logpath, sizeof(logpath), "%s/run.enkilog", dir);
   FILE* f = fopen(path, "w");
-  cr_assert_not_null(f);
+  ASSERT_NOT_NULL(f);
   fputs("alpha", f);
   fclose(f);
 
@@ -191,48 +191,48 @@ Test(replay, readfile_substitutes_without_syscall) {
     er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
     er_scheduler_record(sys, log);
     start_readfile_actor(sys, path);
-    cr_assert_eq(er_scheduler_run(sys), ER_RUN_IDLE);
+    ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
     er_actor* a = er_scheduler_actor_by_id(sys, 0);
-    cr_assert_eq(er_actor_state(a), ER_ACTOR_HALTED);
+    ASSERT_EQ(er_actor_state(a), ER_ACTOR_HALTED);
     assert_bar(er_actor_result(a), "alpha");
     er_scheduler_free(sys);
   }
-  cr_assert_eq(er_log_events(log), 1);
+  ASSERT_EQ(er_log_events(log), 1);
 
   /* the log round-trips through a file; the data file is deleted, so
    * only substitution can reproduce the contents */
-  cr_assert(er_log_write_file(log, logpath));
+  ASSERT(er_log_write_file(log, logpath));
   er_log_free(log);
-  cr_assert_eq(unlink(path), 0);
+  ASSERT_EQ(unlink(path), 0);
   er_log* loaded = er_log_read_file(logpath);
-  cr_assert_not_null(loaded);
-  cr_assert_eq(er_log_events(loaded), 1);
+  ASSERT_NOT_NULL(loaded);
+  ASSERT_EQ(er_log_events(loaded), 1);
 
   {
     er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
     er_scheduler_replay(sys, loaded);
     start_readfile_actor(sys, path);
-    cr_assert_eq(er_scheduler_run(sys), ER_RUN_IDLE);
+    ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
     er_actor* a = er_scheduler_actor_by_id(sys, 0);
-    cr_assert_eq(er_actor_state(a), ER_ACTOR_HALTED);
+    ASSERT_EQ(er_actor_state(a), ER_ACTOR_HALTED);
     assert_bar(er_actor_result(a), "alpha"); /* file no longer exists */
-    cr_assert_eq(er_scheduler_log_cursor(sys), 1);
+    ASSERT_EQ(er_scheduler_log_cursor(sys), 1);
     er_scheduler_free(sys);
   }
   er_log_free(loaded);
   test_rt_free(&rt);
 }
 
-Test(replay, readfolder_substitutes_without_directory) {
+TEST(replay, readfolder_substitutes_without_directory) {
   char dir[] = "/tmp/enki-replay-folder-XXXXXX";
-  cr_assert_not_null(mkdtemp(dir));
+  ASSERT_NOT_NULL(mkdtemp(dir));
   char child[256], file[256], logpath[256];
   (void)snprintf(child, sizeof(child), "%s/subdir", dir);
   (void)snprintf(file, sizeof(file), "%s/plain.txt", dir);
   (void)snprintf(logpath, sizeof(logpath), "%s/run.enkilog", dir);
-  cr_assert_eq(mkdir(child, 0700), 0);
+  ASSERT_EQ(mkdir(child, 0700), 0);
   FILE* f = fopen(file, "w");
-  cr_assert_not_null(f);
+  ASSERT_NOT_NULL(f);
   fputs("alpha", f);
   fclose(f);
 
@@ -242,45 +242,45 @@ Test(replay, readfolder_substitutes_without_directory) {
     er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
     er_scheduler_record(sys, log);
     start_readfolder_actor(sys, dir);
-    cr_assert_eq(er_scheduler_run(sys), ER_RUN_IDLE);
+    ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
     er_actor* a = er_scheduler_actor_by_id(sys, 0);
     pl_val row = er_actor_result(a);
     pl_cell* subdir = folder_entry(row, "subdir");
-    cr_assert_not_null(subdir);
-    cr_assert_eq(pl_app_args(subdir)[0], 1);
+    ASSERT_NOT_NULL(subdir);
+    ASSERT_EQ(pl_app_args(subdir)[0], 1);
     pl_cell* plain = folder_entry(row, "plain.txt");
-    cr_assert_not_null(plain);
-    cr_assert_eq(pl_app_args(plain)[0], 0);
+    ASSERT_NOT_NULL(plain);
+    ASSERT_EQ(pl_app_args(plain)[0], 0);
     er_scheduler_free(sys);
   }
-  cr_assert_eq(er_log_events(log), 1);
-  cr_assert(er_log_write_file(log, logpath));
+  ASSERT_EQ(er_log_events(log), 1);
+  ASSERT(er_log_write_file(log, logpath));
   er_log_free(log);
-  cr_assert_eq(unlink(file), 0);
-  cr_assert_eq(rmdir(child), 0);
+  ASSERT_EQ(unlink(file), 0);
+  ASSERT_EQ(rmdir(child), 0);
   er_log* loaded = er_log_read_file(logpath);
-  cr_assert_not_null(loaded);
+  ASSERT_NOT_NULL(loaded);
 
   {
     er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
     er_scheduler_replay(sys, loaded);
     start_readfolder_actor(sys, dir); /* the directory no longer exists */
-    cr_assert_eq(er_scheduler_run(sys), ER_RUN_IDLE);
+    ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
     er_actor* a = er_scheduler_actor_by_id(sys, 0);
     pl_val row = er_actor_result(a);
     pl_cell* subdir = folder_entry(row, "subdir");
-    cr_assert_not_null(subdir);
-    cr_assert_eq(pl_app_args(subdir)[0], 1);
+    ASSERT_NOT_NULL(subdir);
+    ASSERT_EQ(pl_app_args(subdir)[0], 1);
     pl_cell* plain = folder_entry(row, "plain.txt");
-    cr_assert_not_null(plain);
-    cr_assert_eq(pl_app_args(plain)[0], 0);
-    cr_assert_eq(er_scheduler_log_cursor(sys), 1);
+    ASSERT_NOT_NULL(plain);
+    ASSERT_EQ(pl_app_args(plain)[0], 0);
+    ASSERT_EQ(er_scheduler_log_cursor(sys), 1);
     er_scheduler_free(sys);
   }
   er_log_free(loaded);
   test_rt_free(&rt);
-  cr_assert_eq(unlink(logpath), 0);
-  cr_assert_eq(rmdir(dir), 0);
+  ASSERT_EQ(unlink(logpath), 0);
+  ASSERT_EQ(rmdir(dir), 0);
 }
 
 /* Self-ping with a lazy Now payload: the clock read happens while the
@@ -306,31 +306,31 @@ static pl_val run_now_ping(pl_store* store, const er_log* play, er_log* rec) {
   t->vsp = base;
   er_actor_start(a, actor_fn(t, body));
 
-  cr_assert_eq(er_scheduler_run(sys), ER_RUN_IDLE);
-  cr_assert_eq(er_actor_state(a), ER_ACTOR_HALTED);
+  ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
+  ASSERT_EQ(er_actor_state(a), ER_ACTOR_HALTED);
   pl_cell* r = pl_as(PL_TAG_APP, er_actor_result(a));
-  cr_assert_not_null(r);
+  ASSERT_NOT_NULL(r);
   pl_val instant = pl_app_args(r)[0];
-  cr_assert(pl_is_nat63(instant));
-  cr_assert_gt(instant, 0);
+  ASSERT(pl_is_nat63(instant));
+  ASSERT_GT(instant, 0);
   if (play != NULL)
-    cr_assert_eq(er_scheduler_log_cursor(sys), er_log_events(play));
+    ASSERT_EQ(er_scheduler_log_cursor(sys), er_log_events(play));
   er_scheduler_free(sys);
   return instant;
 }
 
-Test(replay, now_through_pinning_is_stable) {
+TEST(replay, now_through_pinning_is_stable) {
   test_rt rt = test_rt_new();
   er_log* log = er_log_new();
   pl_val recorded = run_now_ping(rt.store, NULL, log);
-  cr_assert_eq(er_log_events(log), 1); /* messaging is internal: only Now */
+  ASSERT_EQ(er_log_events(log), 1); /* messaging is internal: only Now */
   pl_val replayed = run_now_ping(rt.store, log, NULL);
-  cr_assert_eq(replayed, recorded);
+  ASSERT_EQ(replayed, recorded);
   er_log_free(log);
   test_rt_free(&rt);
 }
 
-Test(replay, injections_are_logged_and_verified) {
+TEST(replay, injections_are_logged_and_verified) {
   test_rt rt = test_rt_new();
   er_log* log = er_log_new();
   {
@@ -339,35 +339,35 @@ Test(replay, injections_are_logged_and_verified) {
     er_actor* a = er_scheduler_actor(sys);
     er_actor_start(a,
                    actor_fn(er_actor_thread(a), recv_code(er_actor_thread(a))));
-    cr_assert_eq(er_scheduler_run(sys), ER_RUN_QUIESCENT);
+    ASSERT_EQ(er_scheduler_run(sys), ER_RUN_QUIESCENT);
     er_scheduler_inject(sys, a, 99);
-    cr_assert_eq(er_scheduler_run(sys), ER_RUN_IDLE);
+    ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
     pl_cell* r = pl_as(PL_TAG_APP, er_actor_result(a));
-    cr_assert_not_null(r);
-    cr_assert_eq(pl_app_args(r)[0], 99);
+    ASSERT_NOT_NULL(r);
+    ASSERT_EQ(pl_app_args(r)[0], 99);
     er_scheduler_free(sys);
   }
-  cr_assert_eq(er_log_events(log), 1);
+  ASSERT_EQ(er_log_events(log), 1);
   {
     er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
     er_scheduler_replay(sys, log);
     er_actor* a = er_scheduler_actor(sys);
     er_actor_start(a,
                    actor_fn(er_actor_thread(a), recv_code(er_actor_thread(a))));
-    cr_assert_eq(er_scheduler_run(sys), ER_RUN_QUIESCENT);
+    ASSERT_EQ(er_scheduler_run(sys), ER_RUN_QUIESCENT);
     er_scheduler_inject(sys, a, 99); /* verified against the log */
-    cr_assert_eq(er_scheduler_run(sys), ER_RUN_IDLE);
+    ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
     pl_cell* r = pl_as(PL_TAG_APP, er_actor_result(a));
-    cr_assert_not_null(r);
-    cr_assert_eq(pl_app_args(r)[0], 99);
-    cr_assert_eq(er_scheduler_log_cursor(sys), 1);
+    ASSERT_NOT_NULL(r);
+    ASSERT_EQ(pl_app_args(r)[0], 99);
+    ASSERT_EQ(er_scheduler_log_cursor(sys), 1);
     er_scheduler_free(sys);
   }
   er_log_free(log);
   test_rt_free(&rt);
 }
 
-Test(replay, live_injection_accepts_non_pin_store_snapshot) {
+TEST(replay, live_injection_accepts_non_pin_store_snapshot) {
   test_rt rt = test_rt_new();
   pl_thread* host = rt.t;
   size_t base = host->vsp;
@@ -375,29 +375,29 @@ Test(replay, live_injection_accepts_non_pin_store_snapshot) {
   host->vstack[base] = pl_nf(host, host->vstack[base]);
   pl_val payload = pl_store_snapshot_normal(host, host->vstack[base]);
   host->vsp = base;
-  cr_assert_eq(pl_tag(payload), PL_TAG_APP);
-  cr_assert(pl_store_owns(rt.store, payload));
+  ASSERT_EQ(pl_tag(payload), PL_TAG_APP);
+  ASSERT(pl_store_owns(rt.store, payload));
 
   er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
   er_actor* a = start_recv_actor(sys);
-  cr_assert_eq(er_scheduler_run(sys), ER_RUN_QUIESCENT);
+  ASSERT_EQ(er_scheduler_run(sys), ER_RUN_QUIESCENT);
   er_scheduler_inject(sys, a, payload);
-  cr_assert_eq(er_scheduler_run(sys), ER_RUN_IDLE);
+  ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
 
   pl_val received = recv_result_payload(a);
-  cr_assert_eq(received, payload);
+  ASSERT_EQ(received, payload);
   pl_cell* pair = pl_as(PL_TAG_APP, received);
-  cr_assert_not_null(pair);
-  cr_assert_eq(pl_app_head(pair), 0);
-  cr_assert_eq(pl_app_n(pair), 2);
-  cr_assert_eq(pl_app_args(pair)[0], 17);
-  cr_assert_eq(pl_app_args(pair)[1], 23);
+  ASSERT_NOT_NULL(pair);
+  ASSERT_EQ(pl_app_head(pair), 0);
+  ASSERT_EQ(pl_app_n(pair), 2);
+  ASSERT_EQ(pl_app_args(pair)[0], 17);
+  ASSERT_EQ(pl_app_args(pair)[1], 23);
 
   er_scheduler_free(sys);
   test_rt_free(&rt);
 }
 
-Test(replay, hashed_canonical_pin_injection_records_and_replays) {
+TEST(replay, hashed_canonical_pin_injection_records_and_replays) {
   test_rt rt = test_rt_new();
   pl_thread* host = rt.t;
   size_t base = host->vsp;
@@ -405,47 +405,47 @@ Test(replay, hashed_canonical_pin_injection_records_and_replays) {
   host->vstack[base] = pl_pin(host, host->vstack[base]);
   uint8_t hash[32];
   char err[192] = {0};
-  cr_assert(
+  ASSERT(
       pl_store_save_root(rt.store, host->vstack[base], hash, err, sizeof(err)),
       "%s", err);
   pl_val recorded_payload = pl_store_snapshot_normal(host, host->vstack[base]);
   host->vsp = base;
-  cr_assert_eq(pl_tag(recorded_payload), PL_TAG_PIN);
-  cr_assert(pl_store_owns(rt.store, recorded_payload));
-  cr_assert(pl_pin_is_hashed(recorded_payload));
-  cr_assert_eq(memcmp(pl_pin_hash(recorded_payload), hash, sizeof(hash)), 0);
+  ASSERT_EQ(pl_tag(recorded_payload), PL_TAG_PIN);
+  ASSERT(pl_store_owns(rt.store, recorded_payload));
+  ASSERT(pl_pin_is_hashed(recorded_payload));
+  ASSERT_EQ(memcmp(pl_pin_hash(recorded_payload), hash, sizeof(hash)), 0);
 
   er_log* log = er_log_new();
   {
     er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
     er_scheduler_record(sys, log);
     er_actor* a = start_recv_actor(sys);
-    cr_assert_eq(er_scheduler_run(sys), ER_RUN_QUIESCENT);
+    ASSERT_EQ(er_scheduler_run(sys), ER_RUN_QUIESCENT);
     er_scheduler_inject(sys, a, recorded_payload);
-    cr_assert_eq(er_scheduler_run(sys), ER_RUN_IDLE);
+    ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
     pl_val received = recv_result_payload(a);
-    cr_assert_eq(pl_tag(received), PL_TAG_PIN);
-    cr_assert_eq(memcmp(pl_pin_hash(received), hash, sizeof(hash)), 0);
+    ASSERT_EQ(pl_tag(received), PL_TAG_PIN);
+    ASSERT_EQ(memcmp(pl_pin_hash(received), hash, sizeof(hash)), 0);
     er_scheduler_free(sys);
   }
-  cr_assert_eq(er_log_events(log), 1);
+  ASSERT_EQ(er_log_events(log), 1);
 
   {
     pl_val replay_payload = pl_store_load(host, hash);
-    cr_assert_eq(pl_tag(replay_payload), PL_TAG_PIN);
-    cr_assert(pl_store_owns(rt.store, replay_payload));
-    cr_assert(pl_pin_is_hashed(replay_payload));
+    ASSERT_EQ(pl_tag(replay_payload), PL_TAG_PIN);
+    ASSERT(pl_store_owns(rt.store, replay_payload));
+    ASSERT(pl_pin_is_hashed(replay_payload));
 
     er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
     er_scheduler_replay(sys, log);
     er_actor* a = start_recv_actor(sys);
-    cr_assert_eq(er_scheduler_run(sys), ER_RUN_QUIESCENT);
+    ASSERT_EQ(er_scheduler_run(sys), ER_RUN_QUIESCENT);
     er_scheduler_inject(sys, a, replay_payload);
-    cr_assert_eq(er_scheduler_run(sys), ER_RUN_IDLE);
+    ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
     pl_val received = recv_result_payload(a);
-    cr_assert_eq(pl_tag(received), PL_TAG_PIN);
-    cr_assert_eq(memcmp(pl_pin_hash(received), hash, sizeof(hash)), 0);
-    cr_assert_eq(er_scheduler_log_cursor(sys), 1);
+    ASSERT_EQ(pl_tag(received), PL_TAG_PIN);
+    ASSERT_EQ(memcmp(pl_pin_hash(received), hash, sizeof(hash)), 0);
+    ASSERT_EQ(er_scheduler_log_cursor(sys), 1);
     er_scheduler_free(sys);
   }
 
@@ -453,7 +453,7 @@ Test(replay, hashed_canonical_pin_injection_records_and_replays) {
   test_rt_free(&rt);
 }
 
-Test(replay, live_systems_are_unaffected_by_the_hook) {
+TEST(replay, live_systems_are_unaffected_by_the_hook) {
   /* the io hook stays registered globally after a recording system is
    * freed; a plain live system must keep executing effects directly */
   test_rt rt = test_rt_new();
@@ -471,8 +471,8 @@ Test(replay, live_systems_are_unaffected_by_the_hook) {
     pl_val nargs[1] = {0};
     er_actor_start(a,
                    actor_fn(t, code_effect(t, ax_s3('N', 'o', 'w'), 1, nargs)));
-    cr_assert_eq(er_scheduler_run(sys), ER_RUN_IDLE);
-    cr_assert_gt(er_actor_result(a), 0);
+    ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
+    ASSERT_GT(er_actor_result(a), 0);
     er_scheduler_free(sys);
   }
   test_rt_free(&rt);
