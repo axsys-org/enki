@@ -5,6 +5,7 @@
 #include "plan/build.h"
 #include "plan/heap.h"
 #include "plan/store.h"
+#include "test.h"
 #include "test_plan.h"
 
 typedef struct store_pin_worker {
@@ -177,11 +178,10 @@ static int test_pin_code_publication_is_atomic(void) {
   return status;
 }
 
-int main(int argc, char** argv) {
-  (void)argc;
-  (void)argv;
-  int status = test_concurrent_saves_publish_equal_and_distinct_values();
-  if (test_pin_code_publication_is_atomic() != 0)
-    status = 1;
-  return status;
+TEST(store_tsan, concurrent_saves_publish_equal_and_distinct_values) {
+  ASSERT_EQ(test_concurrent_saves_publish_equal_and_distinct_values(), 0);
+}
+
+TEST(store_tsan, pin_code_publication_is_atomic) {
+  ASSERT_EQ(test_pin_code_publication_is_atomic(), 0);
 }

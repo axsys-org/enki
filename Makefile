@@ -161,7 +161,7 @@ LIB_ENKI := $(BUILD_DIR)/lib/libenki.a
 LIBS := $(LIB_AXSYS) $(LIB_PLAN) $(LIB_ENKI)
 
 ifeq ($(BUILD_TYPE),tsan)
-ACTIVE_UNIT_BINS := $(TSAN_UNIT_BINS)
+ACTIVE_UNIT_BINS := $(UNIT_BINS) $(TSAN_UNIT_BINS)
 else
 ACTIVE_UNIT_BINS := $(UNIT_BINS)
 endif
@@ -180,19 +180,8 @@ TIDY_FILES_ABS := $(addprefix $(CURDIR)/,$(TIDY_FILES))
 FORMAT_FILES := $(HEADERS) $(AXSYS_SRCS) $(PLAN_SRCS) $(ENKI_SRCS) $(APP_SRCS) \
 	$(UNIT_SRCS) $(TSAN_UNIT_SRCS) $(PROPERTY_SRCS) $(FUZZ_SRCS) \
 	$(VENDOR_THEFT_DIR)/theft.h $(VENDOR_THEFT_DIR)/theft.c \
-	tests/support/fff.h tests/support/test_plan.h \
+	tests/support/fff.h tests/support/test.h tests/support/test_plan.h \
 	tests/support/test_http_server.h
-
-CRITERION_CFLAGS := $(shell pkg-config --cflags criterion 2>/dev/null)
-CRITERION_LIBS := $(shell pkg-config --libs criterion 2>/dev/null)
-ifeq ($(strip $(CRITERION_LIBS)),)
-CRITERION_LIBS := -lcriterion
-endif
-
-# Criterion uses a fixed /tmp IPC namespace.  Nix can reuse that namespace
-# between test executables in a single coverage build, so remove only stale
-# Criterion sockets before starting the next executable when requested.
-CRITERION_CLEANUP_SOCKETS ?= 0
 
 FUZZ_CFLAGS := -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer
 FUZZ_ARGS ?= $(FUZZ_DIR)/corpus -max_total_time=10
@@ -273,14 +262,10 @@ $(BUILD_DIR)/tests/%.o: tests/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS_ALL) $(ENKI_INC) $(CFLAGS_ALL) -c $< -o $@
 
-$(BUILD_DIR)/tests/unit/%_tsan: tests/unit/%_tsan.c $(LIBS)
+$(BUILD_DIR)/tests/unit/%: tests/unit/%.c tests/support/test.h \
+		tests/support/greatest.h $(LIBS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS_ALL) $(ENKI_INC) $(CFLAGS_ALL) $< $(LIB_ENKI) $(LIB_PLAN) $(LIB_AXSYS) $(LDFLAGS_ALL) -o $@
-
-$(BUILD_DIR)/tests/unit/%: tests/unit/%.c $(LIBS)
-	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS_ALL) $(ENKI_INC) $(CRITERION_CFLAGS) $(CFLAGS_ALL) $< $(LIB_ENKI) $(LIB_PLAN) $(LIB_AXSYS) \
-		$(LDFLAGS_ALL) $(CRITERION_LIBS) -o $@
 
 $(BUILD_DIR)/tests/property/%: tests/property/%.c $(LIBS) $(THEFT_OBJS)
 	@mkdir -p $(dir $@)
@@ -315,10 +300,7 @@ test: check-layering test-unit test-property
 
 test-unit: $(ACTIVE_UNIT_BINS) $(APP_BINS)
 	@set -eu; for test_bin in $(ACTIVE_UNIT_BINS); do \
-		if [ "$(CRITERION_CLEANUP_SOCKETS)" = 1 ]; then \
-			find /tmp -maxdepth 1 -type s -name 'criterion_*.sock' -delete; \
-		fi; \
-		ENKI_WISP_BIN=$(CURDIR)/$(BUILD_DIR)/bin/wisp "$$test_bin" --jobs 1; \
+		ENKI_WISP_BIN=$(CURDIR)/$(BUILD_DIR)/bin/wisp "$$test_bin"; \
 	done
 
 test-property: $(PROPERTY_BINS)

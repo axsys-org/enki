@@ -38,7 +38,7 @@ direnv allow
 ```
 
 The Makefile also works without Nix when the required tools are installed
-(gmp, lmdb, openssl, criterion):
+(gmp, lmdb, openssl):
 
 ```sh
 make
@@ -79,7 +79,7 @@ make test
 nix flake check -L
 ```
 
-- `tests/unit` — criterion suites for the axsys containers, the plan core
+- `tests/unit` — Greatest suites for the axsys containers, the plan core
   (value representation, nats, GC movement), the reduction machine
   (laziness boundaries, recursive-let knots, primop strictness order),
   pins/store round trips, the wisp front end, and an end-to-end check that
@@ -96,10 +96,8 @@ make BUILD_TYPE=ubsan test
 make BUILD_TYPE=tsan test
 ```
 
-On macOS, nixpkgs' Criterion runtime currently crashes before user tests run
-when it is linked into a TSan executable. For that platform only,
-`BUILD_TYPE=tsan make test-unit` runs an equivalent no-framework unit runner
-against TSan-instrumented enki objects.
+TSan runs the full Greatest suite plus the focused multithreaded stress tests
+in `tests/unit/*_tsan.c`.
 
 Property tests use a fixed seed in CI. Override it locally with:
 
@@ -107,10 +105,10 @@ Property tests use a fixed seed in CI. Override it locally with:
 THEFT_SEED=0x1234 make test-property
 ```
 
-Criterion is supplied by Nix or the host system through pkg-config. Theft is
-vendored under `tests/property/vendor/theft/` as a tiny deterministic
+Greatest and FFF are vendored as single headers under `tests/support/`. Theft
+is vendored under `tests/property/vendor/theft/` as a tiny deterministic
 single-purpose runner, because upstream theft is not reliably packaged in
-nixpkgs. FFF is vendored as a single header under `tests/support/fff.h`.
+nixpkgs.
 
 ## Coverage
 

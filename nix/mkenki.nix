@@ -3,8 +3,6 @@
   stdenv,
   src,
   gnumake,
-  pkg-config,
-  criterion,
   curl,
   gmp,
   lmdb,
@@ -26,12 +24,10 @@ stdenv.mkDerivation {
   nativeBuildInputs =
     [
       gnumake
-      pkg-config
     ]
     ++ extraNativeBuildInputs;
 
   buildInputs = [
-    criterion
     curl
     gmp
     lmdb

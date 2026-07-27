@@ -5,6 +5,7 @@
 #include <unistd.h>
 
 #include "axsys/fd.h"
+#include "test.h"
 
 typedef struct fd_worker {
   bool ok;
@@ -32,7 +33,7 @@ static void* fd_worker_main(void* arg) {
   return NULL;
 }
 
-int main(void) {
+static int run_fd_stress(void) {
   enum { NTHREADS = 4 };
   fd_worker workers[NTHREADS];
   pthread_t threads[NTHREADS];
@@ -59,4 +60,8 @@ int main(void) {
     }
   }
   return status;
+}
+
+TEST(axsys_fd_tsan, concurrent_borrow_and_close) {
+  ASSERT_EQ(run_fd_stress(), 0);
 }

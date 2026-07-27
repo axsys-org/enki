@@ -1,4 +1,4 @@
-#include <criterion/criterion.h>
+#include "test.h"
 
 #include <pthread.h>
 #include <stdbool.h>
@@ -71,7 +71,7 @@ static pl_run_status test_run(pl_thread* t) {
   int quanta = 0;
   do {
     s = pl_thread_run(t, 2);
-    cr_assert_lt(++quanta, 1 << 20, "runaway resume loop");
+    ASSERT_LT(++quanta, 1 << 20, "runaway resume loop");
   } while (s == PL_RUN_YIELDED);
   return s;
 }
@@ -85,7 +85,7 @@ static pl_val test_zone_call(pl_thread* t, const char* op_c, pl_val arg,
   pl_vpush(t, pl_nat_from_bytes(t, (const uint8_t*)op_c, strlen(op_c)));
   pl_val args[1] = {t->vstack[base]};
   pl_thread_start(t, test_op83_thunk(t, t->vstack[base + 1], 1, args));
-  cr_assert_eq(test_run(t), want);
+  ASSERT_EQ(test_run(t), want);
   pl_val result = want == PL_RUN_DONE ? pl_thread_result(t) : 0;
   t->vsp = base;
   return result;
@@ -93,16 +93,16 @@ static pl_val test_zone_call(pl_thread* t, const char* op_c, pl_val arg,
 
 static char* test_read_file(const char* path) {
   FILE* f = fopen(path, "rb");
-  cr_assert_not_null(f, "failed to open `%s`", path);
-  cr_assert_eq(fseek(f, 0, SEEK_END), 0);
+  ASSERT_NOT_NULL(f, "failed to open `%s`", path);
+  ASSERT_EQ(fseek(f, 0, SEEK_END), 0);
   long end = ftell(f);
-  cr_assert_geq(end, 0);
-  cr_assert_eq(fseek(f, 0, SEEK_SET), 0);
+  ASSERT_GTE(end, 0);
+  ASSERT_EQ(fseek(f, 0, SEEK_SET), 0);
   char* data = malloc((size_t)end + 1);
-  cr_assert_not_null(data);
-  cr_assert_eq(fread(data, 1, (size_t)end, f), (size_t)end);
+  ASSERT_NOT_NULL(data);
+  ASSERT_EQ(fread(data, 1, (size_t)end, f), (size_t)end);
   data[end] = '\0';
-  cr_assert_eq(fclose(f), 0);
+  ASSERT_EQ(fclose(f), 0);
   return data;
 }
 
@@ -114,7 +114,7 @@ static size_t test_count(const char* haystack, const char* needle) {
   return count;
 }
 
-Test(op83, zones_have_distinct_handles_and_end_non_lifo) {
+TEST(op83, zones_have_distinct_handles_and_end_non_lifo) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
   t->rplan_f = true;
@@ -127,20 +127,19 @@ Test(op83, zones_have_distinct_handles_and_end_non_lifo) {
   pl_val h2 = test_zone_call(t, "ZoneStart", two, PL_RUN_DONE);
   pl_vpush(t, h2);
 
-  cr_assert_neq(t->vstack[base], t->vstack[base + 1]);
-  cr_assert_eq(t->profile_zone_n, 2);
-  cr_assert_eq(test_zone_call(t, "ZoneEnd", t->vstack[base], PL_RUN_DONE), 0);
-  cr_assert_eq(t->profile_zone_n, 1);
-  cr_assert_eq(t->profile_zones[0].handle, t->vstack[base + 1]);
-  cr_assert_eq(test_zone_call(t, "ZoneEnd", t->vstack[base + 1], PL_RUN_DONE),
-               0);
-  cr_assert_eq(t->profile_zone_n, 0);
+  ASSERT_NEQ(t->vstack[base], t->vstack[base + 1]);
+  ASSERT_EQ(t->profile_zone_n, 2);
+  ASSERT_EQ(test_zone_call(t, "ZoneEnd", t->vstack[base], PL_RUN_DONE), 0);
+  ASSERT_EQ(t->profile_zone_n, 1);
+  ASSERT_EQ(t->profile_zones[0].handle, t->vstack[base + 1]);
+  ASSERT_EQ(test_zone_call(t, "ZoneEnd", t->vstack[base + 1], PL_RUN_DONE), 0);
+  ASSERT_EQ(t->profile_zone_n, 0);
 
   t->vsp = base;
   test_rt_free(&rt);
 }
 
-Test(op83, zone_handles_reject_duplicate_unknown_and_cross_thread) {
+TEST(op83, zone_handles_reject_duplicate_unknown_and_cross_thread) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
   t->rplan_f = true;
@@ -149,33 +148,33 @@ Test(op83, zone_handles_reject_duplicate_unknown_and_cross_thread) {
   pl_vpush(t, h);
   (void)test_zone_call(t, "ZoneEnd", t->vstack[base], PL_RUN_DONE);
   (void)test_zone_call(t, "ZoneEnd", t->vstack[base], PL_RUN_EXN);
-  cr_assert_not_null(t->exn_msg);
+  ASSERT_NOT_NULL(t->exn_msg);
 
   pl_val h2 = test_zone_call(t, "ZoneStart", 8, PL_RUN_DONE);
   pl_vpush(t, h2);
   pl_thread* other = pl_thread_new(rt.heap);
   other->rplan_f = true;
   (void)test_zone_call(other, "ZoneEnd", t->vstack[base + 1], PL_RUN_EXN);
-  cr_assert_not_null(other->exn_msg);
-  cr_assert_eq(t->profile_zone_n, 1);
+  ASSERT_NOT_NULL(other->exn_msg);
+  ASSERT_EQ(t->profile_zone_n, 1);
 
   pl_thread_free(other);
   t->vsp = base;
   test_rt_free(&rt);
 }
 
-Test(op83, zone_start_requires_nat_label) {
+TEST(op83, zone_start_requires_nat_label) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
   t->rplan_f = true;
   pl_val not_nat = test_app1(t, 0, 1);
   (void)test_zone_call(t, "ZoneStart", not_nat, PL_RUN_EXN);
-  cr_assert_not_null(t->exn_msg);
-  cr_assert_eq(t->profile_zone_n, 0);
+  ASSERT_NOT_NULL(t->exn_msg);
+  ASSERT_EQ(t->profile_zone_n, 0);
   test_rt_free(&rt);
 }
 
-Test(op83, zone_handle_and_copied_label_survive_gc) {
+TEST(op83, zone_handle_and_copied_label_survive_gc) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
   t->rplan_f = true;
@@ -183,18 +182,18 @@ Test(op83, zone_handle_and_copied_label_survive_gc) {
   pl_val h = test_zone_call(t, "ZoneStart",
                             pl_nat_from_bytes(t, label, sizeof(label) - 1),
                             PL_RUN_DONE);
-  cr_assert_not_null(pl_as(PL_TAG_APP, h));
+  ASSERT_NOT_NULL(pl_as(PL_TAG_APP, h));
 
   pl_gc_collect_now(t);
-  cr_assert_eq(t->profile_zone_n, 1);
-  cr_assert_eq(t->profile_zones[0].name_n, sizeof(label) - 1);
-  cr_assert_arr_eq(t->profile_zones[0].name, label, sizeof(label) - 1);
+  ASSERT_EQ(t->profile_zone_n, 1);
+  ASSERT_EQ(t->profile_zones[0].name_n, sizeof(label) - 1);
+  ASSERT_MEM_EQ(t->profile_zones[0].name, label, sizeof(label) - 1);
   (void)test_zone_call(t, "ZoneEnd", t->profile_zones[0].handle, PL_RUN_DONE);
-  cr_assert_eq(t->profile_zone_n, 0);
+  ASSERT_EQ(t->profile_zone_n, 0);
   test_rt_free(&rt);
 }
 
-Test(op83, host_unwind_discards_zones_created_inside_catch) {
+TEST(op83, host_unwind_discards_zones_created_inside_catch) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
   t->rplan_f = true;
@@ -202,15 +201,15 @@ Test(op83, host_unwind_discards_zones_created_inside_catch) {
   pl_catch_init(t, &c);
   if (setjmp(c.jb) == 0) {
     (void)test_zone_call(t, "ZoneStart", 9, PL_RUN_DONE);
-    cr_assert_eq(t->profile_zone_n, 1);
+    ASSERT_EQ(t->profile_zone_n, 1);
     pl_raise(t, 42);
   }
   pl_catch_unwind(t, &c);
-  cr_assert_eq(t->profile_zone_n, 0);
+  ASSERT_EQ(t->profile_zone_n, 0);
   test_rt_free(&rt);
 }
 
-Test(op83, zone_pauses_across_yield_block_and_resume) {
+TEST(op83, zone_pauses_across_yield_block_and_resume) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
   t->rplan_f = true;
@@ -218,13 +217,13 @@ Test(op83, zone_pauses_across_yield_block_and_resume) {
 
   pl_val args[2] = {11, 12};
   pl_thread_start(t, test_op83_thunk(t, FETCH, 2, args));
-  cr_assert_eq(test_run(t), PL_RUN_BLOCKED);
-  cr_assert_eq(t->profile_zone_n, 1);
-  cr_assert_not(t->profile_zones[0].live);
+  ASSERT_EQ(test_run(t), PL_RUN_BLOCKED);
+  ASSERT_EQ(t->profile_zone_n, 1);
+  ASSERT_FALSE(t->profile_zones[0].live);
   pl_thread_deposit(t, 0);
-  cr_assert_eq(test_run(t), PL_RUN_DONE);
-  cr_assert_eq(t->profile_zone_n, 1);
-  cr_assert_not(t->profile_zones[0].live);
+  ASSERT_EQ(test_run(t), PL_RUN_DONE);
+  ASSERT_EQ(t->profile_zone_n, 1);
+  ASSERT_FALSE(t->profile_zones[0].live);
 
   (void)test_zone_call(t, "ZoneEnd", t->profile_zones[0].handle, PL_RUN_DONE);
   test_rt_free(&rt);
@@ -242,19 +241,19 @@ static pl_val test_start_then_throw_fetch(pl_thread* t) {
   return out;
 }
 
-Test(op83, uncaught_exception_discards_zones_from_failed_run) {
+TEST(op83, uncaught_exception_discards_zones_from_failed_run) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
   t->rplan_f = true;
   pl_thread_start(t, test_start_then_throw_fetch(t));
-  cr_assert_eq(test_run(t), PL_RUN_EXN);
-  cr_assert_null(t->exn_msg);
-  cr_assert_eq(t->exn, 77);
-  cr_assert_eq(t->profile_zone_n, 0);
+  ASSERT_EQ(test_run(t), PL_RUN_EXN);
+  ASSERT_NULL(t->exn_msg);
+  ASSERT_EQ(t->exn, 77);
+  ASSERT_EQ(t->profile_zone_n, 0);
   test_rt_free(&rt);
 }
 
-Test(op83, try_discards_zones_created_inside_caught_region) {
+TEST(op83, try_discards_zones_created_inside_caught_region) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
   t->rplan_f = true;
@@ -264,21 +263,21 @@ Test(op83, try_discards_zones_created_inside_caught_region) {
   pl_val args[2] = {t->vstack[base + 1], 0};
   pl_val result = test_op66(t, ax_s3('T', 'r', 'y'), 2, args);
   pl_cell* p = pl_as(PL_TAG_APP, result);
-  cr_assert_not_null(p);
-  cr_assert_eq(pl_app_head(p), 1);
-  cr_assert_eq(pl_app_args(p)[0], 77);
-  cr_assert_eq(t->profile_zone_n, 0);
+  ASSERT_NOT_NULL(p);
+  ASSERT_EQ(pl_app_head(p), 1);
+  ASSERT_EQ(pl_app_args(p)[0], 77);
+  ASSERT_EQ(t->profile_zone_n, 0);
   t->vsp = base;
   test_rt_free(&rt);
 }
 
-Test(op83, chrome_json_escapes_labels_and_splits_host_entries) {
+TEST(op83, chrome_json_escapes_labels_and_splits_host_entries) {
   char path[] = "/tmp/enki-profile-zone-XXXXXX";
   int fd = mkstemp(path);
-  cr_assert_geq(fd, 0);
-  cr_assert_eq(close(fd), 0);
+  ASSERT_GTE(fd, 0);
+  ASSERT_EQ(close(fd), 0);
 
-  cr_assert(ax_profile_json_start(path));
+  ASSERT(ax_profile_json_start(path));
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
   t->rplan_f = true;
@@ -287,22 +286,22 @@ Test(op83, chrome_json_escapes_labels_and_splits_host_entries) {
       t, "ZoneStart", pl_nat_from_bytes(t, label, sizeof(label)), PL_RUN_DONE);
   (void)test_zone_call(t, "ZoneEnd", h, PL_RUN_DONE);
   test_rt_free(&rt);
-  cr_assert(ax_profile_json_finish());
+  ASSERT(ax_profile_json_finish());
 
   char* json = test_read_file(path);
-  cr_assert_not_null(strstr(json, "{\"traceEvents\":["));
-  cr_assert_not_null(strstr(json, "\"cat\":\"splan.zone\""));
-  cr_assert_not_null(strstr(json, "\"ph\":\"M\""));
-  cr_assert_not_null(strstr(json, "PLAN thread "));
-  cr_assert_not_null(strstr(json, "a\\\"\\\\\\/\\n\\u0080"));
+  ASSERT_NOT_NULL(strstr(json, "{\"traceEvents\":["));
+  ASSERT_NOT_NULL(strstr(json, "\"cat\":\"splan.zone\""));
+  ASSERT_NOT_NULL(strstr(json, "\"ph\":\"M\""));
+  ASSERT_NOT_NULL(strstr(json, "PLAN thread "));
+  ASSERT_NOT_NULL(strstr(json, "a\\\"\\\\\\/\\n\\u0080"));
   size_t begins = test_count(json, "\"ph\":\"B\"");
   size_t ends = test_count(json, "\"ph\":\"E\"");
-  cr_assert_geq(begins, 2); /* at least one segment per host entry */
-  cr_assert_eq(begins, ends);
-  cr_assert_not_null(strstr(json, "\"args\":{\"zone\":"));
-  cr_assert_not_null(strstr(json, "],\"displayTimeUnit\":\"ms\"}"));
+  ASSERT_GTE(begins, 2); /* at least one segment per host entry */
+  ASSERT_EQ(begins, ends);
+  ASSERT_NOT_NULL(strstr(json, "\"args\":{\"zone\":"));
+  ASSERT_NOT_NULL(strstr(json, "],\"displayTimeUnit\":\"ms\"}"));
   free(json);
-  cr_assert_eq(unlink(path), 0);
+  ASSERT_EQ(unlink(path), 0);
 }
 
 typedef struct test_json_worker_args {
@@ -322,33 +321,32 @@ static void* test_json_worker(void* arg_v) {
   return NULL;
 }
 
-Test(op83, chrome_json_serializes_concurrent_lanes) {
+TEST(op83, chrome_json_serializes_concurrent_lanes) {
   char path[] = "/tmp/enki-profile-concurrent-XXXXXX";
   int fd = mkstemp(path);
-  cr_assert_geq(fd, 0);
-  cr_assert_eq(close(fd), 0);
-  cr_assert(ax_profile_json_start(path));
+  ASSERT_GTE(fd, 0);
+  ASSERT_EQ(close(fd), 0);
+  ASSERT(ax_profile_json_start(path));
 
   pthread_t threads[2];
   test_json_worker_args args[2] = {{.tid = 101}, {.tid = 202}};
   for (size_t i = 0; i < 2; i++)
-    cr_assert_eq(pthread_create(&threads[i], NULL, test_json_worker, &args[i]),
-                 0);
+    ASSERT_EQ(pthread_create(&threads[i], NULL, test_json_worker, &args[i]), 0);
   for (size_t i = 0; i < 2; i++)
-    cr_assert_eq(pthread_join(threads[i], NULL), 0);
-  cr_assert(ax_profile_json_finish());
+    ASSERT_EQ(pthread_join(threads[i], NULL), 0);
+  ASSERT(ax_profile_json_finish());
 
   char* json = test_read_file(path);
-  cr_assert_eq(test_count(json, "\"ph\":\"M\""), 2);
-  cr_assert_eq(test_count(json, "\"ph\":\"B\""), 200);
-  cr_assert_eq(test_count(json, "\"ph\":\"E\""), 200);
-  cr_assert_not_null(strstr(json, "\"tid\":101"));
-  cr_assert_not_null(strstr(json, "\"tid\":202"));
+  ASSERT_EQ(test_count(json, "\"ph\":\"M\""), 2);
+  ASSERT_EQ(test_count(json, "\"ph\":\"B\""), 200);
+  ASSERT_EQ(test_count(json, "\"ph\":\"E\""), 200);
+  ASSERT_NOT_NULL(strstr(json, "\"tid\":101"));
+  ASSERT_NOT_NULL(strstr(json, "\"tid\":202"));
   free(json);
-  cr_assert_eq(unlink(path), 0);
+  ASSERT_EQ(unlink(path), 0);
 }
 
-Test(op83, readfolder_parks_then_deposit_resumes) {
+TEST(op83, readfolder_parks_then_deposit_resumes) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
   t->rplan_f = true;
@@ -357,36 +355,36 @@ Test(op83, readfolder_parks_then_deposit_resumes) {
   pl_vpush(t, pl_nat_from_bytes(t, (const uint8_t*)"folder", 6));
   pl_val args[1] = {t->vstack[base + 1]};
   pl_thread_start(t, test_op83_thunk(t, t->vstack[base], 1, args));
-  cr_assert_eq(test_run(t), PL_RUN_BLOCKED);
+  ASSERT_EQ(test_run(t), PL_RUN_BLOCKED);
 
   pl_cell* p = pl_as(PL_TAG_APP, pl_thread_request(t));
-  cr_assert_not_null(p);
-  cr_assert_eq(pl_app_head(p), t->vstack[base]);
-  cr_assert_eq(pl_app_n(p), 1);
-  cr_assert_eq(pl_app_args(p)[0], t->vstack[base + 1]);
+  ASSERT_NOT_NULL(p);
+  ASSERT_EQ(pl_app_head(p), t->vstack[base]);
+  ASSERT_EQ(pl_app_n(p), 1);
+  ASSERT_EQ(pl_app_args(p)[0], t->vstack[base + 1]);
 
   pl_thread_deposit(t, 0);
-  cr_assert_eq(test_run(t), PL_RUN_DONE);
-  cr_assert_eq(pl_thread_result(t), 0);
+  ASSERT_EQ(test_run(t), PL_RUN_DONE);
+  ASSERT_EQ(pl_thread_result(t), 0);
   t->vsp = base;
   test_rt_free(&rt);
 }
 
-Test(op83, fetch_parks_then_deposit_resumes) {
+TEST(op83, fetch_parks_then_deposit_resumes) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
   t->rplan_f = true;
   size_t vsp0 = t->vsp, fsp0 = t->fsp;
   pl_val args[2] = {11, 22}; /* opaque to the plan layer */
   pl_thread_start(t, test_op83_thunk(t, FETCH, 2, args));
-  cr_assert_eq(test_run(t), PL_RUN_BLOCKED);
+  ASSERT_EQ(test_run(t), PL_RUN_BLOCKED);
 
   pl_cell* p = pl_as(PL_TAG_APP, pl_thread_request(t));
-  cr_assert_not_null(p);
-  cr_assert_eq(pl_app_head(p), FETCH);
-  cr_assert_eq(pl_app_n(p), 2);
-  cr_assert_eq(pl_app_args(p)[0], 11);
-  cr_assert_eq(pl_app_args(p)[1], 22);
+  ASSERT_NOT_NULL(p);
+  ASSERT_EQ(pl_app_head(p), FETCH);
+  ASSERT_EQ(pl_app_n(p), 2);
+  ASSERT_EQ(pl_app_args(p)[0], 11);
+  ASSERT_EQ(pl_app_args(p)[1], 22);
 
   /* a synthetic (0 resp) result row, as the executor would deposit */
   size_t rb = t->vsp;
@@ -394,18 +392,18 @@ Test(op83, fetch_parks_then_deposit_resumes) {
   pl_val resp = t->vstack[rb];
   t->vsp = rb;
   pl_thread_deposit(t, resp);
-  cr_assert_eq(t->blocked_on, 0);
-  cr_assert_eq(test_run(t), PL_RUN_DONE);
+  ASSERT_EQ(t->blocked_on, 0);
+  ASSERT_EQ(test_run(t), PL_RUN_DONE);
   pl_cell* r = pl_as(PL_TAG_APP, pl_thread_result(t));
-  cr_assert_not_null(r);
-  cr_assert_eq(pl_app_head(r), 0);
-  cr_assert_eq(pl_app_args(r)[0], 200);
-  cr_assert_eq(t->vsp, vsp0);
-  cr_assert_eq(t->fsp, fsp0);
+  ASSERT_NOT_NULL(r);
+  ASSERT_EQ(pl_app_head(r), 0);
+  ASSERT_EQ(pl_app_args(r)[0], 200);
+  ASSERT_EQ(t->vsp, vsp0);
+  ASSERT_EQ(t->fsp, fsp0);
   test_rt_free(&rt);
 }
 
-Test(op83, fetch_normalizes_both_args_at_initiation) {
+TEST(op83, fetch_normalizes_both_args_at_initiation) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
   t->rplan_f = true;
@@ -414,24 +412,24 @@ Test(op83, fetch_normalizes_both_args_at_initiation) {
   pl_vpush(t, test_thunk(t, 9)); /* cfg: forced by the deep mask */
   pl_val args[2] = {t->vstack[base], t->vstack[base + 1]};
   pl_thread_start(t, test_op83_thunk(t, FETCH, 2, args));
-  cr_assert_eq(test_run(t), PL_RUN_BLOCKED);
+  ASSERT_EQ(test_run(t), PL_RUN_BLOCKED);
 
   pl_cell* p = pl_as(PL_TAG_APP, pl_thread_request(t));
-  cr_assert_not_null(p);
-  cr_assert_eq(pl_app_head(p), FETCH);
-  cr_assert_eq(pl_app_n(p), 2);
+  ASSERT_NOT_NULL(p);
+  ASSERT_EQ(pl_app_head(p), FETCH);
+  ASSERT_EQ(pl_app_n(p), 2);
   /* both payloads were deep-normalized before the request parked */
-  cr_assert_eq(pl_app_args(p)[0], 7);
-  cr_assert_eq(pl_app_args(p)[1], 9);
+  ASSERT_EQ(pl_app_args(p)[0], 7);
+  ASSERT_EQ(pl_app_args(p)[1], 9);
 
   pl_thread_deposit(t, 0);
-  cr_assert_eq(test_run(t), PL_RUN_DONE);
-  cr_assert_eq(pl_thread_result(t), 0);
+  ASSERT_EQ(test_run(t), PL_RUN_DONE);
+  ASSERT_EQ(pl_thread_result(t), 0);
   t->vsp = base;
   test_rt_free(&rt);
 }
 
-Test(op83, payload_effects_block_before_the_request) {
+TEST(op83, payload_effects_block_before_the_request) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
   t->rplan_f = true;
@@ -454,60 +452,60 @@ Test(op83, payload_effects_block_before_the_request) {
   pl_val fargs[2] = {5, t->vstack[base]};
   pl_thread_start(t, test_op83_thunk(t, FETCH, 2, fargs));
 
-  cr_assert_eq(test_run(t), PL_RUN_BLOCKED);
+  ASSERT_EQ(test_run(t), PL_RUN_BLOCKED);
   pl_cell* p = pl_as(PL_TAG_APP, pl_thread_request(t));
-  cr_assert_not_null(p);
-  cr_assert_eq(pl_app_head(p), ax_s4('R', 'e', 'c', 'v')); /* inner first */
+  ASSERT_NOT_NULL(p);
+  ASSERT_EQ(pl_app_head(p), ax_s4('R', 'e', 'c', 'v')); /* inner first */
 
   pl_thread_deposit(t, 6);
-  cr_assert_eq(test_run(t), PL_RUN_BLOCKED);
+  ASSERT_EQ(test_run(t), PL_RUN_BLOCKED);
   p = pl_as(PL_TAG_APP, pl_thread_request(t));
-  cr_assert_not_null(p);
-  cr_assert_eq(pl_app_head(p), FETCH);
-  cr_assert_eq(pl_app_args(p)[0], 5);
-  cr_assert_eq(pl_app_args(p)[1], 6); /* the deposited response */
+  ASSERT_NOT_NULL(p);
+  ASSERT_EQ(pl_app_head(p), FETCH);
+  ASSERT_EQ(pl_app_args(p)[0], 5);
+  ASSERT_EQ(pl_app_args(p)[1], 6); /* the deposited response */
 
   pl_thread_deposit(t, 0);
-  cr_assert_eq(test_run(t), PL_RUN_DONE);
-  cr_assert_eq(pl_thread_result(t), 0);
+  ASSERT_EQ(test_run(t), PL_RUN_DONE);
+  ASSERT_EQ(pl_thread_result(t), 0);
   t->vsp = base;
   test_rt_free(&rt);
 }
 
-Test(op83, requires_rplan_mode) {
+TEST(op83, requires_rplan_mode) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t; /* rplan_f defaults to false */
   pl_val args[2] = {11, 22};
   pl_thread_start(t, test_op83_thunk(t, FETCH, 2, args));
-  cr_assert_eq(test_run(t), PL_RUN_EXN);
-  cr_assert_not_null(t->exn_msg);
+  ASSERT_EQ(test_run(t), PL_RUN_EXN);
+  ASSERT_NOT_NULL(t->exn_msg);
   test_rt_free(&rt);
 }
 
-Test(op83, unknown_op_is_runtime_error) {
+TEST(op83, unknown_op_is_runtime_error) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
   t->rplan_f = true;
   pl_val args[2] = {11, 22};
   pl_thread_start(t, test_op83_thunk(t, ax_s4('F', 'r', 'o', 'b'), 2, args));
-  cr_assert_eq(test_run(t), PL_RUN_EXN);
-  cr_assert_not_null(t->exn_msg);
+  ASSERT_EQ(test_run(t), PL_RUN_EXN);
+  ASSERT_NOT_NULL(t->exn_msg);
   test_rt_free(&rt);
 }
 
-Test(op83, wrong_arity_is_runtime_error) {
+TEST(op83, wrong_arity_is_runtime_error) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
   t->rplan_f = true;
   /* Fetch is argc 2; a 1-arg row has no matching bucket entry. */
   pl_val args[1] = {11};
   pl_thread_start(t, test_op83_thunk(t, FETCH, 1, args));
-  cr_assert_eq(test_run(t), PL_RUN_EXN);
-  cr_assert_not_null(t->exn_msg);
+  ASSERT_EQ(test_run(t), PL_RUN_EXN);
+  ASSERT_NOT_NULL(t->exn_msg);
   test_rt_free(&rt);
 }
 
-Test(op83, blocked_request_survives_gc) {
+TEST(op83, blocked_request_survives_gc) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
   t->rplan_f = true;
@@ -515,18 +513,18 @@ Test(op83, blocked_request_survives_gc) {
   pl_vpush(t, test_thunk(t, 7));
   pl_val args[2] = {t->vstack[base], 3};
   pl_thread_start(t, test_op83_thunk(t, FETCH, 2, args));
-  cr_assert_eq(test_run(t), PL_RUN_BLOCKED);
+  ASSERT_EQ(test_run(t), PL_RUN_BLOCKED);
 
   pl_gc_collect_now(t); /* moves the request and the parked continuation */
   pl_cell* p = pl_as(PL_TAG_APP, pl_thread_request(t));
-  cr_assert_not_null(p);
-  cr_assert_eq(pl_app_head(p), FETCH);
-  cr_assert_eq(pl_app_args(p)[0], 7);
-  cr_assert_eq(pl_app_args(p)[1], 3);
+  ASSERT_NOT_NULL(p);
+  ASSERT_EQ(pl_app_head(p), FETCH);
+  ASSERT_EQ(pl_app_args(p)[0], 7);
+  ASSERT_EQ(pl_app_args(p)[1], 3);
 
   pl_thread_deposit(t, 0);
-  cr_assert_eq(test_run(t), PL_RUN_DONE);
-  cr_assert_eq(pl_thread_result(t), 0);
+  ASSERT_EQ(test_run(t), PL_RUN_DONE);
+  ASSERT_EQ(pl_thread_result(t), 0);
   t->vsp = base;
   test_rt_free(&rt);
 }

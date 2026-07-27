@@ -1,4 +1,4 @@
-#include <criterion/criterion.h>
+#include "test.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -132,7 +132,7 @@ static void root_start_body(pl_thread* t, pl_val body) {
 
 static double monotonic_seconds(void) {
   struct timespec ts;
-  cr_assert_eq(clock_gettime(CLOCK_MONOTONIC, &ts), 0);
+  ASSERT_EQ(clock_gettime(CLOCK_MONOTONIC, &ts), 0);
   return (double)ts.tv_sec + (double)ts.tv_nsec / 1000000000.0;
 }
 
@@ -170,23 +170,23 @@ static pl_cell* folder_entry(pl_val row, const char* name) {
   return NULL;
 }
 
-Test(actor, readfolder_lists_entries_and_honors_file_root) {
+TEST(actor, readfolder_lists_entries_and_honors_file_root) {
   char dir[] = "/tmp/enki-read-folder-XXXXXX";
-  cr_assert_not_null(mkdtemp(dir));
+  ASSERT_NOT_NULL(mkdtemp(dir));
   char root[512], listing[512], child[512], file[512];
   int n = snprintf(root, sizeof(root), "%s/files", dir);
-  cr_assert(n >= 0 && (size_t)n < sizeof(root));
+  ASSERT(n >= 0 && (size_t)n < sizeof(root));
   n = snprintf(listing, sizeof(listing), "%s/listing", root);
-  cr_assert(n >= 0 && (size_t)n < sizeof(listing));
+  ASSERT(n >= 0 && (size_t)n < sizeof(listing));
   n = snprintf(child, sizeof(child), "%s/subdir", listing);
-  cr_assert(n >= 0 && (size_t)n < sizeof(child));
+  ASSERT(n >= 0 && (size_t)n < sizeof(child));
   n = snprintf(file, sizeof(file), "%s/plain.txt", listing);
-  cr_assert(n >= 0 && (size_t)n < sizeof(file));
-  cr_assert_eq(mkdir(root, 0700), 0);
-  cr_assert_eq(mkdir(listing, 0700), 0);
-  cr_assert_eq(mkdir(child, 0700), 0);
+  ASSERT(n >= 0 && (size_t)n < sizeof(file));
+  ASSERT_EQ(mkdir(root, 0700), 0);
+  ASSERT_EQ(mkdir(listing, 0700), 0);
+  ASSERT_EQ(mkdir(child, 0700), 0);
   FILE* f = fopen(file, "wb");
-  cr_assert_not_null(f);
+  ASSERT_NOT_NULL(f);
   fputs("contents", f);
   fclose(f);
 
@@ -215,47 +215,47 @@ Test(actor, readfolder_lists_entries_and_honors_file_root) {
   outside_t->vsp = base;
   er_actor_start(outside, actor_fn(outside_t, body));
 
-  cr_assert_eq(er_scheduler_run(sys), ER_RUN_IDLE);
-  cr_assert_eq(er_actor_state(inside), ER_ACTOR_HALTED);
+  ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
+  ASSERT_EQ(er_actor_state(inside), ER_ACTOR_HALTED);
   pl_val row = er_actor_result(inside);
   pl_cell* row_p = pl_as(PL_TAG_APP, row);
-  cr_assert_not_null(row_p);
-  cr_assert_eq(pl_app_head(row_p), 0);
-  cr_assert_eq(pl_app_n(row_p), 2);
+  ASSERT_NOT_NULL(row_p);
+  ASSERT_EQ(pl_app_head(row_p), 0);
+  ASSERT_EQ(pl_app_n(row_p), 2);
   pl_cell* subdir = folder_entry(row, "subdir");
-  cr_assert_not_null(subdir);
-  cr_assert_eq(pl_app_args(subdir)[0], 1);
+  ASSERT_NOT_NULL(subdir);
+  ASSERT_EQ(pl_app_args(subdir)[0], 1);
   pl_cell* plain = folder_entry(row, "plain.txt");
-  cr_assert_not_null(plain);
-  cr_assert_eq(pl_app_args(plain)[0], 0);
+  ASSERT_NOT_NULL(plain);
+  ASSERT_EQ(pl_app_args(plain)[0], 0);
 
-  cr_assert_eq(er_actor_state(outside), ER_ACTOR_HALTED);
-  cr_assert_eq(er_actor_result(outside), 0);
+  ASSERT_EQ(er_actor_state(outside), ER_ACTOR_HALTED);
+  ASSERT_EQ(er_actor_result(outside), 0);
   er_scheduler_free(sys);
   test_rt_free(&rt);
 
-  cr_assert_eq(unlink(file), 0);
-  cr_assert_eq(rmdir(child), 0);
-  cr_assert_eq(rmdir(listing), 0);
-  cr_assert_eq(rmdir(root), 0);
-  cr_assert_eq(rmdir(dir), 0);
+  ASSERT_EQ(unlink(file), 0);
+  ASSERT_EQ(rmdir(child), 0);
+  ASSERT_EQ(rmdir(listing), 0);
+  ASSERT_EQ(rmdir(root), 0);
+  ASSERT_EQ(rmdir(dir), 0);
 }
 
-Test(actor, single_actor_halts_with_result) {
+TEST(actor, single_actor_halts_with_result) {
   test_rt rt = test_rt_new();
   er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
   er_actor* a = er_scheduler_actor(sys);
   pl_thread* t = er_actor_thread(a);
   er_actor_start(a, actor_fn(t, 7)); /* body: self-literal 7 */
-  cr_assert_eq(er_scheduler_run(sys), ER_RUN_IDLE);
-  cr_assert_eq(er_actor_state(a), ER_ACTOR_HALTED);
-  cr_assert_eq(er_actor_result(a), 7);
-  cr_assert_eq(er_actor_id(a), 0);
+  ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
+  ASSERT_EQ(er_actor_state(a), ER_ACTOR_HALTED);
+  ASSERT_EQ(er_actor_result(a), 7);
+  ASSERT_EQ(er_actor_id(a), 0);
   er_scheduler_free(sys);
   test_rt_free(&rt);
 }
 
-Test(actor, crash_is_isolated) {
+TEST(actor, crash_is_isolated) {
   test_rt rt = test_rt_new();
   er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
   er_actor* a = er_scheduler_actor(sys);
@@ -276,10 +276,10 @@ Test(actor, crash_is_isolated) {
     pl_thread* t = er_actor_thread(b);
     er_actor_start(b, actor_fn(t, 7));
   }
-  cr_assert_eq(er_scheduler_run(sys), ER_RUN_IDLE);
-  cr_assert_eq(er_actor_state(a), ER_ACTOR_CRASHED);
-  cr_assert_eq(er_actor_state(b), ER_ACTOR_HALTED);
-  cr_assert_eq(er_actor_result(b), 7);
+  ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
+  ASSERT_EQ(er_actor_state(a), ER_ACTOR_CRASHED);
+  ASSERT_EQ(er_actor_state(b), ER_ACTOR_HALTED);
+  ASSERT_EQ(er_actor_result(b), 7);
   er_scheduler_free(sys);
   test_rt_free(&rt);
 }
@@ -297,24 +297,24 @@ static void run_self_ping(pl_store* store, uint64_t quantum) {
   t->vsp = base;
   er_actor_start(a, actor_fn(t, body));
 
-  cr_assert_eq(er_scheduler_run(sys), ER_RUN_IDLE);
-  cr_assert_eq(er_actor_state(a), ER_ACTOR_HALTED);
+  ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
+  ASSERT_EQ(er_actor_state(a), ER_ACTOR_HALTED);
   pl_cell* r = pl_as(PL_TAG_APP, er_actor_result(a));
-  cr_assert_not_null(r);
-  cr_assert_eq(pl_app_head(r), 0);
-  cr_assert_eq(pl_app_n(r), 2);
-  cr_assert_eq(pl_app_args(r)[0], 42);
-  cr_assert_eq(pl_app_args(r)[1], 0); /* no caps: the empty row is 0 */
+  ASSERT_NOT_NULL(r);
+  ASSERT_EQ(pl_app_head(r), 0);
+  ASSERT_EQ(pl_app_n(r), 2);
+  ASSERT_EQ(pl_app_args(r)[0], 42);
+  ASSERT_EQ(pl_app_args(r)[1], 0); /* no caps: the empty row is 0 */
   er_scheduler_free(sys);
 }
 
-Test(actor, send_to_self_then_recv) {
+TEST(actor, send_to_self_then_recv) {
   test_rt rt = test_rt_new();
   run_self_ping(rt.store, 0);
   test_rt_free(&rt);
 }
 
-Test(actor, mt_multiple_actors_halt) {
+TEST(actor, mt_multiple_actors_halt) {
   test_rt rt = test_rt_new();
   er_scheduler* sys = er_scheduler_new(rt.store, (er_config){.quantum = 2});
   er_actor* a = er_scheduler_actor(sys);
@@ -323,17 +323,17 @@ Test(actor, mt_multiple_actors_halt) {
   er_actor_start(b, actor_fn(er_actor_thread(b), 9));
 
   er_mt_executor* ex = er_mt_executor_new(sys, (er_mt_config){.workers = 2});
-  cr_assert_eq(er_mt_executor_run(ex), ER_RUN_IDLE);
-  cr_assert_eq(er_actor_state(a), ER_ACTOR_HALTED);
-  cr_assert_eq(er_actor_result(a), 7);
-  cr_assert_eq(er_actor_state(b), ER_ACTOR_HALTED);
-  cr_assert_eq(er_actor_result(b), 9);
+  ASSERT_EQ(er_mt_executor_run(ex), ER_RUN_IDLE);
+  ASSERT_EQ(er_actor_state(a), ER_ACTOR_HALTED);
+  ASSERT_EQ(er_actor_result(a), 7);
+  ASSERT_EQ(er_actor_state(b), ER_ACTOR_HALTED);
+  ASSERT_EQ(er_actor_result(b), 9);
   er_mt_executor_free(ex);
   er_scheduler_free(sys);
   test_rt_free(&rt);
 }
 
-Test(actor, mt_profile_only_actor_does_not_bind_worker) {
+TEST(actor, mt_profile_only_actor_does_not_bind_worker) {
   test_rt rt = test_rt_new();
   er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
   er_actor* a = er_scheduler_actor(sys);
@@ -345,29 +345,27 @@ Test(actor, mt_profile_only_actor_does_not_bind_worker) {
   er_actor_start(a, fn);
 
   er_mt_executor* ex = er_mt_executor_new(sys, (er_mt_config){.workers = 1});
-  cr_assert_eq(er_mt_executor_run(ex), ER_RUN_IDLE);
-  cr_assert_eq(er_actor_state(a), ER_ACTOR_HALTED);
-  cr_assert_not(a->effectful);
+  ASSERT_EQ(er_mt_executor_run(ex), ER_RUN_IDLE);
+  ASSERT_EQ(er_actor_state(a), ER_ACTOR_HALTED);
+  ASSERT_FALSE(a->effectful);
 
   size_t worker_n = 0;
   for (er_mt_worker* w = ex->worker_head; w != NULL; w = w->next)
     worker_n++;
-  cr_assert_eq(worker_n, 1,
-               "profiling-only actor grew the executor worker pool");
+  ASSERT_EQ(worker_n, 1, "profiling-only actor grew the executor worker pool");
 
   er_mt_executor_free(ex);
   er_scheduler_free(sys);
   test_rt_free(&rt);
 }
 
-Test(actor, mt_bound_spawn_wakes_general_worker_without_broadcast,
-     .timeout = 4) {
+TEST(actor, mt_bound_spawn_wakes_general_worker_without_broadcast) {
   int pipe_fd[2];
-  cr_assert_eq(pipe(pipe_fd), 0);
+  ASSERT_EQ(pipe(pipe_fd), 0);
   size_t read_handle = ax_fd_add(pipe_fd[0]);
   size_t write_handle = ax_fd_add(pipe_fd[1]);
-  cr_assert_neq(read_handle, AX_FD_INVALID);
-  cr_assert_neq(write_handle, AX_FD_INVALID);
+  ASSERT_NEQ(read_handle, AX_FD_INVALID);
+  ASSERT_NEQ(write_handle, AX_FD_INVALID);
 
   test_rt rt = test_rt_new();
   er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
@@ -388,8 +386,8 @@ Test(actor, mt_bound_spawn_wakes_general_worker_without_broadcast,
   /* Recv binds the parent to the only original worker and leaves the
    * replacement general worker parked between executor generations. */
   er_mt_executor* ex = er_mt_executor_new(sys, (er_mt_config){.workers = 1});
-  cr_assert_eq(er_mt_executor_run(ex), ER_RUN_QUIESCENT);
-  cr_assert_eq(er_actor_state(parent), ER_ACTOR_BLOCKED);
+  ASSERT_EQ(er_mt_executor_run(ex), ER_RUN_QUIESCENT);
+  ASSERT_EQ(er_actor_state(parent), ER_ACTOR_BLOCKED);
 
   /* On the second generation the replacement runs sentinel while the bound
    * parent waits in Read.  The general worker holds sys->mu continuously from
@@ -400,7 +398,7 @@ Test(actor, mt_bound_spawn_wakes_general_worker_without_broadcast,
   er_scheduler_inject(sys, parent, 123);
   mt_run_task task = {.ex = ex};
   pthread_t runner;
-  cr_assert_eq(pthread_create(&runner, NULL, mt_run_task_main, &task), 0);
+  ASSERT_EQ(pthread_create(&runner, NULL, mt_run_task_main, &task), 0);
 
   for (;;) {
     pthread_mutex_lock(&sys->mu);
@@ -410,66 +408,66 @@ Test(actor, mt_bound_spawn_wakes_general_worker_without_broadcast,
     struct timespec pause = {.tv_sec = 0, .tv_nsec = 1000000};
     (void)nanosleep(&pause, NULL);
   }
-  cr_assert(ex->running);
-  cr_assert_null(sys->qhead);
+  ASSERT(ex->running);
+  ASSERT_NULL(sys->qhead);
   uint8_t byte = 42;
-  cr_assert_eq(write(pipe_fd[1], &byte, 1), 1);
+  ASSERT_EQ(write(pipe_fd[1], &byte, 1), 1);
   pthread_mutex_unlock(&sys->mu);
 
-  cr_assert_eq(pthread_join(runner, NULL), 0);
-  cr_assert_eq(task.reason, ER_RUN_IDLE);
-  cr_assert_eq(er_actor_state(parent), ER_ACTOR_HALTED);
-  cr_assert_eq(er_actor_result(parent), 1);
-  cr_assert_eq(er_actor_state(sentinel), ER_ACTOR_HALTED);
-  cr_assert_eq(er_actor_result(sentinel), 9);
+  ASSERT_EQ(pthread_join(runner, NULL), 0);
+  ASSERT_EQ(task.reason, ER_RUN_IDLE);
+  ASSERT_EQ(er_actor_state(parent), ER_ACTOR_HALTED);
+  ASSERT_EQ(er_actor_result(parent), 1);
+  ASSERT_EQ(er_actor_state(sentinel), ER_ACTOR_HALTED);
+  ASSERT_EQ(er_actor_result(sentinel), 9);
   er_actor* child = er_scheduler_actor_by_id(sys, 2);
-  cr_assert_not_null(child);
-  cr_assert_eq(er_actor_state(child), ER_ACTOR_HALTED);
-  cr_assert_eq(er_actor_result(child), 7);
+  ASSERT_NOT_NULL(child);
+  ASSERT_EQ(er_actor_state(child), ER_ACTOR_HALTED);
+  ASSERT_EQ(er_actor_result(child), 7);
 
   er_mt_executor_free(ex);
   er_scheduler_free(sys);
   test_rt_free(&rt);
-  cr_assert_eq(ax_fd_close(read_handle), 0);
-  cr_assert_eq(ax_fd_close(write_handle), 0);
+  ASSERT_EQ(ax_fd_close(read_handle), 0);
+  ASSERT_EQ(ax_fd_close(write_handle), 0);
 }
 
-Test(actor, root_quantum_config_environment_and_precedence) {
+TEST(actor, root_quantum_config_environment_and_precedence) {
   const char* old_c = getenv("ENKI_ROOT_QUANTUM");
   char* old = old_c == NULL ? NULL : strdup(old_c);
-  cr_assert(old_c == NULL || old != NULL);
-  cr_assert_eq(unsetenv("ENKI_ROOT_QUANTUM"), 0);
+  ASSERT(old_c == NULL || old != NULL);
+  ASSERT_EQ(unsetenv("ENKI_ROOT_QUANTUM"), 0);
 
   test_rt rt = test_rt_new();
   er_scheduler* inherited =
       er_scheduler_new(rt.store, (er_config){.quantum = 17});
-  cr_assert_eq(inherited->cfg.quantum, 17);
-  cr_assert_eq(inherited->cfg.root_quantum, 17);
+  ASSERT_EQ(inherited->cfg.quantum, 17);
+  ASSERT_EQ(inherited->cfg.root_quantum, 17);
   er_scheduler_free(inherited);
 
-  cr_assert_eq(setenv("ENKI_ROOT_QUANTUM", "257", 1), 0);
+  ASSERT_EQ(setenv("ENKI_ROOT_QUANTUM", "257", 1), 0);
   er_scheduler* from_env =
       er_scheduler_new(rt.store, (er_config){.quantum = 17});
-  cr_assert_eq(from_env->cfg.quantum, 17);
-  cr_assert_eq(from_env->cfg.root_quantum, 257);
+  ASSERT_EQ(from_env->cfg.quantum, 17);
+  ASSERT_EQ(from_env->cfg.root_quantum, 257);
   er_scheduler_free(from_env);
 
   er_scheduler* explicit = er_scheduler_new(
       rt.store, (er_config){.quantum = 17, .root_quantum = 33});
-  cr_assert_eq(explicit->cfg.quantum, 17);
-  cr_assert_eq(explicit->cfg.root_quantum, 33);
+  ASSERT_EQ(explicit->cfg.quantum, 17);
+  ASSERT_EQ(explicit->cfg.root_quantum, 33);
   er_scheduler_free(explicit);
   test_rt_free(&rt);
 
   if (old != NULL) {
-    cr_assert_eq(setenv("ENKI_ROOT_QUANTUM", old, 1), 0);
+    ASSERT_EQ(setenv("ENKI_ROOT_QUANTUM", old, 1), 0);
     free(old);
   } else {
-    cr_assert_eq(unsetenv("ENKI_ROOT_QUANTUM"), 0);
+    ASSERT_EQ(unsetenv("ENKI_ROOT_QUANTUM"), 0);
   }
 }
 
-Test(actor, mt_blocking_effect_replenishes_shared_pool, .timeout = 4) {
+TEST(actor, mt_blocking_effect_replenishes_shared_pool) {
   test_rt rt = test_rt_new();
   er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
   er_actor* a = er_scheduler_actor(sys);
@@ -485,26 +483,26 @@ Test(actor, mt_blocking_effect_replenishes_shared_pool, .timeout = 4) {
    * shared pool, allowing both blocking syscalls to overlap. */
   er_mt_executor* ex = er_mt_executor_new(sys, (er_mt_config){.workers = 1});
   double before = monotonic_seconds();
-  cr_assert_eq(er_mt_executor_run(ex), ER_RUN_IDLE);
+  ASSERT_EQ(er_mt_executor_run(ex), ER_RUN_IDLE);
   double elapsed = monotonic_seconds() - before;
-  cr_assert_lt(elapsed, 1.95,
-               "blocking effects serialized across the shared pool: %.3fs",
-               elapsed);
-  cr_assert_eq(er_actor_state(a), ER_ACTOR_HALTED);
-  cr_assert_eq(er_actor_state(b), ER_ACTOR_HALTED);
+  ASSERT_LT(elapsed, 1.95,
+            "blocking effects serialized across the shared pool: %.3fs",
+            elapsed);
+  ASSERT_EQ(er_actor_state(a), ER_ACTOR_HALTED);
+  ASSERT_EQ(er_actor_state(b), ER_ACTOR_HALTED);
 
   er_mt_executor_free(ex);
   er_scheduler_free(sys);
   test_rt_free(&rt);
 }
 
-Test(actor, mt_direct_read_replenishes_before_blocking, .timeout = 4) {
+TEST(actor, mt_direct_read_replenishes_before_blocking) {
   int pipe_fd[2];
-  cr_assert_eq(pipe(pipe_fd), 0);
+  ASSERT_EQ(pipe(pipe_fd), 0);
   size_t read_handle = ax_fd_add(pipe_fd[0]);
   size_t write_handle = ax_fd_add(pipe_fd[1]);
-  cr_assert_neq(read_handle, AX_FD_INVALID);
-  cr_assert_neq(write_handle, AX_FD_INVALID);
+  ASSERT_NEQ(read_handle, AX_FD_INVALID);
+  ASSERT_NEQ(write_handle, AX_FD_INVALID);
 
   test_rt rt = test_rt_new();
   er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
@@ -527,20 +525,20 @@ Test(actor, mt_direct_read_replenishes_before_blocking, .timeout = 4) {
    * shared worker, the writer can run only if the effect hook binds the
    * reader and replenishes the pool before entering the direct-op body. */
   er_mt_executor* ex = er_mt_executor_new(sys, (er_mt_config){.workers = 1});
-  cr_assert_eq(er_mt_executor_run(ex), ER_RUN_IDLE);
-  cr_assert_eq(er_actor_state(reader), ER_ACTOR_HALTED);
-  cr_assert_eq(er_actor_result(reader), ((pl_val)1 << 8) | 42);
-  cr_assert_eq(er_actor_state(writer), ER_ACTOR_HALTED);
-  cr_assert_eq(er_actor_result(writer), 0);
+  ASSERT_EQ(er_mt_executor_run(ex), ER_RUN_IDLE);
+  ASSERT_EQ(er_actor_state(reader), ER_ACTOR_HALTED);
+  ASSERT_EQ(er_actor_result(reader), ((pl_val)1 << 8) | 42);
+  ASSERT_EQ(er_actor_state(writer), ER_ACTOR_HALTED);
+  ASSERT_EQ(er_actor_result(writer), 0);
 
   er_mt_executor_free(ex);
   er_scheduler_free(sys);
   test_rt_free(&rt);
-  cr_assert_eq(ax_fd_close(read_handle), 0);
-  cr_assert_eq(ax_fd_close(write_handle), 0);
+  ASSERT_EQ(ax_fd_close(read_handle), 0);
+  ASSERT_EQ(ax_fd_close(write_handle), 0);
 }
 
-Test(actor, mt_recv_blocks_until_injection) {
+TEST(actor, mt_recv_blocks_until_injection) {
   test_rt rt = test_rt_new();
   er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
   er_actor* a = er_scheduler_actor(sys);
@@ -548,15 +546,15 @@ Test(actor, mt_recv_blocks_until_injection) {
   er_actor_start(a, actor_fn(t, recv_code(t)));
 
   er_mt_executor* ex = er_mt_executor_new(sys, (er_mt_config){.workers = 2});
-  cr_assert_eq(er_mt_executor_run(ex), ER_RUN_QUIESCENT);
-  cr_assert_eq(er_actor_state(a), ER_ACTOR_BLOCKED);
+  ASSERT_EQ(er_mt_executor_run(ex), ER_RUN_QUIESCENT);
+  ASSERT_EQ(er_actor_state(a), ER_ACTOR_BLOCKED);
 
   er_scheduler_inject(sys, a, 123);
-  cr_assert_eq(er_mt_executor_run(ex), ER_RUN_IDLE);
-  cr_assert_eq(er_actor_state(a), ER_ACTOR_HALTED);
+  ASSERT_EQ(er_mt_executor_run(ex), ER_RUN_IDLE);
+  ASSERT_EQ(er_actor_state(a), ER_ACTOR_HALTED);
   pl_cell* r = pl_as(PL_TAG_APP, er_actor_result(a));
-  cr_assert_not_null(r);
-  cr_assert_eq(pl_app_args(r)[0], 123);
+  ASSERT_NOT_NULL(r);
+  ASSERT_EQ(pl_app_args(r)[0], 123);
   er_mt_executor_free(ex);
   er_scheduler_free(sys);
   test_rt_free(&rt);
@@ -582,10 +580,10 @@ static void run_adopted_root_abandon_zones(bool mt) {
    * either of the later runs.  Root its handle across all allocations. */
   size_t outer_slot = t->vsp;
   root_start_body(t, zone_start_code(t, 11));
-  cr_assert_eq(drive_adopted(sys, ex, root), ER_DRIVE_DONE);
+  ASSERT_EQ(drive_adopted(sys, ex, root), ER_DRIVE_DONE);
   pl_vpush(t, pl_thread_result(t));
-  cr_assert_eq(t->profile_zone_n, 1);
-  cr_assert_eq(t->profile_zones[0].handle, t->vstack[outer_slot]);
+  ASSERT_EQ(t->profile_zone_n, 1);
+  ASSERT_EQ(t->profile_zones[0].handle, t->vstack[outer_slot]);
 
   /* Deadlock abandons a continuation parked on Recv. */
   size_t run_vsp = t->vsp;
@@ -595,11 +593,11 @@ static void run_adopted_root_abandon_zones(bool mt) {
   pl_val body = code_seq(t, t->vstack[run_vsp], t->vstack[run_vsp + 1]);
   t->vsp = run_vsp;
   root_start_body(t, body);
-  cr_assert_eq(drive_adopted(sys, ex, root), ER_DRIVE_DEADLOCK);
-  cr_assert_eq(t->vsp, run_vsp);
-  cr_assert_eq(t->fsp, run_fsp);
-  cr_assert_eq(t->profile_zone_n, 1);
-  cr_assert_eq(t->profile_zones[0].handle, t->vstack[outer_slot]);
+  ASSERT_EQ(drive_adopted(sys, ex, root), ER_DRIVE_DEADLOCK);
+  ASSERT_EQ(t->vsp, run_vsp);
+  ASSERT_EQ(t->fsp, run_fsp);
+  ASSERT_EQ(t->profile_zone_n, 1);
+  ASSERT_EQ(t->profile_zones[0].handle, t->vstack[outer_slot]);
 
   /* A service-detected crash abandons the same kind of parked continuation. */
   pl_vpush(t, zone_start_code(t, 13));
@@ -608,35 +606,35 @@ static void run_adopted_root_abandon_zones(bool mt) {
   body = code_seq(t, t->vstack[run_vsp], t->vstack[run_vsp + 1]);
   t->vsp = run_vsp;
   root_start_body(t, body);
-  cr_assert_eq(drive_adopted(sys, ex, root), ER_DRIVE_EXN);
-  cr_assert_str_eq(t->exn_msg, "invalid actor handle");
-  cr_assert_eq(t->vsp, run_vsp);
-  cr_assert_eq(t->fsp, run_fsp);
-  cr_assert_eq(t->profile_zone_n, 1);
-  cr_assert_eq(t->profile_zones[0].handle, t->vstack[outer_slot]);
+  ASSERT_EQ(drive_adopted(sys, ex, root), ER_DRIVE_EXN);
+  ASSERT_STR_EQ(t->exn_msg, "invalid actor handle");
+  ASSERT_EQ(t->vsp, run_vsp);
+  ASSERT_EQ(t->fsp, run_fsp);
+  ASSERT_EQ(t->profile_zone_n, 1);
+  ASSERT_EQ(t->profile_zones[0].handle, t->vstack[outer_slot]);
 
   /* The embedder can immediately re-arm the adopted root after either
    * abandonment path; no discarded zone may reopen on this run. */
   pl_thread_start(t, 42);
-  cr_assert_eq(drive_adopted(sys, ex, root), ER_DRIVE_DONE);
-  cr_assert_eq(pl_thread_result(t), 42);
-  cr_assert_eq(t->profile_zone_n, 1);
-  cr_assert_eq(t->profile_zones[0].handle, t->vstack[outer_slot]);
+  ASSERT_EQ(drive_adopted(sys, ex, root), ER_DRIVE_DONE);
+  ASSERT_EQ(pl_thread_result(t), 42);
+  ASSERT_EQ(t->profile_zone_n, 1);
+  ASSERT_EQ(t->profile_zones[0].handle, t->vstack[outer_slot]);
 
   er_mt_executor_free(ex);
   er_scheduler_free(sys);
   test_rt_free(&rt);
 }
 
-Test(actor, adopted_root_abandon_drops_current_run_zones) {
+TEST(actor, adopted_root_abandon_drops_current_run_zones) {
   run_adopted_root_abandon_zones(false);
 }
 
-Test(actor, mt_adopted_root_abandon_drops_current_run_zones, .timeout = 10) {
+TEST(actor, mt_adopted_root_abandon_drops_current_run_zones) {
   run_adopted_root_abandon_zones(true);
 }
 
-Test(actor, mt_free_detaches_bound_actor) {
+TEST(actor, mt_free_detaches_bound_actor) {
   test_rt rt = test_rt_new();
   er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
   er_actor* a = er_scheduler_actor(sys);
@@ -644,22 +642,22 @@ Test(actor, mt_free_detaches_bound_actor) {
   er_actor_start(a, actor_fn(t, recv_code(t)));
 
   er_mt_executor* ex = er_mt_executor_new(sys, (er_mt_config){.workers = 1});
-  cr_assert_eq(er_mt_executor_run(ex), ER_RUN_QUIESCENT);
-  cr_assert_eq(er_actor_state(a), ER_ACTOR_BLOCKED);
+  ASSERT_EQ(er_mt_executor_run(ex), ER_RUN_QUIESCENT);
+  ASSERT_EQ(er_actor_state(a), ER_ACTOR_BLOCKED);
   er_mt_executor_free(ex); /* releases the actor's private worker affinity */
 
   er_scheduler_inject(sys, a, 77);
-  cr_assert_eq(er_scheduler_run(sys), ER_RUN_IDLE);
-  cr_assert_eq(er_actor_state(a), ER_ACTOR_HALTED);
+  ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
+  ASSERT_EQ(er_actor_state(a), ER_ACTOR_HALTED);
   pl_cell* r = pl_as(PL_TAG_APP, er_actor_result(a));
-  cr_assert_not_null(r);
-  cr_assert_eq(pl_app_args(r)[0], 77);
+  ASSERT_NOT_NULL(r);
+  ASSERT_EQ(pl_app_args(r)[0], 77);
 
   er_scheduler_free(sys);
   test_rt_free(&rt);
 }
 
-Test(actor, results_independent_of_quantum) {
+TEST(actor, results_independent_of_quantum) {
   /* results must not depend on the quantum: one step per quantum and a huge
    * quantum agree */
   test_rt rt = test_rt_new();
@@ -668,7 +666,7 @@ Test(actor, results_independent_of_quantum) {
   test_rt_free(&rt);
 }
 
-Test(actor, tiny_heaps_collect_through_service) {
+TEST(actor, tiny_heaps_collect_through_service) {
   /* 256-cell semispaces force collection (and growth) inside pinning
    * and response building — a GC-pressure pass over the service paths
    * without the PL_GC_STRESS build flag. */
@@ -684,36 +682,36 @@ Test(actor, tiny_heaps_collect_through_service) {
   pl_val body = code_seq(t, t->vstack[base], t->vstack[base + 1]);
   t->vsp = base;
   er_actor_start(a, actor_fn(t, body));
-  cr_assert_eq(er_scheduler_run(sys), ER_RUN_IDLE);
-  cr_assert_eq(er_actor_state(a), ER_ACTOR_HALTED);
+  ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
+  ASSERT_EQ(er_actor_state(a), ER_ACTOR_HALTED);
   pl_cell* r = pl_as(PL_TAG_APP, er_actor_result(a));
-  cr_assert_not_null(r);
-  cr_assert_eq(pl_app_args(r)[0], 42);
+  ASSERT_NOT_NULL(r);
+  ASSERT_EQ(pl_app_args(r)[0], 42);
   er_scheduler_free(sys);
   test_rt_free(&rt);
 }
 
-Test(actor, recv_blocks_until_injection) {
+TEST(actor, recv_blocks_until_injection) {
   test_rt rt = test_rt_new();
   er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
   er_actor* a = er_scheduler_actor(sys);
   pl_thread* t = er_actor_thread(a);
   er_actor_start(a, actor_fn(t, recv_code(t)));
 
-  cr_assert_eq(er_scheduler_run(sys), ER_RUN_QUIESCENT);
-  cr_assert_eq(er_actor_state(a), ER_ACTOR_BLOCKED);
+  ASSERT_EQ(er_scheduler_run(sys), ER_RUN_QUIESCENT);
+  ASSERT_EQ(er_actor_state(a), ER_ACTOR_BLOCKED);
 
   er_scheduler_inject(sys, a, 99);
-  cr_assert_eq(er_scheduler_run(sys), ER_RUN_IDLE);
-  cr_assert_eq(er_actor_state(a), ER_ACTOR_HALTED);
+  ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
+  ASSERT_EQ(er_actor_state(a), ER_ACTOR_HALTED);
   pl_cell* r = pl_as(PL_TAG_APP, er_actor_result(a));
-  cr_assert_not_null(r);
-  cr_assert_eq(pl_app_args(r)[0], 99);
+  ASSERT_NOT_NULL(r);
+  ASSERT_EQ(pl_app_args(r)[0], 99);
   er_scheduler_free(sys);
   test_rt_free(&rt);
 }
 
-Test(actor, spawn_runs_child_and_returns_handle) {
+TEST(actor, spawn_runs_child_and_returns_handle) {
   test_rt rt = test_rt_new();
   er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
   er_actor* parent = er_scheduler_actor(sys);
@@ -725,18 +723,18 @@ Test(actor, spawn_runs_child_and_returns_handle) {
   t->vsp = base;
   er_actor_start(parent, actor_fn(t, body));
 
-  cr_assert_eq(er_scheduler_run(sys), ER_RUN_IDLE);
-  cr_assert_eq(er_actor_state(parent), ER_ACTOR_HALTED);
-  cr_assert_eq(er_actor_result(parent), 1); /* first minted handle */
+  ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
+  ASSERT_EQ(er_actor_state(parent), ER_ACTOR_HALTED);
+  ASSERT_EQ(er_actor_result(parent), 1); /* first minted handle */
   er_actor* child = er_scheduler_actor_by_id(sys, 1);
-  cr_assert_not_null(child);
-  cr_assert_eq(er_actor_state(child), ER_ACTOR_HALTED);
-  cr_assert_eq(er_actor_result(child), 7);
+  ASSERT_NOT_NULL(child);
+  ASSERT_EQ(er_actor_state(child), ER_ACTOR_HALTED);
+  ASSERT_EQ(er_actor_result(child), 7);
   er_scheduler_free(sys);
   test_rt_free(&rt);
 }
 
-Test(actor, sendcaps_reminted_in_receiver) {
+TEST(actor, sendcaps_reminted_in_receiver) {
   test_rt rt = test_rt_new();
   er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
   er_actor* parent = er_scheduler_actor(sys);
@@ -755,24 +753,24 @@ Test(actor, sendcaps_reminted_in_receiver) {
   t->vsp = base;
   er_actor_start(parent, actor_fn(t, body));
 
-  cr_assert_eq(er_scheduler_run(sys), ER_RUN_IDLE);
-  cr_assert_eq(er_actor_state(parent), ER_ACTOR_HALTED);
-  cr_assert_eq(er_actor_result(parent), 0); /* SendCaps response */
+  ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
+  ASSERT_EQ(er_actor_state(parent), ER_ACTOR_HALTED);
+  ASSERT_EQ(er_actor_result(parent), 0); /* SendCaps response */
   er_actor* child = er_scheduler_actor_by_id(sys, 1);
-  cr_assert_not_null(child);
-  cr_assert_eq(er_actor_state(child), ER_ACTOR_HALTED);
+  ASSERT_NOT_NULL(child);
+  ASSERT_EQ(er_actor_state(child), ER_ACTOR_HALTED);
   pl_cell* r = pl_as(PL_TAG_APP, er_actor_result(child));
-  cr_assert_not_null(r);
-  cr_assert_eq(pl_app_args(r)[0], 5);
+  ASSERT_NOT_NULL(r);
+  ASSERT_EQ(pl_app_args(r)[0], 5);
   pl_cell* caps = pl_as(PL_TAG_APP, pl_app_args(r)[1]);
-  cr_assert_not_null(caps);
-  cr_assert_eq(pl_app_n(caps), 1);
-  cr_assert_eq(pl_app_args(caps)[0], 1); /* fresh receiver-local handle */
+  ASSERT_NOT_NULL(caps);
+  ASSERT_EQ(pl_app_n(caps), 1);
+  ASSERT_EQ(pl_app_args(caps)[0], 1); /* fresh receiver-local handle */
   er_scheduler_free(sys);
   test_rt_free(&rt);
 }
 
-Test(actor, send_to_closed_handle_crashes_sender) {
+TEST(actor, send_to_closed_handle_crashes_sender) {
   test_rt rt = test_rt_new();
   er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
   er_actor* a = er_scheduler_actor(sys);
@@ -789,13 +787,13 @@ Test(actor, send_to_closed_handle_crashes_sender) {
   t->vsp = base;
   er_actor_start(a, actor_fn(t, body));
 
-  cr_assert_eq(er_scheduler_run(sys), ER_RUN_IDLE);
-  cr_assert_eq(er_actor_state(a), ER_ACTOR_CRASHED);
+  ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
+  ASSERT_EQ(er_actor_state(a), ER_ACTOR_CRASHED);
   er_scheduler_free(sys);
   test_rt_free(&rt);
 }
 
-Test(actor, cross_actor_payload_is_store_resident) {
+TEST(actor, cross_actor_payload_is_store_resident) {
   /* Send a structured payload (a law) to a recv-blocked child: it must
    * arrive intact through the store, forced at send. */
   test_rt rt = test_rt_new();
@@ -813,18 +811,18 @@ Test(actor, cross_actor_payload_is_store_resident) {
   t->vsp = base;
   er_actor_start(parent, actor_fn(t, body));
 
-  cr_assert_eq(er_scheduler_run(sys), ER_RUN_IDLE);
+  ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
   er_actor* child = er_scheduler_actor_by_id(sys, 1);
-  cr_assert_not_null(child);
-  cr_assert_eq(er_actor_state(child), ER_ACTOR_HALTED);
+  ASSERT_NOT_NULL(child);
+  ASSERT_EQ(er_actor_state(child), ER_ACTOR_HALTED);
   pl_cell* r = pl_as(PL_TAG_APP, er_actor_result(child));
-  cr_assert_not_null(r);
+  ASSERT_NOT_NULL(r);
   pl_cell* law = pl_as(PL_TAG_LAW, pl_app_args(r)[0]);
-  cr_assert_not_null(law);
-  cr_assert_eq(pl_law_arity(law), 2);
-  cr_assert_eq(pl_law_name(law), ax_s1('K'));
-  cr_assert(pl_store_owns(rt.store, pl_app_args(r)[0]),
-            "payload must live in the shared store");
+  ASSERT_NOT_NULL(law);
+  ASSERT_EQ(pl_law_arity(law), 2);
+  ASSERT_EQ(pl_law_name(law), ax_s1('K'));
+  ASSERT(pl_store_owns(rt.store, pl_app_args(r)[0]),
+         "payload must live in the shared store");
   er_scheduler_free(sys);
   test_rt_free(&rt);
 }
