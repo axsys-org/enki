@@ -228,6 +228,215 @@ static pl_val op_bytes(pl_thread* t, size_t ab) {
   return pl_nat_byte_len(ARG(0));
 }
 
+/* ── Byte scanning / cord trees ───────────────────────────────────────── */
+
+/* scan8 src start class-mask polarity */
+static pl_val op_scan8(pl_thread* t, size_t ab) {
+  COERCE(0);
+  COERCE(1);
+  COERCE(2);
+  COERCE(3);
+
+  size_t src_len = pl_nat_byte_len(ARG(0));
+  uint64_t start = pl_nat_u64_clamp(ARG(1));
+  bool polarity = ARG(3) != 0;
+  size_t end = 0;
+  size_t newlines = 0;
+  size_t final_column = 0;
+  bool preserve_start = start >= (uint64_t)src_len;
+
+  if (!preserve_start) {
+    end = (size_t)start;
+    while (end < src_len) {
+      uint8_t byte = pl_nat_byte_at(ARG(0), end);
+      bool in_class =
+          ((pl_nat_limb_at(ARG(2), byte / 64u) >> (byte % 64u)) & 1u) != 0;
+      if (in_class != polarity)
+        break;
+      end++;
+      if (byte == '\n') {
+        newlines++;
+        final_column = 0;
+      } else {
+        final_column++;
+      }
+    }
+  }
+
+  pl_gc_reserve(t, PL_APP_CELLS(3));
+  PL_GC_FORBID(t);
+  pl_val fields[3] = {
+      preserve_start ? ARG(1) : pl_mk_nat_u64(t, (uint64_t)end),
+      pl_mk_nat_u64(t, (uint64_t)newlines),
+      pl_mk_nat_u64(t, (uint64_t)final_column),
+  };
+  pl_val out = pl_mk_app_from(t, 0, 3, fields);
+  PL_GC_ALLOW(t);
+  return out;
+}
+
+typedef struct strtree_stack {
+  pl_val* items;
+  size_t len;
+  size_t cap;
+} strtree_stack;
+
+typedef struct strtree_sum {
+  uint64_t* limbs;
+  size_t len;
+  size_t cap;
+} strtree_sum;
+
+static void* strtree_grow(void* mem, size_t* cap, size_t need,
+                          size_t item_size) {
+  if (need <= *cap)
+    return mem;
+  size_t next = *cap == 0 ? 16 : *cap;
+  while (next < need) {
+    if (next > SIZE_MAX / 2) {
+      next = need;
+      break;
+    }
+    next *= 2;
+  }
+  if (next > SIZE_MAX / item_size)
+    return NULL;
+  void* grown = realloc(mem, next * item_size);
+  if (grown == NULL)
+    return NULL;
+  *cap = next;
+  return grown;
+}
+
+static bool strtree_push(strtree_stack* stack, pl_val value) {
+  void* grown = strtree_grow(stack->items, &stack->cap, stack->len + 1,
+                             sizeof(*stack->items));
+  if (grown == NULL)
+    return false;
+  stack->items = grown;
+  stack->items[stack->len++] = value;
+  return true;
+}
+
+static bool strtree_add(strtree_sum* sum, pl_val value) {
+  size_t value_len = pl_nat_limb_len(value);
+  if (value_len == 0)
+    return true;
+
+  size_t add_len = sum->len > value_len ? sum->len : value_len;
+  if (add_len == SIZE_MAX)
+    return false;
+  void* grown =
+      strtree_grow(sum->limbs, &sum->cap, add_len + 1, sizeof(*sum->limbs));
+  if (grown == NULL)
+    return false;
+  sum->limbs = grown;
+  for (size_t i = sum->len; i <= add_len; i++)
+    sum->limbs[i] = 0;
+
+  uint64_t carry = 0;
+  for (size_t i = 0; i < value_len; i++) {
+    uint64_t old = sum->limbs[i];
+    uint64_t added = old + pl_nat_limb_at(value, i);
+    uint64_t carry1 = added < old;
+    uint64_t with_carry = added + carry;
+    uint64_t carry2 = with_carry < added;
+    sum->limbs[i] = with_carry;
+    carry = carry1 | carry2;
+  }
+  for (size_t i = value_len; carry != 0 && i < add_len; i++) {
+    uint64_t old = sum->limbs[i];
+    sum->limbs[i] = old + 1;
+    carry = sum->limbs[i] == 0 ? 1 : 0;
+  }
+  sum->limbs[add_len] = carry;
+  sum->len = add_len + (carry != 0 ? 1 : 0);
+  return true;
+}
+
+/*
+ * StrTree traverses an already-deep-normal CordTree.  The host stack and
+ * limb accumulator cannot be invalidated by GC; the only reserve happens
+ * after traversal, when no CordTree pointers remain in them.
+ */
+static pl_val op_strtree(pl_thread* t, size_t ab) {
+  const pl_val text_tag = ax_s4('t', 'e', 'x', 't');
+  const pl_val slice_tag = ax_s5('s', 'l', 'i', 'c', 'e');
+  const pl_val repeat_tag = ax_s6('r', 'e', 'p', 'e', 'a', 't');
+  const pl_val cat_tag = ax_s3('c', 'a', 't');
+  strtree_stack stack = {0};
+  strtree_sum sum = {0};
+
+  if (!strtree_push(&stack, ARG(0)))
+    goto allocation_failed;
+
+  while (stack.len != 0) {
+    pl_val node = stack.items[--stack.len];
+    pl_cell* app = pl_as(PL_TAG_APP, node);
+    if (app == NULL)
+      goto malformed;
+    pl_val tag = pl_app_head(app);
+    uint32_t n = pl_app_n(app);
+    pl_val* fields = pl_app_args(app);
+    if (n == 1 && tag == text_tag) {
+      if (!pl_is_nat(fields[0]))
+        goto malformed;
+      if (!strtree_add(&sum, (pl_val)pl_nat_byte_len(fields[0])))
+        goto allocation_failed;
+    } else if (n == 3 && tag == slice_tag) {
+      if (!pl_is_nat(fields[0]) || !pl_is_nat(fields[1]) ||
+          !pl_is_nat(fields[2]))
+        goto malformed;
+      if (!strtree_add(&sum, fields[2]))
+        goto allocation_failed;
+    } else if (n == 2 && tag == repeat_tag) {
+      if (!pl_is_nat(fields[0]) || !pl_is_nat(fields[1]))
+        goto malformed;
+      if (!strtree_add(&sum, fields[1]))
+        goto allocation_failed;
+    } else if (n == 2 && tag == cat_tag) {
+      if (!strtree_push(&stack, fields[1]) || !strtree_push(&stack, fields[0]))
+        goto allocation_failed;
+    } else {
+      goto malformed;
+    }
+  }
+
+  free(stack.items);
+  if (sum.len == 0) {
+    free(sum.limbs);
+    return 0;
+  }
+  if (sum.len == 1 && sum.limbs[0] <= PL_NAT63_MAX) {
+    pl_val out = sum.limbs[0];
+    free(sum.limbs);
+    return out;
+  }
+  if (sum.len >= (1u << 20)) {
+    free(sum.limbs);
+    pl_raise_msg(t, "StrTree: size exceeds PLAN natural limit");
+  }
+
+  pl_gc_reserve(t, PL_NAT_CELLS(sum.len));
+  PL_GC_FORBID(t);
+  uint64_t* out_limbs;
+  pl_val out = pl_mk_nat_limbs(t, sum.len, &out_limbs);
+  memcpy(out_limbs, sum.limbs, sum.len * sizeof(*out_limbs));
+  PL_GC_ALLOW(t);
+  free(sum.limbs);
+  return out;
+
+malformed:
+  free(stack.items);
+  free(sum.limbs);
+  return 0;
+
+allocation_failed:
+  free(stack.items);
+  free(sum.limbs);
+  pl_raise_msg(t, "StrTree: temporary allocation failed");
+}
+
 /* ── Comparisons ───────────────────────────────────────────────────────── */
 
 static int nat_cmp_args(pl_thread* t, size_t ab) {
@@ -967,11 +1176,14 @@ const pl_opdesc pl_ops[] = {
     OP83C("ReadFolder", 1, 0b1, 0, pl_op83_read_folder),
     OP83C("Fetch", 2, 0b11, 0b11, pl_op83_fetch),
     /* provisional: a blocking sleep, serviced synchronously in pkg/enki.
-     * appended last so op indices and the buckets below do not shift;
-     * Sleep is index 126. */
+     * Sleep remains index 126. */
     OP83C("Sleep", 1, 0b1, 0, pl_op83_sleep),
     OP83_LOCAL("ZoneStart", 1, 0b1, pl_op83_zone_start),
     OP83_LOCAL("ZoneEnd", 1, 0b1, pl_op83_zone_end),
+
+    /* op 66 additions are appended to preserve every established index. */
+    OP66(ax_s5('s', 'c', 'a', 'n', '8'), 4, 0b1111, 0, op_scan8),
+    OP66(ax_s7('S', 't', 'r', 'T', 'r', 'e', 'e'), 1, 0b1, 0b1, op_strtree),
 };
 
 const size_t pl_nops = sizeof(pl_ops) / sizeof(pl_ops[0]);
@@ -988,15 +1200,15 @@ static const uint16_t pl_op0_argc3[] = {1};
 static const uint16_t pl_op0_argc6[] = {2};
 
 static const uint16_t pl_op66_argc1[] = {
-    3,  6,  7,  38, 39, 40, 41, 42, 44,  45,  46,  52, 53, 54,
-    55, 56, 57, 58, 59, 60, 65, 71, 72,  74,  75,  76, 77, 78,
-    79, 80, 81, 82, 83, 85, 86, 99, 100, 101, 103, 104};
+    3,  6,  7,  38, 39, 40, 41, 42, 44,  45,  46,  52,  53, 54,
+    55, 56, 57, 58, 59, 60, 65, 71, 72,  74,  75,  76,  77, 78,
+    79, 80, 81, 82, 83, 85, 86, 99, 100, 101, 103, 104, 130};
 static const uint16_t pl_op66_argc2[] = {
     8,  9,  10, 11, 12, 13, 14, 31, 32, 33, 36, 37, 43, 47, 50, 64,
     66, 69, 70, 73, 84, 87, 88, 89, 92, 93, 94, 95, 96, 97, 98, 102};
 static const uint16_t pl_op66_argc3[] = {4,  15, 30, 34, 35, 48, 51,
                                          61, 62, 63, 67, 68, 90, 91};
-static const uint16_t pl_op66_argc4[] = {16, 49};
+static const uint16_t pl_op66_argc4[] = {16, 49, 129};
 static const uint16_t pl_op66_argc5[] = {17};
 static const uint16_t pl_op66_argc6[] = {5, 18};
 static const uint16_t pl_op66_argc7[] = {19};
