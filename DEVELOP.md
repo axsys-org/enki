@@ -178,6 +178,21 @@ separate lane, and spans are paused while an actor is yielded or blocked. The
 JSON export contains explicit zones only; automatic law attribution remains a
 Tracy-only feature.
 
+To print PINs whose exclusive serialization and store insertion time exceeds
+a wall-time threshold, pass the threshold in microseconds:
+
+```sh
+wisp --profile-pins 1000 DIR MODULE [FUNCTION ARGS...]
+wisp --profile-pins=1000 DIR MODULE [FUNCTION ARGS...]
+```
+
+Profiling records are written to stderr as one line per slow PIN. Each record
+contains only that PIN's own work; time spent freezing dependency PINs is
+reported against those dependencies instead. PLAN `Trace` output and Wisp's
+top-level result dump are suppressed so the records remain readable. A zero
+threshold prints every newly frozen PIN, including work below the clock's
+observable resolution.
+
 ## Formatting And Analysis
 
 ```sh

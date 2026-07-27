@@ -101,8 +101,8 @@ pl_store* pl_store_new_lmdb(const char* path, size_t map_size);
 pl_store* pl_store_new_silo(const char* path, size_t map_size);
 void pl_store_free(pl_store* s);
 
-/* Print each successfully frozen root PIN whose serialization and store
- * publication take longer than `threshold_us`. */
+/* Print each newly frozen PIN whose exclusive serialization and store
+ * insertion time exceeds `threshold_us`. */
 void pl_store_profile_pins(pl_store* s, uint64_t threshold_us);
 
 /* Address-range test used by the collector (store vals are terminal).  The

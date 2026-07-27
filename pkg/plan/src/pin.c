@@ -161,6 +161,7 @@ typedef struct save_item {
   pl_val* table;  /* direct PINs deduplicated by prepared hash */
   pl_hash hash;
   pl_val canonical;
+  uint64_t profile_self_ns;
   bool hash_ready;
 } save_item;
 
@@ -176,6 +177,52 @@ typedef struct save_ctx {
   char* err;
   size_t err_cap;
 } save_ctx;
+
+static struct timespec pin_profile_start(pl_store* s) {
+  struct timespec start = {.tv_sec = -1};
+  if (s->pin_profile_f && clock_gettime(CLOCK_MONOTONIC, &start) != 0)
+    start.tv_sec = -1;
+  return start;
+}
+
+static uint64_t pin_profile_elapsed_ns(const struct timespec* start) {
+  if (start->tv_sec < 0)
+    return 0;
+  struct timespec end;
+  if (clock_gettime(CLOCK_MONOTONIC, &end) != 0)
+    return 0;
+  uint64_t sec = (uint64_t)(end.tv_sec - start->tv_sec);
+  int64_t nsec = end.tv_nsec - start->tv_nsec;
+  if (nsec < 0) {
+    sec--;
+    nsec += 1000000000;
+  }
+  return sec * UINT64_C(1000000000) + (uint64_t)nsec;
+}
+
+static void pin_profile_add(save_item* item, const struct timespec* start) {
+  uint64_t elapsed_ns = pin_profile_elapsed_ns(start);
+  if (UINT64_MAX - item->profile_self_ns < elapsed_ns)
+    item->profile_self_ns = UINT64_MAX;
+  else
+    item->profile_self_ns += elapsed_ns;
+}
+
+static void pin_profile_report(pl_store* s, pl_val pin, uint64_t elapsed_ns) {
+  uint64_t elapsed_us = elapsed_ns / 1000;
+  uint64_t remainder_ns = elapsed_ns % 1000;
+  bool over_threshold = elapsed_us > s->pin_profile_us ||
+                        (elapsed_us == s->pin_profile_us && remainder_ns != 0);
+  /* A zero threshold is the useful "show every PIN" spelling, including work
+   * that completes within the platform clock's observable resolution. */
+  if (s->pin_profile_us != 0 && !over_threshold)
+    return;
+
+  char* shown = pl_show(ax_allocator_system(), pin, NULL);
+  fprintf(stderr, "[pin-profile] %" PRIu64 ".%03" PRIu64 " us %s\n", elapsed_us,
+          remainder_ns, shown);
+  ax_free(ax_allocator_system(), shown);
+}
 
 static bool save_error(save_ctx* c, const char* fmt, ...) {
   if (c->err != NULL && c->err_cap != 0) {
@@ -254,6 +301,7 @@ static bool save_discover_pin(save_ctx* c, pl_val input, uint32_t depth) {
   }
   ax_hmput(c->visit, pin, 1);
 
+  struct timespec profile_start = pin_profile_start(c->store);
   pl_val* direct = NULL;
   pin_idx_entry* seen = NULL;
   bool ok = save_collect_direct(c, pl_pin_body(p), &direct, &seen, 0);
@@ -262,13 +310,18 @@ static bool save_discover_pin(save_ctx* c, pl_val input, uint32_t depth) {
     ax_arrfree(direct);
     return false;
   }
+  uint64_t profile_self_ns = pin_profile_elapsed_ns(&profile_start);
   for (ptrdiff_t i = 0; i < ax_arrlen(direct); i++)
     if (!save_discover_pin(c, direct[i], depth + 1)) {
       ax_arrfree(direct);
       return false;
     }
 
-  save_item item = {.source = pin, .direct = direct};
+  save_item item = {
+      .source = pin,
+      .direct = direct,
+      .profile_self_ns = profile_self_ns,
+  };
   ax_arrpush(c->items, item);
   ax_hmput(c->index, pin, (size_t)(ax_arrlen(c->items) - 1));
   at = ax_hmgeti(c->visit, pin);
@@ -429,6 +482,7 @@ static bool save_legacy_put(save_ctx* c, const uint8_t hash[32],
 static bool save_prepare_legacy(save_ctx* c, pl_val root) {
   for (ptrdiff_t i = 0; i < ax_arrlen(c->items); i++) {
     save_item* item = &c->items[i];
+    struct timespec profile_start = pin_profile_start(c->store);
     const uint8_t* known = pl_pin_hash(item->source);
     if (known != NULL) {
       memcpy(item->hash.b, known, sizeof(item->hash.b));
@@ -442,6 +496,7 @@ static bool save_prepare_legacy(save_ctx* c, pl_val root) {
       }
       if (!save_prepare_table(c, item))
         goto failed;
+      pin_profile_add(item, &profile_start);
       continue;
     }
 
@@ -482,6 +537,7 @@ static bool save_prepare_legacy(save_ctx* c, pl_val root) {
     ax_arrfree(encoded.buf);
     ax_arrfree(encoded.subpins);
     ax_hmfree(encoded.idx);
+    pin_profile_add(item, &profile_start);
   }
 
   const uint8_t* root_hash = save_pin_hash(c, root);
@@ -500,6 +556,7 @@ static bool save_prepare_silo(save_ctx* c, pl_val root) {
     return false;
   for (ptrdiff_t i = 0; i < ax_arrlen(c->items); i++) {
     save_item* item = &c->items[i];
+    struct timespec profile_start = pin_profile_start(c->store);
     if (!save_prepare_table(c, item))
       goto failed;
     const uint8_t* known = pl_pin_hash(item->source);
@@ -541,6 +598,7 @@ static bool save_prepare_silo(save_ctx* c, pl_val root) {
     } else {
       item->hash_ready = true;
     }
+    pin_profile_add(item, &profile_start);
   }
 
   const uint8_t* root_hash = save_pin_hash(c, root);
@@ -565,6 +623,7 @@ static void save_build_canonical(save_ctx* c) {
   c->canonical = NULL;
   for (ptrdiff_t i = 0; i < ax_arrlen(c->items); i++) {
     save_item* item = &c->items[i];
+    struct timespec profile_start = pin_profile_start(c->store);
     const uint8_t* known = pl_pin_hash(item->source);
     if (known != NULL) {
       ptrdiff_t local_at = ax_hmgeti(c->canonical, item->hash);
@@ -574,6 +633,7 @@ static void save_build_canonical(save_ctx* c) {
         item->canonical = save_effective_pin(item->source);
         ax_hmput(c->canonical, item->hash, item->canonical);
       }
+      pin_profile_add(item, &profile_start);
       continue;
     }
     ptrdiff_t local_at = ax_hmgeti(c->canonical, item->hash);
@@ -583,6 +643,7 @@ static void save_build_canonical(save_ctx* c) {
       item->canonical = hit;
       if (local_at < 0)
         ax_hmput(c->canonical, item->hash, item->canonical);
+      pin_profile_add(item, &profile_start);
       continue;
     }
 
@@ -597,15 +658,18 @@ static void save_build_canonical(save_ctx* c) {
                                       (uint32_t)ax_arrlen(subpins), subpins);
     ax_hmput(c->canonical, item->hash, item->canonical);
     ax_arrfree(subpins);
+    pin_profile_add(item, &profile_start);
   }
 }
 
 static void save_publish_targets(save_ctx* c) {
   for (ptrdiff_t i = 0; i < ax_arrlen(c->items); i++) {
     save_item* item = &c->items[i];
+    struct timespec profile_start = pin_profile_start(c->store);
     pl_cell* p = pl_ptr(item->source);
     if (pl_pin_is_proxy(p) && pl_pin_proxy_target(p) == 0)
       pl_pin_set_target(p, item->canonical);
+    pin_profile_add(item, &profile_start);
   }
 }
 
@@ -669,37 +733,6 @@ static bool save_canonical_root(save_ctx* c, pl_val input, bool* handled) {
   return true;
 }
 
-static uint64_t pin_profile_elapsed_ns(const struct timespec* start) {
-  struct timespec end;
-  if (clock_gettime(CLOCK_MONOTONIC, &end) != 0)
-    return 0;
-  uint64_t sec = (uint64_t)(end.tv_sec - start->tv_sec);
-  int64_t nsec = end.tv_nsec - start->tv_nsec;
-  if (nsec < 0) {
-    sec--;
-    nsec += 1000000000;
-  }
-  return sec * UINT64_C(1000000000) + (uint64_t)nsec;
-}
-
-static void pin_profile_report(pl_store* s, pl_val pin,
-                               const struct timespec* start, bool ok) {
-  if (!ok || start->tv_sec < 0)
-    return;
-  uint64_t elapsed_ns = pin_profile_elapsed_ns(start);
-  uint64_t elapsed_us = elapsed_ns / 1000;
-  uint64_t remainder_ns = elapsed_ns % 1000;
-  bool over_threshold = elapsed_us > s->pin_profile_us ||
-                        (elapsed_us == s->pin_profile_us && remainder_ns != 0);
-  if (!over_threshold)
-    return;
-
-  char* shown = pl_show(ax_allocator_system(), pin, NULL);
-  fprintf(stderr, "[pin-profile] %" PRIu64 ".%03" PRIu64 " us %s\n", elapsed_us,
-          remainder_ns, shown);
-  ax_free(ax_allocator_system(), shown);
-}
-
 bool pl_store_save_root(pl_store* s, pl_val pin, uint8_t out_hash[32],
                         char* err, size_t err_cap) {
   if (s == NULL) {
@@ -709,16 +742,12 @@ bool pl_store_save_root(pl_store* s, pl_val pin, uint8_t out_hash[32],
   }
   save_ctx c = {.store = s, .err = err, .err_cap = err_cap};
   pl_store_save_lock(s);
-  struct timespec profile_start = {.tv_sec = -1};
-  if (s->pin_profile_f && clock_gettime(CLOCK_MONOTONIC, &profile_start) != 0)
-    profile_start.tv_sec = -1;
   bool handled = false;
   bool ok = save_canonical_root(&c, pin, &handled);
   if (handled) {
     if (ok && out_hash != NULL)
       memcpy(out_hash, pl_pin_hash(save_effective_pin(pin)), 32);
     pl_store_save_unlock(s);
-    pin_profile_report(s, pin, &profile_start, ok);
     return ok;
   }
   ok = save_discover_pin(&c, pin, 0);
@@ -745,7 +774,9 @@ bool pl_store_save_root(pl_store* s, pl_val pin, uint8_t out_hash[32],
     pl_store_unlock(s);
   }
   pl_store_save_unlock(s);
-  pin_profile_report(s, pin, &profile_start, ok);
+  if (ok && s->pin_profile_f)
+    for (ptrdiff_t i = 0; i < ax_arrlen(c.items); i++)
+      pin_profile_report(s, c.items[i].source, c.items[i].profile_self_ns);
 
   if (compile)
     for (ptrdiff_t i = 0; i < ax_hmlen(c.compile); i++)

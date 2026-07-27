@@ -99,6 +99,29 @@ static bool file_contains(const char* path, const char* needle) {
   return found;
 }
 
+static size_t file_count_occurrences(const char* path, const char* needle) {
+  FILE* f = fopen(path, "r");
+  cr_assert_not_null(f, "failed to open `%s`", path);
+
+  size_t count = 0;
+  size_t needle_n = strlen(needle);
+  size_t matched = 0;
+  int ch;
+  while ((ch = fgetc(f)) != EOF) {
+    if ((char)ch == needle[matched]) {
+      matched++;
+      if (matched == needle_n) {
+        count++;
+        matched = 0;
+      }
+    } else {
+      matched = (char)ch == needle[0] ? 1u : 0u;
+    }
+  }
+  fclose(f);
+  return count;
+}
+
 Test(wisp_cli, save_silo_snapshot_round_trip) {
   char dir[] = "/tmp/enki-snaptest-XXXXXX";
   cr_assert_not_null(mkdtemp(dir), "failed to make temp dir");
@@ -290,7 +313,10 @@ Test(wisp_cli, pin_profile_accepts_both_flag_spellings) {
         "y)))))\n"
         "(#bind Save\n"
         "  (#pin (#law \"Save\" (Save x) ((#pin \"B\") (\"Save\" x)))))\n"
-        "(#bind profiled (#pin (#law \"profiled\" (profiled x) x)))\n"
+        "(#bind profile-child\n"
+        "  (#pin (#law \"profile-child\" (profile-child x) x)))\n"
+        "(#bind profiled\n"
+        "  (#pin (#law \"profiled\" (profiled x) (profile-child x))))\n"
         "(Trace \"profile-noise\" 0)\n"
         "(Save profiled)\n",
         f);
@@ -315,10 +341,13 @@ Test(wisp_cli, pin_profile_accepts_both_flag_spellings) {
     int st = system(cmd);
     cr_assert(WIFEXITED(st) && WEXITSTATUS(st) == 0,
               "PIN profile invocation failed for equals=%d", equals);
-    cr_assert(file_contains(output_path, "[pin-profile]"),
-              "PIN profile record missing for equals=%d", equals);
+    cr_assert_eq(file_count_occurrences(output_path, "[pin-profile]"), 2,
+                 "expected separate parent and child profiles for equals=%d",
+                 equals);
     cr_assert(file_contains(output_path, "profiled/1"),
-              "profiled PIN missing for equals=%d", equals);
+              "parent PIN profile missing for equals=%d", equals);
+    cr_assert(file_contains(output_path, "profile-child/1"),
+              "child PIN profile missing for equals=%d", equals);
     cr_assert_not(file_contains(output_path, "profile-noise"),
                   "Trace output polluted PIN profile for equals=%d", equals);
   }
