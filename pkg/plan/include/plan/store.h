@@ -108,9 +108,10 @@ static inline bool pl_store_owns(const pl_store* s, pl_val v) {
 }
 
 /*
- * Normalize a value and wrap it in a fixed-size moving-heap PIN proxy.  This
- * is deliberately cheap and non-persistent: Save later promotes the reachable
- * PIN closure into canonical store objects and resolves each proxy in place.
+ * Force a value to WHNF and wrap it in a fixed-size moving-heap PIN proxy.
+ * Nested fields remain lazy.  This is deliberately cheap and non-persistent:
+ * the PLAN Save operation later deep-normalizes and promotes the reachable PIN
+ * closure into canonical store objects, then resolves each proxy in place.
  */
 pl_val pl_pin(pl_thread* t, pl_val v);
 
@@ -131,6 +132,8 @@ bool pl_pin_is_hashed(pl_val pin);
 const uint8_t* pl_pin_hash(pl_val pin);
 
 /* Finalize and persist a PIN closure, resolve its proxies, and publish root.
+ * Unresolved PIN bodies must already be deeply normal; the PLAN Save primop
+ * establishes this before calling the store layer.
  * An unresolved moving proxy must belong to a heap whose store is `s`; this
  * keeps its eventual canonical target within the collector's store-lifetime
  * domain.  Store-owned and already-canonical PINs must likewise belong to

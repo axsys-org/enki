@@ -53,7 +53,7 @@ void pl_nf_writeback(pl_val parent, uint32_t field, pl_val child);
 
 /* Pointer-field map used by nf and the collector: number of pointer
  * fields of a WHNF object and access to field i (APP: head+args;
- * LAW: name+body; others: none). */
+ * LAW: name+body; unresolved PIN: body; others: none). */
 uint32_t pl_nf_nfields(pl_val v);
 pl_val pl_nf_field(pl_val v, uint32_t i);
 

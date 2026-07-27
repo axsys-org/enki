@@ -501,6 +501,23 @@ Test(ops, force_deep_normalizes_arg) {
   test_rt_free(&rt);
 }
 
+Test(ops, pin_keeps_nested_fields_lazy) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  pl_vpush(t, test_app1_thunk_to(t, 42));
+  pl_val args[1] = {t->vstack[base]};
+  pl_vpush(t, test_op66(t, ax_s3('P', 'i', 'n'), 1, args));
+
+  pl_cell* proxy = pl_as(PL_TAG_PIN, t->vstack[base + 1]);
+  cr_assert_not_null(proxy);
+  pl_cell* body = pl_as(PL_TAG_APP, pl_pin_body(proxy));
+  cr_assert_not_null(body);
+  cr_assert_eq(pl_tag(pl_app_args(body)[0]), PL_TAG_DEFER);
+  cr_assert_eq(pl_hdr_flags(proxy[0]) & PL_F_NORMAL, 0);
+  test_rt_free(&rt);
+}
+
 Test(ops, deepseq_normalizes_first_and_returns_second_lazily) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;

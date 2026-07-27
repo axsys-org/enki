@@ -93,6 +93,17 @@ static bool test_pin_raises(pl_thread* t, pl_val value) {
   return true;
 }
 
+static pl_val test_lazy_app1(pl_thread* t, pl_val value) {
+  size_t base = t->vsp;
+  pl_vpush(t, test_app1(t, 0, value));
+  pl_gc_reserve(t, PL_ENV_CELLS(1) + PL_THUNK_CELLS);
+  pl_vpush(t, pl_mk_env(t, 1));
+  pl_vpush(t, pl_mk_thunk(t, t->vstack[base + 1], t->vstack[base]));
+  pl_val out = test_app1(t, 0, t->vstack[base + 2]);
+  t->vsp = base;
+  return out;
+}
+
 static bool test_store_load_raises(pl_thread* t, const uint8_t hash[32]) {
   pl_catch c;
   pl_catch_init(t, &c);
@@ -657,18 +668,25 @@ Test(pin, sub_pins_collected_shallow) {
   test_rt_free(&rt);
 }
 
-Test(pin, pinning_normalizes) {
+Test(pin, pinning_only_forces_to_whnf) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
   size_t base = t->vsp;
-  /* pin of (id 42) under-applied row containing a redex via op:
-   * pin the value Add 1 2 lazily applied */
-  pl_vpush(t, 1);
-  pl_vpush(t, 2);
-  pl_vpush(t, test_op66_2(t, ax_s3('A', 'd', 'd'), t->vstack[base],
-                          t->vstack[base + 1]));
-  pl_val pinned = pl_pin(t, t->vstack[base + 2]);
-  cr_assert_eq(pl_pin_body(pl_ptr(pinned)), 3);
+  pl_vpush(t, test_lazy_app1(t, 42));
+  pl_vpush(t, pl_pin(t, t->vstack[base]));
+
+  pl_cell* proxy = pl_ptr(t->vstack[base + 1]);
+  pl_cell* body = pl_as(PL_TAG_APP, pl_pin_body(proxy));
+  cr_assert_not_null(body);
+  cr_assert_eq(pl_tag(pl_app_args(body)[0]), PL_TAG_DEFER);
+  cr_assert_eq(pl_hdr_flags(proxy[0]) & PL_F_NORMAL, 0);
+
+  t->vstack[base + 1] = pl_nf(t, t->vstack[base + 1]);
+  proxy = pl_ptr(t->vstack[base + 1]);
+  body = pl_as(PL_TAG_APP, pl_pin_body(proxy));
+  cr_assert_not_null(body);
+  cr_assert_eq(pl_app_args(body)[0], 42);
+  cr_assert_neq(pl_hdr_flags(proxy[0]) & PL_F_NORMAL, 0);
   test_rt_free(&rt);
 }
 

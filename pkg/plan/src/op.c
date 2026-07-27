@@ -820,11 +820,11 @@ static pl_val op_load(pl_thread* t, size_t ab) {
 
 const pl_opdesc pl_ops[] = {
     /* op 0: core PLAN */
-    {0, 0, NULL, 1, 0b1, 0b1, false, false, op_pin},
+    {0, 0, NULL, 1, 0b1, 0, false, false, op_pin},
     {0, 1, NULL, 3, 0b111, 0, false, false, op_law},
     {0, 2, NULL, 6, 0b100000, 0, false, false, op_elim},
 
-    OP66(ax_s3('P', 'i', 'n'), 1, 0b1, 0b1, op_pin),
+    OP66(ax_s3('P', 'i', 'n'), 1, 0b1, 0, op_pin),
     OP66(ax_s3('L', 'a', 'w'), 3, 0b111, 0, op_law),
     OP66(ax_s4('E', 'l', 'i', 'm'), 6, 0b100000, 0, op_elim),
 
@@ -908,7 +908,7 @@ const pl_opdesc pl_ops[] = {
     OP66(ax_s3('I', 'x', '5'), 1, 0b1, 0, op_ix5),
     OP66(ax_s3('I', 'x', '6'), 1, 0b1, 0, op_ix6),
     OP66(ax_s3('I', 'x', '7'), 1, 0b1, 0, op_ix7),
-    OP66(ax_s4('S', 'a', 'v', 'e'), 1, 0b1, 0, op_save),
+    OP66(ax_s4('S', 'a', 'v', 'e'), 1, 0b1, 0b1, op_save),
     OP66(ax_s4('L', 'o', 'a', 'd'), 1, 0b1, 0, op_load),
     OP66(ax_s5('T', 'r', 'a', 'c', 'e'), 2, 0, 0b1, op_trace),
     OP66(ax_s3('N', 'i', 'l'), 1, 0b1, 0, op_nil),
