@@ -277,6 +277,77 @@ Test(wisp_cli, profile_json_finalizes_after_runtime_error) {
             "runtime-error trace was not finalized");
 }
 
+Test(wisp_cli, pin_profile_accepts_both_flag_spellings) {
+  char dir[] = "/tmp/enki-pin-profile-XXXXXX";
+  cr_assert_not_null(mkdtemp(dir));
+
+  char module_path[512];
+  (void)snprintf(module_path, sizeof(module_path), "%s/profiled.plan", dir);
+  FILE* f = fopen(module_path, "w");
+  cr_assert_not_null(f);
+  fputs("(#bind Trace\n"
+        "  (#pin (#law \"Trace\" (Trace x y) ((#pin \"B\") (\"Trace\" x "
+        "y)))))\n"
+        "(#bind Save\n"
+        "  (#pin (#law \"Save\" (Save x) ((#pin \"B\") (\"Save\" x)))))\n"
+        "(#bind profiled (#pin (#law \"profiled\" (profiled x) x)))\n"
+        "(Trace \"profile-noise\" 0)\n"
+        "(Save profiled)\n",
+        f);
+  fclose(f);
+
+  char output_path[512];
+  char cmd[2048];
+  for (int equals = 0; equals < 2; equals++) {
+    (void)snprintf(output_path, sizeof(output_path), "%s/pins-%d.out", dir,
+                   equals);
+    if (equals) {
+      (void)snprintf(cmd, sizeof(cmd),
+                     "cd %s && %s --profile-pins=0 %s profiled "
+                     ">/dev/null 2>%s",
+                     dir, wisp_bin(), dir, output_path);
+    } else {
+      (void)snprintf(cmd, sizeof(cmd),
+                     "cd %s && %s --profile-pins 0 %s profiled "
+                     ">/dev/null 2>%s",
+                     dir, wisp_bin(), dir, output_path);
+    }
+    int st = system(cmd);
+    cr_assert(WIFEXITED(st) && WEXITSTATUS(st) == 0,
+              "PIN profile invocation failed for equals=%d", equals);
+    cr_assert(file_contains(output_path, "[pin-profile]"),
+              "PIN profile record missing for equals=%d", equals);
+    cr_assert(file_contains(output_path, "profiled/1"),
+              "profiled PIN missing for equals=%d", equals);
+    cr_assert_not(file_contains(output_path, "profile-noise"),
+                  "Trace output polluted PIN profile for equals=%d", equals);
+  }
+}
+
+Test(wisp_cli, top_level_results_are_quiet) {
+  char dir[] = "/tmp/enki-quiet-cli-XXXXXX";
+  cr_assert_not_null(mkdtemp(dir));
+
+  char module_path[512];
+  (void)snprintf(module_path, sizeof(module_path), "%s/quiet.plan", dir);
+  FILE* f = fopen(module_path, "w");
+  cr_assert_not_null(f);
+  fputs("42\n", f);
+  fclose(f);
+
+  char output_path[512];
+  (void)snprintf(output_path, sizeof(output_path), "%s/stderr.out", dir);
+  char cmd[2048];
+  (void)snprintf(cmd, sizeof(cmd), "cd %s && %s %s quiet >/dev/null 2>%s", dir,
+                 wisp_bin(), dir, output_path);
+  int st = system(cmd);
+  cr_assert(WIFEXITED(st) && WEXITSTATUS(st) == 0, "quiet invocation failed");
+
+  struct stat info;
+  cr_assert_eq(stat(output_path, &info), 0);
+  cr_assert_eq(info.st_size, 0, "top-level result leaked to stderr");
+}
+
 /*
  * P4: actor scenarios through the boot driver — the wisp boot thread is
  * the root actor (the reference withNewRts), spawned actors run through
@@ -455,6 +526,10 @@ Test(wisp_cli, boot_reset_imports_stdlib_primitives) {
             "query output path too long");
   cr_assert_not(file_contains(query_path, "(\"ERROR\""),
                 "booted REPL returned an error; see %s", query_path);
-  cr_assert(file_contains(query_path, "\n3\n"),
+  struct stat query_info;
+  cr_assert_eq(stat(query_path, &query_info), 0);
+  cr_assert_eq(query_info.st_size, 2,
+               "booted REPL emitted unexpected output; see %s", query_path);
+  cr_assert(file_contains(query_path, "3\n"),
             "booted REPL did not evaluate (Add 1 2) to 3; see %s", query_path);
 }

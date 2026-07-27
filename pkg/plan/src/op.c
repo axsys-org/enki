@@ -649,6 +649,9 @@ static pl_val op_try(pl_thread* t, size_t ab) {
 
 static pl_val op_trace(pl_thread* t, size_t ab) {
   /* arg 0 deep via mask: the reference shows the value deeply */
+  pl_store* store = pl_heap_store(t->heap);
+  if (store != NULL && store->pin_profile_f)
+    return ARG(1);
   char* s = pl_show_val(ax_allocator_system(), ARG(0), NULL);
   fprintf(stderr, "%s\n", s);
   ax_free(ax_allocator_system(), s);
@@ -705,10 +708,8 @@ static pl_val op_equal(pl_thread* t, size_t ab) {
 static pl_val op_install(pl_thread* t, size_t ab) {
   pl_val a = pl_resolve(ARG(0));
   pl_cell* p = pl_as(PL_TAG_PIN, a);
-  if (!p) {
-    fprintf(stderr, "compiler not pin, ignoring\n");
+  if (!p)
     return 0;
-  }
   const uint8_t* hash = pl_pin_hash(a);
   if (hash == NULL)
     pl_raise_msg(t, "Install: compiler PIN must be saved first");
@@ -725,10 +726,8 @@ static pl_val op_install(pl_thread* t, size_t ab) {
 static pl_val op_compile(pl_thread* t, size_t ab) {
   pl_val a = pl_resolve(ARG(0));
   pl_cell* p = pl_as(PL_TAG_PIN, a);
-  if (!p) {
-    fprintf(stderr, "no pin, failing compile\n");
+  if (!p)
     return 0;
-  }
   const uint8_t* hash = pl_pin_hash(a);
   if (hash == NULL)
     pl_raise_msg(t, "Compile: PIN must be saved first");

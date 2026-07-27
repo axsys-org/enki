@@ -88,7 +88,9 @@ typedef struct pl_store {
   uint8_t compiler[32];
   pl_thread* compiler_t;
   pl_heap* compiler_h;
+  uint64_t pin_profile_us;
   bool compiler_f;
+  bool pin_profile_f;
 } pl_store;
 
 pl_store* pl_store_new(pl_store_backend backend);
@@ -98,6 +100,10 @@ pl_store* pl_store_new_lmdb(const char* path, size_t map_size);
 /* Canonical Silo streams in pins.pack, indexed by LMDB. */
 pl_store* pl_store_new_silo(const char* path, size_t map_size);
 void pl_store_free(pl_store* s);
+
+/* Print each successfully frozen root PIN whose serialization and store
+ * publication take longer than `threshold_us`. */
+void pl_store_profile_pins(pl_store* s, uint64_t threshold_us);
 
 /* Address-range test used by the collector (store vals are terminal).  The
  * region bounds are immutable after construction, and this runs for every

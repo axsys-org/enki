@@ -187,18 +187,8 @@ pl_val er_actor_result(er_actor* a) {
 
 /* ── Run queue / handle table ──────────────────────────────────────────── */
 
-static bool er_trace(void) {
-  static int on = -1;
-  if (on < 0)
-    on = getenv("ENKI_TRACE") != NULL;
-  return on;
-}
-
 void er_enqueue(er_actor* a) {
   if (a->owner != NULL) {
-    if (er_trace())
-      fprintf(stderr, "[trace] wake-bound actor=%llu\n",
-              (unsigned long long)a->id);
     ax_assume(a->qnext == NULL, "er_enqueue: bound actor is globally queued");
     if (!a->owner->ready) {
       a->owner->ready = true;
@@ -207,8 +197,6 @@ void er_enqueue(er_actor* a) {
     pthread_cond_signal(&a->owner->cv);
     return;
   }
-  if (er_trace())
-    fprintf(stderr, "[trace] enqueue actor=%llu\n", (unsigned long long)a->id);
   a->qnext = NULL;
   if (a->sys->qtail != NULL)
     a->sys->qtail->qnext = a;
@@ -255,9 +243,6 @@ static er_actor* er_dequeue_spawned(er_scheduler* sys) {
   for (er_actor* a = sys->qhead; a != NULL; a = a->qnext) {
     if (!a->adopted) {
       (void)er_remove_from_queue(sys, a);
-      if (er_trace())
-        fprintf(stderr, "[trace] dequeue-spawned actor=%llu\n",
-                (unsigned long long)a->id);
       return a;
     }
   }
@@ -313,8 +298,6 @@ static bool er_op_is(pl_val name, const char* s) {
 /* ── Messaging ─────────────────────────────────────────────────────────── */
 
 void er_actor_start(er_actor* a, pl_val fn) {
-  if (er_trace())
-    fprintf(stderr, "[trace] start actor=%llu\n", (unsigned long long)a->id);
   ax_assume(!a->started && a->status == ER_ACTOR_RUNNABLE,
             "er_actor_start: actor already started");
   a->started = true;

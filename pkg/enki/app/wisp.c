@@ -21,6 +21,7 @@
 
 /*
  * wisp [--text-hash] [--file-root DIR] [--profile-json FILE]
+ *      [--profile-pins USECS]
  *      DIR MODULE [FUNCTION ARGS...]
  *
  * Loads MODULE (and its @includes) from DIR, then optionally applies the
@@ -54,7 +55,6 @@ typedef struct boot_ctx {
   /* rooted scratch for env lists under construction */
   en_env_entry* tmp_env_v[BOOT_TMP_ENV_CAP];
   size_t tmp_env_s;
-  bool emit_top_level_f;
 } boot_ctx;
 
 static void boot_trace_env(pl_root_visit visit, void* gc_ctx,
@@ -279,16 +279,9 @@ static bool boot_process_form(boot_ctx* ctx, pl_val form) {
     boot_collect_after_form(ctx);
     return true;
   }
-  pl_val out = en_wisp_thunk(w, exp);
-  if (ctx->emit_top_level_f) {
-    /* the reference prints `force (showVal out)`: deep-force first */
-    out = en_run_nf(w, out);
-    char* out_c = en_wisp_print(w, out, NULL);
-    if (out_c == NULL)
-      return false;
-    fprintf(stderr, "%s\n", out_c);
-    ax_free(ctx->loc_a, out_c);
-  }
+  /* Preserve the reference driver's deep forcing without dumping every
+   * top-level assembly result to stderr. */
+  (void)en_run_nf(w, en_wisp_thunk(w, exp));
   boot_collect_after_form(ctx);
   return true;
 }
@@ -502,11 +495,24 @@ static bool boot_parse_double(const char* s, double* out) {
   return true;
 }
 
+static bool boot_parse_u64(const char* s, uint64_t* out) {
+  if (s[0] == '\0' || s[0] == '-')
+    return false;
+  errno = 0;
+  char* end = NULL;
+  unsigned long long v = strtoull(s, &end, 10);
+  if (errno == ERANGE || end == s || *end != '\0')
+    return false;
+  *out = (uint64_t)v;
+  return true;
+}
+
 static void boot_usage(const char* argv0_c) {
   fprintf(stderr,
           "usage: %s [--text-hash] [--file-root DIR] "
           "[--wait-for-tracy[=SECONDS]] "
-          "[--profile-json FILE] DIR MODULE [FUNCTION ARGS...]\n",
+          "[--profile-json FILE] [--profile-pins USECS] "
+          "DIR MODULE [FUNCTION ARGS...]\n",
           argv0_c);
 }
 
@@ -518,8 +524,10 @@ static const char* boot_env_file_root(void) {
 int main(int argc, char** argv) {
   const char* file_root_c = boot_env_file_root();
   const char* profile_json_c = NULL;
+  uint64_t pin_profile_us = 0;
   double tracy_wait_s = 0.0;
   bool text_hash_f = false;
+  bool pin_profile_f = false;
   volatile int argi = 1;
   while (argi < argc && strncmp(argv[argi], "--", 2) == 0) {
     if (strcmp(argv[argi], "--") == 0) {
@@ -564,6 +572,27 @@ int main(int argc, char** argv) {
         boot_usage(argv[0]);
         return 2;
       }
+      argi++;
+      continue;
+    }
+    if (strcmp(argv[argi], "--profile-pins") == 0) {
+      if (argi + 1 >= argc ||
+          !boot_parse_u64(argv[argi + 1], &pin_profile_us)) {
+        boot_usage(argv[0]);
+        return 2;
+      }
+      pin_profile_f = true;
+      argi += 2;
+      continue;
+    }
+    const char pin_prefix_c[] = "--profile-pins=";
+    size_t pin_prefix_s = sizeof(pin_prefix_c) - 1;
+    if (strncmp(argv[argi], pin_prefix_c, pin_prefix_s) == 0) {
+      if (!boot_parse_u64(argv[argi] + pin_prefix_s, &pin_profile_us)) {
+        boot_usage(argv[0]);
+        return 2;
+      }
+      pin_profile_f = true;
       argi++;
       continue;
     }
@@ -628,6 +657,8 @@ int main(int argc, char** argv) {
       return 1;
     }
   }
+  if (pin_profile_f)
+    pl_store_profile_pins(store, pin_profile_us);
   pl_heap* heap = pl_heap_new(BOOT_HEAP_CELLS, store);
   en_wisp* w = en_wisp_new(heap);
   if (w == NULL) {
@@ -654,7 +685,6 @@ int main(int argc, char** argv) {
       .w = w,
       .src_dir_c = argv[argi],
       .mod_v = NULL,
-      .emit_top_level_f = true,
   };
   pl_gc_add_root_source(heap, boot_roots, ctx);
 

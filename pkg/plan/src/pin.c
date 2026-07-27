@@ -2,6 +2,8 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
+#include <inttypes.h>
+#include <time.h>
 
 #include "axsys/allocator.h"
 #include "axsys/assume.h"
@@ -10,6 +12,7 @@
 #include "internal.h"
 #include "plan/build.h"
 #include "plan/canon.h"
+#include "plan/debug.h"
 #include "plan/nat.h"
 #include "plan/store.h"
 #include "store_internal.h"
@@ -666,6 +669,37 @@ static bool save_canonical_root(save_ctx* c, pl_val input, bool* handled) {
   return true;
 }
 
+static uint64_t pin_profile_elapsed_ns(const struct timespec* start) {
+  struct timespec end;
+  if (clock_gettime(CLOCK_MONOTONIC, &end) != 0)
+    return 0;
+  uint64_t sec = (uint64_t)(end.tv_sec - start->tv_sec);
+  int64_t nsec = end.tv_nsec - start->tv_nsec;
+  if (nsec < 0) {
+    sec--;
+    nsec += 1000000000;
+  }
+  return sec * UINT64_C(1000000000) + (uint64_t)nsec;
+}
+
+static void pin_profile_report(pl_store* s, pl_val pin,
+                               const struct timespec* start, bool ok) {
+  if (!ok || start->tv_sec < 0)
+    return;
+  uint64_t elapsed_ns = pin_profile_elapsed_ns(start);
+  uint64_t elapsed_us = elapsed_ns / 1000;
+  uint64_t remainder_ns = elapsed_ns % 1000;
+  bool over_threshold = elapsed_us > s->pin_profile_us ||
+                        (elapsed_us == s->pin_profile_us && remainder_ns != 0);
+  if (!over_threshold)
+    return;
+
+  char* shown = pl_show(ax_allocator_system(), pin, NULL);
+  fprintf(stderr, "[pin-profile] %" PRIu64 ".%03" PRIu64 " us %s\n", elapsed_us,
+          remainder_ns, shown);
+  ax_free(ax_allocator_system(), shown);
+}
+
 bool pl_store_save_root(pl_store* s, pl_val pin, uint8_t out_hash[32],
                         char* err, size_t err_cap) {
   if (s == NULL) {
@@ -675,12 +709,16 @@ bool pl_store_save_root(pl_store* s, pl_val pin, uint8_t out_hash[32],
   }
   save_ctx c = {.store = s, .err = err, .err_cap = err_cap};
   pl_store_save_lock(s);
+  struct timespec profile_start = {.tv_sec = -1};
+  if (s->pin_profile_f && clock_gettime(CLOCK_MONOTONIC, &profile_start) != 0)
+    profile_start.tv_sec = -1;
   bool handled = false;
   bool ok = save_canonical_root(&c, pin, &handled);
   if (handled) {
     if (ok && out_hash != NULL)
       memcpy(out_hash, pl_pin_hash(save_effective_pin(pin)), 32);
     pl_store_save_unlock(s);
+    pin_profile_report(s, pin, &profile_start, ok);
     return ok;
   }
   ok = save_discover_pin(&c, pin, 0);
@@ -707,6 +745,7 @@ bool pl_store_save_root(pl_store* s, pl_val pin, uint8_t out_hash[32],
     pl_store_unlock(s);
   }
   pl_store_save_unlock(s);
+  pin_profile_report(s, pin, &profile_start, ok);
 
   if (compile)
     for (ptrdiff_t i = 0; i < ax_hmlen(c.compile); i++)

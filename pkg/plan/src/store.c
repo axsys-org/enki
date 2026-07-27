@@ -378,8 +378,6 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
   pl_catch_init(t, &c);
   if (setjmp(c.jb) != 0) {
     pl_catch_unwind(t, &c);
-    fprintf(stderr, "bytecode compile raised: %s\n",
-            t->exn_msg != NULL ? t->exn_msg : "PLAN exn");
     pl_store_save_unlock(s);
     return;
   }
@@ -487,10 +485,8 @@ bool pl_store_put_compiler(pl_store* s, const uint8_t hash[32]) {
   }
   pl_store_unlock(s);
   pl_store_save_unlock(s);
-  if (sweep) {
-    fprintf(stderr, "store: installing bytecode compiler\r\n");
+  if (sweep)
     pl_store_compile_existing(s);
-  }
   return true;
 }
 
@@ -665,6 +661,11 @@ pl_store* pl_store_new(pl_store_backend backend) {
   s->intern = NULL;
   s->be = backend;
   return s;
+}
+
+void pl_store_profile_pins(pl_store* s, uint64_t threshold_us) {
+  s->pin_profile_us = threshold_us;
+  s->pin_profile_f = true;
 }
 
 void pl_store_free(pl_store* s) {
