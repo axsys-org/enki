@@ -2,6 +2,7 @@
 #include <stdio.h>
 
 #include "enki/actor.h"
+#include "test.h"
 #include "test_plan.h"
 
 static pl_val code_lit(pl_thread* t, pl_val value) {
@@ -32,7 +33,7 @@ static pl_val sleep_zero_fn(pl_thread* t) {
   return fn;
 }
 
-int main(void) {
+static int run_actor_stress(void) {
   test_rt rt = test_rt_new();
   er_scheduler* sys = er_scheduler_new(rt.store, (er_config){.quantum = 2});
   er_mt_executor* ex = er_mt_executor_new(sys, (er_mt_config){.workers = 4});
@@ -64,4 +65,8 @@ int main(void) {
   er_scheduler_free(sys);
   test_rt_free(&rt);
   return status;
+}
+
+TEST(actor_tsan, repeated_multithreaded_waves_reach_idle) {
+  ASSERT_EQ(run_actor_stress(), 0);
 }

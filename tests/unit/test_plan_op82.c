@@ -1,4 +1,4 @@
-#include <criterion/criterion.h>
+#include "test.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -61,7 +61,7 @@ static pl_run_status test_run(pl_thread* t) {
   int quanta = 0;
   do {
     s = pl_thread_run(t, 2);
-    cr_assert_lt(++quanta, 1 << 20, "runaway resume loop");
+    ASSERT_LT(++quanta, 1 << 20, "runaway resume loop");
   } while (s == PL_RUN_YIELDED);
   return s;
 }
@@ -74,7 +74,7 @@ static pl_val test_op82_write_file(pl_thread* t, const char* path,
   pl_vpush(t, pl_nat_from_bytes(t, bytes, n));
   pl_val args[2] = {t->vstack[base + 1], t->vstack[base + 2]};
   pl_thread_start(t, test_op82_thunk(t, t->vstack[base], 2, args));
-  cr_assert_eq(test_run(t), PL_RUN_DONE);
+  ASSERT_EQ(test_run(t), PL_RUN_DONE);
   pl_val result = pl_thread_result(t);
   t->vsp = base;
   return result;
@@ -82,7 +82,7 @@ static pl_val test_op82_write_file(pl_thread* t, const char* path,
 
 static bool test_file_eq(const char* path, const char* expected) {
   FILE* f = fopen(path, "rb");
-  cr_assert_not_null(f, "failed to open `%s`", path);
+  ASSERT_NOT_NULL(f, "failed to open `%s`", path);
   for (size_t i = 0; expected[i] != '\0'; i++)
     if (fgetc(f) != (unsigned char)expected[i]) {
       fclose(f);
@@ -93,31 +93,31 @@ static bool test_file_eq(const char* path, const char* expected) {
   return ch == EOF;
 }
 
-Test(op82, recv_blocks_then_deposit_resumes) {
+TEST(op82, recv_blocks_then_deposit_resumes) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
   t->rplan_f = true;
   size_t vsp0 = t->vsp, fsp0 = t->fsp;
   pl_val args[1] = {0};
   pl_thread_start(t, test_op82_thunk(t, ax_s4('R', 'e', 'c', 'v'), 1, args));
-  cr_assert_eq(test_run(t), PL_RUN_BLOCKED);
+  ASSERT_EQ(test_run(t), PL_RUN_BLOCKED);
 
   pl_cell* p = pl_as(PL_TAG_APP, pl_thread_request(t));
-  cr_assert_not_null(p);
-  cr_assert_eq(pl_app_head(p), ax_s4('R', 'e', 'c', 'v'));
-  cr_assert_eq(pl_app_n(p), 1);
-  cr_assert_eq(pl_app_args(p)[0], 0);
+  ASSERT_NOT_NULL(p);
+  ASSERT_EQ(pl_app_head(p), ax_s4('R', 'e', 'c', 'v'));
+  ASSERT_EQ(pl_app_n(p), 1);
+  ASSERT_EQ(pl_app_args(p)[0], 0);
 
   pl_thread_deposit(t, 42);
-  cr_assert_eq(t->blocked_on, 0);
-  cr_assert_eq(test_run(t), PL_RUN_DONE);
-  cr_assert_eq(pl_thread_result(t), 42);
-  cr_assert_eq(t->vsp, vsp0);
-  cr_assert_eq(t->fsp, fsp0);
+  ASSERT_EQ(t->blocked_on, 0);
+  ASSERT_EQ(test_run(t), PL_RUN_DONE);
+  ASSERT_EQ(pl_thread_result(t), 42);
+  ASSERT_EQ(t->vsp, vsp0);
+  ASSERT_EQ(t->fsp, fsp0);
   test_rt_free(&rt);
 }
 
-Test(op82, response_feeds_pending_frames) {
+TEST(op82, response_feeds_pending_frames) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
   t->rplan_f = true;
@@ -135,14 +135,14 @@ Test(op82, response_feeds_pending_frames) {
   t->vsp = base;
   pl_thread_start(t, test_thunk(t, expr));
 
-  cr_assert_eq(test_run(t), PL_RUN_BLOCKED);
+  ASSERT_EQ(test_run(t), PL_RUN_BLOCKED);
   pl_thread_deposit(t, 4);
-  cr_assert_eq(test_run(t), PL_RUN_DONE);
-  cr_assert_eq(pl_thread_result(t), 9);
+  ASSERT_EQ(test_run(t), PL_RUN_DONE);
+  ASSERT_EQ(pl_thread_result(t), 9);
   test_rt_free(&rt);
 }
 
-Test(op82, send_normalizes_payload_at_initiation) {
+TEST(op82, send_normalizes_payload_at_initiation) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
   t->rplan_f = true;
@@ -150,47 +150,47 @@ Test(op82, send_normalizes_payload_at_initiation) {
   pl_vpush(t, test_thunk(t, 7)); /* msg: a thunk forced by the deep mask */
   pl_val args[2] = {3, t->vstack[base]};
   pl_thread_start(t, test_op82_thunk(t, ax_s4('S', 'e', 'n', 'd'), 2, args));
-  cr_assert_eq(test_run(t), PL_RUN_BLOCKED);
+  ASSERT_EQ(test_run(t), PL_RUN_BLOCKED);
 
   pl_cell* p = pl_as(PL_TAG_APP, pl_thread_request(t));
-  cr_assert_not_null(p);
-  cr_assert_eq(pl_app_head(p), ax_s4('S', 'e', 'n', 'd'));
-  cr_assert_eq(pl_app_n(p), 2);
-  cr_assert_eq(pl_app_args(p)[0], 3);
+  ASSERT_NOT_NULL(p);
+  ASSERT_EQ(pl_app_head(p), ax_s4('S', 'e', 'n', 'd'));
+  ASSERT_EQ(pl_app_n(p), 2);
+  ASSERT_EQ(pl_app_args(p)[0], 3);
   /* the payload was deep-normalized before the request parked */
-  cr_assert_eq(pl_app_args(p)[1], 7);
+  ASSERT_EQ(pl_app_args(p)[1], 7);
 
   pl_thread_deposit(t, 0);
-  cr_assert_eq(test_run(t), PL_RUN_DONE);
-  cr_assert_eq(pl_thread_result(t), 0);
+  ASSERT_EQ(test_run(t), PL_RUN_DONE);
+  ASSERT_EQ(pl_thread_result(t), 0);
   t->vsp = base;
   test_rt_free(&rt);
 }
 
-Test(op82, write_file_honors_file_root) {
+TEST(op82, write_file_honors_file_root) {
   char dir[] = "/tmp/enki-write-root-XXXXXX";
-  cr_assert_not_null(mkdtemp(dir), "failed to make temp dir");
+  ASSERT_NOT_NULL(mkdtemp(dir), "failed to make temp dir");
 
   char root[512], inside[512], secret[512], link[512];
   int s = snprintf(root, sizeof(root), "%s/files", dir);
-  cr_assert(s >= 0 && (size_t)s < sizeof(root));
-  cr_assert_eq(mkdir(root, 0700), 0);
+  ASSERT(s >= 0 && (size_t)s < sizeof(root));
+  ASSERT_EQ(mkdir(root, 0700), 0);
   s = snprintf(inside, sizeof(inside), "%s/out.txt", root);
-  cr_assert(s >= 0 && (size_t)s < sizeof(inside));
+  ASSERT(s >= 0 && (size_t)s < sizeof(inside));
   s = snprintf(secret, sizeof(secret), "%s/secret.txt", dir);
-  cr_assert(s >= 0 && (size_t)s < sizeof(secret));
+  ASSERT(s >= 0 && (size_t)s < sizeof(secret));
   s = snprintf(link, sizeof(link), "%s/link.txt", root);
-  cr_assert(s >= 0 && (size_t)s < sizeof(link));
+  ASSERT(s >= 0 && (size_t)s < sizeof(link));
 
   FILE* f = fopen(inside, "wb");
-  cr_assert_not_null(f);
+  ASSERT_NOT_NULL(f);
   fputs("old", f);
   fclose(f);
   f = fopen(secret, "wb");
-  cr_assert_not_null(f);
+  ASSERT_NOT_NULL(f);
   fputs("secret", f);
   fclose(f);
-  cr_assert_eq(symlink(secret, link), 0);
+  ASSERT_EQ(symlink(secret, link), 0);
 
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
@@ -198,26 +198,26 @@ Test(op82, write_file_honors_file_root) {
   t->rplan_file_root_c = root;
 
   static const uint8_t inside_bytes[] = "inside-ok\001";
-  cr_assert_eq(test_op82_write_file(t, "out.txt", inside_bytes,
-                                    sizeof(inside_bytes) - 1),
-               1);
-  cr_assert(test_file_eq(inside, "inside-ok"));
+  ASSERT_EQ(test_op82_write_file(t, "out.txt", inside_bytes,
+                                 sizeof(inside_bytes) - 1),
+            1);
+  ASSERT(test_file_eq(inside, "inside-ok"));
 
   static const uint8_t leak_bytes[] = "leaked\001";
-  cr_assert_eq(test_op82_write_file(t, "../secret.txt", leak_bytes,
-                                    sizeof(leak_bytes) - 1),
-               0);
-  cr_assert(test_file_eq(secret, "secret"));
+  ASSERT_EQ(test_op82_write_file(t, "../secret.txt", leak_bytes,
+                                 sizeof(leak_bytes) - 1),
+            0);
+  ASSERT(test_file_eq(secret, "secret"));
 
-  cr_assert_eq(
+  ASSERT_EQ(
       test_op82_write_file(t, "link.txt", leak_bytes, sizeof(leak_bytes) - 1),
       0);
-  cr_assert(test_file_eq(secret, "secret"));
+  ASSERT(test_file_eq(secret, "secret"));
 
   test_rt_free(&rt);
 }
 
-Test(op82, spawn_normalizes_fn_at_initiation) {
+TEST(op82, spawn_normalizes_fn_at_initiation) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
   t->rplan_f = true;
@@ -226,22 +226,22 @@ Test(op82, spawn_normalizes_fn_at_initiation) {
   pl_val args[1] = {t->vstack[base]};
   pl_thread_start(t,
                   test_op82_thunk(t, ax_s5('S', 'p', 'a', 'w', 'n'), 1, args));
-  cr_assert_eq(test_run(t), PL_RUN_BLOCKED);
+  ASSERT_EQ(test_run(t), PL_RUN_BLOCKED);
 
   pl_cell* p = pl_as(PL_TAG_APP, pl_thread_request(t));
-  cr_assert_not_null(p);
-  cr_assert_eq(pl_app_head(p), ax_s5('S', 'p', 'a', 'w', 'n'));
-  cr_assert_eq(pl_app_n(p), 1);
-  cr_assert_eq(pl_app_args(p)[0], 7); /* forced at initiation */
+  ASSERT_NOT_NULL(p);
+  ASSERT_EQ(pl_app_head(p), ax_s5('S', 'p', 'a', 'w', 'n'));
+  ASSERT_EQ(pl_app_n(p), 1);
+  ASSERT_EQ(pl_app_args(p)[0], 7); /* forced at initiation */
 
   pl_thread_deposit(t, 1); /* fresh child handle */
-  cr_assert_eq(test_run(t), PL_RUN_DONE);
-  cr_assert_eq(pl_thread_result(t), 1);
+  ASSERT_EQ(test_run(t), PL_RUN_DONE);
+  ASSERT_EQ(pl_thread_result(t), 1);
   t->vsp = base;
   test_rt_free(&rt);
 }
 
-Test(op82, payload_effects_block_before_the_request) {
+TEST(op82, payload_effects_block_before_the_request) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
   t->rplan_f = true;
@@ -254,27 +254,27 @@ Test(op82, payload_effects_block_before_the_request) {
   pl_val sargs[2] = {3, t->vstack[base]};
   pl_thread_start(t, test_op82_thunk(t, ax_s4('S', 'e', 'n', 'd'), 2, sargs));
 
-  cr_assert_eq(test_run(t), PL_RUN_BLOCKED);
+  ASSERT_EQ(test_run(t), PL_RUN_BLOCKED);
   pl_cell* p = pl_as(PL_TAG_APP, pl_thread_request(t));
-  cr_assert_not_null(p);
-  cr_assert_eq(pl_app_head(p), ax_s4('R', 'e', 'c', 'v')); /* inner first */
+  ASSERT_NOT_NULL(p);
+  ASSERT_EQ(pl_app_head(p), ax_s4('R', 'e', 'c', 'v')); /* inner first */
 
   pl_thread_deposit(t, 5);
-  cr_assert_eq(test_run(t), PL_RUN_BLOCKED);
+  ASSERT_EQ(test_run(t), PL_RUN_BLOCKED);
   p = pl_as(PL_TAG_APP, pl_thread_request(t));
-  cr_assert_not_null(p);
-  cr_assert_eq(pl_app_head(p), ax_s4('S', 'e', 'n', 'd'));
-  cr_assert_eq(pl_app_args(p)[0], 3);
-  cr_assert_eq(pl_app_args(p)[1], 5); /* the deposited response */
+  ASSERT_NOT_NULL(p);
+  ASSERT_EQ(pl_app_head(p), ax_s4('S', 'e', 'n', 'd'));
+  ASSERT_EQ(pl_app_args(p)[0], 3);
+  ASSERT_EQ(pl_app_args(p)[1], 5); /* the deposited response */
 
   pl_thread_deposit(t, 0);
-  cr_assert_eq(test_run(t), PL_RUN_DONE);
-  cr_assert_eq(pl_thread_result(t), 0);
+  ASSERT_EQ(test_run(t), PL_RUN_DONE);
+  ASSERT_EQ(pl_thread_result(t), 0);
   t->vsp = base;
   test_rt_free(&rt);
 }
 
-Test(op82, recv_inside_nor_conditional) {
+TEST(op82, recv_inside_nor_conditional) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
   t->rplan_f = true;
@@ -291,18 +291,18 @@ Test(op82, recv_inside_nor_conditional) {
   t->vsp = base;
   pl_thread_start(t, test_thunk(t, expr));
 
-  cr_assert_eq(test_run(t), PL_RUN_BLOCKED);
+  ASSERT_EQ(test_run(t), PL_RUN_BLOCKED);
   pl_cell* p = pl_as(PL_TAG_APP, pl_thread_request(t));
-  cr_assert_not_null(p);
-  cr_assert_eq(pl_app_head(p), ax_s4('R', 'e', 'c', 'v'));
+  ASSERT_NOT_NULL(p);
+  ASSERT_EQ(pl_app_head(p), ax_s4('R', 'e', 'c', 'v'));
 
   pl_thread_deposit(t, 0); /* planNil 0 = 1 */
-  cr_assert_eq(test_run(t), PL_RUN_DONE);
-  cr_assert_eq(pl_thread_result(t), 1);
+  ASSERT_EQ(test_run(t), PL_RUN_DONE);
+  ASSERT_EQ(pl_thread_result(t), 1);
   test_rt_free(&rt);
 }
 
-Test(op82, recv_inside_dynamic_law_body) {
+TEST(op82, recv_inside_dynamic_law_body) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
   t->rplan_f = true;
@@ -320,22 +320,22 @@ Test(op82, recv_inside_dynamic_law_body) {
   t->vsp = base;
   pl_thread_start(t, test_thunk(t, expr));
 
-  cr_assert_eq(test_run(t), PL_RUN_BLOCKED);
+  ASSERT_EQ(test_run(t), PL_RUN_BLOCKED);
   pl_cell* p = pl_as(PL_TAG_APP, pl_thread_request(t));
-  cr_assert_not_null(p);
-  cr_assert_eq(pl_app_head(p), ax_s4('R', 'e', 'c', 'v'));
+  ASSERT_NOT_NULL(p);
+  ASSERT_EQ(pl_app_head(p), ax_s4('R', 'e', 'c', 'v'));
 
   size_t rb = t->vsp;
   pl_vpush(t, test_app2(t, 1, 5, 7)); /* body: (1 5 7) — let, then 7 */
   pl_val resp = t->vstack[rb];
   t->vsp = rb;
   pl_thread_deposit(t, resp);
-  cr_assert_eq(test_run(t), PL_RUN_DONE);
-  cr_assert_eq(pl_thread_result(t), 7);
+  ASSERT_EQ(test_run(t), PL_RUN_DONE);
+  ASSERT_EQ(pl_thread_result(t), 7);
   test_rt_free(&rt);
 }
 
-Test(op82, recv_blocks_under_try) {
+TEST(op82, recv_blocks_under_try) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
   t->rplan_f = true;
@@ -357,21 +357,21 @@ Test(op82, recv_blocks_under_try) {
   t->vsp = base;
   pl_thread_start(t, test_thunk(t, expr));
 
-  cr_assert_eq(test_run(t), PL_RUN_BLOCKED);
+  ASSERT_EQ(test_run(t), PL_RUN_BLOCKED);
   pl_cell* p = pl_as(PL_TAG_APP, pl_thread_request(t));
-  cr_assert_not_null(p);
-  cr_assert_eq(pl_app_head(p), ax_s4('R', 'e', 'c', 'v'));
+  ASSERT_NOT_NULL(p);
+  ASSERT_EQ(pl_app_head(p), ax_s4('R', 'e', 'c', 'v'));
 
   pl_thread_deposit(t, 9);
-  cr_assert_eq(test_run(t), PL_RUN_DONE);
+  ASSERT_EQ(test_run(t), PL_RUN_DONE);
   pl_cell* r = pl_as(PL_TAG_APP, pl_thread_result(t));
-  cr_assert_not_null(r);
-  cr_assert_eq(pl_app_head(r), 0); /* planTry's Right */
-  cr_assert_eq(pl_app_args(r)[0], 9);
+  ASSERT_NOT_NULL(r);
+  ASSERT_EQ(pl_app_head(r), 0); /* planTry's Right */
+  ASSERT_EQ(pl_app_args(r)[0], 9);
   test_rt_free(&rt);
 }
 
-Test(op82, blocked_request_survives_gc) {
+TEST(op82, blocked_request_survives_gc) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
   t->rplan_f = true;
@@ -379,54 +379,54 @@ Test(op82, blocked_request_survives_gc) {
   pl_vpush(t, test_thunk(t, 7));
   pl_val args[2] = {3, t->vstack[base]};
   pl_thread_start(t, test_op82_thunk(t, ax_s4('S', 'e', 'n', 'd'), 2, args));
-  cr_assert_eq(test_run(t), PL_RUN_BLOCKED);
+  ASSERT_EQ(test_run(t), PL_RUN_BLOCKED);
 
   pl_gc_collect_now(t); /* moves the request and the parked continuation */
   pl_cell* p = pl_as(PL_TAG_APP, pl_thread_request(t));
-  cr_assert_not_null(p);
-  cr_assert_eq(pl_app_head(p), ax_s4('S', 'e', 'n', 'd'));
-  cr_assert_eq(pl_app_args(p)[0], 3);
+  ASSERT_NOT_NULL(p);
+  ASSERT_EQ(pl_app_head(p), ax_s4('S', 'e', 'n', 'd'));
+  ASSERT_EQ(pl_app_args(p)[0], 3);
 
   pl_thread_deposit(t, 0);
-  cr_assert_eq(test_run(t), PL_RUN_DONE);
-  cr_assert_eq(pl_thread_result(t), 0);
+  ASSERT_EQ(test_run(t), PL_RUN_DONE);
+  ASSERT_EQ(pl_thread_result(t), 0);
   t->vsp = base;
   test_rt_free(&rt);
 }
 
-Test(op82, recv_rejects_nonzero_arg) {
+TEST(op82, recv_rejects_nonzero_arg) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
   t->rplan_f = true;
   pl_val args[1] = {1};
   pl_thread_start(t, test_op82_thunk(t, ax_s4('R', 'e', 'c', 'v'), 1, args));
-  cr_assert_eq(test_run(t), PL_RUN_EXN); /* crash path, not catchable */
-  cr_assert_not_null(t->exn_msg);
+  ASSERT_EQ(test_run(t), PL_RUN_EXN); /* crash path, not catchable */
+  ASSERT_NOT_NULL(t->exn_msg);
   test_rt_free(&rt);
 }
 
-Test(op82, unknown_op_is_runtime_error) {
+TEST(op82, unknown_op_is_runtime_error) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
   t->rplan_f = true;
   pl_val args[1] = {0};
   pl_thread_start(t, test_op82_thunk(t, ax_s4('F', 'r', 'o', 'b'), 1, args));
-  cr_assert_eq(test_run(t), PL_RUN_EXN);
-  cr_assert_not_null(t->exn_msg);
+  ASSERT_EQ(test_run(t), PL_RUN_EXN);
+  ASSERT_NOT_NULL(t->exn_msg);
   test_rt_free(&rt);
 }
 
-Test(op82, requires_rplan_mode) {
+TEST(op82, requires_rplan_mode) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t; /* rplan_f defaults to false */
   pl_val args[1] = {0};
   pl_thread_start(t, test_op82_thunk(t, ax_s4('R', 'e', 'c', 'v'), 1, args));
-  cr_assert_eq(test_run(t), PL_RUN_EXN);
-  cr_assert_not_null(t->exn_msg);
+  ASSERT_EQ(test_run(t), PL_RUN_EXN);
+  ASSERT_NOT_NULL(t->exn_msg);
   test_rt_free(&rt);
 }
 
-Test(op82, host_entry_has_no_executor) {
+TEST(op82, host_entry_has_no_executor) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
   t->rplan_f = true;
@@ -439,21 +439,21 @@ Test(op82, host_entry_has_no_executor) {
   pl_catch_init(t, &c);
   if (setjmp(c.jb) == 0) {
     (void)pl_whnf(t, v);
-    cr_assert_fail("expected a runtime error");
+    FAIL_TEST("expected a runtime error");
   }
   pl_catch_unwind(t, &c);
-  cr_assert_not_null(t->exn_msg);
+  ASSERT_NOT_NULL(t->exn_msg);
   test_rt_free(&rt);
 }
 
-Test(op82, direct_ops_still_run_inline) {
+TEST(op82, direct_ops_still_run_inline) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
   t->rplan_f = true;
   /* Now is a direct effect: no suspension, result inline. */
   pl_val args[1] = {0};
   pl_thread_start(t, test_op82_thunk(t, ax_s3('N', 'o', 'w'), 1, args));
-  cr_assert_eq(test_run(t), PL_RUN_DONE);
-  cr_assert_gt(pl_thread_result(t), 0);
+  ASSERT_EQ(test_run(t), PL_RUN_DONE);
+  ASSERT_GT(pl_thread_result(t), 0);
   test_rt_free(&rt);
 }

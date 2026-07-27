@@ -1,4 +1,4 @@
-#include <criterion/criterion.h>
+#include "test.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -68,7 +68,7 @@ static pl_val actor_fn(pl_thread* t, pl_val body) {
 
 static pl_val mk_bar_n(pl_thread* t, const uint8_t* b, size_t n) {
   uint8_t* buf = malloc(n + 1);
-  cr_assert_not_null(buf);
+  ASSERT_NOT_NULL(buf);
   memcpy(buf, b, n);
   buf[n] = 0x01;
   pl_val v = pl_nat_from_bytes(t, buf, n + 1);
@@ -179,32 +179,32 @@ static pl_val mk_get(pl_thread* t, const void* env) {
 /* Assert (0 resp) and return the Response cell [status url hdrs body]. */
 static pl_cell* result_ok(pl_val res) {
   pl_cell* r = pl_as(PL_TAG_APP, res);
-  cr_assert_not_null(r, "Result is not an app");
-  cr_assert_eq(pl_app_head(r), 0, "Result is an Err");
-  cr_assert_eq(pl_app_n(r), 1);
+  ASSERT_NOT_NULL(r, "Result is not an app");
+  ASSERT_EQ(pl_app_head(r), 0, "Result is an Err");
+  ASSERT_EQ(pl_app_n(r), 1);
   pl_cell* resp = pl_as(PL_TAG_APP, pl_app_args(r)[0]);
-  cr_assert_not_null(resp);
-  cr_assert_eq(pl_app_head(resp), 0);
-  cr_assert_eq(pl_app_n(resp), 4);
+  ASSERT_NOT_NULL(resp);
+  ASSERT_EQ(pl_app_head(resp), 0);
+  ASSERT_EQ(pl_app_n(resp), 4);
   return resp;
 }
 
 /* Assert (1 code) and return the code. */
 static uint64_t result_err(pl_val res) {
   pl_cell* r = pl_as(PL_TAG_APP, res);
-  cr_assert_not_null(r, "Result is not an app");
-  cr_assert_eq(pl_app_head(r), 1, "Result is not an Err");
-  cr_assert_eq(pl_app_n(r), 1);
-  cr_assert(pl_is_nat63(pl_app_args(r)[0]));
+  ASSERT_NOT_NULL(r, "Result is not an app");
+  ASSERT_EQ(pl_app_head(r), 1, "Result is not an Err");
+  ASSERT_EQ(pl_app_n(r), 1);
+  ASSERT(pl_is_nat63(pl_app_args(r)[0]));
   return pl_app_args(r)[0];
 }
 
 static void bar_cstr(pl_val v, char* out, size_t cap) {
-  cr_assert(pl_is_nat(v), "expected a bar");
+  ASSERT(pl_is_nat(v), "expected a bar");
   size_t n = pl_nat_byte_len(v);
-  cr_assert_gt(n, 0);
-  cr_assert_eq(pl_nat_byte_at(v, n - 1), 1, "missing bar terminator");
-  cr_assert_lt(n, cap, "bar too long for the buffer");
+  ASSERT_GT(n, 0);
+  ASSERT_EQ(pl_nat_byte_at(v, n - 1), 1, "missing bar terminator");
+  ASSERT_LT(n, cap, "bar too long for the buffer");
   for (size_t i = 0; i + 1 < n; i++)
     out[i] = (char)pl_nat_byte_at(v, i);
   out[n - 1] = '\0';
@@ -213,7 +213,7 @@ static void bar_cstr(pl_val v, char* out, size_t cap) {
 static void assert_bar_eq(pl_val v, const char* s) {
   char buf[4096];
   bar_cstr(v, buf, sizeof(buf));
-  cr_assert_str_eq(buf, s);
+  ASSERT_STR_EQ(buf, s);
 }
 
 /* The index of header `name` in the headers row, or -1; checks the
@@ -223,11 +223,11 @@ static int64_t header_find(pl_val hdrs, const char* name,
   if (hdrs == 0)
     return -1;
   pl_cell* h = pl_as(PL_TAG_APP, hdrs);
-  cr_assert_not_null(h);
+  ASSERT_NOT_NULL(h);
   for (uint32_t i = 0; i < pl_app_n(h); i++) {
     pl_cell* pair = pl_as(PL_TAG_APP, pl_app_args(h)[i]);
-    cr_assert_not_null(pair);
-    cr_assert_eq(pl_app_n(pair), 2);
+    ASSERT_NOT_NULL(pair);
+    ASSERT_EQ(pl_app_n(pair), 2);
     char nbuf[256];
     bar_cstr(pl_app_args(pair)[0], nbuf, sizeof(nbuf));
     if (strcmp(nbuf, name) != 0)
@@ -235,7 +235,7 @@ static int64_t header_find(pl_val hdrs, const char* name,
     if (expected_value != NULL) {
       char vbuf[1024];
       bar_cstr(pl_app_args(pair)[1], vbuf, sizeof(vbuf));
-      cr_assert_str_eq(vbuf, expected_value);
+      ASSERT_STR_EQ(vbuf, expected_value);
     }
     return i;
   }
@@ -249,9 +249,9 @@ static void url_of(const test_http_server* srv, const char* path, char* out,
 
 /* ── The matrix ────────────────────────────────────────────────────────── */
 
-Test(http, get_roundtrip_status_headers_body) {
+TEST(http, get_roundtrip_status_headers_body) {
   test_http_server srv;
-  cr_assert(test_http_server_start(&srv));
+  ASSERT(test_http_server_start(&srv));
   test_rt rt = test_rt_new();
   er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
 
@@ -268,37 +268,37 @@ Test(http, get_roundtrip_status_headers_body) {
     t->vsp = base;
     er_actor_start(a, actor_fn(t, body));
   }
-  cr_assert_eq(er_scheduler_run(sys), ER_RUN_IDLE);
-  cr_assert_eq(er_actor_state(a), ER_ACTOR_HALTED);
+  ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
+  ASSERT_EQ(er_actor_state(a), ER_ACTOR_HALTED);
 
   pl_cell* resp = result_ok(er_actor_result(a));
-  cr_assert_eq(pl_app_args(resp)[0], 200);
+  ASSERT_EQ(pl_app_args(resp)[0], 200);
   assert_bar_eq(pl_app_args(resp)[1], url); /* effective URL, no redirect */
   pl_val hdrs = pl_app_args(resp)[2];
   int64_t one = header_find(hdrs, "X-One", "alpha");
   int64_t two = header_find(hdrs, "X-Two", "beta");
-  cr_assert_geq(one, 0);
-  cr_assert_gt(two, one); /* wire order preserved */
+  ASSERT_GTE(one, 0);
+  ASSERT_GT(two, one); /* wire order preserved */
   assert_bar_eq(pl_app_args(resp)[3], "hello, enki");
 
   /* server side: method verbatim, request headers sent in order */
   test_http_req* cap = test_http_server_last(&srv, "/ok");
-  cr_assert_not_null(cap);
-  cr_assert_str_eq(cap->method, "GET");
+  ASSERT_NOT_NULL(cap);
+  ASSERT_STR_EQ(cap->method, "GET");
   char* first = strstr(cap->headers, "A-First: 1");
   char* second = strstr(cap->headers, "A-Second: 2");
-  cr_assert_not_null(first);
-  cr_assert_not_null(second);
-  cr_assert(first < second, "request header order not preserved");
+  ASSERT_NOT_NULL(first);
+  ASSERT_NOT_NULL(second);
+  ASSERT(first < second, "request header order not preserved");
 
   er_scheduler_free(sys);
   test_rt_free(&rt);
   test_http_server_stop(&srv);
 }
 
-Test(http, post_body_upload) {
+TEST(http, post_body_upload) {
   test_http_server srv;
-  cr_assert(test_http_server_start(&srv));
+  ASSERT(test_http_server_start(&srv));
   test_rt rt = test_rt_new();
   er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
 
@@ -314,24 +314,24 @@ Test(http, post_body_upload) {
     t->vsp = base;
     er_actor_start(a, actor_fn(t, body));
   }
-  cr_assert_eq(er_scheduler_run(sys), ER_RUN_IDLE);
-  cr_assert_eq(er_actor_state(a), ER_ACTOR_HALTED);
+  ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
+  ASSERT_EQ(er_actor_state(a), ER_ACTOR_HALTED);
   pl_cell* resp = result_ok(er_actor_result(a));
-  cr_assert_eq(pl_app_args(resp)[0], 200);
+  ASSERT_EQ(pl_app_args(resp)[0], 200);
 
   test_http_req* cap = test_http_server_last(&srv, "/ok");
-  cr_assert_not_null(cap);
-  cr_assert_str_eq(cap->method, "POST");
-  cr_assert_not_null(strstr(cap->headers, "Content-Length: 9"));
+  ASSERT_NOT_NULL(cap);
+  ASSERT_STR_EQ(cap->method, "POST");
+  ASSERT_NOT_NULL(strstr(cap->headers, "Content-Length: 9"));
 
   er_scheduler_free(sys);
   test_rt_free(&rt);
   test_http_server_stop(&srv);
 }
 
-Test(http, redirect_chain_final_headers_only) {
+TEST(http, redirect_chain_final_headers_only) {
   test_http_server srv;
-  cr_assert(test_http_server_start(&srv));
+  ASSERT(test_http_server_start(&srv));
   test_rt rt = test_rt_new();
   er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
 
@@ -349,32 +349,32 @@ Test(http, redirect_chain_final_headers_only) {
     t->vsp = base;
     er_actor_start(a, actor_fn(t, body));
   }
-  cr_assert_eq(er_scheduler_run(sys), ER_RUN_IDLE);
-  cr_assert_eq(er_actor_state(a), ER_ACTOR_HALTED);
+  ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
+  ASSERT_EQ(er_actor_state(a), ER_ACTOR_HALTED);
 
   pl_cell* resp = result_ok(er_actor_result(a));
-  cr_assert_eq(pl_app_args(resp)[0], 200);
+  ASSERT_EQ(pl_app_args(resp)[0], 200);
   assert_bar_eq(pl_app_args(resp)[1], final_url); /* effective URL */
   pl_val hdrs = pl_app_args(resp)[2];
-  cr_assert_geq(header_find(hdrs, "X-Final", "yes"), 0);
-  cr_assert_eq(header_find(hdrs, "X-Hop", NULL), -1,
-               "intermediate 3xx headers leaked into the Response");
+  ASSERT_GTE(header_find(hdrs, "X-Final", "yes"), 0);
+  ASSERT_EQ(header_find(hdrs, "X-Hop", NULL), -1,
+            "intermediate 3xx headers leaked into the Response");
   assert_bar_eq(pl_app_args(resp)[3], "landed"); /* not "movedlanded" */
 
   /* same-origin redirect: the Authorization header rides along */
   test_http_req* cap = test_http_server_last(&srv, "/final");
-  cr_assert_not_null(cap);
-  cr_assert(cap->had_auth);
+  ASSERT_NOT_NULL(cap);
+  ASSERT(cap->had_auth);
 
   er_scheduler_free(sys);
   test_rt_free(&rt);
   test_http_server_stop(&srv);
 }
 
-Test(http, cross_origin_redirect_strips_auth) {
+TEST(http, cross_origin_redirect_strips_auth) {
   test_http_server srv_a, srv_b;
-  cr_assert(test_http_server_start(&srv_a));
-  cr_assert(test_http_server_start(&srv_b));
+  ASSERT(test_http_server_start(&srv_a));
+  ASSERT(test_http_server_start(&srv_b));
   srv_a.xorigin_port = srv_b.port; /* different port = different origin */
 
   test_rt rt = test_rt_new();
@@ -392,17 +392,17 @@ Test(http, cross_origin_redirect_strips_auth) {
     t->vsp = base;
     er_actor_start(a, actor_fn(t, body));
   }
-  cr_assert_eq(er_scheduler_run(sys), ER_RUN_IDLE);
-  cr_assert_eq(er_actor_state(a), ER_ACTOR_HALTED);
+  ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
+  ASSERT_EQ(er_actor_state(a), ER_ACTOR_HALTED);
   pl_cell* resp = result_ok(er_actor_result(a));
-  cr_assert_eq(pl_app_args(resp)[0], 200);
+  ASSERT_EQ(pl_app_args(resp)[0], 200);
 
   test_http_req* at_a = test_http_server_last(&srv_a, "/xorigin");
-  cr_assert_not_null(at_a);
-  cr_assert(at_a->had_auth, "Authorization missing at the origin");
+  ASSERT_NOT_NULL(at_a);
+  ASSERT(at_a->had_auth, "Authorization missing at the origin");
   test_http_req* at_b = test_http_server_last(&srv_b, "/final");
-  cr_assert_not_null(at_b);
-  cr_assert(!at_b->had_auth, "Authorization leaked cross-origin");
+  ASSERT_NOT_NULL(at_b);
+  ASSERT(!at_b->had_auth, "Authorization leaked cross-origin");
 
   er_scheduler_free(sys);
   test_rt_free(&rt);
@@ -410,21 +410,21 @@ Test(http, cross_origin_redirect_strips_auth) {
   test_http_server_stop(&srv_b);
 }
 
-Test(http, zero_redirects_delivers_3xx_raw) {
+TEST(http, zero_redirects_delivers_3xx_raw) {
   test_http_server srv;
-  cr_assert(test_http_server_start(&srv));
+  ASSERT(test_http_server_start(&srv));
   test_rt rt = test_rt_new();
   er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
   char url[256];
   url_of(&srv, "/raw301", url, sizeof(url));
   er_actor* a =
       start_fetch_actor(sys, mk_get, url, 5000, /*redirects=*/0, 1 << 20);
-  cr_assert_eq(er_scheduler_run(sys), ER_RUN_IDLE);
-  cr_assert_eq(er_actor_state(a), ER_ACTOR_HALTED);
+  ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
+  ASSERT_EQ(er_actor_state(a), ER_ACTOR_HALTED);
 
   pl_cell* resp = result_ok(er_actor_result(a));
-  cr_assert_eq(pl_app_args(resp)[0], 301);
-  cr_assert_geq(header_find(pl_app_args(resp)[2], "Location", NULL), 0);
+  ASSERT_EQ(pl_app_args(resp)[0], 301);
+  ASSERT_GTE(header_find(pl_app_args(resp)[2], "Location", NULL), 0);
   assert_bar_eq(pl_app_args(resp)[3], "moved");
 
   er_scheduler_free(sys);
@@ -432,26 +432,26 @@ Test(http, zero_redirects_delivers_3xx_raw) {
   test_http_server_stop(&srv);
 }
 
-Test(http, too_many_redirects) {
+TEST(http, too_many_redirects) {
   test_http_server srv;
-  cr_assert(test_http_server_start(&srv));
+  ASSERT(test_http_server_start(&srv));
   test_rt rt = test_rt_new();
   er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
   char url[256];
   url_of(&srv, "/hop1", url, sizeof(url));
   /* the chain needs 2 hops; allow only 1 */
   er_actor* a = start_fetch_actor(sys, mk_get, url, 5000, 1, 1 << 20);
-  cr_assert_eq(er_scheduler_run(sys), ER_RUN_IDLE);
-  cr_assert_eq(er_actor_state(a), ER_ACTOR_HALTED);
-  cr_assert_eq(result_err(er_actor_result(a)), HTTP_REDIRECTS);
+  ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
+  ASSERT_EQ(er_actor_state(a), ER_ACTOR_HALTED);
+  ASSERT_EQ(result_err(er_actor_result(a)), HTTP_REDIRECTS);
   er_scheduler_free(sys);
   test_rt_free(&rt);
   test_http_server_stop(&srv);
 }
 
-Test(http, buffered_cap_exact_and_exceeded, .timeout = 60) {
+TEST(http, buffered_cap_exact_and_exceeded) {
   test_http_server srv;
-  cr_assert(test_http_server_start(&srv));
+  ASSERT(test_http_server_start(&srv));
   test_rt rt = test_rt_new();
   er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
   char url[256];
@@ -460,26 +460,26 @@ Test(http, buffered_cap_exact_and_exceeded, .timeout = 60) {
   /* exactly N bytes with cap N succeeds */
   er_actor* ok =
       start_fetch_actor(sys, mk_get, url, 30000, 0, TEST_HTTP_BIG_BYTES);
-  cr_assert_eq(er_scheduler_run(sys), ER_RUN_IDLE);
-  cr_assert_eq(er_actor_state(ok), ER_ACTOR_HALTED);
+  ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
+  ASSERT_EQ(er_actor_state(ok), ER_ACTOR_HALTED);
   pl_cell* resp = result_ok(er_actor_result(ok));
-  cr_assert_eq(pl_app_args(resp)[0], 200);
-  cr_assert_eq(pl_nat_byte_len(pl_app_args(resp)[3]),
-               (size_t)TEST_HTTP_BIG_BYTES + 1); /* + bar terminator */
+  ASSERT_EQ(pl_app_args(resp)[0], 200);
+  ASSERT_EQ(pl_nat_byte_len(pl_app_args(resp)[3]),
+            (size_t)TEST_HTTP_BIG_BYTES + 1); /* + bar terminator */
 
   /* cap N-1: the last body byte trips the cap — BodyTooLarge */
   er_actor* big =
       start_fetch_actor(sys, mk_get, url, 30000, 0, TEST_HTTP_BIG_BYTES - 1);
-  cr_assert_eq(er_scheduler_run(sys), ER_RUN_IDLE);
-  cr_assert_eq(er_actor_state(big), ER_ACTOR_HALTED);
-  cr_assert_eq(result_err(er_actor_result(big)), HTTP_TOO_LARGE);
+  ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
+  ASSERT_EQ(er_actor_state(big), ER_ACTOR_HALTED);
+  ASSERT_EQ(result_err(er_actor_result(big)), HTTP_TOO_LARGE);
 
   /* a small cap aborts early enough that the (throttled) server is
    * still mid-body and observes the connection drop */
   er_actor* tiny = start_fetch_actor(sys, mk_get, url, 30000, 0, 100000);
-  cr_assert_eq(er_scheduler_run(sys), ER_RUN_IDLE);
-  cr_assert_eq(er_actor_state(tiny), ER_ACTOR_HALTED);
-  cr_assert_eq(result_err(er_actor_result(tiny)), HTTP_TOO_LARGE);
+  ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
+  ASSERT_EQ(er_actor_state(tiny), ER_ACTOR_HALTED);
+  ASSERT_EQ(result_err(er_actor_result(tiny)), HTTP_TOO_LARGE);
   bool dropped = false;
   for (int i = 0; i < 100 && !dropped; i++) { /* the handler thread races */
     pthread_mutex_lock(&srv.mu);
@@ -490,45 +490,45 @@ Test(http, buffered_cap_exact_and_exceeded, .timeout = 60) {
     if (!dropped)
       test_http_msleep(50);
   }
-  cr_assert(dropped, "the aborted transfer was fully written server-side");
+  ASSERT(dropped, "the aborted transfer was fully written server-side");
 
   er_scheduler_free(sys);
   test_rt_free(&rt);
   test_http_server_stop(&srv);
 }
 
-Test(http, deadline_exceeded_on_slow_body, .timeout = 30) {
+TEST(http, deadline_exceeded_on_slow_body) {
   test_http_server srv;
-  cr_assert(test_http_server_start(&srv));
+  ASSERT(test_http_server_start(&srv));
   test_rt rt = test_rt_new();
   er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
   char url[256];
   url_of(&srv, "/slow", url, sizeof(url));
   er_actor* a =
       start_fetch_actor(sys, mk_get, url, /*deadline=*/600, 0, 1 << 20);
-  cr_assert_eq(er_scheduler_run(sys), ER_RUN_IDLE);
-  cr_assert_eq(er_actor_state(a), ER_ACTOR_HALTED);
-  cr_assert_eq(result_err(er_actor_result(a)), HTTP_DEADLINE);
+  ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
+  ASSERT_EQ(er_actor_state(a), ER_ACTOR_HALTED);
+  ASSERT_EQ(result_err(er_actor_result(a)), HTTP_DEADLINE);
   er_scheduler_free(sys);
   test_rt_free(&rt);
   test_http_server_stop(&srv);
 }
 
-Test(http, connect_refused, .timeout = 30) {
+TEST(http, connect_refused) {
   test_rt rt = test_rt_new();
   er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
   char url[256];
   (void)snprintf(url, sizeof(url), "http://127.0.0.1:%u/ok",
                  (unsigned)test_http_dead_port());
   er_actor* a = start_fetch_actor(sys, mk_get, url, 5000, 0, 1 << 20);
-  cr_assert_eq(er_scheduler_run(sys), ER_RUN_IDLE);
-  cr_assert_eq(er_actor_state(a), ER_ACTOR_HALTED);
-  cr_assert_eq(result_err(er_actor_result(a)), HTTP_CONNECT);
+  ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
+  ASSERT_EQ(er_actor_state(a), ER_ACTOR_HALTED);
+  ASSERT_EQ(result_err(er_actor_result(a)), HTTP_CONNECT);
   er_scheduler_free(sys);
   test_rt_free(&rt);
 }
 
-Test(http, bad_url_rejections) {
+TEST(http, bad_url_rejections) {
   test_rt rt = test_rt_new();
   er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
   const char* bad[] = {"/relative/path", "ftp://127.0.0.1/x",
@@ -551,22 +551,22 @@ Test(http, bad_url_rejections) {
     er_actor_start(spooled, actor_fn(t, body));
   }
 
-  cr_assert_eq(er_scheduler_run(sys), ER_RUN_IDLE);
+  ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
   for (size_t i = 0; i < 4; i++) {
-    cr_assert_eq(er_actor_state(actors[i]), ER_ACTOR_HALTED);
-    cr_assert_eq(result_err(er_actor_result(actors[i])), HTTP_BAD_URL,
-                 "url %zu accepted: %s", i, bad[i]);
+    ASSERT_EQ(er_actor_state(actors[i]), ER_ACTOR_HALTED);
+    ASSERT_EQ(result_err(er_actor_result(actors[i])), HTTP_BAD_URL,
+              "url %zu accepted: %s", i, bad[i]);
   }
-  cr_assert_eq(er_actor_state(zero_deadline), ER_ACTOR_HALTED);
-  cr_assert_eq(result_err(er_actor_result(zero_deadline)), HTTP_BAD_URL);
-  cr_assert_eq(er_actor_state(spooled), ER_ACTOR_HALTED);
-  cr_assert_eq(result_err(er_actor_result(spooled)), HTTP_BAD_URL);
+  ASSERT_EQ(er_actor_state(zero_deadline), ER_ACTOR_HALTED);
+  ASSERT_EQ(result_err(er_actor_result(zero_deadline)), HTTP_BAD_URL);
+  ASSERT_EQ(er_actor_state(spooled), ER_ACTOR_HALTED);
+  ASSERT_EQ(result_err(er_actor_result(spooled)), HTTP_BAD_URL);
 
   er_scheduler_free(sys);
   test_rt_free(&rt);
 }
 
-Test(http, malformed_headers_and_oversized_timeouts_are_rejected) {
+TEST(http, malformed_headers_and_oversized_timeouts_are_rejected) {
   test_rt rt = test_rt_new();
   er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
 
@@ -602,22 +602,22 @@ Test(http, malformed_headers_and_oversized_timeouts_are_rejected) {
     er_actor_start(oversized_deadline, actor_fn(t, body));
   }
 
-  cr_assert_eq(er_scheduler_run(sys), ER_RUN_IDLE);
-  cr_assert_eq(result_err(er_actor_result(bad_header)), HTTP_BAD_URL);
-  cr_assert_eq(result_err(er_actor_result(oversized_deadline)), HTTP_BAD_URL);
+  ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
+  ASSERT_EQ(result_err(er_actor_result(bad_header)), HTTP_BAD_URL);
+  ASSERT_EQ(result_err(er_actor_result(oversized_deadline)), HTTP_BAD_URL);
   er_scheduler_free(sys);
 
   er_scheduler* bad_default = er_scheduler_new(
       rt.store, (er_config){.http_connect_default_ms = UINT64_MAX});
   er_actor* oversized_default = start_fetch_actor(
       bad_default, mk_get, "http://127.0.0.1/ok", 5000, 0, 1 << 20);
-  cr_assert_eq(er_scheduler_run(bad_default), ER_RUN_IDLE);
-  cr_assert_eq(result_err(er_actor_result(oversized_default)), HTTP_BAD_URL);
+  ASSERT_EQ(er_scheduler_run(bad_default), ER_RUN_IDLE);
+  ASSERT_EQ(result_err(er_actor_result(oversized_default)), HTTP_BAD_URL);
   er_scheduler_free(bad_default);
   test_rt_free(&rt);
 }
 
-Test(http, malformed_request_shape_crashes_the_actor) {
+TEST(http, malformed_request_shape_crashes_the_actor) {
   test_rt rt = test_rt_new();
   er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
   er_actor* a = er_scheduler_actor(sys);
@@ -630,15 +630,15 @@ Test(http, malformed_request_shape_crashes_the_actor) {
     t->vsp = base;
     er_actor_start(a, actor_fn(t, body));
   }
-  cr_assert_eq(er_scheduler_run(sys), ER_RUN_IDLE);
-  cr_assert_eq(er_actor_state(a), ER_ACTOR_CRASHED);
+  ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
+  ASSERT_EQ(er_actor_state(a), ER_ACTOR_CRASHED);
   er_scheduler_free(sys);
   test_rt_free(&rt);
 }
 
-Test(http, teardown_aborts_inflight_transfers, .timeout = 30) {
+TEST(http, teardown_aborts_inflight_transfers) {
   test_http_server srv;
-  cr_assert(test_http_server_start(&srv));
+  ASSERT(test_http_server_start(&srv));
   test_rt rt = test_rt_new();
   er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
   char url[256];
@@ -650,8 +650,8 @@ Test(http, teardown_aborts_inflight_transfers, .timeout = 30) {
   (void)start_fetch_actor(sys, mk_get, url, /*deadline=*/60000, 0, 1 << 20);
   er_actor* root = er_scheduler_adopt(sys, rt.t);
   pl_thread_start(rt.t, 42);
-  cr_assert_eq(er_scheduler_drive(sys, root), ER_DRIVE_DONE);
-  cr_assert_eq(er_http_inflight_count(sys), 1);
+  ASSERT_EQ(er_scheduler_drive(sys, root), ER_DRIVE_DONE);
+  ASSERT_EQ(er_http_inflight_count(sys), 1);
   er_scheduler_free(sys); /* aborts the transfer, logs nothing */
 
   test_rt_free(&rt);
@@ -671,7 +671,7 @@ typedef struct fetch_summary {
 static fetch_summary summarize(pl_val res) {
   fetch_summary s = {0};
   pl_cell* r = pl_as(PL_TAG_APP, res);
-  cr_assert_not_null(r);
+  ASSERT_NOT_NULL(r);
   if (pl_app_head(r) == 1) {
     s.ok = false;
     s.err = pl_app_args(r)[0];
@@ -686,21 +686,21 @@ static fetch_summary summarize(pl_val res) {
 }
 
 static void assert_summary_eq(const fetch_summary* a, const fetch_summary* b) {
-  cr_assert_eq(a->ok, b->ok);
-  cr_assert_eq(a->err, b->err);
-  cr_assert_eq(a->status, b->status);
-  cr_assert_str_eq(a->url, b->url);
-  cr_assert_str_eq(a->body, b->body);
+  ASSERT_EQ(a->ok, b->ok);
+  ASSERT_EQ(a->err, b->err);
+  ASSERT_EQ(a->status, b->status);
+  ASSERT_STR_EQ(a->url, b->url);
+  ASSERT_STR_EQ(a->body, b->body);
 }
 
-Test(http, record_replay_single_fetch, .timeout = 30) {
+TEST(http, record_replay_single_fetch) {
   char dir[] = "/tmp/enki-http-replay-XXXXXX";
-  cr_assert_not_null(mkdtemp(dir));
+  ASSERT_NOT_NULL(mkdtemp(dir));
   char logpath[256];
   (void)snprintf(logpath, sizeof(logpath), "%s/run.enkilog", dir);
 
   test_http_server srv;
-  cr_assert(test_http_server_start(&srv));
+  ASSERT(test_http_server_start(&srv));
   char url[256];
   url_of(&srv, "/ok", url, sizeof(url));
 
@@ -711,33 +711,33 @@ Test(http, record_replay_single_fetch, .timeout = 30) {
     er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
     er_scheduler_record(sys, log);
     er_actor* a = start_fetch_actor(sys, mk_get, url, 5000, 0, 1 << 20);
-    cr_assert_eq(er_scheduler_run(sys), ER_RUN_IDLE);
-    cr_assert_eq(er_actor_state(a), ER_ACTOR_HALTED);
+    ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
+    ASSERT_EQ(er_actor_state(a), ER_ACTOR_HALTED);
     recorded = summarize(er_actor_result(a));
-    cr_assert(recorded.ok);
-    cr_assert_eq(recorded.status, 200);
+    ASSERT(recorded.ok);
+    ASSERT_EQ(recorded.status, 200);
     er_scheduler_free(sys);
   }
-  cr_assert_eq(er_log_events(log), 1);
+  ASSERT_EQ(er_log_events(log), 1);
 
   /* file round trip, then kill the server: only the log can answer */
-  cr_assert(er_log_write_file(log, logpath));
+  ASSERT(er_log_write_file(log, logpath));
   er_log_free(log);
   test_http_server_stop(&srv);
   er_log* loaded = er_log_read_file(logpath);
-  cr_assert_not_null(loaded);
-  cr_assert_eq(er_log_events(loaded), 1);
+  ASSERT_NOT_NULL(loaded);
+  ASSERT_EQ(er_log_events(loaded), 1);
 
   {
     er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
     er_scheduler_replay(sys, loaded);
     er_actor* a = start_fetch_actor(sys, mk_get, url, 5000, 0, 1 << 20);
-    cr_assert_eq(er_scheduler_run(sys), ER_RUN_IDLE);
-    cr_assert_eq(er_actor_state(a), ER_ACTOR_HALTED);
+    ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
+    ASSERT_EQ(er_actor_state(a), ER_ACTOR_HALTED);
     fetch_summary replayed = summarize(er_actor_result(a));
     assert_summary_eq(&replayed, &recorded);
-    cr_assert_eq(er_scheduler_log_cursor(sys), 1);
-    cr_assert_eq(er_http_inflight_count(sys), 0); /* zero network */
+    ASSERT_EQ(er_scheduler_log_cursor(sys), 1);
+    ASSERT_EQ(er_http_inflight_count(sys), 0); /* zero network */
     er_scheduler_free(sys);
   }
   er_log_free(loaded);
@@ -747,9 +747,9 @@ Test(http, record_replay_single_fetch, .timeout = 30) {
 /* Three concurrent fetches (the first is slow, so completion order
  * differs from service order) recorded, then replayed with the server
  * down: identical per-actor results, resumption order from log order. */
-Test(http, record_replay_concurrent_fetches, .timeout = 60) {
+TEST(http, record_replay_concurrent_fetches) {
   test_http_server srv;
-  cr_assert(test_http_server_start(&srv));
+  ASSERT(test_http_server_start(&srv));
   char slow_url[256], ok_url[256], final_url[256];
   url_of(&srv, "/drip3", slow_url, sizeof(slow_url));
   url_of(&srv, "/ok", ok_url, sizeof(ok_url));
@@ -764,19 +764,19 @@ Test(http, record_replay_concurrent_fetches, .timeout = 60) {
     er_actor* a0 = start_fetch_actor(sys, mk_get, slow_url, 30000, 0, 1 << 20);
     er_actor* a1 = start_fetch_actor(sys, mk_get, ok_url, 30000, 0, 1 << 20);
     er_actor* a2 = start_fetch_actor(sys, mk_get, final_url, 30000, 0, 1 << 20);
-    cr_assert_eq(er_scheduler_run(sys), ER_RUN_IDLE);
+    ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
     er_actor* as[3] = {a0, a1, a2};
     for (int i = 0; i < 3; i++) {
-      cr_assert_eq(er_actor_state(as[i]), ER_ACTOR_HALTED);
+      ASSERT_EQ(er_actor_state(as[i]), ER_ACTOR_HALTED);
       rec[i] = summarize(er_actor_result(as[i]));
-      cr_assert(rec[i].ok);
+      ASSERT(rec[i].ok);
     }
-    cr_assert_str_eq(rec[0].body, "ddd");
-    cr_assert_str_eq(rec[1].body, "hello, enki");
-    cr_assert_str_eq(rec[2].body, "landed");
+    ASSERT_STR_EQ(rec[0].body, "ddd");
+    ASSERT_STR_EQ(rec[1].body, "hello, enki");
+    ASSERT_STR_EQ(rec[2].body, "landed");
     er_scheduler_free(sys);
   }
-  cr_assert_eq(er_log_events(log), 3);
+  ASSERT_EQ(er_log_events(log), 3);
   test_http_server_stop(&srv); /* replay must not need the network */
 
   {
@@ -785,15 +785,15 @@ Test(http, record_replay_concurrent_fetches, .timeout = 60) {
     er_actor* a0 = start_fetch_actor(sys, mk_get, slow_url, 30000, 0, 1 << 20);
     er_actor* a1 = start_fetch_actor(sys, mk_get, ok_url, 30000, 0, 1 << 20);
     er_actor* a2 = start_fetch_actor(sys, mk_get, final_url, 30000, 0, 1 << 20);
-    cr_assert_eq(er_scheduler_run(sys), ER_RUN_IDLE);
+    ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
     er_actor* as[3] = {a0, a1, a2};
     for (int i = 0; i < 3; i++) {
-      cr_assert_eq(er_actor_state(as[i]), ER_ACTOR_HALTED);
+      ASSERT_EQ(er_actor_state(as[i]), ER_ACTOR_HALTED);
       fetch_summary s = summarize(er_actor_result(as[i]));
       assert_summary_eq(&s, &rec[i]);
     }
-    cr_assert_eq(er_scheduler_log_cursor(sys), 3);
-    cr_assert_eq(er_http_inflight_count(sys), 0);
+    ASSERT_EQ(er_scheduler_log_cursor(sys), 3);
+    ASSERT_EQ(er_http_inflight_count(sys), 0);
     er_scheduler_free(sys);
   }
   er_log_free(log);
@@ -802,7 +802,7 @@ Test(http, record_replay_concurrent_fetches, .timeout = 60) {
 
 /* Validation failures are oracles too: logged at the service point and
  * replayed from the log without re-running validation. */
-Test(http, record_replay_bad_url) {
+TEST(http, record_replay_bad_url) {
   test_rt rt = test_rt_new();
   er_log* log = er_log_new();
   {
@@ -810,21 +810,21 @@ Test(http, record_replay_bad_url) {
     er_scheduler_record(sys, log);
     er_actor* a =
         start_fetch_actor(sys, mk_get, "ftp://127.0.0.1/x", 5000, 0, 1 << 20);
-    cr_assert_eq(er_scheduler_run(sys), ER_RUN_IDLE);
-    cr_assert_eq(er_actor_state(a), ER_ACTOR_HALTED);
-    cr_assert_eq(result_err(er_actor_result(a)), HTTP_BAD_URL);
+    ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
+    ASSERT_EQ(er_actor_state(a), ER_ACTOR_HALTED);
+    ASSERT_EQ(result_err(er_actor_result(a)), HTTP_BAD_URL);
     er_scheduler_free(sys);
   }
-  cr_assert_eq(er_log_events(log), 1);
+  ASSERT_EQ(er_log_events(log), 1);
   {
     er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
     er_scheduler_replay(sys, log);
     er_actor* a =
         start_fetch_actor(sys, mk_get, "ftp://127.0.0.1/x", 5000, 0, 1 << 20);
-    cr_assert_eq(er_scheduler_run(sys), ER_RUN_IDLE);
-    cr_assert_eq(er_actor_state(a), ER_ACTOR_HALTED);
-    cr_assert_eq(result_err(er_actor_result(a)), HTTP_BAD_URL);
-    cr_assert_eq(er_scheduler_log_cursor(sys), 1);
+    ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
+    ASSERT_EQ(er_actor_state(a), ER_ACTOR_HALTED);
+    ASSERT_EQ(result_err(er_actor_result(a)), HTTP_BAD_URL);
+    ASSERT_EQ(er_scheduler_log_cursor(sys), 1);
     er_scheduler_free(sys);
   }
   er_log_free(log);
@@ -834,9 +834,9 @@ Test(http, record_replay_bad_url) {
 /* A validation failure and a live fetch in one recording: the FetchV
  * event consumes at its service point, the completion at an idle
  * point, and replay interleaves both identically. */
-Test(http, record_replay_mixed_valid_and_invalid, .timeout = 30) {
+TEST(http, record_replay_mixed_valid_and_invalid) {
   test_http_server srv;
-  cr_assert(test_http_server_start(&srv));
+  ASSERT(test_http_server_start(&srv));
   char url[256];
   url_of(&srv, "/ok", url, sizeof(url));
 
@@ -849,15 +849,15 @@ Test(http, record_replay_mixed_valid_and_invalid, .timeout = 30) {
     er_actor* good = start_fetch_actor(sys, mk_get, url, 5000, 0, 1 << 20);
     er_actor* bad =
         start_fetch_actor(sys, mk_get, "/relative", 5000, 0, 1 << 20);
-    cr_assert_eq(er_scheduler_run(sys), ER_RUN_IDLE);
-    cr_assert_eq(er_actor_state(good), ER_ACTOR_HALTED);
-    cr_assert_eq(er_actor_state(bad), ER_ACTOR_HALTED);
+    ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
+    ASSERT_EQ(er_actor_state(good), ER_ACTOR_HALTED);
+    ASSERT_EQ(er_actor_state(bad), ER_ACTOR_HALTED);
     rec_ok = summarize(er_actor_result(good));
-    cr_assert(rec_ok.ok);
-    cr_assert_eq(result_err(er_actor_result(bad)), HTTP_BAD_URL);
+    ASSERT(rec_ok.ok);
+    ASSERT_EQ(result_err(er_actor_result(bad)), HTTP_BAD_URL);
     er_scheduler_free(sys);
   }
-  cr_assert_eq(er_log_events(log), 2);
+  ASSERT_EQ(er_log_events(log), 2);
   test_http_server_stop(&srv);
 
   {
@@ -866,11 +866,11 @@ Test(http, record_replay_mixed_valid_and_invalid, .timeout = 30) {
     er_actor* good = start_fetch_actor(sys, mk_get, url, 5000, 0, 1 << 20);
     er_actor* bad =
         start_fetch_actor(sys, mk_get, "/relative", 5000, 0, 1 << 20);
-    cr_assert_eq(er_scheduler_run(sys), ER_RUN_IDLE);
+    ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
     fetch_summary s = summarize(er_actor_result(good));
     assert_summary_eq(&s, &rec_ok);
-    cr_assert_eq(result_err(er_actor_result(bad)), HTTP_BAD_URL);
-    cr_assert_eq(er_scheduler_log_cursor(sys), 2);
+    ASSERT_EQ(result_err(er_actor_result(bad)), HTTP_BAD_URL);
+    ASSERT_EQ(er_scheduler_log_cursor(sys), 2);
     er_scheduler_free(sys);
   }
   er_log_free(log);
@@ -879,9 +879,9 @@ Test(http, record_replay_mixed_valid_and_invalid, .timeout = 30) {
 
 /* MT executor (LIVE only): several actors fetch concurrently; one
  * worker at a time owns the CURLM pump while the rest run actors. */
-Test(http, mt_executor_concurrent_fetches, .timeout = 60) {
+TEST(http, mt_executor_concurrent_fetches) {
   test_http_server srv;
-  cr_assert(test_http_server_start(&srv));
+  ASSERT(test_http_server_start(&srv));
   test_rt rt = test_rt_new();
   er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
   er_mt_executor* ex = er_mt_executor_new(sys, (er_mt_config){.workers = 4});
@@ -896,17 +896,17 @@ Test(http, mt_executor_concurrent_fetches, .timeout = 60) {
   for (int i = 0; i < 6; i++)
     as[i] = start_fetch_actor(sys, mk_get, urls[i], 30000, 0, 1 << 20);
 
-  cr_assert_eq(er_mt_executor_run(ex), ER_RUN_IDLE);
+  ASSERT_EQ(er_mt_executor_run(ex), ER_RUN_IDLE);
   const char* bodies[6] = {"ddd",         "hello, enki", "landed",
                            "hello, enki", "hello, enki", "landed"};
   for (int i = 0; i < 6; i++) {
-    cr_assert_eq(er_actor_state(as[i]), ER_ACTOR_HALTED);
+    ASSERT_EQ(er_actor_state(as[i]), ER_ACTOR_HALTED);
     fetch_summary s = summarize(er_actor_result(as[i]));
-    cr_assert(s.ok);
-    cr_assert_eq(s.status, 200);
-    cr_assert_str_eq(s.body, bodies[i]);
+    ASSERT(s.ok);
+    ASSERT_EQ(s.status, 200);
+    ASSERT_STR_EQ(s.body, bodies[i]);
   }
-  cr_assert_eq(er_http_inflight_count(sys), 0);
+  ASSERT_EQ(er_http_inflight_count(sys), 0);
 
   er_mt_executor_free(ex);
   er_scheduler_free(sys);
@@ -914,9 +914,9 @@ Test(http, mt_executor_concurrent_fetches, .timeout = 60) {
   test_http_server_stop(&srv);
 }
 
-Test(http, adopted_root_can_fetch, .timeout = 30) {
+TEST(http, adopted_root_can_fetch) {
   test_http_server srv;
-  cr_assert(test_http_server_start(&srv));
+  ASSERT(test_http_server_start(&srv));
   test_rt rt = test_rt_new();
   rt.t->rplan_f = true;
   er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
@@ -937,9 +937,9 @@ Test(http, adopted_root_can_fetch, .timeout = 30) {
   t->vsp = lb;
   pl_thread_start_call_nf(t, law, 0);
 
-  cr_assert_eq(er_scheduler_drive(sys, root), ER_DRIVE_DONE);
+  ASSERT_EQ(er_scheduler_drive(sys, root), ER_DRIVE_DONE);
   pl_cell* resp = result_ok(pl_thread_result(t));
-  cr_assert_eq(pl_app_args(resp)[0], 200);
+  ASSERT_EQ(pl_app_args(resp)[0], 200);
   assert_bar_eq(pl_app_args(resp)[3], "hello, enki");
 
   er_scheduler_free(sys);
@@ -947,9 +947,9 @@ Test(http, adopted_root_can_fetch, .timeout = 30) {
   test_http_server_stop(&srv);
 }
 
-Test(http, mt_adopted_root_can_fetch, .timeout = 30) {
+TEST(http, mt_adopted_root_can_fetch) {
   test_http_server srv;
-  cr_assert(test_http_server_start(&srv));
+  ASSERT(test_http_server_start(&srv));
   test_rt rt = test_rt_new();
   rt.t->rplan_f = true;
   er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
@@ -970,9 +970,9 @@ Test(http, mt_adopted_root_can_fetch, .timeout = 30) {
   t->vsp = lb;
   pl_thread_start_call_nf(t, law, 0);
 
-  cr_assert_eq(er_mt_executor_drive(ex, root), ER_DRIVE_DONE);
+  ASSERT_EQ(er_mt_executor_drive(ex, root), ER_DRIVE_DONE);
   pl_cell* resp = result_ok(pl_thread_result(t));
-  cr_assert_eq(pl_app_args(resp)[0], 200);
+  ASSERT_EQ(pl_app_args(resp)[0], 200);
   assert_bar_eq(pl_app_args(resp)[3], "hello, enki");
 
   er_mt_executor_free(ex);

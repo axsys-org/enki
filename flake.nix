@@ -1,5 +1,5 @@
 {
-  description = "enki C library project with Nix, Make, Criterion, theft, and libFuzzer";
+  description = "enki C library project with Nix, Make, Greatest, theft, and libFuzzer";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -88,7 +88,7 @@
         in
           import ./nix/mkenki.nix {
             inherit lib src;
-            inherit (pkgs) gnumake pkg-config criterion curl gmp lmdb openssl;
+            inherit (pkgs) gnumake curl gmp lmdb openssl;
             inherit (selected) stdenv compiler cc;
           };
 
@@ -188,14 +188,12 @@
 
           nativeBuildInputs = [
             pkgs.gnumake
-            pkgs.pkg-config
             pkgs.lcov
           ];
 
           ENKI_REAVER_SRC_DIR = "${reaver}/src";
           ENKI_REAVER_PLAN_DIR = "${reaver}/src/plan";
           buildInputs = [
-            pkgs.criterion
             pkgs.curl
             pkgs.gmp
             pkgs.lmdb
@@ -208,7 +206,7 @@
           enableParallelBuilding = true;
           buildPhase = ''
             runHook preBuild
-            make coverage BUILD_TYPE=coverage CC=${(compilerFor "coverage").compiler}/bin/${(compilerFor "coverage").cc} CRITERION_CLEANUP_SOCKETS=1
+            make coverage BUILD_TYPE=coverage CC=${(compilerFor "coverage").compiler}/bin/${(compilerFor "coverage").cc}
             runHook postBuild
           '';
 
@@ -280,7 +278,6 @@
               pkgs.clang-tools
               pkgs.bear
               pkgs.gnumake
-              pkgs.criterion
               pkgs.curl
               pkgs.gmp
               pkgs.lmdb
@@ -288,7 +285,6 @@
               pkgs.lcov
               pkgs.gcovr
               pkgs.compiledb
-              pkgs.pkg-config
               pkgs.alejandra
               pkgs.mdformat
               pkgs.samply
