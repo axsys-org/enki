@@ -1,14 +1,24 @@
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <string.h>
 
+#include "axsys/profile.h"
 #include "plan/build.h"
 #include "plan/heap.h"
 #include "plan/store.h"
 #include "test_plan.h"
 
+typedef struct store_pin_gate {
+  pthread_mutex_t mu;
+  pthread_cond_t cv;
+  size_t ready;
+  bool start;
+} store_pin_gate;
+
 typedef struct store_pin_worker {
   pl_store* store;
+  store_pin_gate* gate;
   pl_val canonical;
   unsigned group;
   bool ok;
@@ -22,10 +32,21 @@ typedef struct pin_code_race {
   bool ok;
 } pin_code_race;
 
+static const char* store_lock_profile_path;
+static const char* store_silo_path;
+
 static void* store_pin_thread(void* arg) {
   store_pin_worker* w = arg;
   pl_heap* heap = pl_heap_new(1 << 14, w->store);
   pl_thread* t = pl_thread_new(heap);
+  pl_store_profile_locks_prepare_thread(w->store);
+  pthread_mutex_lock(&w->gate->mu);
+  w->gate->ready++;
+  pthread_cond_broadcast(&w->gate->cv);
+  while (!w->gate->start)
+    pthread_cond_wait(&w->gate->cv, &w->gate->mu);
+  pthread_mutex_unlock(&w->gate->mu);
+
   for (int i = 0; i < 100; i++) {
     size_t base = t->vsp;
     pl_vpush(t, test_law(t, 1, ax_s4('T', 's', 'a', 'n'), 42 + w->group));
@@ -87,17 +108,38 @@ static void* pin_code_reader(void* arg) {
 }
 
 static int test_concurrent_saves_publish_equal_and_distinct_values(void) {
-  pl_store* store = pl_store_new_mem();
+  pl_store* store = store_silo_path == NULL
+                        ? pl_store_new_mem()
+                        : pl_store_new_silo(store_silo_path, (size_t)64 << 20);
+  if (store == NULL) {
+    fprintf(stderr, "failed to open stress-test store\n");
+    return 1;
+  }
+  if (store_lock_profile_path != NULL &&
+      !pl_store_profile_locks(store, store_lock_profile_path)) {
+    perror("pl_store_profile_locks");
+    pl_store_free(store);
+    return 1;
+  }
   enum { NTHREADS = 4 };
   store_pin_worker workers[NTHREADS];
   pthread_t threads[NTHREADS];
   bool started[NTHREADS] = {0};
+  store_pin_gate gate = {
+      .mu = PTHREAD_MUTEX_INITIALIZER,
+      .cv = PTHREAD_COND_INITIALIZER,
+  };
+  size_t started_count = 0;
   int status = 0;
   pl_val canonical[2] = {0};
 
   for (size_t i = 0; i < NTHREADS; i++) {
     workers[i] = (store_pin_worker){
-        .store = store, .group = (unsigned)(i % 2), .ok = true};
+        .store = store,
+        .gate = &gate,
+        .group = (unsigned)(i % 2),
+        .ok = true,
+    };
     int err = pthread_create(&threads[i], NULL, store_pin_thread, &workers[i]);
     if (err != 0) {
       fprintf(stderr, "pthread_create(%zu) failed: %d\n", i, err);
@@ -105,7 +147,15 @@ static int test_concurrent_saves_publish_equal_and_distinct_values(void) {
       break;
     }
     started[i] = true;
+    started_count++;
   }
+  pthread_mutex_lock(&gate.mu);
+  while (gate.ready != started_count)
+    pthread_cond_wait(&gate.cv, &gate.mu);
+  gate.start = true;
+  pthread_cond_broadcast(&gate.cv);
+  pthread_mutex_unlock(&gate.mu);
+
   for (size_t i = 0; i < NTHREADS; i++) {
     if (!started[i])
       continue;
@@ -128,6 +178,12 @@ static int test_concurrent_saves_publish_equal_and_distinct_values(void) {
   }
   if (canonical[0] == 0 || canonical[1] == 0 || canonical[0] == canonical[1]) {
     fprintf(stderr, "distinct concurrent Saves did not stay distinct\n");
+    status = 1;
+  }
+  pthread_cond_destroy(&gate.cv);
+  pthread_mutex_destroy(&gate.mu);
+  if (!pl_store_profile_locks_finish(store)) {
+    fprintf(stderr, "failed to finalize store lock profile\n");
     status = 1;
   }
   pl_store_free(store);
@@ -178,10 +234,47 @@ static int test_pin_code_publication_is_atomic(void) {
 }
 
 int main(int argc, char** argv) {
-  (void)argc;
-  (void)argv;
+  const char* profile_json_path = NULL;
+  for (int argi = 1; argi < argc;) {
+    const char* value = argi + 1 < argc ? argv[argi + 1] : NULL;
+    if (value != NULL &&
+        (strcmp(argv[argi], "--jobs") == 0 || strcmp(argv[argi], "-j") == 0)) {
+      /* `make test-unit` passes Criterion's job option to every unit binary,
+       * including these standalone TSAN harnesses. */
+      argi += 2;
+      continue;
+    }
+    if (strncmp(argv[argi], "--jobs=", sizeof("--jobs=") - 1) == 0 ||
+        (strncmp(argv[argi], "-j", sizeof("-j") - 1) == 0 &&
+         argv[argi][sizeof("-j") - 1] != '\0')) {
+      argi++;
+      continue;
+    }
+    if (value != NULL && strcmp(argv[argi], "--profile-locks") == 0) {
+      store_lock_profile_path = value;
+    } else if (value != NULL && strcmp(argv[argi], "--profile-json") == 0) {
+      profile_json_path = value;
+    } else if (value != NULL && strcmp(argv[argi], "--silo") == 0) {
+      store_silo_path = value;
+    } else {
+      fprintf(stderr,
+              "usage: %s [--profile-locks FILE] [--profile-json FILE] "
+              "[--silo DIR]\n",
+              argv[0]);
+      return 2;
+    }
+    argi += 2;
+  }
+  if (profile_json_path != NULL && !ax_profile_json_start(profile_json_path)) {
+    fprintf(stderr, "failed to start profile JSON\n");
+    return 1;
+  }
   int status = test_concurrent_saves_publish_equal_and_distinct_values();
   if (test_pin_code_publication_is_atomic() != 0)
     status = 1;
+  if (!ax_profile_json_finish()) {
+    fprintf(stderr, "failed to finish profile JSON\n");
+    status = 1;
+  }
   return status;
 }

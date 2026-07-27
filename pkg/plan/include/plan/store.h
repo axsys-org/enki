@@ -65,6 +65,8 @@ typedef struct pl_code_cache_entry {
   pl_code* value;
 } pl_code_cache_entry;
 
+typedef struct pl_store_lock_profile pl_store_lock_profile;
+
 typedef struct pl_store {
   /* Serializes persistence transactions and Save publication.  Always acquire
    * this before `mu` on paths that need both locks. */
@@ -89,6 +91,7 @@ typedef struct pl_store {
   pl_thread* compiler_t;
   pl_heap* compiler_h;
   uint64_t pin_profile_us;
+  pl_store_lock_profile* lock_profile;
   bool compiler_f;
   bool pin_profile_f;
 } pl_store;
@@ -104,6 +107,17 @@ void pl_store_free(pl_store* s);
 /* Print each newly frozen PIN whose exclusive serialization and store
  * insertion time exceeds `threshold_us`. */
 void pl_store_profile_pins(pl_store* s, uint64_t threshold_us);
+
+/* Collect mutex contention, outermost ownership, and recursive-section
+ * histograms in a JSON report.  Profiling must be enabled before the store is
+ * shared with worker threads.  All worker threads must be joined and no store
+ * lock may be held before finish or pl_store_free.  Finish is idempotent;
+ * pl_store_free also finishes an active report as a fallback. */
+bool pl_store_profile_locks(pl_store* s, const char* path);
+/* Allocate this worker thread's profiler scratch space before a timed region.
+ * This is optional and has no effect when lock profiling is disabled. */
+void pl_store_profile_locks_prepare_thread(pl_store* s);
+bool pl_store_profile_locks_finish(pl_store* s);
 
 /* Address-range test used by the collector (store vals are terminal).  The
  * region bounds are immutable after construction, and this runs for every
@@ -129,6 +143,9 @@ pl_val pl_pin(pl_thread* t, pl_val v);
  * call.
  */
 pl_val pl_store_snapshot_normal(pl_thread* t, pl_val v);
+/* The same lifetime boundary, attributed separately in lock profiles because
+ * message payload copying is a high-frequency concurrent runtime path. */
+pl_val pl_store_snapshot_message(pl_thread* t, pl_val v);
 
 /* True when a PIN has a persistent content hash. */
 bool pl_pin_is_hashed(pl_val pin);

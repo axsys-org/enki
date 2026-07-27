@@ -217,8 +217,12 @@ static void silo_close(void* ctx) {
 static bool batch_flush(pl_silo_batch* batch, char* err, size_t err_cap) {
   if (batch->buffered == 0)
     return true;
-  if (!pack_pwrite_exact(batch->backend->pack_fd, batch->buffer,
-                         batch->buffered, batch->pack_flushed))
+  pl_store_profile_scope profile = pl_store_profile_begin(
+      "store.silo.pack.write", sizeof("store.silo.pack.write") - 1);
+  bool ok = pack_pwrite_exact(batch->backend->pack_fd, batch->buffer,
+                              batch->buffered, batch->pack_flushed);
+  pl_store_profile_end(&profile);
+  if (!ok)
     return pack_error(err, err_cap, "cannot append pins.pack");
   batch->pack_flushed += batch->buffered;
   batch->buffered = 0;
@@ -259,7 +263,11 @@ bool pl_store_silo_batch_begin(pl_store* store, pl_silo_batch** out, char* err,
   if (batch == NULL)
     return pack_error(err, err_cap, "out of memory for Silo batch");
   batch->backend = store->be.ctx;
-  if (mdb_txn_begin(batch->backend->env, NULL, 0, &batch->txn) != 0) {
+  pl_store_profile_scope profile = pl_store_profile_begin(
+      "store.silo.write.begin", sizeof("store.silo.write.begin") - 1);
+  int begin_rc = mdb_txn_begin(batch->backend->env, NULL, 0, &batch->txn);
+  pl_store_profile_end(&profile);
+  if (begin_rc != 0) {
     free(batch);
     return pack_error(err, err_cap, "cannot begin Silo save transaction");
   }
@@ -392,11 +400,14 @@ bool pl_store_silo_batch_commit(pl_silo_batch* batch,
     return false;
   }
   if (batch->pack_dirty) {
+    pl_store_profile_scope profile = pl_store_profile_begin(
+        "store.silo.pack.sync", sizeof("store.silo.pack.sync") - 1);
 #ifdef F_FULLFSYNC
     int sync_rc = fcntl(batch->backend->pack_fd, F_FULLFSYNC, 0);
 #else
     int sync_rc = fsync(batch->backend->pack_fd);
 #endif
+    pl_store_profile_end(&profile);
     if (sync_rc != 0) {
       pl_store_silo_batch_abort(batch);
       return pack_error(err, err_cap, "cannot sync pins.pack");
@@ -412,7 +423,10 @@ bool pl_store_silo_batch_commit(pl_silo_batch* batch,
 
   MDB_txn* txn = batch->txn;
   batch->txn = NULL; /* mdb_txn_commit consumes the handle on every result. */
+  pl_store_profile_scope profile = pl_store_profile_begin(
+      "store.silo.write.commit", sizeof("store.silo.write.commit") - 1);
   int rc = mdb_txn_commit(txn);
+  pl_store_profile_end(&profile);
   ax_hmfree(batch->pending);
   free(batch);
   return rc == 0
@@ -426,7 +440,11 @@ bool pl_store_silo_open(pl_store* store, const uint8_t hash[32],
     return pack_error(err, err_cap, "store is not a Silo backend");
   silo_backend* b = store->be.ctx;
   MDB_txn* txn;
-  if (mdb_txn_begin(b->env, NULL, MDB_RDONLY, &txn) != 0)
+  pl_store_profile_scope profile = pl_store_profile_begin(
+      "store.silo.read.begin", sizeof("store.silo.read.begin") - 1);
+  int begin_rc = mdb_txn_begin(b->env, NULL, MDB_RDONLY, &txn);
+  pl_store_profile_end(&profile);
+  if (begin_rc != 0)
     return pack_error(err, err_cap, "cannot begin Silo index read");
   MDB_val key = {.mv_size = 32, .mv_data = (void*)hash};
   MDB_val value;

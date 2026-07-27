@@ -193,6 +193,23 @@ top-level result dump are suppressed so the records remain readable. A zero
 threshold prints every newly frozen PIN, including work below the clock's
 observable resolution.
 
+To collect store-lock contention without adding an event-writer lock to every
+acquisition, write an aggregated JSON report:
+
+```sh
+wisp --profile-locks locks.json DIR MODULE [FUNCTION ARGS...]
+wisp --profile-locks=locks.json DIR MODULE [FUNCTION ARGS...]
+```
+
+The report separates `mu` from `save_mu` and records true contended wait time,
+outermost ownership time, recursive re-entry, maximum recursion depth, and
+logarithmic histograms by root operation and acquisition site. Recursive
+section durations overlap and are therefore reported separately from the
+non-overlapping owner-hold totals. Run lock and Chrome timeline profiling in
+separate benchmark invocations when measuring overhead-sensitive workloads.
+See `STORE_LOCK_PROFILE.md` for the current measurements and
+`STORE_LOCKING_ROADMAP.md` for the phased redesign and performance gates.
+
 ## Formatting And Analysis
 
 ```sh

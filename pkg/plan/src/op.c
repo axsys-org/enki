@@ -714,7 +714,7 @@ static pl_val op_install(pl_thread* t, size_t ab) {
   if (hash == NULL)
     pl_raise_msg(t, "Install: compiler PIN must be saved first");
   pl_store* s = pl_heap_store(t->heap);
-  pl_store_lock(s);
+  pl_store_lock(s, PL_STORE_LOCK_SITE_INSTALL_SELF_CHECK);
   bool replacing_self = t == s->compiler_t;
   pl_store_unlock(s);
   if (replacing_self)

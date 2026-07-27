@@ -1719,3 +1719,72 @@ Test(store, chrome_json_profiles_slow_store_operations) {
   cr_assert_eq(unlink(db_path), 0);
   cr_assert_eq(rmdir(dir), 0);
 }
+
+Test(store, lock_profile_separates_outer_ownership_from_recursion) {
+  char path[] = "/tmp/enki-lock-profile-store-XXXXXX";
+  int fd = mkstemp(path);
+  cr_assert_geq(fd, 0);
+  cr_assert_eq(close(fd), 0);
+
+  pl_store* store = pl_store_new_mem();
+  cr_assert(pl_store_profile_locks(store, path));
+  {
+    PL_STORE_LOCK_CONTEXT(store, PL_STORE_LOCK_CONTEXT_SNAPSHOT);
+    pl_store_lock(store, PL_STORE_LOCK_SITE_SAVE_PUBLISH);
+    pl_store_lock(store, PL_STORE_LOCK_SITE_ARENA_ALLOC);
+    pl_store_unlock(store);
+    pl_store_unlock(store);
+  }
+  {
+    PL_STORE_LOCK_CONTEXT(store, PL_STORE_LOCK_CONTEXT_SAVE_LEGACY);
+    pl_store_save_lock(store, PL_STORE_LOCK_SITE_SAVE_ROOT);
+    pl_store_save_lock(store, PL_STORE_LOCK_SITE_BACKEND_PUT);
+    pl_store_save_unlock(store);
+    pl_store_save_unlock(store);
+  }
+  cr_assert(pl_store_profile_locks_finish(store));
+  pl_store_free(store);
+
+  char* json = store_test_read_file(path);
+  cr_assert_not_null(strstr(json, "\"schema\":\"enki.store-lock-profile.v1\""));
+  cr_assert_not_null(strstr(
+      json, "\"lock\":\"mu\",\"context\":\"snapshot\",\"site\":\"arena_alloc\","
+            "\"acquisitions\":1,\"outer_acquisitions\":0,"
+            "\"recursive_acquisitions\":1"));
+  cr_assert_not_null(strstr(
+      json,
+      "\"lock\":\"mu\",\"context\":\"snapshot\",\"site\":\"save_publish\","
+      "\"acquisitions\":1,\"outer_acquisitions\":1,"
+      "\"recursive_acquisitions\":0"));
+  cr_assert_not_null(
+      strstr(json, "\"lock\":\"save_mu\",\"context\":\"save_legacy\","
+                   "\"site\":\"backend_put\",\"acquisitions\":1,"
+                   "\"outer_acquisitions\":0,\"recursive_acquisitions\":1"));
+  cr_assert_not_null(strstr(json, "\"max_depth\":2"));
+  cr_assert_not_null(strstr(json, "\"recursive_section_note\":"));
+  free(json);
+  cr_assert_eq(unlink(path), 0);
+}
+
+Test(store, failed_load_restores_lock_profile_context) {
+  char path[] = "/tmp/enki-lock-profile-load-context-XXXXXX";
+  int fd = mkstemp(path);
+  cr_assert_geq(fd, 0);
+  cr_assert_eq(close(fd), 0);
+
+  test_rt rt = test_rt_new();
+  cr_assert(pl_store_profile_locks(rt.store, path));
+  uint8_t missing[32] = {0x42};
+  cr_assert(test_store_load_raises(rt.t, missing));
+  pl_store_lock(rt.store, PL_STORE_LOCK_SITE_ARENA_MARK);
+  pl_store_unlock(rt.store);
+  cr_assert(pl_store_profile_locks_finish(rt.store));
+  test_rt_free(&rt);
+
+  char* json = store_test_read_file(path);
+  cr_assert_not_null(strstr(json,
+                            "\"lock\":\"mu\",\"context\":\"other\","
+                            "\"site\":\"arena_mark\",\"acquisitions\":1"));
+  free(json);
+  cr_assert_eq(unlink(path), 0);
+}

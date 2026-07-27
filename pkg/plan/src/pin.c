@@ -740,8 +740,11 @@ bool pl_store_save_root(pl_store* s, pl_val pin, uint8_t out_hash[32],
       (void)snprintf(err, err_cap, "Save requires a store");
     return false;
   }
+  PL_STORE_LOCK_CONTEXT(s, s->format == PL_STORE_FORMAT_SILO_V1
+                               ? PL_STORE_LOCK_CONTEXT_SAVE_SILO
+                               : PL_STORE_LOCK_CONTEXT_SAVE_LEGACY);
   save_ctx c = {.store = s, .err = err, .err_cap = err_cap};
-  pl_store_save_lock(s);
+  pl_store_save_lock(s, PL_STORE_LOCK_SITE_SAVE_ROOT);
   bool handled = false;
   bool ok = save_canonical_root(&c, pin, &handled);
   if (handled) {
@@ -762,7 +765,7 @@ bool pl_store_save_root(pl_store* s, pl_val pin, uint8_t out_hash[32],
     /* Persistence is complete.  Keep the general lock only around arena and
      * registry publication; Save serialization remains held until every
      * source proxy has its canonical target. */
-    pl_store_lock(s);
+    pl_store_lock(s, PL_STORE_LOCK_SITE_SAVE_PUBLISH);
     save_build_canonical(&c);
     save_publish_targets(&c);
     save_queue_compiles(&c);
@@ -1058,7 +1061,7 @@ static bool load_legacy_pin(pl_thread* t, pl_store* s, const uint8_t hash[32],
 
   /* A direct internal registration can race while backend I/O is in flight.
    * Recheck under mu before constructing a second representative. */
-  pl_store_lock(s);
+  pl_store_lock(s, PL_STORE_LOCK_SITE_LEGACY_LOAD_PUBLISH);
   hit = pl_store_intern_get(s, hash);
   if (hit != 0) {
     *out = hit;
@@ -1088,7 +1091,11 @@ done:
 pl_val pl_store_load(pl_thread* t, const uint8_t hash[32]) {
   pl_store* s = pl_heap_store(t->heap);
   ax_assume(s != NULL, "store_load requires a store");
-  pl_store_save_lock(s);
+  pl_store_lock_context_scope lock_context =
+      pl_store_lock_context_begin(s, s->format == PL_STORE_FORMAT_SILO_V1
+                                         ? PL_STORE_LOCK_CONTEXT_LOAD_SILO
+                                         : PL_STORE_LOCK_CONTEXT_LOAD_LEGACY);
+  pl_store_save_lock(s, PL_STORE_LOCK_SITE_LOAD);
   char err[192] = {0};
   pl_val pin = 0;
   bool ok;
@@ -1096,7 +1103,7 @@ pl_val pl_store_load(pl_thread* t, const uint8_t hash[32]) {
     /* Silo builds directly into the arena and rolls the whole build back on
      * validation failure, so retain mu across its mark/build/release region. */
     pl_intern_entry* compile = NULL;
-    pl_store_lock(s);
+    pl_store_lock(s, PL_STORE_LOCK_SITE_SILO_LOAD_CLOSURE);
     ok = load_silo_pin(t, s, hash, &pin, &compile, err, sizeof(err));
     pl_store_unlock(s);
     /* Loading needs one arena rollback region, but PLAN compilation does not.
@@ -1109,8 +1116,13 @@ pl_val pl_store_load(pl_thread* t, const uint8_t hash[32]) {
     ok = load_legacy_pin(t, s, hash, &pin, err, sizeof(err));
   }
   pl_store_save_unlock(s);
-  if (!ok)
+  if (!ok) {
+    /* pl_raise_msgf longjmps, so a cleanup attribute cannot restore this
+     * thread-local profiling context on the failure path. */
+    pl_store_lock_context_end(&lock_context);
     pl_raise_msgf(t, "store_load: %s",
                   err[0] != '\0' ? err : "backend load failed");
+  }
+  pl_store_lock_context_end(&lock_context);
   return pin;
 }

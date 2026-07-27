@@ -94,37 +94,10 @@ void pl_store_profile_end(pl_store_profile_scope* scope) {
 /* Lock order is save_mu -> mu.  save_mu serializes persistence operations and
  * the compiler machine; mu protects the arena and in-memory registries. */
 
-void pl_store_lock(pl_store* s) {
-  ax_assume(pthread_mutex_lock(&s->mu) == 0, "pthread_mutex_lock");
-}
-
-bool pl_store_trylock(pl_store* s) {
-  int rc = pthread_mutex_trylock(&s->mu);
-  if (!rc) {
-    return true;
-  } else {
-    ax_assume(rc == EBUSY, "pthread_mutex_trylock");
-    return false;
-  }
-}
-
-void pl_store_unlock(pl_store* s) {
-  ax_assume(pthread_mutex_unlock(&s->mu) == 0, "pthread_mutex_unlock");
-}
-
-void pl_store_save_lock(pl_store* s) {
-  ax_assume(pthread_mutex_lock(&s->save_mu) == 0, "save pthread_mutex_lock");
-}
-
-void pl_store_save_unlock(pl_store* s) {
-  ax_assume(pthread_mutex_unlock(&s->save_mu) == 0,
-            "save pthread_mutex_unlock");
-}
-
 /* ── Region allocation ─────────────────────────────────────────────────── */
 
 pl_cell* pl_store_alloc(pl_store* s, size_t cells) {
-  pl_store_lock(s);
+  pl_store_lock(s, PL_STORE_LOCK_SITE_ARENA_ALLOC);
   void* p = ax_arena_alloc_aligned(s->region, cells * sizeof(pl_cell), 8);
   ax_assume(p != NULL, "store region exhausted");
   pl_store_unlock(s);
@@ -132,14 +105,14 @@ pl_cell* pl_store_alloc(pl_store* s, size_t cells) {
 }
 
 size_t pl_store_mark(pl_store* s) {
-  pl_store_lock(s);
+  pl_store_lock(s, PL_STORE_LOCK_SITE_ARENA_MARK);
   size_t mark = s->region->off_o;
   pl_store_unlock(s);
   return mark;
 }
 
 void pl_store_release(pl_store* s, size_t mark) {
-  pl_store_lock(s);
+  pl_store_lock(s, PL_STORE_LOCK_SITE_ARENA_RELEASE);
   s->region->off_o = mark;
   pl_store_unlock(s);
 }
@@ -185,13 +158,13 @@ static void pl_store_index_hashed_law_locked(pl_store* s, pl_val pin) {
 }
 
 void pl_store_index_hashed_law(pl_store* s, pl_val pin) {
-  pl_store_lock(s);
+  pl_store_lock(s, PL_STORE_LOCK_SITE_LAW_INDEX);
   pl_store_index_hashed_law_locked(s, pin);
   pl_store_unlock(s);
 }
 
 pl_val pl_store_intern_get(pl_store* s, const uint8_t hash[32]) {
-  pl_store_lock(s);
+  pl_store_lock(s, PL_STORE_LOCK_SITE_INTERN_GET);
   pl_hash k;
   memcpy(k.b, hash, 32);
   ptrdiff_t i = ax_hmgeti(s->intern, k);
@@ -213,7 +186,8 @@ void pl_store_intern_put(pl_store* s, const uint8_t hash[32], pl_val pin) {
 bool pl_store_backend_put(pl_store* s, const uint8_t hash[32], const uint8_t* b,
                           size_t n) {
   PL_STORE_PROFILE("store.backend.put");
-  pl_store_save_lock(s);
+  PL_STORE_LOCK_CONTEXT(s, PL_STORE_LOCK_CONTEXT_DIRECT_IO);
+  pl_store_save_lock(s, PL_STORE_LOCK_SITE_BACKEND_PUT);
   bool ok = s->be.put(s->be.ctx, hash, b, n);
   pl_store_save_unlock(s);
   return ok;
@@ -222,7 +196,8 @@ bool pl_store_backend_put(pl_store* s, const uint8_t hash[32], const uint8_t* b,
 bool pl_store_backend_get(pl_store* s, const uint8_t hash[32], uint8_t** out_b,
                           size_t* out_s) {
   PL_STORE_PROFILE("store.backend.get");
-  pl_store_save_lock(s);
+  PL_STORE_LOCK_CONTEXT(s, PL_STORE_LOCK_CONTEXT_DIRECT_IO);
+  pl_store_save_lock(s, PL_STORE_LOCK_SITE_BACKEND_GET);
   bool ok = s->be.get(s->be.ctx, hash, out_b, out_s);
   pl_store_save_unlock(s);
   return ok;
@@ -230,7 +205,8 @@ bool pl_store_backend_get(pl_store* s, const uint8_t hash[32], uint8_t** out_b,
 
 bool pl_store_put_root(pl_store* s, const uint8_t hash[32]) {
   PL_STORE_PROFILE("store.root.put");
-  pl_store_save_lock(s);
+  PL_STORE_LOCK_CONTEXT(s, PL_STORE_LOCK_CONTEXT_DIRECT_IO);
+  pl_store_save_lock(s, PL_STORE_LOCK_SITE_ROOT_PUT);
   bool ok = s->be.put_root(s->be.ctx, hash);
   pl_store_save_unlock(s);
   return ok;
@@ -238,7 +214,8 @@ bool pl_store_put_root(pl_store* s, const uint8_t hash[32]) {
 
 bool pl_store_get_root(pl_store* s, uint8_t hash[32]) {
   PL_STORE_PROFILE("store.root.get");
-  pl_store_save_lock(s);
+  PL_STORE_LOCK_CONTEXT(s, PL_STORE_LOCK_CONTEXT_DIRECT_IO);
+  pl_store_save_lock(s, PL_STORE_LOCK_SITE_ROOT_GET);
   bool ok = s->be.get_root(s->be.ctx, hash);
   pl_store_save_unlock(s);
   return ok;
@@ -322,9 +299,11 @@ static pl_val snapshot_copy(pl_store* s, pl_snapshot_entry** map, pl_val v) {
   }
 }
 
-pl_val pl_store_snapshot_normal(pl_thread* t, pl_val v) {
+static pl_val pl_store_snapshot_normal_context(pl_thread* t, pl_val v,
+                                               pl_store_lock_context context) {
   pl_store* s = pl_heap_store(t->heap);
   ax_assume(s != NULL, "snapshot requires a store");
+  PL_STORE_LOCK_CONTEXT(s, context);
   ax_assume(pl_is_normal(v), "snapshot requires a normal value");
   if (pl_is_nat63(v))
     return v;
@@ -339,9 +318,19 @@ pl_val pl_store_snapshot_normal(pl_thread* t, pl_val v) {
   return out;
 }
 
+pl_val pl_store_snapshot_normal(pl_thread* t, pl_val v) {
+  return pl_store_snapshot_normal_context(t, v, PL_STORE_LOCK_CONTEXT_SNAPSHOT);
+}
+
+pl_val pl_store_snapshot_message(pl_thread* t, pl_val v) {
+  return pl_store_snapshot_normal_context(t, v,
+                                          PL_STORE_LOCK_CONTEXT_ACTOR_MESSAGE);
+}
+
 void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
-  pl_store_save_lock(s);
-  pl_store_lock(s);
+  PL_STORE_LOCK_CONTEXT(s, PL_STORE_LOCK_CONTEXT_COMPILE);
+  pl_store_save_lock(s, PL_STORE_LOCK_SITE_CODE_LOOKUP);
+  pl_store_lock(s, PL_STORE_LOCK_SITE_CODE_LOOKUP);
   if (!s->compiler_f || s->compiler_t == NULL) {
     pl_store_unlock(s);
     pl_store_save_unlock(s);
@@ -397,7 +386,7 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
   if (code != NULL) {
     /* Attach the cached code to every canonical LAW registered for this hash.
      */
-    pl_store_lock(s);
+    pl_store_lock(s, PL_STORE_LOCK_SITE_CODE_PUBLISH);
     cached_at = ax_hmgeti(s->code_cache, key);
     if (cached_at >= 0) {
       pl_bytecode_free(code); /* a re-entrant compile won the generation */
@@ -423,8 +412,9 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
  */
 static void pl_store_compile_existing(pl_store* s) {
   PL_STORE_PROFILE("store.compile.existing");
+  PL_STORE_LOCK_CONTEXT(s, PL_STORE_LOCK_CONTEXT_COMPILE_EXISTING);
   pl_intern_entry* laws = NULL;
-  pl_store_lock(s);
+  pl_store_lock(s, PL_STORE_LOCK_SITE_COMPILE_EXISTING_SCAN);
   for (ptrdiff_t i = 0; i < ax_arrlen(s->pins); i++) {
     pl_cell* p = pl_ptr(s->pins[i]);
     if ((pl_hdr_flags(p[0]) & PL_F_PIN_HASHED) == 0 ||
@@ -457,8 +447,9 @@ static void pl_store_free_code(pl_store* s) {
 
 bool pl_store_put_compiler(pl_store* s, const uint8_t hash[32]) {
   PL_STORE_PROFILE("store.compiler.install");
-  pl_store_save_lock(s);
-  pl_store_lock(s);
+  PL_STORE_LOCK_CONTEXT(s, PL_STORE_LOCK_CONTEXT_COMPILER_INSTALL);
+  pl_store_save_lock(s, PL_STORE_LOCK_SITE_COMPILER_INSTALL);
+  pl_store_lock(s, PL_STORE_LOCK_SITE_COMPILER_INSTALL);
   bool enabled = hash[0] ? memcmp(hash, hash + 1, 31) != 0 : true;
   if (s->compiler_f == enabled &&
       memcmp(s->compiler, hash, sizeof(s->compiler)) == 0) {
@@ -524,7 +515,7 @@ void pl_store_register_canonical(pl_store* s, pl_val pin) {
 
   pl_hash key;
   memcpy(key.b, pl_pin_hash_bytes(p), sizeof(key.b));
-  pl_store_lock(s);
+  pl_store_lock(s, PL_STORE_LOCK_SITE_CANONICAL_REGISTER);
   ptrdiff_t at = ax_hmgeti(s->intern, key);
   if (at >= 0) {
     pl_val existing = s->intern[at].value;
@@ -618,7 +609,8 @@ static pl_val st_ix_expr(pl_store* s, pl_val p66, uint64_t name) {
 }
 
 static void pl_store_init_ix(pl_store* s) {
-  pl_store_lock(s);
+  PL_STORE_LOCK_CONTEXT(s, PL_STORE_LOCK_CONTEXT_LAZY_ROW);
+  pl_store_lock(s, PL_STORE_LOCK_SITE_LAZY_ROW_INIT);
   if (s->ix0_expr != 0)
     goto done;
   pl_val p66 = pl_store_pin_of_nat(s, 66);
@@ -687,6 +679,8 @@ void pl_store_free(pl_store* s) {
   if (s->be.close != NULL)
     s->be.close(s->be.ctx);
   ax_arena_destroy(s->region);
+  if (!pl_store_profile_locks_finish(s))
+    fprintf(stderr, "store: failed to finalize lock profile\n");
   pthread_mutex_destroy(&s->mu);
   pthread_mutex_destroy(&s->save_mu);
   free(s);

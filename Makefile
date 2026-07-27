@@ -174,12 +174,13 @@ $(PGO_PROFILE):
 	$(MAKE) pgo-profile
 endif
 
-TIDY_FILES := $(AXSYS_SRCS) $(PLAN_SRCS) $(ENKI_SRCS) $(UNIT_SRCS) $(PROPERTY_SRCS) $(FUZZ_SRCS) $(TSAN_UNIT_SRCS)
+TIDY_FILES := $(AXSYS_SRCS) $(PLAN_SRCS) $(ENKI_SRCS) $(UNIT_SRCS) \
+	$(PROPERTY_SRCS) $(FUZZ_SRCS) $(PERF_SRCS) $(TSAN_UNIT_SRCS)
 TIDY_FILES_ABS := $(addprefix $(CURDIR)/,$(TIDY_FILES))
 
 FORMAT_FILES := $(HEADERS) $(AXSYS_SRCS) $(PLAN_SRCS) $(ENKI_SRCS) $(APP_SRCS) \
 	$(UNIT_SRCS) $(TSAN_UNIT_SRCS) $(PROPERTY_SRCS) $(FUZZ_SRCS) \
-	$(VENDOR_THEFT_DIR)/theft.h $(VENDOR_THEFT_DIR)/theft.c \
+	$(PERF_SRCS) $(VENDOR_THEFT_DIR)/theft.h $(VENDOR_THEFT_DIR)/theft.c \
 	tests/support/fff.h tests/support/test_plan.h \
 	tests/support/test_http_server.h
 

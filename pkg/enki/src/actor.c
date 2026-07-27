@@ -319,7 +319,7 @@ static bool er_pin_payload(er_actor* a, pl_val v, pl_val* out) {
   pl_thread* t = a->t;
   size_t base = t->vsp;
   pl_vpush(t, v);
-  *out = pl_store_snapshot_normal(t, t->vstack[base]);
+  *out = pl_store_snapshot_message(t, t->vstack[base]);
   t->vsp = base;
   return true;
 }

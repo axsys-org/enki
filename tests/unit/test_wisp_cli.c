@@ -300,6 +300,61 @@ Test(wisp_cli, profile_json_finalizes_after_runtime_error) {
             "runtime-error trace was not finalized");
 }
 
+Test(wisp_cli, lock_profile_accepts_both_flag_spellings) {
+  char dir[] = "/tmp/enki-lock-profile-cli-XXXXXX";
+  cr_assert_not_null(mkdtemp(dir));
+
+  char module_path[512];
+  (void)snprintf(module_path, sizeof(module_path), "%s/ok.plan", dir);
+  FILE* f = fopen(module_path, "w");
+  cr_assert_not_null(f);
+  fputs("0\n", f);
+  fclose(f);
+
+  char profile_path[512];
+  char cmd[2048];
+  for (int equals = 0; equals < 2; equals++) {
+    (void)snprintf(profile_path, sizeof(profile_path), "%s/locks-%d.json", dir,
+                   equals);
+    if (equals) {
+      (void)snprintf(cmd, sizeof(cmd),
+                     "%s --profile-locks=%s %s ok >/dev/null 2>&1", wisp_bin(),
+                     profile_path, dir);
+    } else {
+      (void)snprintf(cmd, sizeof(cmd),
+                     "%s --profile-locks %s %s ok >/dev/null 2>&1", wisp_bin(),
+                     profile_path, dir);
+    }
+    int st = system(cmd);
+    cr_assert(WIFEXITED(st) && WEXITSTATUS(st) == 0,
+              "lock profile invocation failed for equals=%d", equals);
+    cr_assert(file_contains(profile_path,
+                            "\"schema\":\"enki.store-lock-profile.v1\""),
+              "lock profile was not finalized for equals=%d", equals);
+    cr_assert(file_contains(profile_path, "\"lock\":\"mu\""),
+              "general mutex total missing for equals=%d", equals);
+    cr_assert(file_contains(profile_path, "\"lock\":\"save_mu\""),
+              "save mutex total missing for equals=%d", equals);
+  }
+}
+
+Test(wisp_cli, lock_profile_open_failure_exits_early) {
+  char dir[] = "/tmp/enki-lock-profile-missing-XXXXXX";
+  cr_assert_not_null(mkdtemp(dir));
+  cr_assert_eq(rmdir(dir), 0);
+
+  char profile_path[512];
+  (void)snprintf(profile_path, sizeof(profile_path), "%s/locks.json", dir);
+  char cmd[2048];
+  (void)snprintf(cmd, sizeof(cmd),
+                 "%s --profile-locks %s %s reaver >/dev/null 2>&1", wisp_bin(),
+                 profile_path, reaver_plan_dir());
+  int st = system(cmd);
+  cr_assert(WIFEXITED(st) && WEXITSTATUS(st) != 0,
+            "unopenable lock profile destination should fail");
+  cr_assert_neq(access(profile_path, F_OK), 0);
+}
+
 Test(wisp_cli, pin_profile_accepts_both_flag_spellings) {
   char dir[] = "/tmp/enki-pin-profile-XXXXXX";
   cr_assert_not_null(mkdtemp(dir));

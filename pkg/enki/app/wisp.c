@@ -511,7 +511,8 @@ static void boot_usage(const char* argv0_c) {
   fprintf(stderr,
           "usage: %s [--text-hash] [--file-root DIR] "
           "[--wait-for-tracy[=SECONDS]] "
-          "[--profile-json FILE] [--profile-pins USECS] "
+          "[--profile-json FILE] [--profile-locks FILE] "
+          "[--profile-pins USECS] "
           "DIR MODULE [FUNCTION ARGS...]\n",
           argv0_c);
 }
@@ -524,6 +525,7 @@ static const char* boot_env_file_root(void) {
 int main(int argc, char** argv) {
   const char* file_root_c = boot_env_file_root();
   const char* profile_json_c = NULL;
+  const char* profile_locks_c = NULL;
   uint64_t pin_profile_us = 0;
   double tracy_wait_s = 0.0;
   bool text_hash_f = false;
@@ -569,6 +571,26 @@ int main(int argc, char** argv) {
     if (strncmp(argv[argi], json_prefix_c, json_prefix_s) == 0) {
       profile_json_c = argv[argi] + json_prefix_s;
       if (profile_json_c[0] == '\0') {
+        boot_usage(argv[0]);
+        return 2;
+      }
+      argi++;
+      continue;
+    }
+    if (strcmp(argv[argi], "--profile-locks") == 0) {
+      if (argi + 1 >= argc || argv[argi + 1][0] == '\0') {
+        boot_usage(argv[0]);
+        return 2;
+      }
+      profile_locks_c = argv[argi + 1];
+      argi += 2;
+      continue;
+    }
+    const char lock_prefix_c[] = "--profile-locks=";
+    size_t lock_prefix_s = sizeof(lock_prefix_c) - 1;
+    if (strncmp(argv[argi], lock_prefix_c, lock_prefix_s) == 0) {
+      profile_locks_c = argv[argi] + lock_prefix_s;
+      if (profile_locks_c[0] == '\0') {
         boot_usage(argv[0]);
         return 2;
       }
@@ -657,6 +679,14 @@ int main(int argc, char** argv) {
       return 1;
     }
   }
+  if (profile_locks_c != NULL &&
+      !pl_store_profile_locks(store, profile_locks_c)) {
+    fprintf(stderr, "wisp: cannot open lock profile `%s`: %s\n",
+            profile_locks_c, strerror(errno));
+    pl_store_free(store);
+    (void)ax_profile_json_finish();
+    return 1;
+  }
   if (pin_profile_f)
     pl_store_profile_pins(store, pin_profile_us);
   pl_heap* heap = pl_heap_new(BOOT_HEAP_CELLS, store);
@@ -664,6 +694,7 @@ int main(int argc, char** argv) {
   if (w == NULL) {
     fprintf(stderr, "wisp: oom\n");
     pl_heap_free(heap);
+    (void)pl_store_profile_locks_finish(store);
     pl_store_free(store);
     if (!ax_profile_json_finish())
       fprintf(stderr, "wisp: failed to finalize profile JSON\n");
@@ -712,6 +743,10 @@ int main(int argc, char** argv) {
   er_scheduler_free(sched); /* leftover actors die with the program */
   en_wisp_free(w);
   pl_heap_free(heap);
+  if (!pl_store_profile_locks_finish(store)) {
+    fprintf(stderr, "wisp: failed to finalize lock profile\n");
+    exit_code = 1;
+  }
   pl_store_free(store);
   if (!ax_profile_json_finish()) {
     fprintf(stderr, "wisp: failed to finalize profile JSON\n");
