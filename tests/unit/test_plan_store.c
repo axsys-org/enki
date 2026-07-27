@@ -546,12 +546,24 @@ TEST(store, compiler_install_is_generation_idempotent) {
   pl_store_free(s);
 }
 
+enum { TEST_SIGABRT_EXIT = 128 + SIGABRT };
+
+static void test_sigabrt_exit(int signal_number) {
+  (void)signal_number;
+  _exit(TEST_SIGABRT_EXIT);
+}
+
+static void test_expect_sigabrt(void) {
+  if (signal(SIGABRT, test_sigabrt_exit) == SIG_ERR)
+    _exit(EXIT_FAILURE);
+}
+
 static void assert_sigabrt(pid_t child) {
   ASSERT_GT(child, 0);
   int status = 0;
   ASSERT_EQ(waitpid(child, &status, 0), child);
-  ASSERT(WIFSIGNALED(status));
-  ASSERT_EQ(WTERMSIG(status), SIGABRT);
+  ASSERT(WIFEXITED(status));
+  ASSERT_EQ(WEXITSTATUS(status), TEST_SIGABRT_EXIT);
 }
 
 TEST(store, registries_reject_resolved_moving_pin_proxies) {
@@ -568,6 +580,7 @@ TEST(store, registries_reject_resolved_moving_pin_proxies) {
 
   pid_t child = fork();
   if (child == 0) {
+    test_expect_sigabrt();
     pl_store_index_hashed_law(rt.store, proxy);
     _exit(0);
   }
@@ -575,6 +588,7 @@ TEST(store, registries_reject_resolved_moving_pin_proxies) {
 
   child = fork();
   if (child == 0) {
+    test_expect_sigabrt();
     pl_store_intern_put(rt.store, hash, proxy);
     _exit(0);
   }
@@ -586,6 +600,7 @@ TEST(store, registries_reject_resolved_moving_pin_proxies) {
   wrong_hash[0] ^= 1;
   child = fork();
   if (child == 0) {
+    test_expect_sigabrt();
     pl_store_intern_put(rt.store, wrong_hash, canonical);
     _exit(0);
   }
@@ -600,6 +615,7 @@ TEST(store, registries_reject_resolved_moving_pin_proxies) {
   ASSERT_NEQ(nat_canonical, 0);
   child = fork();
   if (child == 0) {
+    test_expect_sigabrt();
     pl_store_index_hashed_law(rt.store, nat_canonical);
     _exit(0);
   }
