@@ -113,8 +113,9 @@ static inline bool pl_is_normal(pl_val v) {
     return true;
   switch (pl_tag(v)) {
   case PL_TAG_NAT:
-  case PL_TAG_PIN:
     return true;
+  case PL_TAG_PIN:
+    return (pl_hdr_flags(pl_pin_resolved(pl_ptr(v))[0]) & PL_F_NORMAL) != 0;
   case PL_TAG_APP:
   case PL_TAG_LAW:
     return (pl_hdr_flags(*pl_ptr(v)) & PL_F_NORMAL) != 0;

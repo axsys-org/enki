@@ -227,6 +227,11 @@ void pl_nf_writeback(pl_val parent, uint32_t field, pl_val child) {
   case PL_K_LAW:
     p[2 + field] = child;
     return;
+  case PL_K_PIN:
+    ax_assume(pl_pin_is_proxy(p) && pl_pin_proxy_target(p) == 0 && field == 0,
+              "nf_writeback on a resolved or canonical PIN");
+    p[5] = child;
+    return;
   default:
     ax_abort("nf_writeback on kind %d", (int)pl_hdr_kind(p[0]));
   }
@@ -240,6 +245,8 @@ uint32_t pl_nf_nfields(pl_val v) {
     return pl_app_n(pl_ptr(v)) + 1;
   case PL_TAG_LAW:
     return 2;
+  case PL_TAG_PIN:
+    return 1;
   default:
     return 0;
   }
@@ -252,6 +259,10 @@ pl_val pl_nf_field(pl_val v, uint32_t i) {
     return (pl_val)p[1 + i];
   case PL_TAG_LAW:
     return (pl_val)p[2 + i];
+  case PL_TAG_PIN:
+    ax_assume(pl_pin_is_proxy(p) && pl_pin_proxy_target(p) == 0 && i == 0,
+              "pl_nf_field on a resolved or canonical PIN");
+    return (pl_val)p[5];
   default:
     ax_abort("pl_nf_field on tag 0x%llx", (unsigned long long)pl_tag(v));
   }

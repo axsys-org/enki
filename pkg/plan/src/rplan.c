@@ -519,10 +519,18 @@ pl_val pl_op82_stamp(pl_thread* t, size_t ab) {
 
 pl_val pl_op82_now(pl_thread* t, size_t ab) {
   AX_UNUSED(ab);
-  time_t now = time(NULL);
-  if (now == (time_t)-1)
+  struct timespec now;
+  if (clock_gettime(CLOCK_REALTIME, &now) != 0)
     pl_raise_msg(t, "Now: clock failed");
-  return (pl_val)(uint64_t)now;
+
+  uint64_t sec = (uint64_t)now.tv_sec;
+  uint64_t nsec = (uint64_t)now.tv_nsec;
+  if (sec > (UINT64_MAX - nsec) / UINT64_C(1000000000))
+    pl_raise_msg(t, "Now: timestamp overflow");
+
+  uint64_t instant = sec * UINT64_C(1000000000) + nsec;
+  pl_gc_reserve(t, PL_NAT_CELLS(1));
+  return pl_mk_nat_u64(t, instant);
 }
 
 /* ── Sockets / descriptors (handles via the global fd table) ───────────── */

@@ -15,8 +15,8 @@
 #include "store_internal.h"
 
 /*
- * Pinning is deliberately cheap: pl_pin only normalizes the value and wraps it
- * in a moving-heap proxy.  Save discovers the reachable proxy closure,
+ * Pinning is deliberately cheap: pl_pin only forces the value to WHNF and
+ * wraps it in a moving-heap proxy.  Save discovers the reachable proxy closure,
  * persists it in dependency order, builds or reuses a canonical store DAG,
  * then publishes each proxy's canonical target.  Publication happens only
  * after the persistence commit succeeds, so a failed Save remains retryable.
@@ -716,14 +716,13 @@ bool pl_store_save_root(pl_store* s, pl_val pin, uint8_t out_hash[32],
 }
 
 pl_val pl_pin(pl_thread* t, pl_val v) {
-  v = pl_nf(t, v);
+  v = pl_whnf(t, v);
   size_t root = t->vsp;
   pl_vpush(t, v);
   pl_gc_reserve(t, PL_PIN_CELLS(0));
   PL_GC_FORBID(t);
   pl_cell* p = pl_bump(t, PL_PIN_CELLS(0));
-  p[0] =
-      pl_hdr_make(PL_K_PIN, PL_F_NORMAL | PL_F_PIN_PROXY, 0, PL_PIN_CELLS(0));
+  p[0] = pl_hdr_make(PL_K_PIN, PL_F_PIN_PROXY, 0, PL_PIN_CELLS(0));
   memset(p + 1, 0, 4 * sizeof(pl_cell));
   p[5] = t->vstack[root];
   p[6] = 0;
