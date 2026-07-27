@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "test_plan.h"
@@ -451,9 +452,18 @@ TEST(op82, direct_ops_still_run_inline) {
   pl_thread* t = rt.t;
   t->rplan_f = true;
   /* Now is a direct effect: no suspension, result inline. */
+  time_t before = time(NULL);
+  ASSERT_NEQ(before, (time_t)-1);
   pl_val args[1] = {0};
   pl_thread_start(t, test_op82_thunk(t, ax_s3('N', 'o', 'w'), 1, args));
   ASSERT_EQ(test_run(t), PL_RUN_DONE);
-  ASSERT_GT(pl_thread_result(t), 0);
+  time_t after = time(NULL);
+  ASSERT_NEQ(after, (time_t)-1);
+
+  pl_val result = pl_thread_result(t);
+  ASSERT(pl_is_nat(result));
+  uint64_t now_ns = pl_nat_u64_clamp(result);
+  ASSERT_GTE(now_ns, (uint64_t)before * UINT64_C(1000000000));
+  ASSERT_LT(now_ns, ((uint64_t)after + 1) * UINT64_C(1000000000));
   test_rt_free(&rt);
 }
