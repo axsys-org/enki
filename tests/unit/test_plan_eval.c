@@ -35,6 +35,47 @@ static pl_val test_app1_thunk_to(pl_thread* t, pl_val value) {
   return out;
 }
 
+static pl_val test_byte_mask(pl_thread* t, const uint8_t* bytes, size_t n) {
+  uint8_t mask[32] = {0};
+  for (size_t i = 0; i < n; i++)
+    mask[bytes[i] / 8u] |= (uint8_t)(1u << (bytes[i] % 8u));
+  return pl_nat_from_bytes(t, mask, sizeof(mask));
+}
+
+static void test_assert_nat_row3(pl_val value, pl_val a, pl_val b, pl_val c) {
+  pl_cell* p = pl_as(PL_TAG_APP, value);
+  ASSERT_NOT_NULL(p);
+  ASSERT_EQ(pl_app_head(p), 0);
+  ASSERT_EQ(pl_app_n(p), 3);
+  ASSERT(pl_is_nat(pl_app_args(p)[0]));
+  ASSERT(pl_is_nat(pl_app_args(p)[1]));
+  ASSERT(pl_is_nat(pl_app_args(p)[2]));
+  ASSERT(pl_nat_eq(pl_app_args(p)[0], a));
+  ASSERT(pl_nat_eq(pl_app_args(p)[1], b));
+  ASSERT(pl_nat_eq(pl_app_args(p)[2], c));
+}
+
+static pl_val test_cord_text(pl_thread* t, pl_val text) {
+  pl_val fields[1] = {text};
+  return test_app(t, ax_s4('t', 'e', 'x', 't'), 1, fields);
+}
+
+static pl_val test_cord_slice(pl_thread* t, pl_val source, pl_val offset,
+                              pl_val length) {
+  pl_val fields[3] = {source, offset, length};
+  return test_app(t, ax_s5('s', 'l', 'i', 'c', 'e'), 3, fields);
+}
+
+static pl_val test_cord_repeat(pl_thread* t, pl_val byte, pl_val count) {
+  pl_val fields[2] = {byte, count};
+  return test_app(t, ax_s6('r', 'e', 'p', 'e', 'a', 't'), 2, fields);
+}
+
+static pl_val test_cord_cat(pl_thread* t, pl_val left, pl_val right) {
+  pl_val fields[2] = {left, right};
+  return test_app(t, ax_s3('c', 'a', 't'), 2, fields);
+}
+
 static bool growing_enter_hook(pl_thread* t, size_t hbase, uint32_t argc,
                                pl_val* out) {
   (void)hbase;
@@ -56,7 +97,9 @@ static void test_expect_no_op66(pl_thread* t, pl_val name, size_t n,
   }
   pl_catch_unwind(t, &c);
   ASSERT_NOT_NULL(t->exn_msg);
-  ASSERT_STR_EQ(t->exn_msg, "no primop 66 (argc 1)");
+  char expected[64];
+  (void)snprintf(expected, sizeof(expected), "no primop 66 (argc %zu)", n);
+  ASSERT_STR_EQ(t->exn_msg, expected);
 }
 
 static bool test_install_self_replacement_raises(pl_thread* t,
@@ -665,6 +708,194 @@ TEST(ops, whole_row_slice_reuses_only_exact_result) {
   ASSERT_EQ(pl_app_head(p), 0);
   ASSERT_EQ(pl_app_n(p), 3);
 
+  test_rt_free(&rt);
+}
+
+TEST(ops, scan8_handles_both_polarities_and_stops_at_rejected_byte) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  static const uint8_t source[] = {'a', 'a', 'a', 'b'};
+  static const uint8_t klass[] = {'a'};
+  pl_vpush(t, pl_nat_from_bytes(t, source, sizeof(source)));
+  pl_vpush(t, test_byte_mask(t, klass, sizeof(klass)));
+
+  pl_val inside_args[4] = {
+      t->vstack[base],
+      0,
+      t->vstack[base + 1],
+      1,
+  };
+  pl_val inside = test_op66(t, ax_s5('s', 'c', 'a', 'n', '8'), 4, inside_args);
+  test_assert_nat_row3(inside, 3, 0, 3);
+
+  pl_val outside_args[4] = {
+      t->vstack[base],
+      3,
+      t->vstack[base + 1],
+      0,
+  };
+  pl_val outside =
+      test_op66(t, ax_s5('s', 'c', 'a', 'n', '8'), 4, outside_args);
+  test_assert_nat_row3(outside, 4, 0, 1);
+  test_rt_free(&rt);
+}
+
+TEST(ops, scan8_counts_lf_and_tracks_column_from_nonzero_start) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  static const uint8_t source[] = {'x', 'x',  'a', '\n', 'b',
+                                   'c', '\n', 'z', '!'};
+  uint8_t all_bytes[32];
+  memset(all_bytes, 0xff, sizeof(all_bytes));
+  pl_vpush(t, pl_nat_from_bytes(t, source, sizeof(source)));
+  pl_vpush(t, pl_nat_from_bytes(t, all_bytes, sizeof(all_bytes)));
+
+  pl_val args[4] = {
+      t->vstack[base],
+      2,
+      t->vstack[base + 1],
+      42,
+  };
+  pl_val out = test_op66(t, ax_s5('s', 'c', 'a', 'n', '8'), 4, args);
+  test_assert_nat_row3(out, 9, 2, 2);
+  test_rt_free(&rt);
+}
+
+TEST(ops, scan8_preserves_eof_and_past_end_start) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  static const uint8_t source[] = {'a', 'b', 'c'};
+  pl_vpush(t, pl_nat_from_bytes(t, source, sizeof(source)));
+
+  pl_val eof_args[4] = {t->vstack[base], 3, 0, 0};
+  pl_val eof = test_op66(t, ax_s5('s', 'c', 'a', 'n', '8'), 4, eof_args);
+  test_assert_nat_row3(eof, 3, 0, 0);
+
+  uint8_t large_start_bytes[9] = {0};
+  large_start_bytes[8] = 1;
+  pl_vpush(t,
+           pl_nat_from_bytes(t, large_start_bytes, sizeof(large_start_bytes)));
+  pl_val past_args[4] = {t->vstack[base], t->vstack[base + 1], 0, 0};
+  pl_val past = test_op66(t, ax_s5('s', 'c', 'a', 'n', '8'), 4, past_args);
+  test_assert_nat_row3(past, t->vstack[base + 1], 0, 0);
+
+  pl_val empty_args[4] = {0, 0, 0, 1};
+  pl_val empty = test_op66(t, ax_s5('s', 'c', 'a', 'n', '8'), 4, empty_args);
+  test_assert_nat_row3(empty, 0, 0, 0);
+  test_rt_free(&rt);
+}
+
+TEST(ops, scan8_uses_all_256_mask_bits) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  static const uint8_t source[] = {0xff, 'x'};
+  static const uint8_t klass[] = {0xff};
+  pl_vpush(t, pl_nat_from_bytes(t, source, sizeof(source)));
+  pl_vpush(t, test_byte_mask(t, klass, sizeof(klass)));
+  pl_val args[4] = {
+      t->vstack[base],
+      0,
+      t->vstack[base + 1],
+      1,
+  };
+  pl_val out = test_op66(t, ax_s5('s', 'c', 'a', 'n', '8'), 4, args);
+  test_assert_nat_row3(out, 1, 0, 1);
+  test_rt_free(&rt);
+}
+
+TEST(ops, strtree_sizes_all_constructors_and_shared_subtrees) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  static const uint8_t hello[] = {'h', 'e', 'l', 'l', 'o'};
+  static const uint8_t source[] = {'s', 'o', 'u', 'r', 'c', 'e'};
+  pl_vpush(t, pl_nat_from_bytes(t, hello, sizeof(hello)));
+  pl_vpush(t, pl_nat_from_bytes(t, source, sizeof(source)));
+  pl_vpush(t, test_cord_text(t, t->vstack[base]));
+  pl_vpush(t, test_cord_slice(t, t->vstack[base + 1], 123, 7));
+  pl_vpush(t, test_cord_repeat(t, 0xff, 9));
+  pl_vpush(t, test_cord_cat(t, t->vstack[base + 2], t->vstack[base + 3]));
+  pl_vpush(t, test_cord_cat(t, t->vstack[base + 4], t->vstack[base + 2]));
+  pl_vpush(t, test_cord_cat(t, t->vstack[base + 5], t->vstack[base + 6]));
+
+  pl_val args[1] = {t->vstack[base + 7]};
+  pl_val out = test_op66(t, ax_s7('S', 't', 'r', 'T', 'r', 'e', 'e'), 1, args);
+  ASSERT_EQ(out, 26);
+  test_rt_free(&rt);
+}
+
+TEST(ops, strtree_preserves_boxed_nat_precision) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  uint8_t count_bytes[9] = {0};
+  uint8_t expected_bytes[9] = {0};
+  count_bytes[8] = 1;    /* 2^64 */
+  expected_bytes[8] = 2; /* 2^65 */
+  pl_vpush(t, pl_nat_from_bytes(t, count_bytes, sizeof(count_bytes)));
+  pl_vpush(t, test_cord_repeat(t, 0, t->vstack[base]));
+  pl_vpush(t, test_cord_cat(t, t->vstack[base + 1], t->vstack[base + 1]));
+  pl_vpush(t, pl_nat_from_bytes(t, expected_bytes, sizeof(expected_bytes)));
+
+  pl_val args[1] = {t->vstack[base + 2]};
+  pl_val out = test_op66(t, ax_s7('S', 't', 'r', 'T', 'r', 'e', 'e'), 1, args);
+  ASSERT(pl_is_nat(out));
+  ASSERT(pl_nat_eq(out, t->vstack[base + 3]));
+
+  uint8_t max_u64_bytes[8];
+  memset(max_u64_bytes, 0xff, sizeof(max_u64_bytes));
+  pl_vpush(t, pl_nat_from_bytes(t, max_u64_bytes, sizeof(max_u64_bytes)));
+  pl_vpush(t, test_cord_repeat(t, 0, t->vstack[base + 4]));
+  pl_vpush(t, test_cord_repeat(t, 0, 1));
+  pl_vpush(t, test_cord_cat(t, t->vstack[base + 5], t->vstack[base + 6]));
+  pl_val carry_args[1] = {t->vstack[base + 7]};
+  pl_val carried =
+      test_op66(t, ax_s7('S', 't', 'r', 'T', 'r', 'e', 'e'), 1, carry_args);
+  ASSERT(pl_nat_eq(carried, t->vstack[base]));
+  test_rt_free(&rt);
+}
+
+TEST(ops, strtree_traversal_is_stack_safe) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  pl_vpush(t, test_cord_repeat(t, 0, 1));
+  pl_vpush(t, t->vstack[base]);
+  for (size_t i = 0; i < 4096; i++) {
+    pl_val next = test_cord_cat(t, t->vstack[base + 1], t->vstack[base]);
+    t->vstack[base + 1] = next;
+  }
+
+  pl_val args[1] = {t->vstack[base + 1]};
+  pl_val out = test_op66(t, ax_s7('S', 't', 'r', 'T', 'r', 'e', 'e'), 1, args);
+  ASSERT_EQ(out, 4097);
+  test_rt_free(&rt);
+}
+
+TEST(ops, strtree_rejects_malformed_nodes_and_wrong_arity) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  pl_vpush(t, test_app1(t, 0, 0));
+  pl_vpush(t, test_cord_text(t, t->vstack[base]));
+  pl_val args[1] = {t->vstack[base + 1]};
+  ASSERT_EQ(test_op66(t, ax_s7('S', 't', 'r', 'T', 'r', 'e', 'e'), 1, args), 0);
+
+  pl_val bad_fields[1] = {0};
+  pl_vpush(t, test_app(t, ax_s3('b', 'a', 'd'), 1, bad_fields));
+  pl_val bad_args[1] = {t->vstack[base + 2]};
+  ASSERT_EQ(test_op66(t, ax_s7('S', 't', 'r', 'T', 'r', 'e', 'e'), 1, bad_args),
+            0);
+
+  pl_val wrong_args[2] = {0, 0};
+  test_expect_no_op66(t, ax_s7('S', 't', 'r', 'T', 'r', 'e', 'e'), 2,
+                      wrong_args);
+  pl_val scan_args[3] = {0, 0, 0};
+  test_expect_no_op66(t, ax_s5('s', 'c', 'a', 'n', '8'), 3, scan_args);
   test_rt_free(&rt);
 }
 
