@@ -76,6 +76,49 @@ static pl_run_status test_run(pl_thread* t) {
   return s;
 }
 
+static pl_val test_op83(pl_thread* t, pl_val name, size_t n,
+                        const pl_val* args) {
+  pl_thread_start(t, test_op83_thunk(t, name, n, args));
+  ASSERT_EQ(test_run(t), PL_RUN_DONE);
+  return pl_thread_result(t);
+}
+
+TEST(op83, reaver_string_ops_are_available_through_splan) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  t->rplan_f = true;
+  size_t base = t->vsp;
+
+  static const uint8_t source[] = {'a', 'a', 'a', 'b'};
+  uint8_t mask[32] = {0};
+  mask['a' / 8u] = (uint8_t)(1u << ('a' % 8u));
+  pl_vpush(t, pl_nat_from_bytes(t, source, sizeof(source)));
+  pl_vpush(t, pl_nat_from_bytes(t, mask, sizeof(mask)));
+  pl_val scan_args[4] = {
+      t->vstack[base],
+      0,
+      t->vstack[base + 1],
+      1,
+  };
+  pl_val scanned = test_op83(t, ax_s5('s', 'c', 'a', 'n', '8'), 4, scan_args);
+  pl_cell* row = pl_as(PL_TAG_APP, scanned);
+  ASSERT_NOT_NULL(row);
+  ASSERT_EQ(pl_app_head(row), 0);
+  ASSERT_EQ(pl_app_n(row), 3);
+  ASSERT_EQ(pl_app_args(row)[0], 3);
+  ASSERT_EQ(pl_app_args(row)[1], 0);
+  ASSERT_EQ(pl_app_args(row)[2], 3);
+
+  pl_val repeat_args[3] = {ax_s6('r', 'e', 'p', 'e', 'a', 't'), 0xff, 9};
+  pl_vpush(t, test_app(t, 0, 3, repeat_args));
+  pl_val tree_args[1] = {t->vstack[t->vsp - 1]};
+  ASSERT_EQ(
+      test_op83(t, ax_s7('S', 't', 'r', 'T', 'r', 'e', 'e'), 1, tree_args), 9);
+
+  t->vsp = base;
+  test_rt_free(&rt);
+}
+
 #define FETCH ax_s5('F', 'e', 't', 'c', 'h')
 
 static pl_val test_zone_call(pl_thread* t, const char* op_c, pl_val arg,

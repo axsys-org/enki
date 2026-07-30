@@ -56,24 +56,24 @@ static void test_assert_nat_row3(pl_val value, pl_val a, pl_val b, pl_val c) {
 }
 
 static pl_val test_cord_text(pl_thread* t, pl_val text) {
-  pl_val fields[1] = {text};
-  return test_app(t, ax_s4('t', 'e', 'x', 't'), 1, fields);
+  pl_val fields[2] = {ax_s4('t', 'e', 'x', 't'), text};
+  return test_app(t, 0, 2, fields);
 }
 
 static pl_val test_cord_slice(pl_thread* t, pl_val source, pl_val offset,
                               pl_val length) {
-  pl_val fields[3] = {source, offset, length};
-  return test_app(t, ax_s5('s', 'l', 'i', 'c', 'e'), 3, fields);
+  pl_val fields[4] = {ax_s5('s', 'l', 'i', 'c', 'e'), source, offset, length};
+  return test_app(t, 0, 4, fields);
 }
 
 static pl_val test_cord_repeat(pl_thread* t, pl_val byte, pl_val count) {
-  pl_val fields[2] = {byte, count};
-  return test_app(t, ax_s6('r', 'e', 'p', 'e', 'a', 't'), 2, fields);
+  pl_val fields[3] = {ax_s6('r', 'e', 'p', 'e', 'a', 't'), byte, count};
+  return test_app(t, 0, 3, fields);
 }
 
 static pl_val test_cord_cat(pl_thread* t, pl_val left, pl_val right) {
-  pl_val fields[2] = {left, right};
-  return test_app(t, ax_s3('c', 'a', 't'), 2, fields);
+  pl_val fields[3] = {ax_s3('c', 'a', 't'), left, right};
+  return test_app(t, 0, 3, fields);
 }
 
 static bool growing_enter_hook(pl_thread* t, size_t hbase, uint32_t argc,
@@ -885,10 +885,16 @@ TEST(ops, strtree_rejects_malformed_nodes_and_wrong_arity) {
   pl_val args[1] = {t->vstack[base + 1]};
   ASSERT_EQ(test_op66(t, ax_s7('S', 't', 'r', 'T', 'r', 'e', 'e'), 1, args), 0);
 
-  pl_val bad_fields[1] = {0};
-  pl_vpush(t, test_app(t, ax_s3('b', 'a', 'd'), 1, bad_fields));
+  pl_val bad_fields[2] = {ax_s3('b', 'a', 'd'), 0};
+  pl_vpush(t, test_app(t, 0, 2, bad_fields));
   pl_val bad_args[1] = {t->vstack[base + 2]};
   ASSERT_EQ(test_op66(t, ax_s7('S', 't', 'r', 'T', 'r', 'e', 'e'), 1, bad_args),
+            0);
+
+  pl_val old_fields[1] = {0};
+  pl_vpush(t, test_app(t, ax_s4('t', 'e', 'x', 't'), 1, old_fields));
+  pl_val old_args[1] = {t->vstack[base + 3]};
+  ASSERT_EQ(test_op66(t, ax_s7('S', 't', 'r', 'T', 'r', 'e', 'e'), 1, old_args),
             0);
 
   pl_val wrong_args[2] = {0, 0};

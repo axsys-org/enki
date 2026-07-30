@@ -375,9 +375,13 @@ static pl_val op_strtree(pl_thread* t, size_t ab) {
     pl_cell* app = pl_as(PL_TAG_APP, node);
     if (app == NULL)
       goto malformed;
-    pl_val tag = pl_app_head(app);
-    uint32_t n = pl_app_n(app);
+    uint32_t row_n = pl_app_n(app);
+    if (pl_app_head(app) != 0 || row_n == 0)
+      goto malformed;
     pl_val* fields = pl_app_args(app);
+    pl_val tag = fields[0];
+    fields++;
+    uint32_t n = row_n - 1;
     if (n == 1 && tag == text_tag) {
       if (!pl_is_nat(fields[0]))
         goto malformed;
@@ -1023,6 +1027,8 @@ static pl_val op_load(pl_thread* t, size_t ab) {
 /* Evaluator-local op 83 entries: no host-effect worker affinity. */
 #define OP83_LOCAL(name, argc, mask, body)                                     \
   {83, 0, name, argc, mask, 0, false, false, body}
+#define OP83_LOCAL_DEEP(name, argc, mask, deep, body)                          \
+  {83, 0, name, argc, mask, deep, false, false, body}
 /* Coordination effects are serviced in pkg/enki. */
 #define OP83C(name, argc, mask, deep, body)                                    \
   {83, 0, name, argc, mask, deep, true, true, body}
@@ -1184,6 +1190,10 @@ const pl_opdesc pl_ops[] = {
     /* op 66 additions are appended to preserve every established index. */
     OP66(ax_s5('s', 'c', 'a', 'n', '8'), 4, 0b1111, 0, op_scan8),
     OP66(ax_s7('S', 't', 'r', 'T', 'r', 'e', 'e'), 1, 0b1, 0b1, op_strtree),
+
+    /* Reaver exposes these provisional string operations through splan. */
+    OP83_LOCAL_DEEP("scan8", 4, 0b1111, 0, op_scan8),
+    OP83_LOCAL_DEEP("StrTree", 1, 0b1, 0b1, op_strtree),
 };
 
 const size_t pl_nops = sizeof(pl_ops) / sizeof(pl_ops[0]);
@@ -1228,8 +1238,9 @@ static const uint16_t pl_op82_argc1[] = {105, 106, 107, 108, 110, 111, 112,
 static const uint16_t pl_op82_argc2[] = {109, 116, 117, 119};
 static const uint16_t pl_op82_argc3[] = {120, 123};
 
-static const uint16_t pl_op83_argc1[] = {124, 126, 127, 128};
+static const uint16_t pl_op83_argc1[] = {124, 126, 127, 128, 132};
 static const uint16_t pl_op83_argc2[] = {125};
+static const uint16_t pl_op83_argc4[] = {131};
 
 static pl_opbucket pl_op_lookup_bucket(uint64_t opset, uint32_t argc) {
   switch (opset) {
@@ -1297,6 +1308,8 @@ static pl_opbucket pl_op_lookup_bucket(uint64_t opset, uint32_t argc) {
       return PL_IX_BUCKET(pl_op83_argc1);
     case 2:
       return PL_IX_BUCKET(pl_op83_argc2);
+    case 4:
+      return PL_IX_BUCKET(pl_op83_argc4);
     }
     break;
   }
