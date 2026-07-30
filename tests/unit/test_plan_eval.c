@@ -807,55 +807,43 @@ TEST(ops, scan8_uses_all_256_mask_bits) {
   test_rt_free(&rt);
 }
 
-TEST(ops, strtree_sizes_all_constructors_and_shared_subtrees) {
+TEST(ops, strtree_text_returns_its_string) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  static const uint8_t hello[] = {'h', 'e', 'l', 'l', 'o'};
+  pl_vpush(t, pl_nat_from_bytes(t, hello, sizeof(hello)));
+  pl_vpush(t, test_cord_text(t, t->vstack[base]));
+
+  pl_val args[1] = {t->vstack[base + 1]};
+  pl_val out = test_op66(t, ax_s7('S', 't', 'r', 'T', 'r', 'e', 'e'), 1, args);
+  ASSERT(pl_nat_eq(out, t->vstack[base]));
+  test_rt_free(&rt);
+}
+
+TEST(ops, strtree_materializes_all_constructors_and_shared_subtrees) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
   size_t base = t->vsp;
   static const uint8_t hello[] = {'h', 'e', 'l', 'l', 'o'};
   static const uint8_t source[] = {'s', 'o', 'u', 'r', 'c', 'e'};
+  static const uint8_t expected[] = {
+      'h', 'e', 'l', 'l', 'o', 'o', 'u', 'r', '!', '!', 'h', 'e', 'l', 'l', 'o',
+  };
   pl_vpush(t, pl_nat_from_bytes(t, hello, sizeof(hello)));
   pl_vpush(t, pl_nat_from_bytes(t, source, sizeof(source)));
   pl_vpush(t, test_cord_text(t, t->vstack[base]));
-  pl_vpush(t, test_cord_slice(t, t->vstack[base + 1], 123, 7));
-  pl_vpush(t, test_cord_repeat(t, 0xff, 9));
+  pl_vpush(t, test_cord_slice(t, t->vstack[base + 1], 1, 3));
+  pl_vpush(t, test_cord_repeat(t, '!', 2));
   pl_vpush(t, test_cord_cat(t, t->vstack[base + 2], t->vstack[base + 3]));
   pl_vpush(t, test_cord_cat(t, t->vstack[base + 4], t->vstack[base + 2]));
   pl_vpush(t, test_cord_cat(t, t->vstack[base + 5], t->vstack[base + 6]));
 
   pl_val args[1] = {t->vstack[base + 7]};
   pl_val out = test_op66(t, ax_s7('S', 't', 'r', 'T', 'r', 'e', 'e'), 1, args);
-  ASSERT_EQ(out, 26);
-  test_rt_free(&rt);
-}
-
-TEST(ops, strtree_preserves_boxed_nat_precision) {
-  test_rt rt = test_rt_new();
-  pl_thread* t = rt.t;
-  size_t base = t->vsp;
-  uint8_t count_bytes[9] = {0};
-  uint8_t expected_bytes[9] = {0};
-  count_bytes[8] = 1;    /* 2^64 */
-  expected_bytes[8] = 2; /* 2^65 */
-  pl_vpush(t, pl_nat_from_bytes(t, count_bytes, sizeof(count_bytes)));
-  pl_vpush(t, test_cord_repeat(t, 0, t->vstack[base]));
-  pl_vpush(t, test_cord_cat(t, t->vstack[base + 1], t->vstack[base + 1]));
-  pl_vpush(t, pl_nat_from_bytes(t, expected_bytes, sizeof(expected_bytes)));
-
-  pl_val args[1] = {t->vstack[base + 2]};
-  pl_val out = test_op66(t, ax_s7('S', 't', 'r', 'T', 'r', 'e', 'e'), 1, args);
-  ASSERT(pl_is_nat(out));
-  ASSERT(pl_nat_eq(out, t->vstack[base + 3]));
-
-  uint8_t max_u64_bytes[8];
-  memset(max_u64_bytes, 0xff, sizeof(max_u64_bytes));
-  pl_vpush(t, pl_nat_from_bytes(t, max_u64_bytes, sizeof(max_u64_bytes)));
-  pl_vpush(t, test_cord_repeat(t, 0, t->vstack[base + 4]));
-  pl_vpush(t, test_cord_repeat(t, 0, 1));
-  pl_vpush(t, test_cord_cat(t, t->vstack[base + 5], t->vstack[base + 6]));
-  pl_val carry_args[1] = {t->vstack[base + 7]};
-  pl_val carried =
-      test_op66(t, ax_s7('S', 't', 'r', 'T', 'r', 'e', 'e'), 1, carry_args);
-  ASSERT(pl_nat_eq(carried, t->vstack[base]));
+  ASSERT_EQ(pl_nat_byte_len(out), sizeof(expected));
+  for (size_t i = 0; i < sizeof(expected); i++)
+    ASSERT_EQ(pl_nat_byte_at(out, i), expected[i]);
   test_rt_free(&rt);
 }
 
@@ -863,7 +851,7 @@ TEST(ops, strtree_traversal_is_stack_safe) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
   size_t base = t->vsp;
-  pl_vpush(t, test_cord_repeat(t, 0, 1));
+  pl_vpush(t, test_cord_repeat(t, 'x', 1));
   pl_vpush(t, t->vstack[base]);
   for (size_t i = 0; i < 4096; i++) {
     pl_val next = test_cord_cat(t, t->vstack[base + 1], t->vstack[base]);
@@ -872,7 +860,9 @@ TEST(ops, strtree_traversal_is_stack_safe) {
 
   pl_val args[1] = {t->vstack[base + 1]};
   pl_val out = test_op66(t, ax_s7('S', 't', 'r', 'T', 'r', 'e', 'e'), 1, args);
-  ASSERT_EQ(out, 4097);
+  ASSERT_EQ(pl_nat_byte_len(out), 4097);
+  ASSERT_EQ(pl_nat_byte_at(out, 0), 'x');
+  ASSERT_EQ(pl_nat_byte_at(out, 4096), 'x');
   test_rt_free(&rt);
 }
 

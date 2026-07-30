@@ -109,11 +109,17 @@ TEST(op83, reaver_string_ops_are_available_through_splan) {
   ASSERT_EQ(pl_app_args(row)[1], 0);
   ASSERT_EQ(pl_app_args(row)[2], 3);
 
-  pl_val repeat_args[3] = {ax_s6('r', 'e', 'p', 'e', 'a', 't'), 0xff, 9};
-  pl_vpush(t, test_app(t, 0, 3, repeat_args));
+  static const uint8_t hello[] = {'h', 'e', 'l', 'l', 'o'};
+  pl_vpush(t, pl_nat_from_bytes(t, hello, sizeof(hello)));
+  pl_val text_args[2] = {
+      ax_s4('t', 'e', 'x', 't'),
+      t->vstack[t->vsp - 1],
+  };
+  pl_vpush(t, test_app(t, 0, 2, text_args));
   pl_val tree_args[1] = {t->vstack[t->vsp - 1]};
-  ASSERT_EQ(
-      test_op83(t, ax_s7('S', 't', 'r', 'T', 'r', 'e', 'e'), 1, tree_args), 9);
+  ASSERT(pl_nat_eq(
+      test_op83(t, ax_s7('S', 't', 'r', 'T', 'r', 'e', 'e'), 1, tree_args),
+      t->vstack[t->vsp - 2]));
 
   t->vsp = base;
   test_rt_free(&rt);

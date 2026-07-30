@@ -281,11 +281,13 @@ typedef struct strtree_stack {
   size_t cap;
 } strtree_stack;
 
-typedef struct strtree_sum {
-  uint64_t* limbs;
+typedef struct strtree_bytes {
+  uint8_t* items;
   size_t len;
   size_t cap;
-} strtree_sum;
+} strtree_bytes;
+
+#define STRTREE_MAX_BYTES ((((size_t)1 << 20) - 1) * sizeof(uint64_t))
 
 static void* strtree_grow(void* mem, size_t* cap, size_t need,
                           size_t item_size) {
@@ -318,46 +320,33 @@ static bool strtree_push(strtree_stack* stack, pl_val value) {
   return true;
 }
 
-static bool strtree_add(strtree_sum* sum, pl_val value) {
-  size_t value_len = pl_nat_limb_len(value);
-  if (value_len == 0)
-    return true;
-
-  size_t add_len = sum->len > value_len ? sum->len : value_len;
-  if (add_len == SIZE_MAX)
+static bool strtree_nat_size(pl_val value, size_t* out) {
+  if (pl_nat_limb_len(value) > 1)
     return false;
-  void* grown =
-      strtree_grow(sum->limbs, &sum->cap, add_len + 1, sizeof(*sum->limbs));
+  uint64_t n = pl_nat_limb_at(value, 0);
+  if (n > SIZE_MAX)
+    return false;
+  *out = (size_t)n;
+  return true;
+}
+
+static bool strtree_reserve_bytes(strtree_bytes* bytes, size_t add) {
+  if (add == 0)
+    return true;
+  if (add > STRTREE_MAX_BYTES - bytes->len)
+    return false;
+  void* grown = strtree_grow(bytes->items, &bytes->cap, bytes->len + add,
+                             sizeof(*bytes->items));
   if (grown == NULL)
     return false;
-  sum->limbs = grown;
-  for (size_t i = sum->len; i <= add_len; i++)
-    sum->limbs[i] = 0;
-
-  uint64_t carry = 0;
-  for (size_t i = 0; i < value_len; i++) {
-    uint64_t old = sum->limbs[i];
-    uint64_t added = old + pl_nat_limb_at(value, i);
-    uint64_t carry1 = added < old;
-    uint64_t with_carry = added + carry;
-    uint64_t carry2 = with_carry < added;
-    sum->limbs[i] = with_carry;
-    carry = carry1 | carry2;
-  }
-  for (size_t i = value_len; carry != 0 && i < add_len; i++) {
-    uint64_t old = sum->limbs[i];
-    sum->limbs[i] = old + 1;
-    carry = sum->limbs[i] == 0 ? 1 : 0;
-  }
-  sum->limbs[add_len] = carry;
-  sum->len = add_len + (carry != 0 ? 1 : 0);
+  bytes->items = grown;
   return true;
 }
 
 /*
  * StrTree traverses an already-deep-normal CordTree.  The host stack and
- * limb accumulator cannot be invalidated by GC; the only reserve happens
- * after traversal, when no CordTree pointers remain in them.
+ * byte accumulator cannot be invalidated by GC; the only PLAN allocation
+ * happens after traversal, when no CordTree pointers remain in the host stack.
  */
 static pl_val op_strtree(pl_thread* t, size_t ab) {
   const pl_val text_tag = ax_s4('t', 'e', 'x', 't');
@@ -365,7 +354,7 @@ static pl_val op_strtree(pl_thread* t, size_t ab) {
   const pl_val repeat_tag = ax_s6('r', 'e', 'p', 'e', 'a', 't');
   const pl_val cat_tag = ax_s3('c', 'a', 't');
   strtree_stack stack = {0};
-  strtree_sum sum = {0};
+  strtree_bytes bytes = {0};
 
   if (!strtree_push(&stack, ARG(0)))
     goto allocation_failed;
@@ -385,19 +374,42 @@ static pl_val op_strtree(pl_thread* t, size_t ab) {
     if (n == 1 && tag == text_tag) {
       if (!pl_is_nat(fields[0]))
         goto malformed;
-      if (!strtree_add(&sum, (pl_val)pl_nat_byte_len(fields[0])))
-        goto allocation_failed;
+      size_t text_len = pl_nat_byte_len(fields[0]);
+      if (!strtree_reserve_bytes(&bytes, text_len))
+        goto output_too_large_or_allocation_failed;
+      for (size_t i = 0; i < text_len; i++)
+        bytes.items[bytes.len + i] = pl_nat_byte_at(fields[0], i);
+      bytes.len += text_len;
     } else if (n == 3 && tag == slice_tag) {
       if (!pl_is_nat(fields[0]) || !pl_is_nat(fields[1]) ||
           !pl_is_nat(fields[2]))
         goto malformed;
-      if (!strtree_add(&sum, fields[2]))
-        goto allocation_failed;
+      size_t slice_len;
+      if (!strtree_nat_size(fields[2], &slice_len) ||
+          !strtree_reserve_bytes(&bytes, slice_len))
+        goto output_too_large_or_allocation_failed;
+      size_t offset;
+      size_t source_len = pl_nat_byte_len(fields[0]);
+      size_t available = 0;
+      if (strtree_nat_size(fields[1], &offset) && offset < source_len)
+        available = source_len - offset;
+      if (available > slice_len)
+        available = slice_len;
+      for (size_t i = 0; i < available; i++)
+        bytes.items[bytes.len + i] = pl_nat_byte_at(fields[0], offset + i);
+      if (slice_len != available)
+        memset(bytes.items + bytes.len + available, 0, slice_len - available);
+      bytes.len += slice_len;
     } else if (n == 2 && tag == repeat_tag) {
       if (!pl_is_nat(fields[0]) || !pl_is_nat(fields[1]))
         goto malformed;
-      if (!strtree_add(&sum, fields[1]))
-        goto allocation_failed;
+      size_t count;
+      if (!strtree_nat_size(fields[1], &count) ||
+          !strtree_reserve_bytes(&bytes, count))
+        goto output_too_large_or_allocation_failed;
+      if (count != 0)
+        memset(bytes.items + bytes.len, pl_nat_byte_at(fields[0], 0), count);
+      bytes.len += count;
     } else if (n == 2 && tag == cat_tag) {
       if (!strtree_push(&stack, fields[1]) || !strtree_push(&stack, fields[0]))
         goto allocation_failed;
@@ -407,38 +419,24 @@ static pl_val op_strtree(pl_thread* t, size_t ab) {
   }
 
   free(stack.items);
-  if (sum.len == 0) {
-    free(sum.limbs);
-    return 0;
-  }
-  if (sum.len == 1 && sum.limbs[0] <= PL_NAT63_MAX) {
-    pl_val out = sum.limbs[0];
-    free(sum.limbs);
-    return out;
-  }
-  if (sum.len >= (1u << 20)) {
-    free(sum.limbs);
-    pl_raise_msg(t, "StrTree: size exceeds PLAN natural limit");
-  }
-
-  pl_gc_reserve(t, PL_NAT_CELLS(sum.len));
-  PL_GC_FORBID(t);
-  uint64_t* out_limbs;
-  pl_val out = pl_mk_nat_limbs(t, sum.len, &out_limbs);
-  memcpy(out_limbs, sum.limbs, sum.len * sizeof(*out_limbs));
-  PL_GC_ALLOW(t);
-  free(sum.limbs);
+  pl_val out = pl_nat_from_bytes(t, bytes.items, bytes.len);
+  free(bytes.items);
   return out;
 
 malformed:
   free(stack.items);
-  free(sum.limbs);
+  free(bytes.items);
   return 0;
 
 allocation_failed:
   free(stack.items);
-  free(sum.limbs);
+  free(bytes.items);
   pl_raise_msg(t, "StrTree: temporary allocation failed");
+
+output_too_large_or_allocation_failed:
+  free(stack.items);
+  free(bytes.items);
+  pl_raise_msg(t, "StrTree: output too large or temporary allocation failed");
 }
 
 /* ── Comparisons ───────────────────────────────────────────────────────── */
