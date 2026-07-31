@@ -928,3 +928,220 @@ TEST(nf, deep_normalization_snaps_thunks) {
   ASSERT((pl_hdr_flags(p[0]) & PL_F_NORMAL) != 0);
   test_rt_free(&rt);
 }
+
+/* ── S2 opcodes: FORCE / PUSH_SLOT / BR / JMP / CALL / NOUPD ─────────── */
+
+/* Make a saved law pin with arity and set its code; returns the pin
+ * rooted at the current vsp (caller owns the slot). */
+static pl_val test_code_pin(test_rt* rt, uint64_t arity, pl_code* code) {
+  pl_thread* t = rt->t;
+  size_t base = t->vsp;
+  pl_vpush(t, test_law(t, arity, 0, 0));
+  t->vstack[base] = pl_pin(t, t->vstack[base]);
+  char err[192] = {0};
+  ASSERT(pl_store_save_root(rt->store, t->vstack[base], NULL, err, sizeof(err)),
+         "%s", err);
+  pl_cell* proxy = pl_as(PL_TAG_PIN, t->vstack[base]);
+  ASSERT_NOT_NULL(proxy);
+  pl_val pin = pl_pin_proxy_target(proxy);
+  ASSERT_NEQ(pin, 0);
+  t->vstack[base] = pin;
+  pl_pin_set_code(pl_as(PL_TAG_PIN, pin), code);
+  return pin;
+}
+
+static pl_val test_run_call1(pl_thread* t, pl_val pin, pl_val arg) {
+  size_t base = t->vsp;
+  pl_vpush(t, pin);
+  pl_vpush(t, arg);
+  pl_gc_reserve(t, PL_THKE_CELLS(2));
+  pl_val thke = pl_mk_thke(t, 0, PL_BAN_FAST, 2, &t->vstack[base]);
+  t->vsp = base;
+  pl_thread_start(t, thke);
+  pl_run_status s;
+  while ((s = pl_thread_run(t, 100000)) == PL_RUN_YIELDED)
+    ;
+  ASSERT_EQ(s, PL_RUN_DONE);
+  return t->result;
+}
+
+TEST(exec, force_delivers_whnf_result) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  static pl_op_t ops[4] = {OP_PUSH_VAR, 1, OP_FORCE, OP_RET};
+  static pl_code code = {ops, 4};
+  pl_val pin = test_code_pin(&rt, 1, &code);
+  (void)pin;
+  pl_vpush(t, test_thunk(t, 42)); /* lazy arg, forced by OP_FORCE */
+  pl_val r = test_run_call1(t, t->vstack[base], t->vstack[base + 1]);
+  ASSERT_EQ(r, 42);
+  /* already-WHNF operand passes through unchanged */
+  r = test_run_call1(t, t->vstack[base], 7);
+  ASSERT_EQ(r, 7);
+  pl_pin_set_code(pl_as(PL_TAG_PIN, t->vstack[base]), NULL);
+  test_rt_free(&rt);
+}
+
+TEST(exec, push_slot_duplicates_operand) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  static pl_op_t ops[8] = {OP_PUSH_VAR, 1,         OP_FORCE, OP_PUSH_SLOT,
+                           0,           OP_MK_APP, 1,        OP_RET};
+  static pl_code code = {ops, 8};
+  test_code_pin(&rt, 1, &code);
+  pl_val r = test_run_call1(t, t->vstack[base], 42);
+  pl_cell* p = pl_as(PL_TAG_APP, r);
+  ASSERT_NOT_NULL(p);
+  ASSERT_EQ(pl_app_head(p), 42);
+  ASSERT_EQ(pl_app_n(p), 1);
+  ASSERT_EQ(pl_app_args(p)[0], 42);
+  pl_pin_set_code(pl_as(PL_TAG_PIN, t->vstack[base]), NULL);
+  test_rt_free(&rt);
+}
+
+TEST(exec, br_selects_arm_and_bounds) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  static pl_op_t ops[13] = {OP_PUSH_VAR, 1,  OP_FORCE,    OP_BR, 2,
+                            7,           10, OP_PUSH_LIT, 10,    OP_RET,
+                            OP_PUSH_LIT, 20, OP_RET};
+  static pl_code code = {ops, 13};
+  test_code_pin(&rt, 1, &code);
+  ASSERT_EQ(test_run_call1(t, t->vstack[base], 0), 10);
+  ASSERT_EQ(test_run_call1(t, t->vstack[base], 1), 20);
+  /* out-of-range scrutinee raises */
+  size_t mark = t->vsp;
+  pl_vpush(t, t->vstack[base]);
+  pl_vpush(t, 2);
+  pl_gc_reserve(t, PL_THKE_CELLS(2));
+  pl_val thke = pl_mk_thke(t, 0, PL_BAN_FAST, 2, &t->vstack[mark]);
+  t->vsp = mark;
+  pl_thread_start(t, thke);
+  pl_run_status s;
+  while ((s = pl_thread_run(t, 100000)) == PL_RUN_YIELDED)
+    ;
+  ASSERT_EQ(s, PL_RUN_EXN);
+  pl_pin_set_code(pl_as(PL_TAG_PIN, t->vstack[base]), NULL);
+  test_rt_free(&rt);
+}
+
+TEST(exec, jmp_loop_stays_preemptable) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  static pl_op_t ops[3] = {OP_JMP, 0, OP_RET};
+  static pl_code code = {ops, 3};
+  test_code_pin(&rt, 1, &code);
+  size_t fcap0 = t->fcap;
+  pl_vpush(t, t->vstack[base]);
+  pl_vpush(t, 5);
+  pl_gc_reserve(t, PL_THKE_CELLS(2));
+  pl_val thke = pl_mk_thke(t, 0, PL_BAN_FAST, 2, &t->vstack[base + 1]);
+  t->vsp = base + 1;
+  pl_thread_start(t, thke);
+  for (int i = 0; i < 50; i++)
+    ASSERT_EQ(pl_thread_run(t, 10000), PL_RUN_YIELDED);
+  ASSERT_EQ(t->fcap, fcap0); /* the loop runs in constant frame space */
+  pl_pin_set_code(pl_as(PL_TAG_PIN, t->vstack[base]), NULL);
+  test_rt_free(&rt);
+}
+
+TEST(exec, call_local_block_returns_forced) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  /* main: [0, arg] -> call sub(arg) -> [0, arg'] -> row [arg']
+   * sub (at 10): force its stack argument and return it */
+  static pl_op_t ops[14] = {OP_PUSH_LIT,  0, OP_PUSH_VAR, 1,     OP_CALL,
+                            10,           1, OP_MK_APP,   1,     OP_RET,
+                            OP_PUSH_SLOT, 0, OP_FORCE,    OP_RET};
+  static pl_code code = {ops, 14};
+  test_code_pin(&rt, 1, &code);
+  pl_vpush(t, test_thunk(t, 42));
+  pl_val r = test_run_call1(t, t->vstack[base], t->vstack[base + 1]);
+  pl_cell* p = pl_as(PL_TAG_APP, r);
+  ASSERT_NOT_NULL(p);
+  ASSERT_EQ(pl_app_head(p), 0);
+  ASSERT_EQ(pl_app_n(p), 1);
+  ASSERT_EQ(pl_app_args(p)[0], 42);
+  pl_pin_set_code(pl_as(PL_TAG_PIN, t->vstack[base]), NULL);
+  test_rt_free(&rt);
+}
+
+TEST(exec, noupd_thke_reevaluates) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  /* the code allocates a fresh row [x] on every execution */
+  static pl_op_t ops[7] = {OP_PUSH_LIT, 0, OP_PUSH_VAR, 1,
+                           OP_MK_APP,   1, OP_RET};
+  static pl_code code = {ops, 7};
+  test_code_pin(&rt, 1, &code);
+  pl_vpush(t, t->vstack[base]);
+  pl_vpush(t, 7);
+  pl_gc_reserve(t, 2 * PL_THKE_CELLS(2));
+  PL_GC_FORBID(t);
+  pl_val no_upd =
+      pl_mk_thke(t, 0, PL_BAN_FAST | PL_BAN_NOUPD, 2, &t->vstack[base + 1]);
+  pl_val upd = pl_mk_thke(t, 0, PL_BAN_FAST, 2, &t->vstack[base + 1]);
+  PL_GC_ALLOW(t);
+  t->vsp = base + 1;
+  pl_vpush(t, no_upd);
+  pl_vpush(t, upd);
+  for (int round = 0; round < 2; round++) {
+    /* a NOUPD thke survives forcing un-updated, and re-evaluates */
+    pl_thread_start(t, t->vstack[base + 1]);
+    pl_run_status s;
+    while ((s = pl_thread_run(t, 100000)) == PL_RUN_YIELDED)
+      ;
+    ASSERT_EQ(s, PL_RUN_DONE);
+    pl_cell* rp = pl_as(PL_TAG_APP, t->result);
+    ASSERT_NOT_NULL(rp);
+    ASSERT_EQ(pl_app_args(rp)[0], 7);
+    ASSERT_EQ(pl_hdr_kind(*pl_ptr(t->vstack[base + 1])), PL_K_THKE);
+  }
+  /* the updateable control is overwritten by its first force */
+  pl_thread_start(t, t->vstack[base + 2]);
+  pl_run_status s;
+  while ((s = pl_thread_run(t, 100000)) == PL_RUN_YIELDED)
+    ;
+  ASSERT_EQ(s, PL_RUN_DONE);
+  ASSERT_NEQ(pl_hdr_kind(*pl_ptr(t->vstack[base + 2])), PL_K_THKE);
+  pl_pin_set_code(pl_as(PL_TAG_PIN, t->vstack[base]), NULL);
+  test_rt_free(&rt);
+}
+
+TEST(exec, ingest_validates_targets_and_guards_fusion) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  /* BR arm 1 targets the RET behind a MK_THK: decode must NOT fuse */
+  pl_val guarded[13] = {OP_PUSH_VAR, 1,           OP_FORCE,    OP_BR, 2,
+                        7,           12,          OP_PUSH_VAR, 1,     OP_MK_THK,
+                        1,           PL_BAN_SLOW, OP_RET};
+  pl_vpush(t, test_app(t, 0, 13, guarded));
+  pl_code* c = pl_bytecode_from_val(t->vstack[base]);
+  ASSERT_NOT_NULL(c);
+  ASSERT_EQ(c->ops[9], OP_MK_THK);
+  pl_bytecode_free(c);
+  /* same program, arm 1 rejoining arm 0 instead: the MK_THK fuses */
+  pl_val fused[13] = {OP_PUSH_VAR, 1, OP_FORCE,  OP_BR, 2,           7,     7,
+                      OP_PUSH_VAR, 1, OP_MK_THK, 1,     PL_BAN_SLOW, OP_RET};
+  pl_vpush(t, test_app(t, 0, 13, fused));
+  c = pl_bytecode_from_val(t->vstack[base + 1]);
+  ASSERT_NOT_NULL(c);
+  ASSERT_EQ(c->ops[9], OP_TAILCALL);
+  pl_bytecode_free(c);
+  /* a target into an operand slot fails the decode */
+  pl_val bad[6] = {OP_JMP, 4, OP_RET, OP_PUSH_LIT, 9, OP_RET};
+  pl_vpush(t, test_app(t, 0, 6, bad));
+  ASSERT_EQ(pl_bytecode_from_val(t->vstack[base + 2]), NULL);
+  /* a target out of range fails the decode */
+  pl_val oob[3] = {OP_JMP, 99, OP_RET};
+  pl_vpush(t, test_app(t, 0, 3, oob));
+  ASSERT_EQ(pl_bytecode_from_val(t->vstack[base + 3]), NULL);
+  test_rt_free(&rt);
+}

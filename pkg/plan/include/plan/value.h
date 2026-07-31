@@ -56,6 +56,11 @@ typedef enum {
   PL_BAN_SLOW = 2,       /* fallback - possibly over or under applied */
   PL_BAN_PRIM = 3,       /* primop [oppin, arg]: dispatch via the op table */
   PL_BAN_PRIM_KNOWN = 4, /* ingest-resolved primop [opidx, args…] */
+  PL_BAN_MASK = 7,       /* low bits: the bane proper */
+  PL_BAN_NOUPD = 8,      /* flag: entry-count Zero/Once (occurrence
+                            analysis) — no blackhole, no update; re-entry
+                            re-evaluates.  Also loses <<loop>> detection,
+                            which the Once guarantee makes unreachable. */
 } pl_bane;
 
 /*

@@ -457,10 +457,13 @@ static bool pl_yield_now(pl_thread* t) {
 /* ── The machine ───────────────────────────────────────────────────────── */
 
 static pl_run_status pl_run_caught(pl_thread* t, pl_val v0, size_t base,
-                                   bool at_return0);
+                                   uint8_t entry0);
 
+/* entry is a pl_resume_kind: EVAL evaluates v, RETURN delivers v to the
+ * top frame, RUN re-enters compiled code at the top F_EXEC frame's
+ * saved offset (v is unused). */
 static pl_run_status pl_run(pl_thread* t, pl_val v, size_t base,
-                            bool at_return) {
+                            uint8_t entry) {
   pl_val env, expr;
   pl_frame* fr;
   size_t hbase = 0;
@@ -484,15 +487,21 @@ static pl_run_status pl_run(pl_thread* t, pl_val v, size_t base,
       [PL_K_BH] = &&defer_bh,
       [PL_K_THKE] = &&defer_thke,
   };
-  /* OP_EVAL/OP_CALL are unimplemented: abort, in all builds.
-   * OP_TAILCALL is never emitted by the compiler — the ingest walker
+  /* OP_TAILCALL is never emitted by the compiler — the ingest walker
    * fuses MK_THK+RET into it. */
   static void* const op_tbl[PL_OP_COUNT] = {
-      [OP_PUSH_VAR] = &&x_push_var, [OP_PUSH_LIT] = &&x_push_lit,
-      [OP_MK_THK] = &&x_mk_thk,     [OP_MK_APP] = &&x_mk_app,
-      [OP_INTERP] = &&x_interp,     [OP_RET] = &&x_ret,
-      [OP_EVAL] = &&x_bad,          [OP_CALL] = &&x_bad,
+      [OP_PUSH_VAR] = &&x_push_var,
+      [OP_PUSH_LIT] = &&x_push_lit,
+      [OP_MK_THK] = &&x_mk_thk,
+      [OP_MK_APP] = &&x_mk_app,
+      [OP_INTERP] = &&x_interp,
+      [OP_RET] = &&x_ret,
+      [OP_FORCE] = &&x_force,
+      [OP_CALL] = &&x_call,
       [OP_TAILCALL] = &&x_tail,
+      [OP_PUSH_SLOT] = &&x_push_slot,
+      [OP_BR] = &&x_br,
+      [OP_JMP] = &&x_jmp,
   };
   static void* const ret_tbl[PL_F_KIND_COUNT] = {
       [PL_F_UPDATE] = &&ret_update, [PL_F_APPLY] = &&ret_apply,
@@ -506,8 +515,10 @@ static pl_run_status pl_run(pl_thread* t, pl_val v, size_t base,
       [PL_F_APPLYN] = &&ret_applyn,
   };
 
-  if (at_return)
+  if (entry == PL_RES_RETURN)
     goto ret;
+  if (entry == PL_RES_RUN)
+    goto exec;
 
 eval:
   /*
@@ -558,6 +569,9 @@ defer_thunk: {
 
 defer_thke: {
   pl_cell* p = pl_ptr(v);
+  if (pl_thke_bane(p) & PL_BAN_NOUPD)
+    goto eval_thke_v; /* Zero/Once entry count: no blackhole, no update
+                         frame; re-entry re-evaluates */
   if ((pl_hdr_flags(p[0]) & PL_F_HOLE) != 0)
     pl_raise_msg(t, "<<loop>>");
   p[0] = pl_hdr_set_flag(p[0], PL_F_HOLE);
@@ -566,11 +580,12 @@ defer_thke: {
   fr->a = v;
   goto eval_thke;
 }
-eval_thke: {
+eval_thke:
   fr = &t->fstack[t->fsp - 1];
   v = fr->a;
+eval_thke_v: {
   pl_val* args;
-  pl_bane ban = pl_thke_bane(pl_ptr(v));
+  pl_bane ban = (pl_bane)(pl_thke_bane(pl_ptr(v)) & PL_BAN_MASK);
   argc = pl_thke_n(pl_ptr(v));
   args = pl_thke_args(pl_ptr(v));
   if (argc == 0)
@@ -686,7 +701,8 @@ x_push_lit:
 
 x_mk_thk: {
   argc = (uint32_t)NEXT();
-  pl_bane bane = (pl_bane)NEXT();
+  pl_op_t rawbane = NEXT();
+  pl_bane bane = (pl_bane)(rawbane & PL_BAN_MASK);
   if (argc == 0 || argc > t->vsp - fr->argbase)
     pl_raise_msg(t, "bytecode stack underflow");
   if (bane == PL_BAN_PRIM_KNOWN) {
@@ -697,6 +713,8 @@ x_mk_thk: {
     pl_gc_reserve(t, PL_THKE_CELLS(argc + 1));
     PL_GC_FORBID(t);
     pl_val thke = pl_mk_thke_known(t, fr->a, idx, argc, pl_vpeek(t, argc));
+    if (rawbane & PL_BAN_NOUPD)
+      pl_ptr(thke)[2] = PL_BAN_PRIM_KNOWN | PL_BAN_NOUPD;
     pl_vreplace(t, argc, thke);
     PL_GC_ALLOW(t);
     DISPATCH();
@@ -705,7 +723,7 @@ x_mk_thk: {
     pl_raise_msg(t, "exec: bad bane");
   pl_gc_reserve(t, PL_THKE_CELLS(argc));
   PL_GC_FORBID(t);
-  pl_val thke = pl_mk_thke(t, fr->a, bane, argc, pl_vpeek(t, argc));
+  pl_val thke = pl_mk_thke(t, fr->a, (pl_bane)rawbane, argc, pl_vpeek(t, argc));
   pl_vreplace(t, argc, thke);
   PL_GC_ALLOW(t);
   DISPATCH();
@@ -748,7 +766,8 @@ x_tail: {
    * tbase, exactly where x_ret's vsp reset would have left the stack.
    */
   argc = (uint32_t)NEXT();
-  pl_bane bane = (pl_bane)NEXT();
+  pl_op_t rawbane = NEXT();
+  pl_bane bane = (pl_bane)(rawbane & PL_BAN_MASK);
   uint32_t idx = 0;
   if (bane == PL_BAN_PRIM_KNOWN) {
     idx = (uint32_t)NEXT();
@@ -844,9 +863,12 @@ tail_fallback:
   pl_gc_reserve(t, bane == PL_BAN_PRIM_KNOWN ? PL_THKE_CELLS(argc + 1)
                                              : PL_THKE_CELLS(argc));
   PL_GC_FORBID(t);
-  pl_val thke = bane == PL_BAN_PRIM_KNOWN
-                    ? pl_mk_thke_known(t, fr->a, idx, argc, pl_vpeek(t, argc))
-                    : pl_mk_thke(t, fr->a, bane, argc, pl_vpeek(t, argc));
+  pl_val thke =
+      bane == PL_BAN_PRIM_KNOWN
+          ? pl_mk_thke_known(t, fr->a, idx, argc, pl_vpeek(t, argc))
+          : pl_mk_thke(t, fr->a, (pl_bane)rawbane, argc, pl_vpeek(t, argc));
+  if (bane == PL_BAN_PRIM_KNOWN && (rawbane & PL_BAN_NOUPD))
+    pl_ptr(thke)[2] = PL_BAN_PRIM_KNOWN | PL_BAN_NOUPD;
   PL_GC_ALLOW(t);
   v = thke;
   t->vsp = tbase;
@@ -854,8 +876,86 @@ tail_fallback:
   goto eval;
 }
 
-x_bad:
-  ax_abort("exec: unsupported opcode");
+x_force:
+  /* pop and evaluate to WHNF; ret_exec delivers the result back onto
+   * the operand stack when the value returns to this frame */
+  if (t->vsp == fr->argbase)
+    pl_raise_msg(t, "bytecode stack underflow");
+  v = pl_vpop(t);
+  goto eval;
+
+x_push_slot: {
+  pl_op_t slot = NEXT();
+  if (slot >= t->vsp - fr->argbase)
+    pl_raise_msg(t, "exec: slot out of range");
+  pl_vpush(t, t->vstack[fr->argbase + slot]);
+  DISPATCH();
+}
+
+x_br: {
+  /* [m, t0..t(m-1)]: the scrutinee is the (already forced) top of
+   * stack; arm targets were boundary-checked at ingest.  A backward
+   * arm is a loop edge: take a fuel step there, and on exhaustion
+   * yield with the jump already taken (PL_RES_RUN resumes exec). */
+  size_t br_pc = fr->k - 1;
+  pl_op_t m = NEXT();
+  if (t->vsp == fr->argbase)
+    pl_raise_msg(t, "bytecode stack underflow");
+  pl_val scrut = pl_vpop(t);
+  if (!pl_is_nat63(scrut))
+    pl_raise_msg(t, "exec: branch on non-nat");
+  if (scrut >= m)
+    pl_raise_msg(t, "exec: branch out of range");
+  pl_op_t target = fr->code->ops[fr->k + scrut];
+  fr->k = (uint32_t)target;
+  if (target <= br_pc && ax_unlikely(--t->fuel == 0) && pl_yield_now(t)) {
+    t->resume_kind = PL_RES_RUN;
+    pl_profile_pause_all(t);
+    return PL_RUN_YIELDED;
+  }
+  DISPATCH();
+}
+
+x_jmp: {
+  size_t jmp_pc = fr->k - 1;
+  pl_op_t target = NEXT();
+  fr->k = (uint32_t)target;
+  if (target <= jmp_pc && ax_unlikely(--t->fuel == 0) && pl_yield_now(t)) {
+    t->resume_kind = PL_RES_RUN;
+    pl_profile_pause_all(t);
+    return PL_RUN_YIELDED;
+  }
+  DISPATCH();
+}
+
+x_call: {
+  /* [target, argc]: call a local block; the argc topmost operands
+   * become the callee's operand-stack base, consumed by its RET, whose
+   * result arrives WHNF via ret_exec.  Every call takes a fuel step
+   * (self-recursive local calls would otherwise grow the frame stack
+   * unpreemptably); on exhaustion, yield rewound to re-execute the
+   * call with fresh fuel. */
+  size_t call_pc = fr->k - 1;
+  pl_op_t target = NEXT();
+  pl_op_t nargs = NEXT();
+  if (nargs > t->vsp - fr->argbase)
+    pl_raise_msg(t, "bytecode stack underflow");
+  if (ax_unlikely(--t->fuel == 0) && pl_yield_now(t)) {
+    fr->k = (uint32_t)call_pc;
+    t->resume_kind = PL_RES_RUN;
+    pl_profile_pause_all(t);
+    return PL_RUN_YIELDED;
+  }
+  pl_code* ccode = fr->code;
+  pl_val cenv = fr->a;
+  fr = pl_fpush(t);
+  fr->kind = PL_F_EXEC;
+  fr->a = cenv;
+  fr->code = ccode;
+  fr->k = (uint32_t)target;
+  fr->argbase = (uint32_t)(t->vsp - nargs);
+  DISPATCH();
+}
 }
 #undef DISPATCH
 #undef NEXT
@@ -1439,15 +1539,15 @@ op_body:
  * carries its barriers across quanta.
  */
 static pl_run_status pl_run_caught(pl_thread* t, pl_val v0, size_t base,
-                                   bool at_return0) {
+                                   uint8_t entry0) {
   /* modified across setjmp/longjmp iterations */
   volatile pl_val v = v0;
-  volatile bool at_return = at_return0;
+  volatile uint8_t entry = entry0;
   for (;;) {
     pl_catch c;
     pl_catch_init(t, &c);
     if (setjmp(c.jb) == 0) {
-      pl_run_status s = pl_run(t, v, base, at_return);
+      pl_run_status s = pl_run(t, v, base, entry);
       pl_catch_pop(t, &c);
       return s;
     }
@@ -1471,7 +1571,7 @@ static pl_run_status pl_run_caught(pl_thread* t, pl_val v0, size_t base,
         v = pl_mk_app_from(t, 1, 1, &t->exn);
         PL_GC_ALLOW(t);
         t->exn = 0;
-        at_return = true;
+        entry = PL_RES_RETURN;
         continue;
       }
     }
@@ -1589,10 +1689,13 @@ pl_run_status pl_thread_run(pl_thread* t, uint64_t fuel) {
   pl_run_status s;
   switch (t->resume_kind) {
   case PL_RES_EVAL:
-    s = pl_run_caught(t, t->resume_val, t->base_fsp, false);
+    s = pl_run_caught(t, t->resume_val, t->base_fsp, PL_RES_EVAL);
     break;
   case PL_RES_RETURN:
-    s = pl_run_caught(t, t->resume_val, t->base_fsp, true);
+    s = pl_run_caught(t, t->resume_val, t->base_fsp, PL_RES_RETURN);
+    break;
+  case PL_RES_RUN:
+    s = pl_run_caught(t, 0, t->base_fsp, PL_RES_RUN);
     break;
   default:
     ax_abort("pl_thread_run: bad resume kind %d", (int)t->resume_kind);
@@ -1618,7 +1721,7 @@ static pl_val pl_run_centry(pl_thread* t, pl_val v, size_t base) {
   if (outermost)
     pl_profile_resume_all(t);
   t->centry_depth++;
-  pl_run_status s = pl_run_caught(t, v, base, false);
+  pl_run_status s = pl_run_caught(t, v, base, PL_RES_EVAL);
   t->centry_depth--;
   if (outermost)
     pl_profile_pause_all(t);
