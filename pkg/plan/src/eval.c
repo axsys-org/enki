@@ -1323,7 +1323,7 @@ judge_scan:
     }
     uint32_t m = (uint32_t)(t->vsp - cursor - 1);
     uint32_t nslots = 1 + jargc + m;
-    pl_gc_reserve(t, PL_ENV_CELLS(nslots) + (size_t)(m + 1) * PL_THUNK_CELLS);
+    pl_gc_reserve(t, PL_ENV_CELLS(nslots) + (size_t)m * PL_THUNK_CELLS);
     PL_GC_FORBID(t);
     /* Every slot is written below before the no-collect window closes.  Avoid
      * zeroing what JUDGE immediately overwrites on every law entry. */
@@ -1346,10 +1346,16 @@ judge_scan:
       PL_GC_ALLOW(t);
       goto exec;
     }
-    v = pl_kal1(t, envv, t->vstack[cursor]);
+    /* Tail skip: decompose the body in place under envv instead of
+     * deferring it through a fresh unshared thunk (which would round-trip
+     * defer_thunk's blackhole + F_UPDATE + dead update).  envv lives only
+     * in `env` until eval_expr roots it (frame or vstack) before any
+     * allocation. */
+    expr = t->vstack[cursor];
+    env = envv;
     PL_GC_ALLOW(t);
     t->vsp = jbase;
-    goto eval;
+    goto eval_expr;
   }
 
 opdeep_next:
