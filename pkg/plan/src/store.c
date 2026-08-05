@@ -110,6 +110,7 @@ void pl_store_profile_end(pl_store_profile_scope* scope) {
  * cold compiler.  Unset dir (library users, tests) or an unopenable
  * path (CI sandboxes) disables it silently.  PL_CODECACHE=0 forces it
  * off. */
+#ifndef ENKI_WASM
 static pthread_mutex_t plgc_mu = PTHREAD_MUTEX_INITIALIZER;
 static MDB_env* plgc_env;
 static MDB_dbi plgc_dbi;
@@ -192,6 +193,20 @@ static void plgc_put(const uint8_t key[32], const uint8_t* b, size_t n) {
   }
   pthread_mutex_unlock(&plgc_mu);
 }
+#else
+static bool plgc_get(const uint8_t key[32], uint8_t** out_b, size_t* out_n) {
+  AX_UNUSED(key);
+  AX_UNUSED(out_b);
+  AX_UNUSED(out_n);
+  return false;
+}
+
+static void plgc_put(const uint8_t key[32], const uint8_t* b, size_t n) {
+  AX_UNUSED(key);
+  AX_UNUSED(b);
+  AX_UNUSED(n);
+}
+#endif
 
 /* Lock order is save_mu -> mu.  save_mu serializes persistence operations and
  * the compiler machine; mu protects the arena and in-memory registries. */

@@ -68,6 +68,39 @@ static _Thread_local er_mt_worker* er_current_worker;
 
 /* Struct definitions live in actor_internal.h, shared with http.c. */
 
+#ifdef ENKI_WASM
+void er_http_service(er_scheduler* sys, er_actor* a, uint32_t argc,
+                     pl_val* args) {
+  AX_UNUSED(sys);
+  AX_UNUSED(argc);
+  AX_UNUSED(args);
+  er_crash_msg(a, "Fetch is unavailable in the WASM host");
+}
+
+void er_http_pump(er_scheduler* sys) {
+  AX_UNUSED(sys);
+}
+
+bool er_http_idle(er_scheduler* sys) {
+  AX_UNUSED(sys);
+  return false;
+}
+
+bool er_http_outstanding(const er_scheduler* sys) {
+  AX_UNUSED(sys);
+  return false;
+}
+
+bool er_http_mt_pump(er_scheduler* sys) {
+  AX_UNUSED(sys);
+  return false;
+}
+
+void er_http_teardown(er_scheduler* sys) {
+  AX_UNUSED(sys);
+}
+#endif
+
 /* ── Construction ──────────────────────────────────────────────────────── */
 
 er_scheduler* er_scheduler_new(pl_store* store, er_config cfg) {
@@ -492,6 +525,10 @@ static int64_t er_load_caps(er_actor* a, size_t capslot, er_actor*** out) {
  * the actor already owns this worker; drop the global mutex around that work
  * so the replacement pool can keep scheduling unrelated actors. */
 static void er_service_unlock(er_scheduler* sys, bool locked) {
+#ifdef ENKI_WASM
+  AX_UNUSED(sys);
+  ax_assume(!locked, "browser executor cannot hold the native scheduler mutex");
+#else
   if (!locked)
     return;
   if (er_current_worker != NULL) {
@@ -500,9 +537,14 @@ static void er_service_unlock(er_scheduler* sys, bool locked) {
     er_current_worker->holds_mu = false;
   }
   pthread_mutex_unlock(&sys->mu);
+#endif
 }
 
 static void er_service_relock(er_scheduler* sys, bool locked) {
+#ifdef ENKI_WASM
+  AX_UNUSED(sys);
+  ax_assume(!locked, "browser executor cannot hold the native scheduler mutex");
+#else
   if (!locked)
     return;
   pthread_mutex_lock(&sys->mu);
@@ -511,6 +553,7 @@ static void er_service_relock(er_scheduler* sys, bool locked) {
               "service worker already holds scheduler mutex");
     er_current_worker->holds_mu = true;
   }
+#endif
 }
 
 /* Service the request parked by PL_RUN_BLOCKED.  The request spine and

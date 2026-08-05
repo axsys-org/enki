@@ -121,6 +121,7 @@ function runAction(action, payload) {
 
 function wasiImports() {
   const badf = 8;
+  const nosys = 52;
   return {
     enki: jplanHost.imports(),
     wasi_snapshot_preview1: {
@@ -171,6 +172,7 @@ function wasiImports() {
       path_rename: () => badf,
       path_symlink: () => badf,
       path_unlink_file: () => badf,
+      poll_oneoff: () => nosys,
     },
   };
 }

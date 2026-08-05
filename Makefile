@@ -137,13 +137,14 @@ endif
 
 AXSYS_SRCS := $(wildcard pkg/axsys/src/*.c)
 PLAN_SRCS := $(filter-out pkg/plan/src/host_wasm_io.c pkg/plan/src/nat_wasm.c \
-	pkg/plan/src/host_wasm.c,$(wildcard pkg/plan/src/*.c))
+	pkg/plan/src/host_wasm.c pkg/plan/src/store_silo_wasm.c,\
+	$(wildcard pkg/plan/src/*.c))
 ENKI_SRCS := $(filter-out pkg/enki/src/wisp_browser.c,$(wildcard pkg/enki/src/*.c))
 ifeq ($(BUILD_TYPE),wasm)
 PLAN_SRCS := $(filter-out pkg/plan/src/host_native_io.c pkg/plan/src/nat.c \
-	pkg/plan/src/host_native.c,$(PLAN_SRCS)) \
+	pkg/plan/src/host_native.c pkg/plan/src/store_silo.c,$(PLAN_SRCS)) \
 	pkg/plan/src/nat_wasm.c pkg/plan/src/host_wasm_io.c \
-	pkg/plan/src/host_wasm.c
+	pkg/plan/src/host_wasm.c pkg/plan/src/store_silo_wasm.c
 ENKI_SRCS := $(filter-out pkg/enki/src/http.c,$(ENKI_SRCS))
 endif
 HEADERS := $(wildcard pkg/axsys/include/axsys/*.h) \
@@ -175,11 +176,14 @@ PROPERTY_BINS := $(patsubst %.c,$(BUILD_DIR)/%,$(PROPERTY_SRCS))
 THEFT_OBJS := $(patsubst %.c,$(BUILD_DIR)/%.o,$(THEFT_SRCS))
 FUZZ_BINS := $(patsubst %.c,$(BUILD_DIR)/%,$(FUZZ_SRCS))
 PERF_BINS := $(patsubst %.c,$(BUILD_DIR)/%,$(PERF_SRCS))
-WASM_UNSUPPORTED_UNIT_SRCS := $(UNIT_DIR)/test_enki_actor.c \
+WASM_UNSUPPORTED_UNIT_SRCS := $(UNIT_DIR)/test_axsys_fd.c \
+	$(UNIT_DIR)/test_enki_actor.c \
+	$(UNIT_DIR)/test_enki_http.c \
 	$(UNIT_DIR)/test_enki_replay.c \
 	$(UNIT_DIR)/test_enki_wisp.c \
 	$(UNIT_DIR)/test_plan_host_native.c \
 	$(UNIT_DIR)/test_plan_op82.c \
+	$(UNIT_DIR)/test_plan_op83.c \
 	$(UNIT_DIR)/test_plan_store.c \
 	$(UNIT_DIR)/test_wisp_cli.c
 WASM_UNIT_SRCS := $(filter-out $(WASM_UNSUPPORTED_UNIT_SRCS),$(UNIT_SRCS))

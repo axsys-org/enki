@@ -324,6 +324,7 @@ async function submitInput() {
 function wasiImports() {
   const errnoSuccess = 0;
   const errnoBadf = 8;
+  const errnoNosys = 52;
   return {
     enki: jplanHost.imports(),
     wasi_snapshot_preview1: {
@@ -381,6 +382,7 @@ function wasiImports() {
       path_rename: () => errnoBadf,
       path_symlink: () => errnoBadf,
       path_unlink_file: () => errnoBadf,
+      poll_oneoff: () => errnoNosys,
     },
   };
 }

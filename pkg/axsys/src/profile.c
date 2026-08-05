@@ -128,7 +128,13 @@ bool ax_profile_json_start(const char* path) {
     return false;
   }
   ax_json.file = file;
+#ifdef ENKI_WASM
+  /* WASI has no process model. Trace events still require a stable pid field.
+   */
+  ax_json.pid = 0;
+#else
   ax_json.pid = (uint64_t)getpid();
+#endif
   ax_json.first = true;
   ax_json.failed = clock_gettime(CLOCK_MONOTONIC, &ax_json.start) != 0;
   if (!ax_json.failed)
