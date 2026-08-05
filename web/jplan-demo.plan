@@ -1,0 +1,41 @@
+;;;; Deliberately unsandboxed browser demo: every user action crosses PLAN and
+;;;; JPLAN, whose host evaluates same-origin JavaScript with new Function.
+
+(#bind B (#pin "B"))
+(#bind J (#pin "J"))
+
+(#bind Ix0
+  (#pin
+    (#law "Ix0" (Ix0 row)
+      (B ("Ix0" row)))))
+
+(#bind Ix1
+  (#pin
+    (#law "Ix1" (Ix1 row)
+      (B ("Ix1" row)))))
+
+(#bind Ix2
+  (#pin
+    (#law "Ix2" (Ix2 row)
+      (B ("Ix2" row)))))
+
+(#bind Rep
+  (#pin
+    (#law "Rep" (Rep head value count)
+      (B ("Rep" head value count)))))
+
+(#bind Eval
+  (#pin
+    (#law "Eval" (Eval environment objects source)
+      (J ("Eval" environment objects source)))))
+
+(#bind main
+  (#pin
+    (#law "main" (main args)
+      environment(Ix0 args)
+      objects(Ix1 args)
+      source(Ix2 args)
+      result(Eval environment objects source)
+      (Eval environment
+            (Rep 0 result 1)
+            "environment.acceptResult(objects[0]); return environment;"))))

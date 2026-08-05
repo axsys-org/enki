@@ -14,6 +14,7 @@
 #include "internal.h"
 #include "plan/build.h"
 #include "plan/canon.h"
+#include "plan/wormhole.h"
 #include "plan/nat.h"
 #include "plan/store.h"
 
@@ -470,6 +471,44 @@ static bool pl_yield_now(pl_thread* t) {
   return false;
 }
 
+/* A wormhole may terminate evaluation only when it is the value being
+ * requested by a descriptor-local opaque argument/row slot.  Thunk-update
+ * and profiling frames merely relay that value to the descriptor; semantic
+ * consumers such as APPLY, SEQ, NF, and KAL remain hard boundaries and keep
+ * ordinary blackhole behavior. */
+static bool pl_opaque_wormhole_return(const pl_thread* t, size_t base) {
+  for (size_t i = t->fsp; i > base; i--) {
+    const pl_frame* fr = &t->fstack[i - 1];
+    switch (fr->kind) {
+    case PL_F_UPDATE:
+    case PL_F_UPD:
+    case PL_F_PROF:
+      continue;
+    case PL_F_OPROW:
+      return true;
+    case PL_F_OPARG:
+      return ((pl_ops[fr->op].opaque_mask >> fr->k) & 1u) != 0;
+    default:
+      return false;
+    }
+  }
+  return false;
+}
+
+static bool pl_opaque_wormhole_return_step(const pl_frame* fr) {
+  switch (fr->kind) {
+  case PL_F_UPDATE:
+  case PL_F_UPD:
+  case PL_F_PROF:
+  case PL_F_OPROW:
+    return true;
+  case PL_F_OPARG:
+    return ((pl_ops[fr->op].opaque_mask >> fr->k) & 1u) != 0;
+  default:
+    return false;
+  }
+}
+
 /* ── The machine ───────────────────────────────────────────────────────── */
 
 static pl_run_status pl_run_caught(pl_thread* t, pl_val v0, size_t base,
@@ -531,8 +570,9 @@ static pl_run_status pl_run(pl_thread* t, pl_val v, size_t base,
       [PL_F_SEQ] = &&ret_seq,       [PL_F_KAL] = &&ret_kal,
       [PL_F_KAPP] = &&ret_kapp,     [PL_F_OPENT] = &&ret_opent,
       [PL_F_OPARG] = &&ret_oparg,   [PL_F_OPDEEP] = &&ret_opdeep,
-      [PL_F_NF] = &&ret_nf,         [PL_F_NFOBJ] = &&ret_nfobj,
-      [PL_F_EXEC] = &&ret_exec,     [PL_F_EXECV] = &&ret_exec,
+      [PL_F_OPROW] = &&ret_oprow,   [PL_F_NF] = &&ret_nf,
+      [PL_F_NFOBJ] = &&ret_nfobj,   [PL_F_EXEC] = &&ret_exec,
+      [PL_F_EXECV] = &&ret_exec,
       [PL_F_UPD] = &&ret_upd,       [PL_F_TRY] = &&ret_try,
       [PL_F_JUDGE] = &&ret_judge,   [PL_F_NIL] = &&ret_nil,
       [PL_F_PROF] = &&ret_prof,     [PL_F_APPLYN] = &&ret_applyn,
@@ -556,6 +596,8 @@ eval:
     pl_profile_pause_all(t);
     return PL_RUN_YIELDED;
   }
+  if (pl_is_wormhole(v) && pl_opaque_wormhole_return(t, base))
+    goto ret;
   if (pl_is_whnf(v))
     goto ret;
   {
@@ -1180,6 +1222,8 @@ ret:
     return PL_RUN_DONE;
   }
   fr = &t->fstack[t->fsp - 1];
+  if (pl_is_wormhole(v) && !pl_opaque_wormhole_return_step(fr))
+    goto eval;
   if (ax_unlikely(fr->kind >= PL_F_KIND_COUNT || ret_tbl[fr->kind] == NULL))
     ax_abort("RETURN: bad frame kind %d", (int)fr->kind);
   goto* ret_tbl[fr->kind];
@@ -1406,6 +1450,12 @@ ret_opdeep: {
   goto opdeep_next;
 }
 
+ret_oprow: {
+  pl_app_args(pl_ptr(fr->a))[fr->argc] = v;
+  fr->argc++;
+  goto oprow_elem;
+}
+
 ret_nf: {
   if (pl_is_normal(v)) {
     t->fsp--;
@@ -1537,7 +1587,8 @@ oparg_next:
   fr = &t->fstack[t->fsp - 1];
   {
     const pl_opdesc* d = &pl_ops[fr->op];
-    while (fr->k < fr->argc && ((d->strict_mask >> fr->k) & 1u) == 0)
+    uint32_t force_mask = d->strict_mask | d->opaque_mask;
+    while (fr->k < fr->argc && ((force_mask >> fr->k) & 1u) == 0)
       fr->k++;
     if (fr->k < fr->argc) {
       v = t->vstack[fr->argbase + fr->k];
@@ -1548,8 +1599,9 @@ oparg_next:
       fr->k = 0;
       goto opdeep_next;
     }
+    fr->k = 0;
   }
-  goto op_body;
+  goto oprow_next;
 
 judge_scan:
   /*
@@ -1664,7 +1716,59 @@ opdeep_next:
       goto eval;
     }
   }
-  goto op_body;
+  fr->k = 0;
+  goto oprow_next;
+
+oprow_next:
+  fr = &t->fstack[t->fsp - 1];
+  {
+    const pl_opdesc* d = &pl_ops[fr->op];
+    while (fr->k < d->argc && ((d->opaque_row_mask >> fr->k) & 1u) == 0)
+      fr->k++;
+    if (fr->k >= d->argc)
+      goto op_body;
+
+    size_t slot = fr->argbase + fr->k;
+    pl_val row = t->vstack[slot];
+    if (row == 0) {
+      fr->k++;
+      goto oprow_next;
+    }
+    pl_cell* p = pl_as(PL_TAG_APP, row);
+    if (p == NULL || pl_app_head(p) != 0) {
+      fr->k++;
+      goto oprow_next; /* the host reports the boundary type error */
+    }
+    uint32_t n = pl_app_n(p);
+    pl_gc_reserve(t, PL_APP_CELLS(n));
+    fr = &t->fstack[t->fsp - 1];
+    p = pl_ptr(t->vstack[slot]);
+    PL_GC_FORBID(t);
+    pl_val fresh = pl_mk_app_from(t, 0, n, pl_app_args(p));
+    PL_GC_ALLOW(t);
+    t->vstack[slot] = fresh;
+    fr->kind = PL_F_OPROW;
+    fr->a = fresh;
+    fr->argc = 0;
+    goto oprow_elem;
+  }
+
+oprow_elem:
+  fr = &t->fstack[t->fsp - 1];
+  {
+    uint32_t n = pl_app_n(pl_ptr(fr->a));
+    if (fr->argc < n) {
+      v = pl_app_args(pl_ptr(fr->a))[fr->argc];
+      goto eval;
+    }
+    uint32_t next_arg = fr->k + 1;
+    uint32_t op = fr->op;
+    fr->kind = PL_F_OPARG;
+    fr->a = 0;
+    fr->argc = pl_ops[op].argc;
+    fr->k = next_arg;
+    goto oprow_next;
+  }
 
 op_body:
   fr = &t->fstack[t->fsp - 1];
@@ -1679,7 +1783,7 @@ op_body:
         t->effect_observer != NULL)
       t->effect_observer(t->effect_observer_ctx, t);
     if (d->host_op != PL_HOST_OP_NONE) {
-      if (t->effect_interceptor == NULL ||
+      if (d->opset != 82 || t->effect_interceptor == NULL ||
           !t->effect_interceptor(t->effect_interceptor_ctx, t, opi, argbase,
                                  &r))
         r = pl_host_effect_run(t, d->host_op, argbase);
@@ -1711,6 +1815,8 @@ op_body:
       return PL_RUN_BLOCKED;
     }
     v = r;
+    if (d->opaque_result)
+      goto ret;
     goto eval;
   }
 }
@@ -1808,6 +1914,13 @@ void pl_thread_start_nf(pl_thread* t, pl_val v) {
   pl_thread_start(t, v);
   pl_frame* fr = pl_fpush(t); /* above base_fsp: pops exactly at DONE */
   fr->kind = PL_F_NF;
+}
+
+void pl_thread_start_call(pl_thread* t, pl_val f, pl_val x) {
+  pl_thread_start(t, f);
+  pl_frame* fr = pl_fpush(t);
+  fr->kind = PL_F_APPLY;
+  fr->b = x;
 }
 
 void pl_thread_start_call_nf(pl_thread* t, pl_val f, pl_val x) {

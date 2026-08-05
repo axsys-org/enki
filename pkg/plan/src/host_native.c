@@ -113,6 +113,8 @@ static pl_val pl_native_effect(void* ctx, void* scope, pl_thread* t,
     return pl_op82_write(t, ab);
   case PL_HOST_OP_CONNECT:
     return pl_op82_connect(t, ab);
+  case PL_HOST_OP_JPLAN_EVAL:
+    pl_raise_msg(t, "JPLAN Eval is unavailable on the native host");
   case PL_HOST_OP_NONE:
   default:
     pl_raise_msg(t, "unknown native host effect");
