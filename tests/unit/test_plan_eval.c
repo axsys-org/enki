@@ -318,7 +318,7 @@ TEST(apply, tailcall_loops_in_constant_frame_space) {
   loop_ops[4] = OP_TAILCALL;
   loop_ops[5] = 2;
   loop_ops[6] = PL_BAN_FAST;
-  static pl_code loop_code = {loop_ops, 7};
+  static pl_code loop_code = {loop_ops, 7, 0, 0, 0};
   pl_pin_set_code(pp, &loop_code);
 
   size_t fcap0 = t->fcap;
@@ -933,10 +933,13 @@ TEST(nf, deep_normalization_snaps_thunks) {
 
 /* Make a saved law pin with arity and set its code; returns the pin
  * rooted at the current vsp (caller owns the slot). */
-static pl_val test_code_pin(test_rt* rt, uint64_t arity, pl_code* code) {
+/* Distinct `name`s keep otherwise-identical laws from interning to the
+ * same canonical pin (and silently sharing one code slot). */
+static pl_val test_code_pin_named(test_rt* rt, uint64_t arity, uint64_t name,
+                                  pl_code* code) {
   pl_thread* t = rt->t;
   size_t base = t->vsp;
-  pl_vpush(t, test_law(t, arity, 0, 0));
+  pl_vpush(t, test_law(t, arity, name, 0));
   t->vstack[base] = pl_pin(t, t->vstack[base]);
   char err[192] = {0};
   ASSERT(pl_store_save_root(rt->store, t->vstack[base], NULL, err, sizeof(err)),
@@ -948,6 +951,10 @@ static pl_val test_code_pin(test_rt* rt, uint64_t arity, pl_code* code) {
   t->vstack[base] = pin;
   pl_pin_set_code(pl_as(PL_TAG_PIN, pin), code);
   return pin;
+}
+
+static pl_val test_code_pin(test_rt* rt, uint64_t arity, pl_code* code) {
+  return test_code_pin_named(rt, arity, 0, code);
 }
 
 static pl_val test_run_call1(pl_thread* t, pl_val pin, pl_val arg) {
@@ -970,7 +977,7 @@ TEST(exec, force_delivers_whnf_result) {
   pl_thread* t = rt.t;
   size_t base = t->vsp;
   static pl_op_t ops[4] = {OP_PUSH_VAR, 1, OP_FORCE, OP_RET};
-  static pl_code code = {ops, 4};
+  static pl_code code = {ops, 4, 0, 0, 0};
   pl_val pin = test_code_pin(&rt, 1, &code);
   (void)pin;
   pl_vpush(t, test_thunk(t, 42)); /* lazy arg, forced by OP_FORCE */
@@ -989,7 +996,7 @@ TEST(exec, push_slot_duplicates_operand) {
   size_t base = t->vsp;
   static pl_op_t ops[8] = {OP_PUSH_VAR, 1,         OP_FORCE, OP_PUSH_SLOT,
                            0,           OP_MK_APP, 1,        OP_RET};
-  static pl_code code = {ops, 8};
+  static pl_code code = {ops, 8, 0, 0, 0};
   test_code_pin(&rt, 1, &code);
   pl_val r = test_run_call1(t, t->vstack[base], 42);
   pl_cell* p = pl_as(PL_TAG_APP, r);
@@ -1008,7 +1015,7 @@ TEST(exec, br_selects_arm_and_bounds) {
   static pl_op_t ops[13] = {OP_PUSH_VAR, 1,  OP_FORCE,    OP_BR, 2,
                             7,           10, OP_PUSH_LIT, 10,    OP_RET,
                             OP_PUSH_LIT, 20, OP_RET};
-  static pl_code code = {ops, 13};
+  static pl_code code = {ops, 13, 0, 0, 0};
   test_code_pin(&rt, 1, &code);
   ASSERT_EQ(test_run_call1(t, t->vstack[base], 0), 10);
   ASSERT_EQ(test_run_call1(t, t->vstack[base], 1), 20);
@@ -1033,7 +1040,7 @@ TEST(exec, jmp_loop_stays_preemptable) {
   pl_thread* t = rt.t;
   size_t base = t->vsp;
   static pl_op_t ops[3] = {OP_JMP, 0, OP_RET};
-  static pl_code code = {ops, 3};
+  static pl_code code = {ops, 3, 0, 0, 0};
   test_code_pin(&rt, 1, &code);
   size_t fcap0 = t->fcap;
   pl_vpush(t, t->vstack[base]);
@@ -1058,7 +1065,7 @@ TEST(exec, call_local_block_returns_forced) {
   static pl_op_t ops[14] = {OP_PUSH_LIT,  0, OP_PUSH_VAR, 1,     OP_CALL,
                             10,           1, OP_MK_APP,   1,     OP_RET,
                             OP_PUSH_SLOT, 0, OP_FORCE,    OP_RET};
-  static pl_code code = {ops, 14};
+  static pl_code code = {ops, 14, 0, 0, 0};
   test_code_pin(&rt, 1, &code);
   pl_vpush(t, test_thunk(t, 42));
   pl_val r = test_run_call1(t, t->vstack[base], t->vstack[base + 1]);
@@ -1078,7 +1085,7 @@ TEST(exec, noupd_thke_reevaluates) {
   /* the code allocates a fresh row [x] on every execution */
   static pl_op_t ops[7] = {OP_PUSH_LIT, 0, OP_PUSH_VAR, 1,
                            OP_MK_APP,   1, OP_RET};
-  static pl_code code = {ops, 7};
+  static pl_code code = {ops, 7, 0, 0, 0};
   test_code_pin(&rt, 1, &code);
   pl_vpush(t, t->vstack[base]);
   pl_vpush(t, 7);
@@ -1143,5 +1150,162 @@ TEST(exec, ingest_validates_targets_and_guards_fusion) {
   pl_val oob[3] = {OP_JMP, 99, OP_RET};
   pl_vpush(t, test_app(t, 0, 3, oob));
   ASSERT_EQ(pl_bytecode_from_val(t->vstack[base + 3]), NULL);
+  test_rt_free(&rt);
+}
+
+TEST(exec, strict_entry_dual_entrypoints) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  /* checked prologue forces arg 1; OP_ENTRY 1 marks the fast entry;
+   * the body never touches the argument */
+  static pl_op_t ops[8] = {OP_PUSH_VAR, 1,           OP_FORCE, OP_ENTRY,
+                           1,           OP_PUSH_LIT, 5,        OP_RET};
+  static pl_code code = {ops, 8, 1, 5, 0};
+  test_code_pin(&rt, 1, &code);
+  /* decode of an equivalent row records mask + entry */
+  {
+    pl_val row[8] = {OP_PUSH_VAR, 1,           OP_FORCE, OP_ENTRY,
+                     1,           OP_PUSH_LIT, 5,        OP_RET};
+    pl_vpush(t, test_app(t, 0, 8, row));
+    pl_code* c = pl_bytecode_from_val(t->vstack[base + 1]);
+    ASSERT_NOT_NULL(c);
+    ASSERT_EQ(c->strict_mask, 1);
+    ASSERT_EQ(c->strict_entry, 5);
+    pl_bytecode_free(c);
+    t->vsp = base + 1;
+  }
+  pl_run_status s;
+  /* checked entry (no hint): the prologue forces the raising thunk */
+  pl_vpush(t, t->vstack[base]);
+  pl_vpush(t, test_throwing(t, 77));
+  pl_gc_reserve(t, PL_THKE_CELLS(2));
+  pl_val thke = pl_mk_thke(t, 0, PL_BAN_FAST, 2, &t->vstack[base + 1]);
+  t->vsp = base + 1;
+  pl_thread_start(t, thke);
+  while ((s = pl_thread_run(t, 100000)) == PL_RUN_YIELDED)
+    ;
+  ASSERT_EQ(s, PL_RUN_EXN);
+  /* matching hint: fast entry skips the force entirely */
+  pl_vpush(t, t->vstack[base]);
+  pl_vpush(t, test_throwing(t, 77));
+  pl_gc_reserve(t, PL_THKE_CELLS(2));
+  thke = pl_mk_thke(t, 0, PL_BAN_FAST | (1u << 8), 2, &t->vstack[base + 1]);
+  t->vsp = base + 1;
+  pl_thread_start(t, thke);
+  while ((s = pl_thread_run(t, 100000)) == PL_RUN_YIELDED)
+    ;
+  ASSERT_EQ(s, PL_RUN_DONE);
+  ASSERT_EQ(t->result, 5);
+  /* mismatched hint degrades to the checked entry */
+  pl_vpush(t, t->vstack[base]);
+  pl_vpush(t, test_throwing(t, 77));
+  pl_gc_reserve(t, PL_THKE_CELLS(2));
+  thke = pl_mk_thke(t, 0, PL_BAN_FAST | (2u << 8), 2, &t->vstack[base + 1]);
+  t->vsp = base + 1;
+  pl_thread_start(t, thke);
+  while ((s = pl_thread_run(t, 100000)) == PL_RUN_YIELDED)
+    ;
+  ASSERT_EQ(s, PL_RUN_EXN);
+  pl_pin_set_code(pl_as(PL_TAG_PIN, t->vstack[base]), NULL);
+  test_rt_free(&rt);
+}
+
+/* ── Direct call opcodes: CALL_KNOWN / CALL_FAST / CALL_SLOW ─────────── */
+
+TEST(exec, call_known_runs_resolved_primop_direct) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  /* decode resolves (opset 66, "Add", 2); law computes arg + 1 */
+  pl_vpush(t, pl_pin(t, 66));
+  {
+    pl_val row[10] = {OP_PUSH_VAR,
+                      1,
+                      OP_FORCE,
+                      OP_PUSH_LIT,
+                      1,
+                      OP_CALL_KNOWN,
+                      2,
+                      t->vstack[base],
+                      UINT64_C(0x646441) /* "Add" */,
+                      OP_RET};
+    pl_vpush(t, test_app(t, 0, 10, row));
+  }
+  pl_code* c = pl_bytecode_from_val(t->vstack[base + 1]);
+  ASSERT_NOT_NULL(c);
+  t->vsp = base;
+  pl_val pin = test_code_pin(&rt, 1, c);
+  ASSERT_EQ(test_run_call1(t, pin, 41), 42);
+  /* a lazy arg is forced by the op's own strict-arg driver */
+  pl_vpush(t, test_thunk(t, 6));
+  ASSERT_EQ(test_run_call1(t, t->vstack[base], t->vstack[base + 1]), 7);
+  pl_pin_set_code(pl_as(PL_TAG_PIN, t->vstack[base]), NULL);
+  pl_bytecode_free(c);
+  test_rt_free(&rt);
+}
+
+TEST(exec, call_fast_enters_law_direct) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  /* callee: force and return its argument */
+  static pl_op_t id_ops[4] = {OP_PUSH_VAR, 1, OP_FORCE, OP_RET};
+  static pl_code id_code = {id_ops, 4, 0, 0, 0};
+  pl_val callee = test_code_pin_named(&rt, 1, 111, &id_code);
+  /* caller: direct call of the callee on its (lazy) argument */
+  pl_op_t caller_ops[8] = {OP_PUSH_LIT,  callee, OP_PUSH_VAR, 1,
+                           OP_CALL_FAST, 1,      0,           OP_RET};
+  pl_code caller_code = {caller_ops, 8, 0, 0, 0};
+  test_code_pin(&rt, 1, &caller_code);
+  ASSERT_EQ(test_run_call1(t, t->vstack[base + 1], 42), 42);
+  pl_vpush(t, test_thunk(t, 9));
+  ASSERT_EQ(test_run_call1(t, t->vstack[base + 1], t->vstack[base + 2]), 9);
+  pl_pin_set_code(pl_as(PL_TAG_PIN, t->vstack[base]), NULL);
+  pl_pin_set_code(pl_as(PL_TAG_PIN, t->vstack[base + 1]), NULL);
+  test_rt_free(&rt);
+}
+
+TEST(exec, call_fast_arity_mismatch_degrades_to_apply) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  /* head: an arity-2 law pin (its code never runs — the direct call
+   * supplies one arg, so verification rejects it and the generic
+   * apply path yields the WHNF partial application) */
+  static pl_op_t id_ops[4] = {OP_PUSH_VAR, 1, OP_FORCE, OP_RET};
+  static pl_code id_code = {id_ops, 4, 0, 0, 0};
+  pl_val head2 = test_code_pin(&rt, 2, &id_code);
+  pl_op_t caller_ops[8] = {OP_PUSH_LIT,  head2, OP_PUSH_VAR, 1,
+                           OP_CALL_FAST, 1,     0,           OP_RET};
+  pl_code caller_code = {caller_ops, 8, 0, 0, 0};
+  test_code_pin(&rt, 1, &caller_code);
+  pl_val r = test_run_call1(t, t->vstack[base + 1], 42);
+  pl_cell* p = pl_as(PL_TAG_APP, r);
+  ASSERT_NOT_NULL(p);
+  ASSERT_EQ(pl_app_n(p), 1);
+  ASSERT_EQ(pl_app_args(p)[0], 42);
+  pl_pin_set_code(pl_as(PL_TAG_PIN, t->vstack[base]), NULL);
+  pl_pin_set_code(pl_as(PL_TAG_PIN, t->vstack[base + 1]), NULL);
+  test_rt_free(&rt);
+}
+
+TEST(exec, call_slow_forces_head_then_applies) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  static pl_op_t id_ops[4] = {OP_PUSH_VAR, 1, OP_FORCE, OP_RET};
+  static pl_code id_code = {id_ops, 4, 0, 0, 0};
+  pl_val callee = test_code_pin_named(&rt, 1, 222, &id_code);
+  (void)callee;
+  /* caller: head is a lazy thunk (forced by the slow path) */
+  pl_op_t caller_ops[7] = {OP_PUSH_VAR,  1, OP_PUSH_LIT, 9,
+                           OP_CALL_SLOW, 1, OP_RET};
+  pl_code caller_code = {caller_ops, 7, 0, 0, 0};
+  test_code_pin(&rt, 1, &caller_code);
+  pl_vpush(t, test_thunk(t, t->vstack[base]));
+  ASSERT_EQ(test_run_call1(t, t->vstack[base + 1], t->vstack[base + 2]), 9);
+  pl_pin_set_code(pl_as(PL_TAG_PIN, t->vstack[base]), NULL);
+  pl_pin_set_code(pl_as(PL_TAG_PIN, t->vstack[base + 1]), NULL);
   test_rt_free(&rt);
 }

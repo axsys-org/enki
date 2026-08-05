@@ -138,6 +138,8 @@ const uint8_t* pl_pin_hash(pl_val pin);
  * keeps its eventual canonical target within the collector's store-lifetime
  * domain.  Store-owned and already-canonical PINs must likewise belong to
  * `s`. */
+bool pl_store_save_pin(pl_store* s, pl_val pin, uint8_t out_hash[32], char* err,
+                       size_t err_cap);
 bool pl_store_save_root(pl_store* s, pl_val pin, uint8_t out_hash[32],
                         char* err, size_t err_cap);
 

@@ -9,9 +9,12 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <sys/stat.h>
 
 #include "axsys/arena.h"
 #include "axsys/assume.h"
+#include "axsys/sha256.h"
 #include "axsys/ds.h"
 #include "axsys/profile.h"
 #include "axsys/util.h"
@@ -90,6 +93,99 @@ void pl_store_profile_end(pl_store_profile_scope* scope) {
 #define PL_STORE_PROFILE(name)                                                 \
   __attribute__((cleanup(pl_store_profile_end))) pl_store_profile_scope        \
       pl_store_profile_scope_ = pl_store_profile_begin(name, sizeof(name) - 1)
+
+/* ── Global compile cache ──────────────────────────────────────────────
+ *
+ * A machine-wide LMDB at PL_CODECACHE_DIR mapping the same
+ * (compiler, law) keys as the per-snap cache to the encoded Silo
+ * stream of the code-row pin.  Because streams carry their subpin
+ * hashes and rebuilds are content-verified, a fresh snap can adopt
+ * rows compiled by any earlier snap — `rm -rf snap` no longer means a
+ * cold compiler.  Unset dir (library users, tests) or an unopenable
+ * path (CI sandboxes) disables it silently.  PL_CODECACHE=0 forces it
+ * off. */
+static pthread_mutex_t plgc_mu = PTHREAD_MUTEX_INITIALIZER;
+static MDB_env* plgc_env;
+static MDB_dbi plgc_dbi;
+static int plgc_state; /* 0 unopened, 1 open, -1 disabled */
+
+static bool plgc_open(void) {
+  if (plgc_state != 0)
+    return plgc_state > 0;
+  plgc_state = -1;
+  const char* flag = getenv("PL_CODECACHE");
+  if (flag != NULL && strcmp(flag, "0") == 0)
+    return false;
+  const char* dir = getenv("PL_CODECACHE_DIR");
+  if (dir == NULL || dir[0] == '\0')
+    return false;
+  (void)mkdir(dir, 0755); /* parent must exist; failure surfaces below */
+  MDB_env* env = NULL;
+  if (mdb_env_create(&env) != 0)
+    return false;
+  if (mdb_env_set_maxdbs(env, 1) != 0 ||
+      mdb_env_set_mapsize(env, (size_t)1 << 33) != 0 ||
+      mdb_env_open(env, dir, 0, 0664) != 0) {
+    mdb_env_close(env);
+    return false;
+  }
+  MDB_txn* txn = NULL;
+  if (mdb_txn_begin(env, NULL, 0, &txn) != 0 ||
+      mdb_dbi_open(txn, "cache", MDB_CREATE, &plgc_dbi) != 0) {
+    if (txn != NULL)
+      mdb_txn_abort(txn);
+    mdb_env_close(env);
+    return false;
+  }
+  if (mdb_txn_commit(txn) != 0) {
+    mdb_env_close(env);
+    return false;
+  }
+  plgc_env = env;
+  plgc_state = 1;
+  return true;
+}
+
+static bool plgc_get(const uint8_t key[32], uint8_t** out_b, size_t* out_n) {
+  pthread_mutex_lock(&plgc_mu);
+  bool ok = false;
+  if (plgc_open()) {
+    MDB_txn* txn;
+    if (mdb_txn_begin(plgc_env, NULL, MDB_RDONLY, &txn) == 0) {
+      MDB_val k = {32, (void*)key};
+      MDB_val v;
+      if (mdb_get(txn, plgc_dbi, &k, &v) == 0) {
+        *out_b = malloc(v.mv_size);
+        if (*out_b != NULL) {
+          memcpy(*out_b, v.mv_data, v.mv_size);
+          *out_n = v.mv_size;
+          ok = true;
+        }
+      }
+      mdb_txn_abort(txn);
+    }
+  }
+  pthread_mutex_unlock(&plgc_mu);
+  return ok;
+}
+
+static void plgc_put(const uint8_t key[32], const uint8_t* b, size_t n) {
+  pthread_mutex_lock(&plgc_mu);
+  if (plgc_open()) {
+    MDB_txn* txn;
+    if (mdb_txn_begin(plgc_env, NULL, 0, &txn) == 0) {
+      MDB_val k = {32, (void*)key};
+      MDB_val v = {n, (void*)b};
+      if (mdb_put(txn, plgc_dbi, &k, &v, 0) == 0) {
+        if (mdb_txn_commit(txn) != 0)
+          txn = NULL; /* commit consumed it either way */
+      } else {
+        mdb_txn_abort(txn);
+      }
+    }
+  }
+  pthread_mutex_unlock(&plgc_mu);
+}
 
 /* Lock order is save_mu -> mu.  save_mu serializes persistence operations and
  * the compiler machine; mu protects the arena and in-memory registries. */
@@ -372,6 +468,137 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
    * registry accesses, so do not retain the general lock while PLAN runs. */
   pl_store_unlock(s);
   PL_STORE_PROFILE("store.compile.law");
+  /* Persistent (compiler, law) -> code-row cache.  The compiler is a
+   * pure function, so a row computed by any earlier process (or an
+   * earlier Install of the same compiler in this one) is THE answer:
+   * a hit skips the compiler entirely.  Rows are persisted as ordinary
+   * anonymous root pins; the mapping entry stores the row pin's hash
+   * under a tagged key, so keys can never dangle across snapshots.
+   * Keyed by compiler hash, a new compiler simply opens a fresh
+   * keyspace — no invalidation.  save_mu is recursive, so the save /
+   * load / backend re-entry below is safe. */
+  uint8_t codecache_key[32];
+  bool codecache = s->be.get != NULL && s->be.put != NULL;
+  if (codecache) {
+    uint8_t pre[68];
+    memcpy(pre, "plgc", 4);
+    memcpy(pre + 4, compiler_hash, 32);
+    memcpy(pre + 36, hash, 32);
+    ax_sha256(pre, sizeof(pre), codecache_key);
+    uint8_t* got = NULL;
+    size_t gn = 0;
+    if (pl_store_backend_get(s, codecache_key, &got, &gn)) {
+      bool served = false;
+      if (gn == 32 && (s->be.has == NULL || s->be.has(s->be.ctx, got))) {
+        pl_catch cc;
+        pl_catch_init(t, &cc);
+        if (setjmp(cc.jb) != 0) {
+          /* stale or unreadable cache row: recompile below */
+          pl_catch_unwind(t, &cc);
+        } else {
+          pl_val rowpin = pl_store_load(t, got);
+          pl_catch_pop(t, &cc);
+          pl_cell* rp = pl_as(PL_TAG_PIN, rowpin);
+          if (rp != NULL) {
+            pl_code* code = pl_bytecode_from_val(pl_pin_body(rp));
+            if (code != NULL) {
+              pl_store_lock(s);
+              ptrdiff_t hit_at = ax_hmgeti(s->code_cache, key);
+              if (hit_at >= 0) {
+                pl_bytecode_free(code);
+                code = s->code_cache[hit_at].value;
+              } else {
+                ax_arrpush(s->codes, code);
+                ax_hmput(s->code_cache, key, code);
+              }
+              targets_at = ax_hmgeti(s->code_targets, key);
+              if (targets_at >= 0)
+                for (ptrdiff_t i = 0;
+                     i < ax_arrlen(s->code_targets[targets_at].value); i++)
+                  pl_pin_set_code(pl_ptr(s->code_targets[targets_at].value[i]),
+                                  code);
+              pl_store_unlock(s);
+            }
+            /* an undecodable cached row (unknown-op wrapper) also
+             * counts: the compile would reproduce it exactly */
+            served = true;
+            /* migrate snap-local entries machine-wide so older snaps'
+             * work survives their deletion */
+            if (s->format == PL_STORE_FORMAT_SILO_V1) {
+              uint8_t* have = NULL;
+              size_t have_n = 0;
+              if (plgc_get(codecache_key, &have, &have_n)) {
+                free(have);
+              } else {
+                pl_silo_reader rd = {0};
+                char rerr[192] = {0};
+                if (pl_store_silo_open(s, got, &rd, rerr, sizeof(rerr))) {
+                  uint8_t* buf = malloc(rd.len);
+                  if (buf != NULL && rd.rewind(rd.ctx) &&
+                      rd.read(rd.ctx, buf, rd.len))
+                    plgc_put(codecache_key, buf, rd.len);
+                  free(buf);
+                  pl_store_silo_close_reader(&rd);
+                }
+              }
+            }
+          }
+        }
+      }
+      free(got);
+      if (served) {
+        pl_store_save_unlock(s);
+        return;
+      }
+    }
+    /* global (snap-independent) layer: an encoded row stream from any
+     * earlier snap; subpin resolution against this store validates it */
+    uint8_t* gb = NULL;
+    size_t gbn = 0;
+    if (s->format == PL_STORE_FORMAT_SILO_V1 &&
+        plgc_get(codecache_key, &gb, &gbn)) {
+      bool served = false;
+      pl_catch cc;
+      pl_catch_init(t, &cc);
+      if (setjmp(cc.jb) != 0) {
+        pl_catch_unwind(t, &cc);
+      } else {
+        char lerr[192] = {0};
+        pl_val rowpin = 0;
+        bool loaded = pl_store_load_silo_stream(t, s, gb, gbn, &rowpin, lerr,
+                                                sizeof(lerr));
+        pl_catch_pop(t, &cc);
+        pl_cell* rp = loaded ? pl_as(PL_TAG_PIN, rowpin) : NULL;
+        if (rp != NULL) {
+          pl_code* code = pl_bytecode_from_val(pl_pin_body(rp));
+          if (code != NULL) {
+            pl_store_lock(s);
+            ptrdiff_t hit_at = ax_hmgeti(s->code_cache, key);
+            if (hit_at >= 0) {
+              pl_bytecode_free(code);
+              code = s->code_cache[hit_at].value;
+            } else {
+              ax_arrpush(s->codes, code);
+              ax_hmput(s->code_cache, key, code);
+            }
+            targets_at = ax_hmgeti(s->code_targets, key);
+            if (targets_at >= 0)
+              for (ptrdiff_t i = 0;
+                   i < ax_arrlen(s->code_targets[targets_at].value); i++)
+                pl_pin_set_code(pl_ptr(s->code_targets[targets_at].value[i]),
+                                code);
+            pl_store_unlock(s);
+          }
+          served = true;
+        }
+      }
+      free(gb);
+      if (served) {
+        pl_store_save_unlock(s);
+        return;
+      }
+    }
+  }
   /* the compiler is installed PLAN code: a compile failure must not
    * take the runtime down — the law just stays interpreted */
   pl_catch c;
@@ -383,6 +610,8 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
     pl_store_save_unlock(s);
     return;
   }
+  struct timespec compile_t0;
+  clock_gettime(CLOCK_MONOTONIC, &compile_t0);
   pl_val compiler = pl_store_load(t, compiler_hash);
   pl_val fun = pl_store_load(t, hash);
   pl_val res = pl_apply(t, compiler, fun);
@@ -413,6 +642,55 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
     for (ptrdiff_t i = 0; i < ax_arrlen(s->code_targets[targets_at].value); i++)
       pl_pin_set_code(pl_ptr(s->code_targets[targets_at].value[i]), code);
     pl_store_unlock(s);
+  }
+  struct timespec compile_t1;
+  clock_gettime(CLOCK_MONOTONIC, &compile_t1);
+  uint64_t compile_ns =
+      (uint64_t)(compile_t1.tv_sec - compile_t0.tv_sec) * 1000000000u +
+      (uint64_t)(compile_t1.tv_nsec - compile_t0.tv_nsec);
+  /* Only cache compiles worth remembering: a cache write costs a pin
+   * save plus an LMDB transaction (~ms), so persisting sub-10ms
+   * compiles (the ship compiler's whole range) would slow the sweeps
+   * it is meant to speed up. */
+  if (codecache && compile_ns < 10000000u)
+    codecache = false;
+  if (codecache) {
+    /* persist the row as a pin and record the (compiler, law) -> row
+     * mapping; cached regardless of whether the row decoded
+     * (undecodable rows still skip future compiles).  The save may
+     * queue compiles for law literals inside the row — the recursive
+     * save_mu and the code_cache early-return make the re-entry
+     * safe. */
+    size_t rb = t->vsp;
+    pl_vpush(t, stable);
+    pl_catch cc;
+    pl_catch_init(t, &cc);
+    if (setjmp(cc.jb) != 0) {
+      pl_catch_unwind(t, &cc); /* cache write is best-effort */
+    } else {
+      t->vstack[rb] = pl_pin(t, t->vstack[rb]);
+      pl_catch_pop(t, &cc);
+      uint8_t rowhash[32];
+      char err[192] = {0};
+      if (pl_store_save_pin(s, t->vstack[rb], rowhash, err, sizeof(err))) {
+        (void)pl_store_backend_put(s, codecache_key, rowhash, 32);
+        if (s->format == PL_STORE_FORMAT_SILO_V1) {
+          /* publish the encoded stream machine-wide: read the bytes
+           * the save just wrote back out of the pack */
+          pl_silo_reader rd = {0};
+          char rerr[192] = {0};
+          if (pl_store_silo_open(s, rowhash, &rd, rerr, sizeof(rerr))) {
+            uint8_t* buf = malloc(rd.len);
+            if (buf != NULL && rd.rewind(rd.ctx) &&
+                rd.read(rd.ctx, buf, rd.len))
+              plgc_put(codecache_key, buf, rd.len);
+            free(buf);
+            pl_store_silo_close_reader(&rd);
+          }
+        }
+      }
+    }
+    t->vsp = rb;
   }
   pl_store_save_unlock(s);
 }

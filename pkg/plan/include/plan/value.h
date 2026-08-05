@@ -304,8 +304,10 @@ static inline pl_val pl_thke_env(pl_cell* p) {
   return (pl_val)p[1];
 }
 
-static inline pl_bane pl_thke_bane(pl_cell* p) {
-  return (pl_bane)p[2];
+/* The full bane word: low 3 bits the bane, bit 3 NOUPD, bits >= 8 a
+ * strict-entry mask hint (FAST only). */
+static inline uint64_t pl_thke_bane(pl_cell* p) {
+  return (uint64_t)p[2];
 }
 
 static inline uint32_t pl_thke_n(pl_cell* p) {

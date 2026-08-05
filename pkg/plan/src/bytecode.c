@@ -73,9 +73,21 @@ pl_code* pl_bytecode_from_val(pl_val val) {
     last_op = op;
     switch (op) {
     case OP_PUSH_VAR:
+      if (i + 1 > n)
+        FAIL("truncated operand")
+      if (pl_is_nat63((pl_val)ops[i]) && ops[i] > out->max_var &&
+          out->max_var != UINT32_MAX)
+        out->max_var = (uint32_t)(ops[i] < UINT32_MAX ? ops[i] : UINT32_MAX);
+      i += 1;
+      break;
+    case OP_INTERP:
+      out->max_var = UINT32_MAX; /* expr operands read env vars */
+      if (i + 1 > n)
+        FAIL("truncated operand")
+      i += 1;
+      break;
     case OP_PUSH_LIT:
     case OP_MK_APP:
-    case OP_INTERP:
     case OP_PUSH_SLOT:
       if (i + 1 > n)
         FAIL("truncated operand")
@@ -83,6 +95,15 @@ pl_code* pl_bytecode_from_val(pl_val val) {
       break;
     case OP_RET:
     case OP_FORCE:
+      break;
+    case OP_ENTRY:
+      if (i + 1 > n)
+        FAIL("truncated operand")
+      if (out->strict_entry != 0 || !pl_is_nat63((pl_val)ops[i]) || ops[i] == 0)
+        FAIL("bad strict entry")
+      out->strict_mask = ops[i];
+      out->strict_entry = (uint32_t)(i + 1);
+      i += 1;
       break;
     case OP_JMP:
       if (i + 1 > n)
@@ -96,6 +117,44 @@ pl_code* pl_bytecode_from_val(pl_val val) {
       MARK_TARGET(ops[i])
       i += 2;
       break;
+    case OP_CALL_SLOW:
+      if (i + 1 > n)
+        FAIL("truncated operand")
+      if (ops[i] == 0 || !pl_is_nat63((pl_val)ops[i]))
+        FAIL("bad call argc")
+      i += 1;
+      break;
+    case OP_CALL_FAST:
+      if (i + 2 > n)
+        FAIL("truncated operand")
+      if (ops[i] == 0 || !pl_is_nat63((pl_val)ops[i]) ||
+          !pl_is_nat63((pl_val)ops[i + 1]))
+        FAIL("bad call argc")
+      i += 2;
+      break;
+    case OP_CALL_KNOWN: {
+      /* +argc +oppin +name: resolve (opset, name, argc) exactly as the
+       * MK_THK KNOWN path does, rewriting the operands to the pl_ops
+       * index; an op this runtime doesn't implement fails the decode
+       * silently (the law stays interpreted). */
+      if (i + 3 > n)
+        FAIL("truncated operand")
+      pl_op_t cargc = ops[i];
+      if (cargc == 0 || !pl_is_nat63((pl_val)cargc))
+        FAIL("bad call argc")
+      pl_cell* cpin = pl_as(PL_TAG_PIN, (pl_val)ops[i + 1]);
+      pl_val cname = (pl_val)ops[i + 2];
+      if (cpin == NULL || !pl_is_nat(pl_pin_body(cpin)))
+        FAIL("bad known-primop opset")
+      uint64_t copset = pl_nat_u64_clamp(pl_pin_body(cpin));
+      int cidx = pl_op_lookup(copset, cname, (uint32_t)cargc);
+      if (cidx < 0)
+        goto failed;
+      ops[i + 1] = (pl_op_t)cidx;
+      ops[i + 2] = 0;
+      i += 3;
+      break;
+    }
     case OP_BR: {
       if (i + 1 > n)
         FAIL("truncated operand")
@@ -112,8 +171,11 @@ pl_code* pl_bytecode_from_val(pl_val val) {
         FAIL("truncated operand")
       pl_op_t argc = ops[i];
       pl_op_t bane = ops[i + 1] & PL_BAN_MASK;
-      if (ops[i + 1] & ~(pl_op_t)(PL_BAN_MASK | PL_BAN_NOUPD))
+      pl_op_t hint = ops[i + 1] >> 8;
+      if (ops[i + 1] & ~(pl_op_t)(PL_BAN_MASK | PL_BAN_NOUPD) & (pl_op_t)0xff)
         FAIL("bad bane")
+      if (hint != 0 && (bane != PL_BAN_FAST || !pl_is_nat63((pl_val)hint)))
+        FAIL("bad strict hint")
       i += 2;
       if (bane == PL_BAN_PRIM_KNOWN) {
         if (i + 2 > n)
@@ -165,10 +227,18 @@ pl_code* pl_bytecode_from_val(pl_val val) {
     case OP_INTERP:
     case OP_PUSH_SLOT:
     case OP_JMP:
+    case OP_ENTRY:
       i += 1;
       break;
     case OP_CALL:
+    case OP_CALL_FAST:
       i += 2;
+      break;
+    case OP_CALL_SLOW:
+      i += 1;
+      break;
+    case OP_CALL_KNOWN:
+      i += 3;
       break;
     case OP_BR:
       i += 1 + (size_t)ops[i];
