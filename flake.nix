@@ -38,6 +38,7 @@
             ./Makefile
             ./pkg
             ./tests
+            ./web
           ];
         };
 

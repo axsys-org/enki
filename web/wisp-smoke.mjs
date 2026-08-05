@@ -59,6 +59,7 @@ function errors() {
 }
 
 function wasiImports() {
+  const errnoNosys = 52;
   return {
     enki: jplanHost.imports(),
     wasi_snapshot_preview1: {
@@ -118,6 +119,7 @@ function wasiImports() {
       path_rename: () => 8,
       path_symlink: () => 8,
       path_unlink_file: () => 8,
+      poll_oneoff: () => errnoNosys,
     },
   };
 }

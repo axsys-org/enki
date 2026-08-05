@@ -8,6 +8,7 @@
 #include "plan/build.h"
 #include "plan/host.h"
 #include "plan/nat.h"
+#include "plan/rplan.h"
 #include "plan/wasm_io.h"
 
 #define ARG(i) (t->vstack[ab + (i)])
