@@ -18,6 +18,9 @@
 #include "plan/nat.h"
 #include "plan/store.h"
 #include "store_internal.h"
+#ifdef ENKI_WASM
+#include "plan/wasm_io.h"
+#endif
 
 /*
  * Primops, normative semantics from the Haskell reference (Plan.hs).
@@ -860,8 +863,19 @@ static pl_val op_try(pl_thread* t, size_t ab) {
 
 static pl_val op_trace(pl_thread* t, size_t ab) {
   /* arg 0 deep via mask: the reference shows the value deeply */
-  char* s = pl_show_val(ax_allocator_system(), ARG(0), NULL);
+  size_t n = 0;
+  char* s = pl_show_val(ax_allocator_system(), ARG(0), &n);
+#ifdef ENKI_WASM
+  const pl_wasm_io* io = pl_wasm_io_get();
+  if (io != NULL && io->output != NULL) {
+    io->output(io->ctx, PL_WASM_IO_STDERR, (const uint8_t*)s, n);
+    io->output(io->ctx, PL_WASM_IO_STDERR, (const uint8_t*)"\n", 1);
+  } else {
+    fprintf(stderr, "%s\n", s);
+  }
+#else
   fprintf(stderr, "%s\n", s);
+#endif
   ax_free(ax_allocator_system(), s);
   return ARG(1);
 }
@@ -954,14 +968,68 @@ static pl_val op_compile(pl_thread* t, size_t ab) {
  * the canonical text whose SHA-256 is the pin hash, so any PLAN
  * assembler can resume from the snapshot directory.
  */
+#ifdef ENKI_WASM
+static const pl_wasm_io* save_wasm_io(pl_thread* t) {
+  const pl_wasm_io* io = pl_wasm_io_get();
+  if (io == NULL || io->write_file == NULL)
+    pl_raise_msg(t, "Save: browser I/O is not configured");
+  return io;
+}
+
+static bool save_wasm_exists(pl_thread* t, const char* path) {
+  const pl_wasm_io* io = save_wasm_io(t);
+  if (io->read_file == NULL)
+    return false;
+  uint8_t* bytes = NULL;
+  size_t len = 0;
+  bool ok = io->read_file(io->ctx, "", path, &bytes, &len);
+  free(bytes);
+  return ok;
+}
+
+static bool save_wasm_write(pl_thread* t, const char* path,
+                            const uint8_t* bytes, size_t len) {
+  const pl_wasm_io* io = save_wasm_io(t);
+  return io->write_file(io->ctx, "", path, bytes, len);
+}
+
+static bool save_wasm_append(pl_thread* t, const char* path,
+                             const uint8_t* bytes, size_t len) {
+  const pl_wasm_io* io = save_wasm_io(t);
+  uint8_t* old = NULL;
+  size_t old_len = 0;
+  if (io->read_file != NULL &&
+      !io->read_file(io->ctx, "", path, &old, &old_len)) {
+    old = NULL;
+    old_len = 0;
+  }
+
+  uint8_t* joined = malloc(old_len + len);
+  ax_assume(joined != NULL, "oom");
+  if (old_len > 0)
+    memcpy(joined, old, old_len);
+  if (len > 0)
+    memcpy(joined + old_len, bytes, len);
+  bool ok = io->write_file(io->ctx, "", path, joined, old_len + len);
+  free(joined);
+  free(old);
+  return ok;
+}
+#endif
+
 static void save_pin_only(pl_thread* t, pl_val pin) {
   pl_cell* p = pl_ptr(pin);
   char b58[AX_BASE58_CAP(32)];
   ax_base58(pl_pin_hash(pin), 32, b58);
   char path[AX_BASE58_CAP(32) + 16];
   (void)snprintf(path, sizeof(path), "snap/%s.plan", b58);
+#ifdef ENKI_WASM
+  if (save_wasm_exists(t, path))
+    return;
+#else
   if (access(path, F_OK) == 0)
     return;
+#endif
 
   uint32_t np = pl_pin_npins(p);
   for (uint32_t i = 0; i < np; i++)
@@ -969,6 +1037,13 @@ static void save_pin_only(pl_thread* t, pl_val pin) {
 
   size_t n;
   char* text = pl_canonize(ax_allocator_system(), pin, &n);
+#ifdef ENKI_WASM
+  if (!save_wasm_write(t, path, (const uint8_t*)text, n)) {
+    ax_free(ax_allocator_system(), text);
+    pl_raise_msg(t, "Save: cannot write snapshot file");
+  }
+  ax_free(ax_allocator_system(), text);
+#else
   FILE* f = fopen(path, "wb");
   if (f == NULL) {
     ax_free(ax_allocator_system(), text);
@@ -978,6 +1053,7 @@ static void save_pin_only(pl_thread* t, pl_val pin) {
   ax_free(ax_allocator_system(), text);
   if (fclose(f) != 0 || wrote != n)
     pl_raise_msg(t, "Save: short write");
+#endif
 }
 
 static pl_val op_save(pl_thread* t, size_t ab) {
@@ -992,17 +1068,27 @@ static pl_val op_save(pl_thread* t, size_t ab) {
     return 0;
   }
 
+#ifndef ENKI_WASM
   (void)mkdir("./snap", 0777); /* EEXIST is fine */
+#endif
   save_pin_only(t, ARG(0));
 
   char b58[AX_BASE58_CAP(32)];
   ax_base58(pl_pin_hash(ARG(0)), 32, b58);
+#ifdef ENKI_WASM
+  char line[AX_BASE58_CAP(32) + 4];
+  int len = snprintf(line, sizeof(line), "@%s\n", b58);
+  if (len < 0 || (size_t)len >= sizeof(line) ||
+      !save_wasm_append(t, "snap/root.plan", (const uint8_t*)line, (size_t)len))
+    pl_raise_msg(t, "Save: cannot append snap/root.plan");
+#else
   FILE* f = fopen("snap/root.plan", "a");
   if (f == NULL)
     pl_raise_msg(t, "Save: cannot append snap/root.plan");
   fprintf(f, "@%s\n", b58);
   if (fclose(f) != 0)
     pl_raise_msg(t, "Save: short write");
+#endif
   return 0;
 }
 
