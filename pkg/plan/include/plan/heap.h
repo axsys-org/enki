@@ -73,12 +73,12 @@ typedef struct pl_frame {
   uint32_t k;       /* field index / mask cursor / ip */
   uint32_t argbase; /* offset into vstack (never a pointer) */
   uint32_t argc;
-  pl_val a;                /* root */
-  pl_val b;                /* root */
-  union {                  /* kind-exclusive state: */
-    uint64_t opset;        /*   op set number (F_OPENT) */
-    pl_code* code;         /*   bytecode (F_EXEC) */
-    uint32_t op;           /*   op descriptor index (F_OPARG/F_OPDEEP/F_OPROW) */
+  pl_val a;         /* root */
+  pl_val b;         /* root */
+  union {           /* kind-exclusive state: */
+    uint64_t opset; /*   op set number (F_OPENT) */
+    pl_code* code;  /*   bytecode (F_EXEC) */
+    uint32_t op;    /*   op descriptor index (F_OPARG/F_OPDEEP/F_OPROW) */
     uint64_t profile_mark; /* profile generation watermark (F_TRY) */
     uint64_t epoch;        /* effect-epoch watermark (F_MEMO) */
   };

@@ -34,6 +34,9 @@ WISP_EXPORT int wisp_jplan_run(uint64_t environment_token,
                                const uint64_t* object_tokens,
                                size_t object_count, const uint8_t* source,
                                size_t source_len);
+WISP_EXPORT int wisp_jplan_dispatch(uint64_t environment_token,
+                                    const uint8_t* action, size_t action_len,
+                                    const uint8_t* payload, size_t payload_len);
 WISP_EXPORT const uint8_t* wisp_output_ptr(int channel);
 WISP_EXPORT size_t wisp_output_len(int channel);
 WISP_EXPORT const uint8_t* wisp_error_ptr(void);
@@ -529,6 +532,8 @@ typedef struct browser_jplan_args {
   uint64_t environment_token;
   const uint64_t* object_tokens;
   size_t object_count;
+  const uint8_t* action;
+  size_t action_len;
   const uint8_t* source;
   size_t source_len;
 } browser_jplan_args;
@@ -547,9 +552,12 @@ static pl_val browser_make_jplan_args(en_wisp* w,
     objects = en_app_make(w, 0, args->object_count, &w->tmp_v[objects_mark]);
   en_root_pop(w, objects_mark);
   en_root_push(w, objects);
+  if (args->action != NULL)
+    en_root_push(w, pl_nat_from_bytes(w->t, args->action, args->action_len));
   en_root_push(w, pl_nat_from_bytes(w->t, args->source, args->source_len));
 
-  pl_val out = en_app_make(w, 0, 3, &w->tmp_v[mark]);
+  size_t argc = args->action == NULL ? 3 : 4;
+  pl_val out = en_app_make(w, 0, argc, &w->tmp_v[mark]);
   en_root_pop(w, mark);
   return out;
 }
@@ -567,11 +575,11 @@ static bool browser_invoke_jplan(boot_ctx* ctx, void* data) {
     return false;
   }
 
-  en_root_push(w, en_string_nat(w, "main"));
+  en_root_push(w, en_string_nat(w, "_"));
   en_env_entry* ent = en_wisp_getenv(w, w->tmp_v[mark + 1]);
   en_root_pop(w, mark + 1);
   if (ent == NULL) {
-    boot_emitf(2, "wisp: program unbound: main\n");
+    boot_emitf(2, "wisp: program unbound: _\n");
     en_root_pop(w, mark);
     return false;
   }
@@ -589,8 +597,26 @@ WISP_EXPORT int wisp_jplan_run(uint64_t environment_token,
       .environment_token = environment_token,
       .object_tokens = object_tokens,
       .object_count = object_count,
+      .action = NULL,
+      .action_len = 0,
       .source = source,
       .source_len = source_len,
+  };
+  return browser_run("reaver/src/plan", browser_invoke_jplan, &args);
+}
+
+WISP_EXPORT int wisp_jplan_dispatch(uint64_t environment_token,
+                                    const uint8_t* action, size_t action_len,
+                                    const uint8_t* payload,
+                                    size_t payload_len) {
+  browser_jplan_args args = {
+      .environment_token = environment_token,
+      .object_tokens = NULL,
+      .object_count = 0,
+      .action = action,
+      .action_len = action_len,
+      .source = payload,
+      .source_len = payload_len,
   };
   return browser_run("reaver/src/plan", browser_invoke_jplan, &args);
 }

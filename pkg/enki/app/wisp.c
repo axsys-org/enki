@@ -12,11 +12,13 @@
 
 #include "axsys/allocator.h"
 #include "axsys/assume.h"
+#include "axsys/base58.h"
 #include "axsys/profile.h"
 #include "axsys/util.h"
 #include "enki/actor.h"
 #include "enki/wisp.h"
 #include "plan/build.h"
+#include "plan/canon.h"
 #include "plan/eval.h"
 #include "plan/host_native.h"
 #include "plan/nat.h"
@@ -34,7 +36,7 @@
  * loadAssembly / runRepl drivers.
  */
 
-#define BOOT_HEAP_CELLS                ((size_t)1 << 26) /* 512 MiB per semispace, grows */
+#define BOOT_HEAP_CELLS ((size_t)1 << 26) /* 512 MiB per semispace, grows */
 #define BOOT_GC_ALLOCATION_FLOOR_CELLS ((size_t)1 << 20) /* 8 MiB */
 // ./build/release/bin/wisp --file-root ../reaver/src ../reaver/src/plan
 // main  35.43s user 0.55s system 99% cpu 36.136 total
@@ -593,10 +595,72 @@ static bool boot_parse_double(const char* s, double* out) {
 
 static void boot_usage(const char* argv0_c) {
   boot_emitf(2,
-             "usage: %s [--text-hash] [--file-root DIR] "
+             "usage: %s [--text-hash] [--export-text-snapshot DIR] "
+             "[--file-root DIR] "
              "[--wait-for-tracy[=SECONDS]] "
              "[--profile-json FILE] DIR MODULE [FUNCTION ARGS...]\n",
              argv0_c);
+}
+
+static bool boot_export_text_pin(pl_val pin, const char* dir_c) {
+  pl_cell* p = pl_as(PL_TAG_PIN, pin);
+  const uint8_t* hash = p != NULL ? pl_pin_hash(pin) : NULL;
+  if (p == NULL || hash == NULL)
+    return false;
+
+  for (uint32_t i = 0; i < pl_pin_npins(p); i++)
+    if (!boot_export_text_pin(pl_pin_subpins(p)[i], dir_c))
+      return false;
+
+  char b58[AX_BASE58_CAP(32)];
+  ax_base58(hash, 32, b58);
+  size_t path_n = strlen(dir_c) + strlen(b58) + sizeof("/.plan");
+  char* path_c = malloc(path_n);
+  if (path_c == NULL)
+    return false;
+  (void)snprintf(path_c, path_n, "%s/%s.plan", dir_c, b58);
+  if (access(path_c, F_OK) == 0) {
+    free(path_c);
+    return true;
+  }
+
+  size_t text_n = 0;
+  char* text_c = pl_canonize(ax_allocator_system(), pin, &text_n);
+  FILE* file = fopen(path_c, "wb");
+  free(path_c);
+  if (file == NULL) {
+    ax_free(ax_allocator_system(), text_c);
+    return false;
+  }
+  size_t wrote = fwrite(text_c, 1, text_n, file);
+  ax_free(ax_allocator_system(), text_c);
+  return fclose(file) == 0 && wrote == text_n;
+}
+
+static bool boot_export_text_snapshot(pl_thread* t, pl_store* store,
+                                      const char* dir_c) {
+  if (mkdir(dir_c, 0777) != 0 && errno != EEXIST)
+    return false;
+  uint8_t root_hash[32];
+  if (!pl_store_get_root(store, root_hash))
+    return false;
+  pl_val root = pl_store_load(t, root_hash);
+  if (!boot_export_text_pin(root, dir_c))
+    return false;
+
+  size_t path_n = strlen(dir_c) + sizeof("/root.plan");
+  char* path_c = malloc(path_n);
+  if (path_c == NULL)
+    return false;
+  (void)snprintf(path_c, path_n, "%s/root.plan", dir_c);
+  FILE* file = fopen(path_c, "wb");
+  free(path_c);
+  if (file == NULL)
+    return false;
+  char b58[AX_BASE58_CAP(32)];
+  ax_base58(root_hash, 32, b58);
+  int wrote = fprintf(file, "@%s\n", b58);
+  return fclose(file) == 0 && wrote > 0;
 }
 
 static const char* boot_env_file_root(void) {
@@ -629,6 +693,7 @@ static void boot_default_codecache(void) {
 int main(int argc, char** argv) {
   boot_default_codecache();
   const char* file_root_c = boot_env_file_root();
+  const char* export_text_snapshot_c = NULL;
   const char* profile_json_c = NULL;
   double tracy_wait_s = 0.0;
   bool text_hash_f = false;
@@ -656,6 +721,26 @@ int main(int argc, char** argv) {
     size_t prefix_s = sizeof(prefix_c) - 1;
     if (strncmp(argv[argi], prefix_c, prefix_s) == 0) {
       file_root_c = argv[argi] + prefix_s;
+      argi++;
+      continue;
+    }
+    if (strcmp(argv[argi], "--export-text-snapshot") == 0) {
+      if (argi + 1 >= argc || argv[argi + 1][0] == '\0') {
+        boot_usage(argv[0]);
+        return 2;
+      }
+      export_text_snapshot_c = argv[argi + 1];
+      argi += 2;
+      continue;
+    }
+    const char export_prefix_c[] = "--export-text-snapshot=";
+    size_t export_prefix_s = sizeof(export_prefix_c) - 1;
+    if (strncmp(argv[argi], export_prefix_c, export_prefix_s) == 0) {
+      export_text_snapshot_c = argv[argi] + export_prefix_s;
+      if (export_text_snapshot_c[0] == '\0') {
+        boot_usage(argv[0]);
+        return 2;
+      }
       argi++;
       continue;
     }
@@ -773,14 +858,20 @@ int main(int argc, char** argv) {
   volatile int exit_code = 1;
   w->err_f = true;
   if (setjmp(w->errjmp) != 0) {
-    boot_emitf(2, "wisp: %s\n",
-               w->msg_c == NULL ? "unknown error" : w->msg_c);
+    boot_emitf(2, "wisp: %s\n", w->msg_c == NULL ? "unknown error" : w->msg_c);
   } else {
     const char* fn_c = argc - argi >= 3 ? argv[argi + 2] : NULL;
     int run_argc = argc - argi >= 4 ? argc - argi - 3 : 0;
     char** run_argv = argc - argi >= 4 ? argv + argi + 3 : NULL;
     bool ok = boot_load_assembly(ctx, argv[argi + 1], fn_c, run_argc, run_argv);
     exit_code = ok ? 0 : 1;
+  }
+
+  if (export_text_snapshot_c != NULL &&
+      !boot_export_text_snapshot(w->t, store, export_text_snapshot_c)) {
+    fprintf(stderr, "wisp: failed to export text snapshot to %s\n",
+            export_text_snapshot_c);
+    exit_code = 1;
   }
 
   pl_gc_del_root_source(heap, boot_roots, ctx);
