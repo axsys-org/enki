@@ -466,8 +466,8 @@ static pl_val boot_repl_fun(pl_val fun) {
   }
 }
 
-static bool boot_run_function(boot_ctx* ctx, pl_val fun, int argc,
-                              char** argv) {
+static bool boot_run_function_value(boot_ctx* ctx, pl_val fun, pl_val args,
+                                    bool normalize) {
   en_wisp* w = ctx->w;
   en_env_entry* old_env = w->env;
   size_t env_mark = ctx->tmp_env_s;
@@ -477,16 +477,18 @@ static bool boot_run_function(boot_ctx* ctx, pl_val fun, int argc,
 
   size_t mark = en_root_mark(w);
   en_root_push(w, boot_repl_fun(fun));
-  en_root_push(w, 0);
-  w->tmp_v[mark + 1] = boot_make_row(ctx, argc, argv);
+  en_root_push(w, args);
 
-  /* the reference runRepl: force (fun % args), in the root actor so
-   * the program may spawn, send, and block on Recv.  Assembly deliberately
-   * leaves w->exec NULL and uses the deterministic scheduler; create the
-   * persistent worker pool only at this final-program boundary. */
+  /* Assembly deliberately leaves w->exec NULL and uses the deterministic
+   * scheduler.  Create the worker pool only at this final-program boundary.
+   * The ordinary CLI path normalizes (fun % args); browser integrations that
+   * intentionally return an opaque value can stop at WHNF instead. */
   ax_assume(w->exec == NULL, "boot assembly must be single-threaded");
   er_mt_executor* exec = er_mt_executor_new(w->sched, (er_mt_config){0});
-  pl_thread_start_call_nf(w->t, w->tmp_v[mark], w->tmp_v[mark + 1]);
+  if (normalize)
+    pl_thread_start_call_nf(w->t, w->tmp_v[mark], w->tmp_v[mark + 1]);
+  else
+    pl_thread_start_call(w->t, w->tmp_v[mark], w->tmp_v[mark + 1]);
   er_drive_status ds = er_mt_executor_drive(exec, w->self);
   er_mt_executor_free(exec);
   en_root_pop(w, mark);
@@ -516,6 +518,12 @@ static bool boot_run_function(boot_ctx* ctx, pl_val fun, int argc,
                       "(re-root with a fresh boot)\n");
   }
   return true;
+}
+
+static bool boot_run_function(boot_ctx* ctx, pl_val fun, int argc,
+                              char** argv) {
+  pl_val args = boot_make_row(ctx, argc, argv);
+  return boot_run_function_value(ctx, fun, args, true);
 }
 
 static bool boot_load_assembly(boot_ctx* ctx, const char* mod_c,

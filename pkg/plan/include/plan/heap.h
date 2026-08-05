@@ -48,6 +48,7 @@ typedef enum {
   PL_F_OPENT,      /* op entry: forcing the op's single argument        */
   PL_F_OPARG,      /* primop strict-arg driver                          */
   PL_F_OPDEEP,     /* primop deep (nf) phase over the deep_mask args    */
+  PL_F_OPROW,      /* materialize a row whose fields may be wormholes   */
   PL_F_NF,         /* normalize the incoming value                      */
   PL_F_NFOBJ,      /* a: object being normalized, k: field index        */
   PL_F_EXEC,       /* a: env, ip: pointer  */
@@ -77,7 +78,7 @@ typedef struct pl_frame {
   union {                  /* kind-exclusive state: */
     uint64_t opset;        /*   op set number (F_OPENT) */
     pl_code* code;         /*   bytecode (F_EXEC) */
-    uint32_t op;           /*   op descriptor index (F_OPARG/F_OPDEEP) */
+    uint32_t op;           /*   op descriptor index (F_OPARG/F_OPDEEP/F_OPROW) */
     uint64_t profile_mark; /* profile generation watermark (F_TRY) */
     uint64_t epoch;        /* effect-epoch watermark (F_MEMO) */
   };

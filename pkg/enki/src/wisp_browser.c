@@ -30,6 +30,10 @@ WISP_EXPORT void wisp_set_now(uint64_t now_s);
 WISP_EXPORT void wisp_set_emit_top_level(int enabled);
 WISP_EXPORT int wisp_run(const char* src_dir_c, const char* mod_c,
                          const char* fn_c, int argc, char** argv);
+WISP_EXPORT int wisp_jplan_run(uint64_t environment_token,
+                               const uint64_t* object_tokens,
+                               size_t object_count, const uint8_t* source,
+                               size_t source_len);
 WISP_EXPORT const uint8_t* wisp_output_ptr(int channel);
 WISP_EXPORT size_t wisp_output_len(int channel);
 WISP_EXPORT const uint8_t* wisp_error_ptr(void);
@@ -429,8 +433,10 @@ WISP_EXPORT void wisp_set_emit_top_level(int enabled) {
   g_browser.emit_top_level_f = enabled != 0;
 }
 
-WISP_EXPORT int wisp_run(const char* src_dir_c, const char* mod_c,
-                         const char* fn_c, int argc, char** argv) {
+typedef bool (*browser_invoke_fn)(boot_ctx* ctx, void* data);
+
+static int browser_run(const char* src_dir_c, browser_invoke_fn invoke,
+                       void* data) {
   wisp_reset();
   pl_wasm_host_install(&browser_io);
   boot_io_set(&g_browser, browser_read_boot_file, browser_emit);
@@ -441,7 +447,6 @@ WISP_EXPORT int wisp_run(const char* src_dir_c, const char* mod_c,
   en_wisp* w = NULL;
   er_scheduler* sched = NULL;
   boot_ctx ctx = {0};
-  bool roots_added = false;
   bool boot_roots_added = false;
 
   store = pl_store_new_mem();
@@ -477,8 +482,7 @@ WISP_EXPORT int wisp_run(const char* src_dir_c, const char* mod_c,
     goto cleanup;
   }
 
-  const char* run_fn_c = fn_c != NULL && fn_c[0] != '\0' ? fn_c : NULL;
-  bool ok = boot_load_assembly(&ctx, mod_c, run_fn_c, argc, argv);
+  bool ok = invoke(&ctx, data);
   rc = ok ? 0 : 1;
   if (!ok && g_browser.error_buf.len == 0)
     buf_append(&g_browser.error_buf, g_browser.stderr_buf.data,
@@ -493,12 +497,102 @@ cleanup:
     ax_free(ctx.loc_a, mod);
     mod = next;
   }
-  AX_UNUSED(roots_added);
   er_scheduler_free(sched);
   en_wisp_free(w);
   pl_heap_free(heap);
   pl_store_free(store);
   return rc;
+}
+
+typedef struct browser_wisp_args {
+  const char* mod_c;
+  const char* fn_c;
+  int argc;
+  char** argv;
+} browser_wisp_args;
+
+static bool browser_invoke_wisp(boot_ctx* ctx, void* data) {
+  browser_wisp_args* args = data;
+  const char* fn_c =
+      args->fn_c != NULL && args->fn_c[0] != '\0' ? args->fn_c : NULL;
+  return boot_load_assembly(ctx, args->mod_c, fn_c, args->argc, args->argv);
+}
+
+WISP_EXPORT int wisp_run(const char* src_dir_c, const char* mod_c,
+                         const char* fn_c, int argc, char** argv) {
+  browser_wisp_args args = {
+      .mod_c = mod_c, .fn_c = fn_c, .argc = argc, .argv = argv};
+  return browser_run(src_dir_c, browser_invoke_wisp, &args);
+}
+
+typedef struct browser_jplan_args {
+  uint64_t environment_token;
+  const uint64_t* object_tokens;
+  size_t object_count;
+  const uint8_t* source;
+  size_t source_len;
+} browser_jplan_args;
+
+static pl_val browser_make_jplan_args(en_wisp* w,
+                                      const browser_jplan_args* args) {
+  ax_assume(args->object_count <= UINT32_MAX, "too many JPLAN objects");
+  size_t mark = en_root_mark(w);
+  en_root_push(w, pl_wormhole_adopt(w->t, args->environment_token));
+  size_t objects_mark = en_root_mark(w);
+  for (size_t i = 0; i < args->object_count; i++)
+    en_root_push(w, pl_wormhole_adopt(w->t, args->object_tokens[i]));
+
+  pl_val objects = 0;
+  if (args->object_count != 0)
+    objects = en_app_make(w, 0, args->object_count, &w->tmp_v[objects_mark]);
+  en_root_pop(w, objects_mark);
+  en_root_push(w, objects);
+  en_root_push(w, pl_nat_from_bytes(w->t, args->source, args->source_len));
+
+  pl_val out = en_app_make(w, 0, 3, &w->tmp_v[mark]);
+  en_root_pop(w, mark);
+  return out;
+}
+
+static bool browser_invoke_jplan(boot_ctx* ctx, void* data) {
+  browser_jplan_args* args = data;
+  en_wisp* w = ctx->w;
+  size_t mark = en_root_mark(w);
+  en_root_push(w, browser_make_jplan_args(w, args));
+
+  w->env = NULL;
+  w->t->rplan_f = false;
+  if (!boot_process_file(ctx, "jplan-demo")) {
+    en_root_pop(w, mark);
+    return false;
+  }
+
+  en_root_push(w, en_string_nat(w, "main"));
+  en_env_entry* ent = en_wisp_getenv(w, w->tmp_v[mark + 1]);
+  en_root_pop(w, mark + 1);
+  if (ent == NULL) {
+    boot_emitf(2, "wisp: program unbound: main\n");
+    en_root_pop(w, mark);
+    return false;
+  }
+
+  bool ok = boot_run_function_value(ctx, ent->val_v, w->tmp_v[mark], false);
+  en_root_pop(w, mark);
+  return ok;
+}
+
+WISP_EXPORT int wisp_jplan_run(uint64_t environment_token,
+                               const uint64_t* object_tokens,
+                               size_t object_count, const uint8_t* source,
+                               size_t source_len) {
+  browser_jplan_args args = {
+      .environment_token = environment_token,
+      .object_tokens = object_tokens,
+      .object_count = object_count,
+      .source = source,
+      .source_len = source_len,
+  };
+  return browser_run("reaver/src/plan", browser_invoke_jplan, &args);
 }
 
 static browser_buf* output_for_channel(int channel) {

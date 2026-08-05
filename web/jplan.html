@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Enki JPLAN Workspace</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #17253a;
+        --muted: #59697f;
+        --paper: #f5f0df;
+        --panel: #fffdf4;
+        --blue: #245ea8;
+        --blue-dark: #173f75;
+        --line: #23334b;
+        --sun: #e7b94e;
+        --danger: #a43a34;
+        font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+      }
+
+      * { box-sizing: border-box; }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        color: var(--ink);
+        background:
+          linear-gradient(90deg, rgb(35 51 75 / 0.045) 1px, transparent 1px),
+          linear-gradient(rgb(35 51 75 / 0.045) 1px, transparent 1px),
+          var(--paper);
+        background-size: 24px 24px;
+      }
+
+      header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 24px;
+        padding: 18px 24px 14px;
+        border-bottom: 2px solid var(--line);
+        background: rgb(255 253 244 / 0.92);
+      }
+
+      h1 { margin: 0; font-size: clamp(1.3rem, 3vw, 2rem); letter-spacing: -0.03em; }
+      .subtitle { color: var(--muted); font: 0.82rem ui-monospace, monospace; }
+      .status { padding: 6px 10px; border: 1px solid var(--line); background: white; font: 700 0.72rem ui-monospace, monospace; text-transform: uppercase; }
+      .status.ready { color: #1e6b45; }
+      .status.fail { color: var(--danger); }
+
+      .warning {
+        margin: 14px 24px 0;
+        padding: 10px 12px;
+        border: 1px solid #8a5a14;
+        border-left: 6px solid var(--sun);
+        background: #fff4cc;
+        font-size: 0.82rem;
+      }
+
+      main {
+        display: grid;
+        grid-template-columns: minmax(190px, 0.7fr) minmax(360px, 1.55fr) minmax(270px, 1fr);
+        grid-template-rows: minmax(430px, 1fr) 210px;
+        gap: 12px;
+        min-height: calc(100vh - 145px);
+        padding: 14px 24px 24px;
+      }
+
+      .window {
+        min-width: 0;
+        border: 2px solid var(--line);
+        box-shadow: 5px 5px 0 rgb(35 51 75 / 0.18);
+        background: var(--panel);
+        display: flex;
+        flex-direction: column;
+      }
+
+      .titlebar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        min-height: 34px;
+        padding: 6px 9px;
+        color: white;
+        background: var(--blue);
+        border-bottom: 2px solid var(--line);
+        font: 700 0.75rem ui-monospace, monospace;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+      }
+
+      .titlebar span:last-child { opacity: 0.75; font-weight: 500; }
+      .objects { grid-column: 1; grid-row: 1; }
+      .workspace { grid-column: 2; grid-row: 1; }
+      .inspector { grid-column: 3; grid-row: 1; }
+      .transcript { grid-column: 1 / -1; grid-row: 2; }
+
+      #object-list { list-style: none; padding: 8px; margin: 0; overflow: auto; }
+      #object-list li { margin-bottom: 7px; }
+      .object-row {
+        width: 100%;
+        display: grid;
+        grid-template-columns: 34px 1fr;
+        gap: 8px;
+        align-items: center;
+        padding: 9px;
+        border: 1px solid var(--line);
+        background: white;
+        color: inherit;
+        text-align: left;
+        cursor: pointer;
+      }
+      .object-row.selected { color: white; background: var(--blue-dark); }
+      .slot { font: 700 0.72rem ui-monospace, monospace; opacity: 0.75; }
+      .object-name { font-weight: 750; }
+      .object-type { display: block; opacity: 0.65; font: 0.7rem ui-monospace, monospace; margin-top: 2px; }
+
+      textarea {
+        flex: 1;
+        width: 100%;
+        resize: none;
+        border: 0;
+        outline: none;
+        padding: 16px;
+        color: #142239;
+        background: #fffef9;
+        font: 0.9rem/1.58 ui-monospace, SFMono-Regular, Menlo, monospace;
+        tab-size: 2;
+      }
+
+      .controls { display: flex; gap: 8px; padding: 9px; border-top: 1px solid var(--line); background: #e8e1ce; }
+      button.action { min-width: 86px; padding: 8px 12px; border: 2px solid var(--line); box-shadow: 2px 2px 0 var(--line); background: white; color: inherit; font-weight: 800; cursor: pointer; }
+      button.action.primary { background: var(--sun); }
+      button.action:active { transform: translate(2px, 2px); box-shadow: none; }
+      button.action:disabled { opacity: 0.5; cursor: wait; }
+
+      .result-summary { padding: 12px; border-bottom: 1px solid var(--line); background: #edf3fb; }
+      .result-kind { color: var(--muted); font: 0.72rem ui-monospace, monospace; text-transform: uppercase; }
+      #result-value { margin-top: 5px; overflow-wrap: anywhere; font: 700 0.9rem ui-monospace, monospace; }
+      .properties { overflow: auto; }
+      .property { display: grid; grid-template-columns: minmax(90px, 0.8fr) 1.2fr; border-bottom: 1px solid #c7cfda; font: 0.76rem/1.35 ui-monospace, monospace; }
+      .property > span { padding: 7px 8px; overflow-wrap: anywhere; }
+      .property > span:first-child { color: var(--blue-dark); border-right: 1px solid #c7cfda; font-weight: 700; }
+
+      #transcript { flex: 1; margin: 0; padding: 10px 12px; overflow: auto; white-space: pre-wrap; color: #dceaff; background: #111c2c; font: 0.78rem/1.45 ui-monospace, monospace; }
+
+      @media (max-width: 980px) {
+        main { grid-template-columns: 1fr 1.6fr; grid-template-rows: 220px 430px 300px 210px; }
+        .objects { grid-column: 1; grid-row: 1; }
+        .workspace { grid-column: 1 / -1; grid-row: 2; }
+        .inspector { grid-column: 2; grid-row: 1 / span 1; }
+        .transcript { grid-column: 1 / -1; grid-row: 4; }
+      }
+
+      @media (max-width: 650px) {
+        header { align-items: flex-start; }
+        main { display: flex; flex-direction: column; padding-inline: 12px; }
+        .warning { margin-inline: 12px; }
+        .window { min-height: 260px; }
+        .workspace { min-height: 430px; }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div>
+        <h1>JPLAN Browser Workspace</h1>
+        <div class="subtitle">opaque JS objects · PLAN evaluation · process-local lifetime</div>
+      </div>
+      <div id="status" class="status">loading</div>
+    </header>
+
+    <div class="warning">
+      <strong>Unsandboxed demo.</strong> JPLAN runs arbitrary same-origin JavaScript with
+      <code>new Function</code>. Only execute source you trust.
+    </div>
+
+    <main>
+      <section class="window objects">
+        <div class="titlebar"><span>Named objects</span><span>argument row</span></div>
+        <ul id="object-list"></ul>
+      </section>
+
+      <section class="window workspace">
+        <div class="titlebar"><span>Workspace</span><span>JavaScript function body</span></div>
+        <textarea id="source" spellcheck="false" aria-label="JavaScript source"></textarea>
+        <div class="controls">
+          <button id="do-it" class="action primary" type="button">Do It</button>
+          <button id="inspect" class="action" type="button">Inspect</button>
+          <button id="reset" class="action" type="button">Reset</button>
+        </div>
+      </section>
+
+      <section class="window inspector">
+        <div class="titlebar"><span>Inspector</span><span id="property-count">0 properties</span></div>
+        <div class="result-summary">
+          <div id="result-kind" class="result-kind">no result</div>
+          <div id="result-value">—</div>
+        </div>
+        <div id="properties" class="properties"></div>
+      </section>
+
+      <section class="window transcript">
+        <div class="titlebar"><span>Transcript</span><span id="handle-count">0 live handles</span></div>
+        <pre id="transcript"></pre>
+      </section>
+    </main>
+
+    <script type="module" src="./jplan.js"></script>
+  </body>
+</html>

@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { WormholeTable } from "./wormhole-table.mjs";
+import { JPlanHost } from "./jplan-host.mjs";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -9,7 +9,8 @@ const wasmPath = resolve(process.argv[2] ?? "build/wasm/browser/wisp.wasm");
 const repoRoot = resolve(process.argv[3] ?? ".");
 
 let instance;
-const wormholes = new WormholeTable();
+const jplanHost = new JPlanHost(() => memory());
+const wormholes = jplanHost.wormholes;
 
 function memory() {
   return instance.exports.memory;
@@ -58,7 +59,7 @@ function errors() {
 
 function wasiImports() {
   return {
-    enki: wormholes.imports(),
+    enki: jplanHost.imports(),
     wasi_snapshot_preview1: {
       args_get: () => 0,
       args_sizes_get: (argc, argvBufSize) => {
@@ -177,6 +178,31 @@ function run(srcDir, mod, fn = "", args = []) {
   } finally {
     ptrs.forEach((ptr, i) => free(ptr, encoder.encode(strings[i]).length + 1));
     free(argvPtr, args.length * 4 || 4);
+  }
+}
+
+function runJplan(environment, objects, source) {
+  const environmentToken = wormholes.adopt(environment);
+  const objectTokens = objects.map((object) => wormholes.adopt(object));
+  const objectTokensPtr = instance.exports.wisp_alloc(
+    objectTokens.length * 8 || 8,
+  );
+  const sourceBytes = encoder.encode(source);
+  const sourcePtr = allocBytes(sourceBytes);
+  try {
+    objectTokens.forEach((token, i) =>
+      dv().setBigUint64(objectTokensPtr + i * 8, token, true),
+    );
+    return instance.exports.wisp_jplan_run(
+      environmentToken,
+      objectTokensPtr,
+      objectTokens.length,
+      sourcePtr,
+      sourceBytes.length,
+    );
+  } finally {
+    free(objectTokensPtr, objectTokens.length * 8 || 8);
+    free(sourcePtr, sourceBytes.length);
   }
 }
 
@@ -302,5 +328,40 @@ for (const [fn, want] of [
 }
 rc = run("tests/plan", "actors", "stuck");
 assert(rc !== 0 && errors().includes("deadlock"), "stuck did not report deadlock");
+
+instance.exports.wisp_clear_files();
+setFileRoot("reaver/src");
+mount(
+  "reaver/src/plan/jplan-demo.plan",
+  await readFile(resolve(repoRoot, "web/jplan-demo.plan"), "utf8"),
+);
+const environment = {
+  result: undefined,
+  acceptResult(value) {
+    this.result = value;
+  },
+};
+const model = { value: 40, label: "π" };
+rc = runJplan(
+  environment,
+  [model],
+  `if (this !== environment) throw new Error("wrong this");
+objects[0].value += 2;
+return { value: objects[0].value, label: objects[0].label };`,
+);
+assert(rc === 0, `JPLAN demo failed: ${errors()}`);
+assert(environment.result.value === 42, "JPLAN result was not published");
+assert(environment.result.label === "π", "JPLAN UTF-8 source/object mismatch");
+assert(wormholes.size === 0, "JPLAN demo leaked wormhole table entries");
+
+rc = runJplan(environment, [], `throw new TypeError("demo boom");`);
+assert(rc === 0, `JPLAN Error result failed: ${errors()}`);
+assert(environment.result instanceof TypeError, "JPLAN did not publish an Error value");
+assert(environment.result.message === "demo boom", "JPLAN Error message mismatch");
+assert(wormholes.size === 0, "JPLAN Error result leaked wormholes");
+
+rc = runJplan(environment, [], "return 7;");
+assert(rc === 0 && environment.result === 7, "JPLAN primitive result failed");
+assert(wormholes.size === 0, "JPLAN primitive result leaked wormholes");
 
 console.log("wisp browser smoke: OK");

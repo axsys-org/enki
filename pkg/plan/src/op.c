@@ -1193,27 +1193,29 @@ static pl_val op_load(pl_thread* t, size_t ab) {
 
 #define M2(a, b) ax_s2(a, b)
 #define OP66(name, argc, mask, deep, body)                                     \
-  {66, name, NULL, argc, mask, deep, PL_HOST_OP_NONE, false, body}
+  {66, name, NULL, argc, mask, deep, 0, 0, PL_HOST_OP_NONE, false, false, body}
+#define OP74(name, argc, mask, opaque, opaque_row, host)                       \
+  {74, 0, name, argc, mask, 0, opaque, opaque_row, host, false, true, NULL}
 #define OP82(name, argc, mask, host)                                           \
-  {82, 0, name, argc, mask, 0, host, false, NULL}
+  {82, 0, name, argc, mask, 0, 0, 0, host, false, false, NULL}
 /* coordination effects: the machine blocks instead of executing;
  * deep is the initiation-time payload normalization */
 #define OP82C(name, argc, mask, deep, body)                                    \
-  {82, 0, name, argc, mask, deep, PL_HOST_OP_NONE, true, body}
+  {82, 0, name, argc, mask, deep, 0, 0, PL_HOST_OP_NONE, true, false, body}
 /* Evaluator-local op 83 entries do not cross the host boundary. */
 #define OP83_LOCAL(name, argc, mask, body)                                     \
-  {83, 0, name, argc, mask, 0, PL_HOST_OP_NONE, false, body}
+  {83, 0, name, argc, mask, 0, 0, 0, PL_HOST_OP_NONE, false, false, body}
 #define OP83_LOCAL_DEEP(name, argc, mask, deep, body)                          \
-  {83, 0, name, argc, mask, deep, PL_HOST_OP_NONE, false, body}
+  {83, 0, name, argc, mask, deep, 0, 0, PL_HOST_OP_NONE, false, false, body}
 /* Coordination effects are serviced in pkg/enki. */
 #define OP83C(name, argc, mask, deep, body)                                    \
-  {83, 0, name, argc, mask, deep, PL_HOST_OP_NONE, true, body}
+  {83, 0, name, argc, mask, deep, 0, 0, PL_HOST_OP_NONE, true, false, body}
 
 const pl_opdesc pl_ops[] = {
     /* op 0: core PLAN */
-    {0, 0, NULL, 1, 0b1, 0, PL_HOST_OP_NONE, false, op_pin},
-    {0, 1, NULL, 3, 0b111, 0, PL_HOST_OP_NONE, false, op_law},
-    {0, 2, NULL, 6, 0b100000, 0, PL_HOST_OP_NONE, false, op_elim},
+    {0, 0, NULL, 1, 0b1, 0, 0, 0, PL_HOST_OP_NONE, false, false, op_pin},
+    {0, 1, NULL, 3, 0b111, 0, 0, 0, PL_HOST_OP_NONE, false, false, op_law},
+    {0, 2, NULL, 6, 0b100000, 0, 0, 0, PL_HOST_OP_NONE, false, false, op_elim},
 
     OP66(ax_s3('P', 'i', 'n'), 1, 0b1, 0, op_pin),
     OP66(ax_s3('L', 'a', 'w'), 3, 0b111, 0, op_law),
@@ -1373,6 +1375,11 @@ const pl_opdesc pl_ops[] = {
 
     /* Memo stays index 133. */
     OP66(ax_s4('M', 'e', 'm', 'o'), 2, 0b11, 0, op_memo),
+
+    /* op 74: process-local JavaScript values.  Eval's environment and row
+     * elements may terminate at wormholes, and its wormhole result is
+     * delivered directly to the continuation. */
+    OP74("Eval", 3, 0b110, 0b001, 0b010, PL_HOST_OP_JPLAN_EVAL),
 };
 
 const size_t pl_nops = sizeof(pl_ops) / sizeof(pl_ops[0]);
@@ -1420,6 +1427,8 @@ static const uint16_t pl_op82_argc3[] = {120, 123};
 static const uint16_t pl_op83_argc1[] = {124, 126, 127, 128, 132};
 static const uint16_t pl_op83_argc2[] = {125};
 static const uint16_t pl_op83_argc4[] = {131};
+
+static const uint16_t pl_op74_argc3[] = {133};
 
 static pl_opbucket pl_op_lookup_bucket(uint64_t opset, uint32_t argc) {
   switch (opset) {
@@ -1470,6 +1479,10 @@ static pl_opbucket pl_op_lookup_bucket(uint64_t opset, uint32_t argc) {
     case 17:
       return PL_IX_BUCKET(pl_op66_argc17);
     }
+    break;
+  case 74:
+    if (argc == 3)
+      return PL_IX_BUCKET(pl_op74_argc3);
     break;
   case 82:
     switch (argc) {

@@ -204,6 +204,7 @@ WISP_BROWSER_EXPORTS := \
 	-Wl,--export=wisp_set_now \
 	-Wl,--export=wisp_set_emit_top_level \
 	-Wl,--export=wisp_run \
+	-Wl,--export=wisp_jplan_run \
 	-Wl,--export=wisp_output_ptr \
 	-Wl,--export=wisp_output_len \
 	-Wl,--export=wisp_error_ptr \
@@ -333,7 +334,7 @@ $(WISP_BROWSER_WASM): $(WISP_BROWSER_OBJ) $(LIBS)
 	$(CC) $(CPPFLAGS_ALL) $(ENKI_INC) $(CFLAGS_ALL) $< $(LIB_ENKI) $(LIB_PLAN) $(LIB_AXSYS) \
 		$(LDFLAGS_ALL) -Wl,--no-entry -Wl,--export-memory $(WISP_BROWSER_EXPORTS) -o $@
 
-$(WISP_BROWSER_REAVER): web/reaver-bundle.mjs $(shell find $(REAVER_SRC) -type f 2>/dev/null)
+$(WISP_BROWSER_REAVER): web/reaver-bundle.mjs web/jplan-demo.plan $(shell find $(REAVER_SRC) -type f 2>/dev/null)
 	@mkdir -p $(dir $@)
 	node web/reaver-bundle.mjs $(REAVER_SRC) $@
 
