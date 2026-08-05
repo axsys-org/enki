@@ -2,11 +2,17 @@
 import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, relative, resolve } from "node:path";
 
-const [srcArg = "reaver/src", outArg = "build/wasm/browser/reaver-src.json"] =
-  process.argv.slice(2);
+const [
+  srcArg = "reaver/src",
+  outArg = "build/wasm/browser/reaver-src.json",
+  jplanArg = "build/jplan-demo",
+] = process.argv.slice(2);
 const srcRoot = resolve(srcArg);
 const outPath = resolve(outArg);
-const jplanDemoPath = new URL("./jplan-demo.plan", import.meta.url);
+const jplanRoot = resolve(jplanArg);
+const jplanDemoPath = resolve(jplanRoot, "jplan-demo.plan");
+const jplanSourcePath = new URL("./jplan-demo.rvr", import.meta.url);
+const jplanSnapRoot = resolve(jplanRoot, "jplan-demo-snap");
 
 async function collect(dir) {
   const entries = await readdir(dir, { withFileTypes: true });
@@ -36,6 +42,22 @@ files.push({
   mtime: Math.floor(jplanInfo.mtimeMs / 1000),
   base64: (await readFile(jplanDemoPath)).toString("base64"),
 });
+
+const jplanSourceInfo = await stat(jplanSourcePath);
+files.push({
+  path: "reaver/src/reaver/jplan-demo.rvr",
+  mtime: Math.floor(jplanSourceInfo.mtimeMs / 1000),
+  base64: (await readFile(jplanSourcePath)).toString("base64"),
+});
+
+for (const file of await collect(jplanSnapRoot)) {
+  const info = await stat(file);
+  files.push({
+    path: `reaver/src/plan/${relative(jplanSnapRoot, file).replaceAll("\\", "/")}`,
+    mtime: Math.floor(info.mtimeMs / 1000),
+    base64: (await readFile(file)).toString("base64"),
+  });
+}
 
 await mkdir(dirname(outPath), { recursive: true });
 await writeFile(

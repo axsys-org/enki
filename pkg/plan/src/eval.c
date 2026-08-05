@@ -572,10 +572,10 @@ static pl_run_status pl_run(pl_thread* t, pl_val v, size_t base,
       [PL_F_OPARG] = &&ret_oparg,   [PL_F_OPDEEP] = &&ret_opdeep,
       [PL_F_OPROW] = &&ret_oprow,   [PL_F_NF] = &&ret_nf,
       [PL_F_NFOBJ] = &&ret_nfobj,   [PL_F_EXEC] = &&ret_exec,
-      [PL_F_EXECV] = &&ret_exec,
-      [PL_F_UPD] = &&ret_upd,       [PL_F_TRY] = &&ret_try,
-      [PL_F_JUDGE] = &&ret_judge,   [PL_F_NIL] = &&ret_nil,
-      [PL_F_PROF] = &&ret_prof,     [PL_F_APPLYN] = &&ret_applyn,
+      [PL_F_EXECV] = &&ret_exec,    [PL_F_UPD] = &&ret_upd,
+      [PL_F_TRY] = &&ret_try,       [PL_F_JUDGE] = &&ret_judge,
+      [PL_F_NIL] = &&ret_nil,       [PL_F_PROF] = &&ret_prof,
+      [PL_F_APPLYN] = &&ret_applyn,
   };
 
   if (entry == PL_RES_RETURN)
