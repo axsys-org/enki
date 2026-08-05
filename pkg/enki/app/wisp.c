@@ -508,6 +508,7 @@ static bool boot_run_function_value(boot_ctx* ctx, pl_val fun, pl_val args,
    * snapshot whose root is not the repl (a bench or serve run Saved
    * last): the session exits 0 in silence and the user loses an hour.
    * One consumed byte is a fair price for the warning. */
+#ifndef ENKI_WASM
   if (!isatty(0)) {
     struct pollfd pfd = {.fd = 0, .events = POLLIN};
     uint8_t leftover;
@@ -519,6 +520,7 @@ static bool boot_run_function_value(boot_ctx* ctx, pl_val fun, pl_val args,
                       "input — the snapshot root is probably not a repl "
                       "(re-root with a fresh boot)\n");
   }
+#endif
   return true;
 }
 

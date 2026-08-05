@@ -698,7 +698,11 @@ static void er_service(er_scheduler* sys, er_actor* a, bool locked) {
     /* Provisional staging op: a synchronous blocking sleep on the scheduler
      * thread.  The result is the constant 0 (no external data), so it needs
      * no event-log entry and replay simply skips the wait.  A non-blocking
-     * timer that parks only this actor is the natural settled version. */
+     * timer that parks only this actor is the natural settled version.  The
+     * browser host has no blocking scheduler primitive, so the provisional
+     * operation completes immediately there instead of pulling poll_oneoff
+     * into the WASI import surface. */
+#ifndef ENKI_WASM
     if (sys->mode != ER_MODE_REPLAY) {
       uint64_t secs = pl_nat_u64_clamp(args[0]);
       struct timespec ts = {.tv_sec = (time_t)secs, .tv_nsec = 0}, rem;
@@ -707,6 +711,7 @@ static void er_service(er_scheduler* sys, er_actor* a, bool locked) {
         ts = rem;
       er_service_relock(sys, locked);
     }
+#endif
     pl_thread_deposit(t, 0);
     a->status = ER_ACTOR_RUNNABLE;
     er_enqueue(a);
