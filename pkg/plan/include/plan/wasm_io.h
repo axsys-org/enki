@@ -24,7 +24,4 @@ typedef struct pl_wasm_io {
   uint64_t (*now)(void* ctx);
 } pl_wasm_io;
 
-void pl_wasm_io_set(const pl_wasm_io* io);
-const pl_wasm_io* pl_wasm_io_get(void);
-
 #endif

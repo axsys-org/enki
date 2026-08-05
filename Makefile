@@ -136,11 +136,15 @@ LDFLAGS_ALL += -L/opt/homebrew/opt/tracy/lib -Wl,-rpath,/opt/homebrew/opt/tracy/
 endif
 
 AXSYS_SRCS := $(wildcard pkg/axsys/src/*.c)
-PLAN_SRCS := $(filter-out pkg/plan/src/rplan_wasm.c pkg/plan/src/nat_wasm.c,$(wildcard pkg/plan/src/*.c))
+PLAN_SRCS := $(filter-out pkg/plan/src/host_wasm_io.c pkg/plan/src/nat_wasm.c \
+	pkg/plan/src/host_wasm.c,$(wildcard pkg/plan/src/*.c))
 ENKI_SRCS := $(filter-out pkg/enki/src/wisp_browser.c,$(wildcard pkg/enki/src/*.c))
 ifeq ($(BUILD_TYPE),wasm)
-PLAN_SRCS := $(filter-out pkg/plan/src/rplan.c pkg/plan/src/nat.c,$(PLAN_SRCS)) \
-	pkg/plan/src/nat_wasm.c pkg/plan/src/rplan_wasm.c
+PLAN_SRCS := $(filter-out pkg/plan/src/host_native_io.c pkg/plan/src/nat.c \
+	pkg/plan/src/host_native.c,$(PLAN_SRCS)) \
+	pkg/plan/src/nat_wasm.c pkg/plan/src/host_wasm_io.c \
+	pkg/plan/src/host_wasm.c
+ENKI_SRCS := $(filter-out pkg/enki/src/http.c,$(ENKI_SRCS))
 endif
 HEADERS := $(wildcard pkg/axsys/include/axsys/*.h) \
 	$(wildcard pkg/plan/include/plan/*.h) \
@@ -174,6 +178,7 @@ PERF_BINS := $(patsubst %.c,$(BUILD_DIR)/%,$(PERF_SRCS))
 WASM_UNSUPPORTED_UNIT_SRCS := $(UNIT_DIR)/test_enki_actor.c \
 	$(UNIT_DIR)/test_enki_replay.c \
 	$(UNIT_DIR)/test_enki_wisp.c \
+	$(UNIT_DIR)/test_plan_host_native.c \
 	$(UNIT_DIR)/test_plan_op82.c \
 	$(UNIT_DIR)/test_plan_store.c \
 	$(UNIT_DIR)/test_wisp_cli.c
@@ -209,7 +214,14 @@ WISP_BROWSER_EXPORTS := \
 	-Wl,--export=wisp_file_data_ptr \
 	-Wl,--export=wisp_file_data_len \
 	-Wl,--export=wisp_file_written \
-	-Wl,--export=wisp_dispose
+	-Wl,--export=wisp_dispose \
+	-Wl,--export=wisp_wormhole_heap_new \
+	-Wl,--export=wisp_wormhole_adopt \
+	-Wl,--export=wisp_wormhole_clone \
+	-Wl,--export=wisp_wormhole_close \
+	-Wl,--export=wisp_wormhole_drop \
+	-Wl,--export=wisp_wormhole_collect \
+	-Wl,--export=wisp_wormhole_heap_dispose
 
 ifeq ($(BUILD_TYPE),tsan)
 ACTIVE_UNIT_BINS := $(UNIT_BINS) $(TSAN_UNIT_BINS)

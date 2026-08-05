@@ -174,6 +174,7 @@
             install -m 0644 build/wasm/browser/reaver-src.json $out/share/enki/browser/reaver-src.json
             install -m 0644 web/wisp.html $out/share/enki/browser/wisp.html
             install -m 0644 web/wisp.js $out/share/enki/browser/wisp.js
+            install -m 0644 web/wormhole-table.mjs $out/share/enki/browser/wormhole-table.mjs
             install -m 0755 web/reaver-bundle.mjs $out/share/enki/browser/reaver-bundle.mjs
             install -m 0755 web/wisp-devserver.mjs $out/share/enki/browser/wisp-devserver.mjs
             runHook postInstall

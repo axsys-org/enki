@@ -1,3 +1,5 @@
+import { WormholeTable } from "./wormhole-table.mjs";
+
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
@@ -18,6 +20,7 @@ const els = {
 let instance;
 let bundledSource = null;
 let transcript = "";
+export const wormholes = new WormholeTable();
 
 const bootStdlibInput = "(#bind std (#module std))\n(#import std)\n";
 
@@ -321,6 +324,7 @@ function wasiImports() {
   const errnoSuccess = 0;
   const errnoBadf = 8;
   return {
+    enki: wormholes.imports(),
     wasi_snapshot_preview1: {
       args_get: () => errnoSuccess,
       args_sizes_get: (argc, argvBufSize) => {

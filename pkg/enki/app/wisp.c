@@ -18,6 +18,7 @@
 #include "enki/wisp.h"
 #include "plan/build.h"
 #include "plan/eval.h"
+#include "plan/host_native.h"
 #include "plan/nat.h"
 #include "plan/heap.h"
 #include "plan/store.h"
@@ -741,7 +742,7 @@ int main(int argc, char** argv) {
       fprintf(stderr, "wisp: failed to finalize profile JSON\n");
     return 1;
   }
-  w->t->rplan_file_root_c = file_root_c;
+  pl_native_host_set_file_root(w->t, file_root_c);
 
   /* the boot thread is the root actor (the reference withNewRts);
    * spawned actors inherit the ReadFile jail */
