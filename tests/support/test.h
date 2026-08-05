@@ -198,7 +198,9 @@ static void enki_test_timeout(int signal_number) {
   static const char message[] =
       "\ngreatest: test process timed out after " ENKI_TEST_STRINGIFY(
           ENKI_TEST_TIMEOUT_SECONDS) " seconds\n";
-  (void)write(STDERR_FILENO, message, sizeof(message) - 1);
+  /* glibc marks write() warn-unused-result; assigning satisfies it */
+  ssize_t ignored = write(STDERR_FILENO, message, sizeof(message) - 1);
+  (void)ignored;
   _exit(124);
 }
 

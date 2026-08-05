@@ -488,7 +488,7 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
     uint8_t* got = NULL;
     size_t gn = 0;
     if (pl_store_backend_get(s, codecache_key, &got, &gn)) {
-      bool served = false;
+      volatile bool served = false;
       if (gn == 32 && (s->be.has == NULL || s->be.has(s->be.ctx, got))) {
         pl_catch cc;
         pl_catch_init(t, &cc);
@@ -557,7 +557,7 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
     size_t gbn = 0;
     if (s->format == PL_STORE_FORMAT_SILO_V1 &&
         plgc_get(codecache_key, &gb, &gbn)) {
-      bool served = false;
+      volatile bool served = false;
       pl_catch cc;
       pl_catch_init(t, &cc);
       if (setjmp(cc.jb) != 0) {

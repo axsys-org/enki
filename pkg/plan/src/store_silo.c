@@ -367,8 +367,11 @@ void pl_store_silo_batch_abort(pl_silo_batch* batch) {
      * lock, so no cooperating writer can have appended behind this batch.
      * Best-effort rollback prevents retryable failures from accumulating a
      * full orphan closure; a failed truncate remains safe as an orphan tail. */
-    if (batch->pack_end > batch->pack_start)
-      (void)ftruncate(batch->backend->pack_fd, (off_t)batch->pack_start);
+    if (batch->pack_end > batch->pack_start &&
+        ftruncate(batch->backend->pack_fd, (off_t)batch->pack_start) != 0) {
+      /* glibc marks ftruncate warn-unused-result; the failure is
+       * acceptable here per the comment above */
+    }
     mdb_txn_abort(batch->txn);
   }
   ax_hmfree(batch->pending);
