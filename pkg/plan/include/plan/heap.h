@@ -50,6 +50,10 @@ typedef enum {
   PL_F_NF,         /* normalize the incoming value                      */
   PL_F_NFOBJ,      /* a: object being normalized, k: field index        */
   PL_F_EXEC,       /* a: env, ip: pointer  */
+  PL_F_EXECV,      /* stack-resident law entry: the [head, args…] group
+                      stays on the vstack at b (a nat index); argc =
+                      group size; a = 0 until an op that captures an
+                      env reifies one on demand.  RET resets to b.     */
   PL_F_UPD,        /* a: newstyle thunk update */
   PL_F_TRY,        /* exception barrier (op 66 Try); argbase: vsp mark  */
   PL_F_JUDGE,      /* forcing a law-body chain node; argbase: hbase     */

@@ -56,6 +56,11 @@ typedef enum {
   PL_BAN_SLOW = 2,       /* fallback - possibly over or under applied */
   PL_BAN_PRIM = 3,       /* primop [oppin, arg]: dispatch via the op table */
   PL_BAN_PRIM_KNOWN = 4, /* ingest-resolved primop [opidx, args…] */
+  PL_BAN_MASK = 7,       /* low bits: the bane proper */
+  PL_BAN_NOUPD = 8,      /* flag: entry-count Zero/Once (occurrence
+                            analysis) — no blackhole, no update; re-entry
+                            re-evaluates.  Also loses <<loop>> detection,
+                            which the Once guarantee makes unreachable. */
 } pl_bane;
 
 /*
@@ -299,8 +304,10 @@ static inline pl_val pl_thke_env(pl_cell* p) {
   return (pl_val)p[1];
 }
 
-static inline pl_bane pl_thke_bane(pl_cell* p) {
-  return (pl_bane)p[2];
+/* The full bane word: low 3 bits the bane, bit 3 NOUPD, bits >= 8 a
+ * strict-entry mask hint (FAST only). */
+static inline uint64_t pl_thke_bane(pl_cell* p) {
+  return (uint64_t)p[2];
 }
 
 static inline uint32_t pl_thke_n(pl_cell* p) {

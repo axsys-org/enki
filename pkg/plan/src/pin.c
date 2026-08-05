@@ -172,6 +172,7 @@ typedef struct save_ctx {
   pl_cell** transient;       /* Save-local Legacy canonicalization cells */
   char* err;
   size_t err_cap;
+  bool no_root; /* persist objects only; leave the store root untouched */
 } save_ctx;
 
 static bool save_error(save_ctx* c, const char* fmt, ...) {
@@ -482,7 +483,11 @@ static bool save_prepare_legacy(save_ctx* c, pl_val root) {
   }
 
   const uint8_t* root_hash = save_pin_hash(c, root);
-  if (root_hash == NULL || !pl_store_put_root(c->store, root_hash)) {
+  if (root_hash == NULL) {
+    save_error(c, "Legacy root publication failed");
+    goto failed;
+  }
+  if (!c->no_root && !pl_store_put_root(c->store, root_hash)) {
     save_error(c, "Legacy root publication failed");
     goto failed;
   }
@@ -547,7 +552,8 @@ static bool save_prepare_silo(save_ctx* c, pl_val root) {
   }
   pl_silo_batch* batch = c->batch;
   c->batch = NULL;
-  return pl_store_silo_batch_commit(batch, root_hash, c->err, c->err_cap);
+  return pl_store_silo_batch_commit(batch, c->no_root ? NULL : root_hash,
+                                    c->err, c->err_cap);
 
 failed:
   pl_store_silo_batch_abort(c->batch);
@@ -652,6 +658,14 @@ static bool save_canonical_root(save_ctx* c, pl_val input, bool* handled) {
     return true;
   *handled = true;
 
+  if (c->no_root) {
+    /* already canonical: presence is all that matters, and the root
+     * stays whatever it was */
+    if (c->store->be.has != NULL && !c->store->be.has(c->store->be.ctx, hash))
+      return save_error(c, "canonical object is not persisted");
+    return true;
+  }
+
   if (c->store->format == PL_STORE_FORMAT_SILO_V1) {
     pl_silo_batch* batch = NULL;
     if (!pl_store_silo_batch_begin(c->store, &batch, c->err, c->err_cap))
@@ -666,14 +680,15 @@ static bool save_canonical_root(save_ctx* c, pl_val input, bool* handled) {
   return true;
 }
 
-bool pl_store_save_root(pl_store* s, pl_val pin, uint8_t out_hash[32],
-                        char* err, size_t err_cap) {
+static bool pl_store_save_pin_or_root(pl_store* s, pl_val pin,
+                                      uint8_t out_hash[32], char* err,
+                                      size_t err_cap, bool no_root) {
   if (s == NULL) {
     if (err != NULL && err_cap != 0)
       (void)snprintf(err, err_cap, "Save requires a store");
     return false;
   }
-  save_ctx c = {.store = s, .err = err, .err_cap = err_cap};
+  save_ctx c = {.store = s, .err = err, .err_cap = err_cap, .no_root = no_root};
   pl_store_save_lock(s);
   bool handled = false;
   bool ok = save_canonical_root(&c, pin, &handled);
@@ -713,6 +728,19 @@ bool pl_store_save_root(pl_store* s, pl_val pin, uint8_t out_hash[32],
       pl_store_put_code(s, c.compile[i].key.b);
   save_ctx_free(&c);
   return ok;
+}
+
+bool pl_store_save_root(pl_store* s, pl_val pin, uint8_t out_hash[32],
+                        char* err, size_t err_cap) {
+  return pl_store_save_pin_or_root(s, pin, out_hash, err, err_cap, false);
+}
+
+/* Persist a pin's closed graph without publishing it as the store
+ * root — the bytecode compile cache stores derived artifacts this
+ * way. */
+bool pl_store_save_pin(pl_store* s, pl_val pin, uint8_t out_hash[32], char* err,
+                       size_t err_cap) {
+  return pl_store_save_pin_or_root(s, pin, out_hash, err, err_cap, true);
 }
 
 pl_val pl_pin(pl_thread* t, pl_val v) {
@@ -823,6 +851,122 @@ static bool store_hash_loading(pl_store* s, const uint8_t hash[32]) {
     if (memcmp(s->loading[i].b, hash, 32) == 0)
       return true;
   return false;
+}
+
+static bool load_silo_pin(pl_thread* t, pl_store* s, const uint8_t hash[32],
+                          pl_val* out, pl_intern_entry** compile, char* err,
+                          size_t err_cap);
+
+/* Load a Silo object stream from an external byte buffer (the global
+ * compile cache): subpins resolve through the regular store paths, so
+ * a stream referencing pins this store has never seen simply fails —
+ * the caller treats that as a cache miss.  The result is hashed,
+ * interned, and indistinguishable from a pack-loaded pin. */
+typedef struct silo_mem_reader {
+  const uint8_t* b;
+  size_t n;
+  size_t pos;
+} silo_mem_reader;
+
+static bool silo_mem_read(void* ctx, uint8_t* bytes, size_t len) {
+  silo_mem_reader* r = ctx;
+  if (len > r->n - r->pos)
+    return false;
+  memcpy(bytes, r->b + r->pos, len);
+  r->pos += len;
+  return true;
+}
+
+static bool silo_mem_rewind(void* ctx) {
+  silo_mem_reader* r = ctx;
+  r->pos = 0;
+  return true;
+}
+
+bool pl_store_load_silo_stream(pl_thread* t, pl_store* s, const uint8_t* bytes,
+                               size_t len, pl_val* out, char* err,
+                               size_t err_cap) {
+  silo_mem_reader mem = {.b = bytes, .n = len, .pos = 0};
+  pl_silo_reader reader = {.ctx = &mem,
+                           .read = silo_mem_read,
+                           .rewind = silo_mem_rewind,
+                           .len = len,
+                           .pos = 0};
+  pl_silo_scan scan = {0};
+  pl_val* resolved = NULL;
+  pl_val* subpins = NULL;
+  pl_intern_entry* compile = NULL;
+  size_t mark = 0;
+  bool marked = false;
+  bool ok = pl_silo_scan_stream(&reader, false, &scan, err, err_cap);
+  if (!ok)
+    goto done;
+  resolved = calloc(scan.pin_count ? scan.pin_count : 1, sizeof(*resolved));
+  if (resolved == NULL) {
+    (void)snprintf(err, err_cap, "out of memory resolving Silo PINs");
+    ok = false;
+    goto done;
+  }
+  for (size_t i = 0; i < scan.used_count; i++) {
+    uint32_t index = scan.used[i];
+    pl_val sub;
+    if (!load_silo_pin(t, s, scan.pins[index].b, &sub, &compile, err,
+                       err_cap)) {
+      ok = false;
+      goto done;
+    }
+    resolved[index] = sub;
+    ax_arrpush(subpins, sub);
+  }
+
+  mark = pl_store_mark(s);
+  marked = true;
+  pl_val body;
+  if (!pl_silo_build_stream(&reader, s, &scan, resolved, &body, err, err_cap)) {
+    ok = false;
+    goto done;
+  }
+
+  uint8_t actual[32];
+  if (!pl_silo_hash(body, subpins, (size_t)ax_arrlen(subpins), actual, err,
+                    err_cap)) {
+    ok = false;
+    goto done;
+  }
+  pl_val hit = pl_store_intern_get(s, actual);
+  if (hit != 0) {
+    pl_store_release(s, mark);
+    marked = false;
+    *out = hit;
+    ok = true;
+    goto done;
+  }
+
+  size_t pin_cells = PL_PIN_CELLS((uint32_t)scan.used_count);
+  size_t region_mark = pl_store_mark(s);
+  if (region_mark > s->region->cap_s ||
+      pin_cells > (s->region->cap_s - region_mark) / sizeof(pl_cell)) {
+    (void)snprintf(err, err_cap,
+                   "decoded PIN exceeds remaining store-region capacity");
+    ok = false;
+    goto done;
+  }
+
+  *out = pl_store_mk_pin(s, actual, body, (uint32_t)scan.used_count, subpins);
+  marked = false;
+  ok = true;
+
+done:
+  if (!ok && marked)
+    pl_store_release(s, mark);
+  pl_silo_scan_free(&scan);
+  free(resolved);
+  ax_arrfree(subpins);
+  if (ok)
+    for (ptrdiff_t i = 0; i < ax_hmlen(compile); i++)
+      pl_store_put_code(s, compile[i].key.b);
+  ax_hmfree(compile);
+  return ok;
 }
 
 static bool load_silo_pin(pl_thread* t, pl_store* s, const uint8_t hash[32],

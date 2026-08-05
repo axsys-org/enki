@@ -20,6 +20,7 @@ typedef struct silo_backend {
   MDB_env* env;
   MDB_dbi objects;
   MDB_dbi meta;
+  MDB_dbi codecache; /* side KV: (compiler, law) -> code-row pin hash */
   int pack_fd;
 } silo_backend;
 
@@ -186,22 +187,43 @@ static bool silo_get_root(void* ctx, uint8_t hash[32]) {
   return silo_meta_get(ctx, root_key, sizeof(root_key) - 1, hash, 32);
 }
 
-static bool silo_unused_get(void* ctx, const uint8_t hash[32], uint8_t** out_b,
-                            size_t* out_s) {
-  (void)ctx;
-  (void)hash;
-  (void)out_b;
-  (void)out_s;
-  return false;
+/* Generic KV over the side `codecache` DBI.  Silo's pin objects only
+ * ever move through the validated batch path; this table serves small
+ * derived artifacts (the bytecode compile cache) keyed by tagged
+ * hashes that cannot collide with anything content-addressed. */
+static bool silo_kv_get(void* ctx, const uint8_t hash[32], uint8_t** out_b,
+                        size_t* out_s) {
+  silo_backend* b = ctx;
+  MDB_txn* txn;
+  if (mdb_txn_begin(b->env, NULL, MDB_RDONLY, &txn) != 0)
+    return false;
+  MDB_val k = {.mv_size = 32, .mv_data = (void*)hash};
+  MDB_val v;
+  if (mdb_get(txn, b->codecache, &k, &v) != 0) {
+    mdb_txn_abort(txn);
+    return false;
+  }
+  *out_b = malloc(v.mv_size);
+  ax_assume(*out_b != NULL, "oom");
+  memcpy(*out_b, v.mv_data, v.mv_size);
+  *out_s = v.mv_size;
+  mdb_txn_abort(txn);
+  return true;
 }
 
-static bool silo_unused_put(void* ctx, const uint8_t hash[32],
-                            const uint8_t* bytes, size_t len) {
-  (void)ctx;
-  (void)hash;
-  (void)bytes;
-  (void)len;
-  return false;
+static bool silo_kv_put(void* ctx, const uint8_t hash[32], const uint8_t* bytes,
+                        size_t len) {
+  silo_backend* b = ctx;
+  MDB_txn* txn;
+  if (mdb_txn_begin(b->env, NULL, 0, &txn) != 0)
+    return false;
+  MDB_val k = {.mv_size = 32, .mv_data = (void*)hash};
+  MDB_val v = {.mv_size = len, .mv_data = (void*)bytes};
+  if (mdb_put(txn, b->codecache, &k, &v, 0) != 0) {
+    mdb_txn_abort(txn);
+    return false;
+  }
+  return mdb_txn_commit(txn) == 0;
 }
 
 static void silo_close(void* ctx) {
@@ -210,6 +232,7 @@ static void silo_close(void* ctx) {
     (void)close(b->pack_fd);
   mdb_dbi_close(b->env, b->objects);
   mdb_dbi_close(b->env, b->meta);
+  mdb_dbi_close(b->env, b->codecache);
   mdb_env_close(b->env);
   free(b);
 }
@@ -344,8 +367,11 @@ void pl_store_silo_batch_abort(pl_silo_batch* batch) {
      * lock, so no cooperating writer can have appended behind this batch.
      * Best-effort rollback prevents retryable failures from accumulating a
      * full orphan closure; a failed truncate remains safe as an orphan tail. */
-    if (batch->pack_end > batch->pack_start)
-      (void)ftruncate(batch->backend->pack_fd, (off_t)batch->pack_start);
+    if (batch->pack_end > batch->pack_start &&
+        ftruncate(batch->backend->pack_fd, (off_t)batch->pack_start) != 0) {
+      /* glibc marks ftruncate warn-unused-result; the failure is
+       * acceptable here per the comment above */
+    }
     mdb_txn_abort(batch->txn);
   }
   ax_hmfree(batch->pending);
@@ -355,32 +381,37 @@ void pl_store_silo_batch_abort(pl_silo_batch* batch) {
 bool pl_store_silo_batch_commit(pl_silo_batch* batch,
                                 const uint8_t root_hash[32], char* err,
                                 size_t err_cap) {
-  if (batch == NULL || batch->txn == NULL || root_hash == NULL) {
+  /* root_hash == NULL: commit the batch's objects without touching the
+   * store root (derived-artifact writes, e.g. the compile cache). */
+  if (batch == NULL || batch->txn == NULL) {
     pl_store_silo_batch_abort(batch);
     return pack_error(err, err_cap, "invalid Silo batch commit");
   }
-  bool root_present = false;
-  if (!pl_store_silo_batch_contains(batch, root_hash, &root_present, err,
-                                    err_cap)) {
-    pl_store_silo_batch_abort(batch);
-    return false;
-  }
-  if (!root_present) {
-    pl_store_silo_batch_abort(batch);
-    return pack_error(err, err_cap, "Silo root object is not indexed");
-  }
-
+  bool root_changed = false;
   MDB_val root_k = {.mv_size = sizeof(root_key) - 1,
                     .mv_data = (void*)root_key};
-  MDB_val old_root;
-  int root_rc = mdb_get(batch->txn, batch->backend->meta, &root_k, &old_root);
-  bool root_changed =
-      root_rc == MDB_NOTFOUND ||
-      (root_rc == 0 && (old_root.mv_size != 32 ||
-                        memcmp(old_root.mv_data, root_hash, 32) != 0));
-  if (root_rc != 0 && root_rc != MDB_NOTFOUND) {
-    pl_store_silo_batch_abort(batch);
-    return pack_error(err, err_cap, "cannot query Silo root");
+  if (root_hash != NULL) {
+    bool root_present = false;
+    if (!pl_store_silo_batch_contains(batch, root_hash, &root_present, err,
+                                      err_cap)) {
+      pl_store_silo_batch_abort(batch);
+      return false;
+    }
+    if (!root_present) {
+      pl_store_silo_batch_abort(batch);
+      return pack_error(err, err_cap, "Silo root object is not indexed");
+    }
+
+    MDB_val old_root;
+    int root_rc = mdb_get(batch->txn, batch->backend->meta, &root_k, &old_root);
+    root_changed =
+        root_rc == MDB_NOTFOUND ||
+        (root_rc == 0 && (old_root.mv_size != 32 ||
+                          memcmp(old_root.mv_data, root_hash, 32) != 0));
+    if (root_rc != 0 && root_rc != MDB_NOTFOUND) {
+      pl_store_silo_batch_abort(batch);
+      return pack_error(err, err_cap, "cannot query Silo root");
+    }
   }
 
   if (!batch->changed && !root_changed) {
@@ -488,7 +519,7 @@ pl_store* pl_store_new_silo(const char* path, size_t map_size) {
   if (b == NULL)
     return NULL;
   b->pack_fd = -1;
-  if (mdb_env_create(&b->env) != 0 || mdb_env_set_maxdbs(b->env, 2) != 0 ||
+  if (mdb_env_create(&b->env) != 0 || mdb_env_set_maxdbs(b->env, 3) != 0 ||
       mdb_env_set_mapsize(b->env, map_size) != 0 ||
       mdb_env_open(b->env, path, 0, 0664) != 0)
     goto fail_env;
@@ -505,7 +536,8 @@ pl_store* pl_store_new_silo(const char* path, size_t map_size) {
   if (mdb_txn_begin(b->env, NULL, 0, &txn) != 0)
     goto fail_pack;
   if (mdb_dbi_open(txn, "objects", MDB_CREATE, &b->objects) != 0 ||
-      mdb_dbi_open(txn, "meta", MDB_CREATE, &b->meta) != 0) {
+      mdb_dbi_open(txn, "meta", MDB_CREATE, &b->meta) != 0 ||
+      mdb_dbi_open(txn, "codecache", MDB_CREATE, &b->codecache) != 0) {
     mdb_txn_abort(txn);
     goto fail_pack;
   }
@@ -531,8 +563,8 @@ pl_store* pl_store_new_silo(const char* path, size_t map_size) {
 
   pl_store* store = pl_store_new((pl_store_backend){
       .ctx = b,
-      .get = silo_unused_get,
-      .put = silo_unused_put,
+      .get = silo_kv_get,
+      .put = silo_kv_put,
       .has = silo_has,
       .put_root = silo_put_root,
       .get_root = silo_get_root,

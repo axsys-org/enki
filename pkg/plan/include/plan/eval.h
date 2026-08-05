@@ -46,7 +46,8 @@ typedef enum {
 typedef enum {
   PL_RES_EVAL = 0, /* re-enter the machine EVALing t->resume_val */
   PL_RES_RETURN,   /* re-enter RETURNing t->resume_val to the top frame */
-  PL_RES_RUN,      /* reserved: compiled-law re-entry at a saved offset */
+  PL_RES_RUN,      /* re-enter compiled code at the top F_EXEC frame's
+                      saved offset (BR/JMP back-edge and CALL yields) */
 } pl_resume_kind;
 
 /*

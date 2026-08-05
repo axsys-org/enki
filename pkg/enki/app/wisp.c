@@ -5,6 +5,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <poll.h>
+#include <unistd.h>
 #include <sys/stat.h>
 
 #include "axsys/allocator.h"
@@ -445,6 +447,21 @@ static bool boot_run_function(boot_ctx* ctx, pl_val fun, int argc,
                                     : "PLAN exception");
     return false;
   }
+  /* Piped input the program never read is the signature of running a
+   * snapshot whose root is not the repl (a bench or serve run Saved
+   * last): the session exits 0 in silence and the user loses an hour.
+   * One consumed byte is a fair price for the warning. */
+  if (!isatty(0)) {
+    struct pollfd pfd = {.fd = 0, .events = POLLIN};
+    uint8_t leftover;
+    /* zero-timeout poll: only peek at input that is already buffered —
+     * a bare read() here blocks forever on a pipe that never closes */
+    if (poll(&pfd, 1, 0) == 1 && (pfd.revents & POLLIN) != 0 &&
+        read(0, &leftover, 1) == 1)
+      fprintf(stderr, "wisp: warning: the program exited without consuming its "
+                      "input — the snapshot root is probably not a repl "
+                      "(re-root with a fresh boot)\n");
+  }
   return true;
 }
 
@@ -470,6 +487,17 @@ static bool boot_load_assembly(boot_ctx* ctx, const char* mod_c,
     if (strcmp(fn_c, "_") != 0) {
       fprintf(stderr, "wisp: Silo root only binds _\n");
       return false;
+    }
+    /* A snapshot rooted at plain data (a value some non-repl run
+     * Saved last) "runs" to itself and exits 0 in silence — an
+     * infamous time sink.  Warn loudly; the run still proceeds. */
+    {
+      pl_val prog = boot_repl_fun(root);
+      if (pl_is_nat63(prog) || pl_arity(prog) == 0)
+        fprintf(stderr,
+                "wisp: warning: snapshot root is not a runnable program "
+                "(saved by a non-repl run?) — stdin will be ignored; "
+                "re-root with a fresh boot to get a repl\n");
     }
     return boot_run_function(ctx, root, argc, argv);
   }
@@ -515,7 +543,29 @@ static const char* boot_env_file_root(void) {
   return env_c != NULL && env_c[0] != '\0' ? env_c : BOOT_DEFAULT_FILE_ROOT;
 }
 
+/* Default the global compile cache to ~/.cache/enki/codecache: the
+ * store layer opens it lazily and disables itself when the directory
+ * cannot be created (CI sandboxes).  PL_CODECACHE=0 or an explicit
+ * PL_CODECACHE_DIR always wins. */
+static void boot_default_codecache(void) {
+  if (getenv("PL_CODECACHE_DIR") != NULL)
+    return;
+  const char* home = getenv("HOME");
+  if (home == NULL || home[0] == '\0')
+    return;
+  static char dir_c[1024];
+  int n = snprintf(dir_c, sizeof(dir_c), "%s/.cache", home);
+  if (n < 0 || (size_t)n >= sizeof(dir_c) - 32)
+    return;
+  (void)mkdir(dir_c, 0755);
+  (void)snprintf(dir_c + n, sizeof(dir_c) - (size_t)n, "/enki");
+  (void)mkdir(dir_c, 0755);
+  (void)snprintf(dir_c + n, sizeof(dir_c) - (size_t)n, "/enki/codecache");
+  (void)setenv("PL_CODECACHE_DIR", dir_c, 0);
+}
+
 int main(int argc, char** argv) {
+  boot_default_codecache();
   const char* file_root_c = boot_env_file_root();
   const char* profile_json_c = NULL;
   double tracy_wait_s = 0.0;

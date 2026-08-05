@@ -54,6 +54,9 @@ void pl_store_silo_batch_abort(pl_silo_batch* batch);
 bool pl_store_silo_open(pl_store* s, const uint8_t hash[32],
                         pl_silo_reader* out, char* err, size_t err_cap);
 void pl_store_silo_close_reader(pl_silo_reader* r);
+bool pl_store_load_silo_stream(pl_thread* t, pl_store* s, const uint8_t* bytes,
+                               size_t len, pl_val* out, char* err,
+                               size_t err_cap);
 
 pl_val pl_store_mk_pin(pl_store* s, const uint8_t* hash, pl_val body,
                        uint32_t npins, const pl_val* subpins);
