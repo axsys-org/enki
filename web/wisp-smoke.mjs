@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { WormholeTable } from "./wormhole-table.mjs";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -8,6 +9,7 @@ const wasmPath = resolve(process.argv[2] ?? "build/wasm/browser/wisp.wasm");
 const repoRoot = resolve(process.argv[3] ?? ".");
 
 let instance;
+const wormholes = new WormholeTable();
 
 function memory() {
   return instance.exports.memory;
@@ -56,6 +58,7 @@ function errors() {
 
 function wasiImports() {
   return {
+    enki: wormholes.imports(),
     wasi_snapshot_preview1: {
       args_get: () => 0,
       args_sizes_get: (argc, argvBufSize) => {
@@ -209,6 +212,27 @@ function fileText(path) {
 }
 
 await load();
+
+const held = { kind: "js-object" };
+const heldToken = wormholes.adopt(held);
+instance.exports.wisp_wormhole_heap_new();
+const heldSlot = instance.exports.wisp_wormhole_adopt(heldToken);
+assert(wormholes.get(heldToken) === held, "wormhole lost adopted object");
+instance.exports.wisp_wormhole_collect();
+assert(wormholes.refCount(heldToken) === 1, "live wormhole was released");
+const cloneSlot = instance.exports.wisp_wormhole_clone(heldSlot);
+assert(wormholes.refCount(heldToken) === 2, "wormhole clone did not retain");
+instance.exports.wisp_wormhole_drop(heldSlot);
+instance.exports.wisp_wormhole_collect();
+assert(wormholes.refCount(heldToken) === 1, "dead wormhole was not released");
+instance.exports.wisp_wormhole_close(cloneSlot);
+instance.exports.wisp_wormhole_close(cloneSlot);
+assert(!wormholes.has(heldToken), "closed wormhole retained its JS object");
+
+const teardownToken = wormholes.adopt({ kind: "heap-teardown" });
+instance.exports.wisp_wormhole_adopt(teardownToken);
+instance.exports.wisp_wormhole_heap_dispose();
+assert(!wormholes.has(teardownToken), "heap teardown retained its JS object");
 
 instance.exports.wisp_clear_files();
 setFileRoot("files");

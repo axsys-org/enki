@@ -9,6 +9,13 @@
 #include <unistd.h>
 
 #include "test_plan.h"
+#include "plan/host_native.h"
+
+static void op82_init(void) {
+  pl_native_host_install();
+}
+
+TEST_FIXTURE(op82, op82_init, NULL)
 
 /*
  * op 82 coordination effects: Spawn/Send/SendCaps/
@@ -196,7 +203,7 @@ TEST(op82, write_file_honors_file_root) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
   t->rplan_f = true;
-  t->rplan_file_root_c = root;
+  pl_native_host_set_file_root(t, root);
 
   static const uint8_t inside_bytes[] = "inside-ok\001";
   ASSERT_EQ(test_op82_write_file(t, "out.txt", inside_bytes,

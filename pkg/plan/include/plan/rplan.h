@@ -18,7 +18,8 @@
  *   (0 (0 is-folder folder-name) ...)
  *
  * `is-folder` is 1 for directories and 0 for every other entry.  Path
- * resolution observes t->rplan_file_root_c exactly as ReadFile does.
+ * Resolution observes the thread's native-host file-root scope exactly as
+ * ReadFile does.
  */
 pl_val pl_rplan_read_folder(pl_thread* t, pl_val path);
 

@@ -18,6 +18,7 @@
 #include "axsys/fd.h"
 #include "axsys/util.h"
 #include "internal.h"
+#include "plan/host_native.h"
 #include "plan/nat.h"
 #include "plan/rplan.h"
 #include "plan/xtract.h"
@@ -34,12 +35,8 @@
  *   - Output / Warn / Write take bars and strip the top byte (natBytes).
  *   - Print takes a plain string nat and writes every byte (natStr).
  *
- * Actor ops (Spawn/Send/SendCaps/Recv/CloseHandle) are coordination
- * effects: their bodies below only validate the forced args and rebuild
- * the request spine [OpName, args…]; the machine parks it in
- * t->blocked_on and suspends with PL_RUN_BLOCKED (eval.c op_body).
- * Servicing — mailboxes, handle tables, spawning — belongs to the
- * executor, which deposits the response with pl_thread_deposit.
+ * Actor coordination effects remain environment-independent in
+ * rplan_coord.c.
  */
 
 #define ARG(i) (t->vstack[ab + (i)])
@@ -134,12 +131,13 @@ static bool rp_path_under_root(const char* root, const char* path) {
 
 static bool rp_resolve_read_path(pl_thread* t, const char* arg_path,
                                  char** out_path) {
-  if (t->rplan_file_root_c == NULL || t->rplan_file_root_c[0] == '\0') {
+  const char* file_root = pl_native_host_file_root(t);
+  if (file_root == NULL || file_root[0] == '\0') {
     *out_path = rp_strdup(arg_path);
     return true;
   }
 
-  char* root = realpath(t->rplan_file_root_c, NULL);
+  char* root = realpath(file_root, NULL);
   if (root == NULL)
     return false;
 
@@ -191,14 +189,15 @@ static bool rp_resolve_write_path(pl_thread* t, const char* arg_path,
     goto cleanup;
 
   candidate = rp_join_path(resolved_dir, base_path);
-  if (t->rplan_file_root_c == NULL || t->rplan_file_root_c[0] == '\0') {
+  const char* file_root = pl_native_host_file_root(t);
+  if (file_root == NULL || file_root[0] == '\0') {
     *out_path = candidate;
     candidate = NULL;
     res = true;
     goto cleanup;
   }
 
-  root = realpath(t->rplan_file_root_c, NULL);
+  root = realpath(file_root, NULL);
   if (root == NULL)
     goto cleanup;
 
@@ -714,63 +713,4 @@ pl_val pl_op82_write(pl_thread* t, size_t ab) {
   if (rc < 0)
     pl_raise_msg(t, "Write: write failed");
   return 0;
-}
-
-/* ── Actors: coordination effects (see header comment) ─────────────────── */
-
-/* Rebuild the request spine [OpName, args…] from the unapp'd op row on
- * the value stack (name at ab-1, argc args from ab).  Strict args are
- * already forced; the rest stay lazy until the executor services them. */
-static pl_val rp_request(pl_thread* t, size_t ab, uint32_t argc) {
-  pl_gc_reserve(t, PL_APP_CELLS(argc));
-  PL_GC_FORBID(t);
-  pl_val r = pl_mk_app_from(t, t->vstack[ab - 1], argc, &t->vstack[ab]);
-  PL_GC_ALLOW(t);
-  return r;
-}
-
-pl_val pl_op82_spawn(pl_thread* t, size_t ab) {
-  return rp_request(t, ab, 1); /* fn is taken unevaluated */
-}
-
-pl_val pl_op82_send(pl_thread* t, size_t ab) {
-  rp_want_nat(t, ARG(0)); /* handle; the message stays lazy */
-  return rp_request(t, ab, 2);
-}
-
-pl_val pl_op82_send_caps(pl_thread* t, size_t ab) {
-  rp_want_nat(t, ARG(0));
-  return rp_request(t, ab, 3);
-}
-
-pl_val pl_op82_recv(pl_thread* t, size_t ab) {
-  if (ARG(0) != 0) /* the reference accepts only the literal nat 0 */
-    pl_raise_msg(t, "unknown actor/net op");
-  return rp_request(t, ab, 1);
-}
-
-pl_val pl_op82_close_handle(pl_thread* t, size_t ab) {
-  rp_want_nat(t, ARG(0));
-  return rp_request(t, ab, 1);
-}
-
-/* ── op 83: structured drivers ─────────────────────────────────────────── */
-
-pl_val pl_op83_read_folder(pl_thread* t, size_t ab) {
-  rp_want_nat(t, ARG(0));
-  return rp_request(t, ab, 1);
-}
-
-pl_val pl_op83_fetch(pl_thread* t, size_t ab) {
-  /* req and cfg are deep-normalized by the machine before the body runs;
-   * all shape/URL validation happens at service time in pkg/enki (libcurl
-   * stays out of the plan layer). */
-  return rp_request(t, ab, 2);
-}
-
-pl_val pl_op83_sleep(pl_thread* t, size_t ab) {
-  /* Seconds in arg 0; the wait happens at service time in pkg/enki.  Here we
-   * only validate the (forced) arg and park as a coordination request. */
-  rp_want_nat(t, ARG(0));
-  return rp_request(t, ab, 1);
 }
