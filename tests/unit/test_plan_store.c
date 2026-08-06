@@ -557,6 +557,172 @@ TEST(store, compiler_install_is_generation_idempotent) {
   pl_store_free(s);
 }
 
+/* ── Staged compilation ────────────────────────────────────────────────── */
+
+/*
+ * A constant "compiler": an arity-1 law whose body is a literal code row, so
+ * it compiles every law to the same program.  That is enough to drive the
+ * staging path end to end, but it is NOT self-hosting — code emitted for the
+ * compiler itself would make it return that program's *result* instead of
+ * the program.  Tests therefore clear the compiler pins' own code after every
+ * sweep, keeping their interpreted meaning.
+ */
+static pl_val test_const_compiler(test_rt* rt, uint64_t name, const pl_val* ops,
+                                  size_t nops, uint8_t out_hash[32]) {
+  pl_thread* t = rt->t;
+  size_t base = t->vsp;
+  pl_vpush(t, test_app(t, 99, nops, ops)); /* head 99: a literal, not a call */
+  pl_val law = test_law(t, 1, name, t->vstack[base]);
+  t->vstack[base] = law;
+  pl_val proxy = pl_pin(t, t->vstack[base]);
+  t->vstack[base] = proxy;
+  char err[192] = {0};
+  ASSERT(pl_store_save_root(rt->store, t->vstack[base], out_hash, err,
+                            sizeof(err)),
+         "%s", err);
+  pl_val canonical = pl_pin_proxy_target(pl_ptr(t->vstack[base]));
+  ASSERT_NEQ(canonical, 0);
+  t->vsp = base;
+  return canonical;
+}
+
+/* Save an arity-1 law returning `body` when interpreted. */
+static pl_val test_saved_law(test_rt* rt, uint64_t name, pl_val body,
+                             uint8_t out_hash[32]) {
+  pl_thread* t = rt->t;
+  size_t base = t->vsp;
+  pl_vpush(t, test_law(t, 1, name, body));
+  pl_val proxy = pl_pin(t, t->vstack[base]);
+  t->vstack[base] = proxy;
+  char err[192] = {0};
+  ASSERT(pl_store_save_root(rt->store, t->vstack[base], out_hash, err,
+                            sizeof(err)),
+         "%s", err);
+  pl_val canonical = pl_pin_proxy_target(pl_ptr(t->vstack[base]));
+  ASSERT_NEQ(canonical, 0);
+  t->vsp = base;
+  return canonical;
+}
+
+TEST(store, staged_upgrade_publishes_optimized_code) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  pl_store* s = rt.store;
+
+  /* The optimizing tier compiles every law to "return 9"; a law that is
+   * still interpreted answers 42 — so what a call returns names the
+   * generation whose code ran.  The fast tier is a hash with no pin behind
+   * it: it must be installed for staging to be active, and every compile it
+   * attempts raises and leaves the law interpreted (the fast tier proper is
+   * covered by the two tests around this one). */
+  pl_val opt_ops[3] = {OP_PUSH_LIT, 9, OP_RET};
+  uint8_t opt_hash[32] = {0};
+  pl_val opt_c =
+      test_const_compiler(&rt, ax_s3('o', 'p', 't'), opt_ops, 3, opt_hash);
+  uint8_t fast_hash[32];
+  for (size_t i = 0; i < sizeof(fast_hash); i++)
+    fast_hash[i] = (uint8_t)i;
+
+  ASSERT(pl_store_put_compiler(s, fast_hash));
+  ASSERT(pl_store_put_opt_compiler(s, opt_hash));
+  ASSERT(pl_store_stage_drain(s));
+  ASSERT_NOT_NULL(pl_pin_code(pl_ptr(opt_c))); /* it upgraded itself */
+  pl_pin_set_code(pl_ptr(opt_c), NULL);        /* see test_const_compiler */
+
+  /* A law interned now is queued by the interning thread and upgraded by the
+   * worker; the drain is the only synchronization the test needs. */
+  uint8_t law_hash[32] = {0};
+  pl_val law = test_saved_law(&rt, ax_s3('l', 'a', 'w'), 42, law_hash);
+  ASSERT(pl_store_stage_drain(s));
+  ASSERT_NOT_NULL(pl_pin_code(pl_ptr(law)));
+  ASSERT_EQ(test_call1(t, law, 0), 9);
+  ASSERT(pl_store_code_have(s, law_hash, true));
+
+  uint64_t queued = 0, upgraded = 0, served = 0, failed = 0;
+  pl_store_stage_stats(s, &queued, &upgraded, &served, &failed);
+  ASSERT_GTE(queued, 2);
+  ASSERT_GTE(upgraded, 2);
+  ASSERT_EQ(failed, 0);
+  test_rt_free(&rt);
+}
+
+TEST(store, staged_upgrade_outranks_the_fast_tier) {
+  test_rt rt = test_rt_new();
+  pl_store* s = rt.store;
+  uint8_t law_hash[32] = {0};
+  pl_val law = test_saved_law(&rt, ax_s3('l', 'a', 'w'), 42, law_hash);
+  pl_hash key;
+  memcpy(key.b, law_hash, sizeof(key.b));
+
+  uint8_t fake[32];
+  for (size_t i = 0; i < sizeof(fake); i++)
+    fake[i] = (uint8_t)i;
+  ASSERT(pl_store_put_compiler(s, fake));
+
+  pl_code* fast = calloc(1, sizeof(*fast));
+  pl_code* opt = calloc(1, sizeof(*opt));
+  ASSERT_NOT_NULL(fast);
+  ASSERT_NOT_NULL(opt);
+  fast->ops = calloc(1, sizeof(*fast->ops));
+  opt->ops = calloc(1, sizeof(*opt->ops));
+  ASSERT_NOT_NULL(fast->ops);
+  ASSERT_NOT_NULL(opt->ops);
+
+  pl_store_code_publish(s, law_hash, fast, false);
+  ASSERT_EQ(pl_pin_code(pl_ptr(law)), fast);
+  pl_store_code_publish(s, law_hash, opt, true);
+  ASSERT_EQ(pl_pin_code(pl_ptr(law)), opt);
+
+  /* the fast tier must not walk an upgrade back */
+  pl_store_put_code(s, law_hash);
+  ASSERT_EQ(pl_pin_code(pl_ptr(law)), opt);
+  ASSERT(pl_store_code_have(s, law_hash, true));
+  ASSERT(pl_store_code_have(s, law_hash, false));
+
+  pl_store_lock(s);
+  ptrdiff_t at = ax_hmgeti(s->code_targets, key);
+  ASSERT_GTE(at, 0);
+  pl_store_unlock(s);
+
+  /* invalidation clears both tiers */
+  uint8_t disabled[32];
+  memset(disabled, 0xff, sizeof(disabled));
+  ASSERT(pl_store_put_compiler(s, disabled));
+  ASSERT_NULL(pl_pin_code(pl_ptr(law)));
+  ASSERT_FALSE(pl_store_code_have(s, law_hash, true));
+  ASSERT_FALSE(pl_store_code_have(s, law_hash, false));
+  test_rt_free(&rt);
+}
+
+TEST(store, staged_queue_dedupes_and_drains) {
+  test_rt rt = test_rt_new();
+  pl_store* s = rt.store;
+  uint8_t law_hash[32] = {0};
+  (void)test_saved_law(&rt, ax_s3('l', 'a', 'w'), 42, law_hash);
+
+  /* no optimizing compiler: queued work is dropped at the worker, which is
+   * exactly what a drain must still terminate on */
+  pl_stage_enqueue(s, law_hash);
+  pl_stage_enqueue(s, law_hash);
+  pl_stage_enqueue(s, law_hash);
+  ASSERT(pl_store_stage_drain(s));
+  uint64_t queued = 0, upgraded = 0;
+  pl_store_stage_stats(s, &queued, &upgraded, NULL, NULL);
+  ASSERT_EQ(queued, 1);
+  ASSERT_EQ(upgraded, 0);
+
+  /* installing a compiler resets the generation: the same law queues again */
+  uint8_t fake[32];
+  for (size_t i = 0; i < sizeof(fake); i++)
+    fake[i] = (uint8_t)i;
+  ASSERT(pl_store_put_compiler(s, fake));
+  pl_stage_enqueue(s, law_hash);
+  ASSERT(pl_store_stage_drain(s));
+  pl_store_stage_stats(s, &queued, NULL, NULL, NULL);
+  ASSERT_EQ(queued, 2);
+  test_rt_free(&rt);
+}
+
 enum { TEST_SIGABRT_EXIT = 128 + SIGABRT };
 
 static void test_sigabrt_exit(int signal_number) {

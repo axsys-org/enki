@@ -90,10 +90,6 @@ void pl_store_profile_end(pl_store_profile_scope* scope) {
   scope->active = false;
 }
 
-#define PL_STORE_PROFILE(name)                                                 \
-  __attribute__((cleanup(pl_store_profile_end))) pl_store_profile_scope        \
-      pl_store_profile_scope_ = pl_store_profile_begin(name, sizeof(name) - 1)
-
 /* ── Global compile cache ──────────────────────────────────────────────
  *
  * A machine-wide LMDB at PL_CODECACHE_DIR mapping the same
@@ -376,6 +372,9 @@ static pl_cell* pl_store_require_canonical_pin(pl_store* s, pl_val pin,
   return p;
 }
 
+/* Code for a law hash in the fast (opt=false) or optimized tier. */
+static pl_code* tier_get_locked(pl_store* s, pl_hash key, bool opt);
+
 static void pl_store_index_hashed_law_locked(pl_store* s, pl_val pin) {
   pl_cell* p = pl_store_require_canonical_pin(s, pin, "index_hashed_law");
   pl_val body = (pl_val)p[5];
@@ -392,9 +391,12 @@ static void pl_store_index_hashed_law_locked(pl_store* s, pl_val pin) {
   } else {
     ax_arrpush(s->code_targets[at].value, pin);
   }
-  ptrdiff_t code_at = ax_hmgeti(s->code_cache, key);
-  if (code_at >= 0)
-    pl_pin_set_code(p, s->code_cache[code_at].value);
+  /* a new representative of an already-upgraded law starts upgraded */
+  pl_code* code = tier_get_locked(s, key, true);
+  if (code == NULL)
+    code = tier_get_locked(s, key, false);
+  if (code != NULL)
+    pl_pin_set_code(p, code);
 }
 
 void pl_store_index_hashed_law(pl_store* s, pl_val pin) {
@@ -552,13 +554,223 @@ pl_val pl_store_snapshot_normal(pl_thread* t, pl_val v) {
   return out;
 }
 
-void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
+/* ── Compiler tiers ────────────────────────────────────────────────────
+ *
+ * A law can hold code from two generations.  The FAST tier is compiled on
+ * the interning thread by pl_store_put_code; the OPT tier is compiled by
+ * the staging worker (stage.c) and replaces it in place.  Both compilers
+ * are pure functions of the law, and both must preserve its meaning, so
+ * which one a caller happens to observe is a performance question only.
+ * Retired pl_code is owned by s->codes until teardown — a suspended
+ * F_EXEC frame can still be executing it — so publication is a single
+ * release store and needs no reader-side coordination.
+ */
+
+void pl_store_code_key(const uint8_t compiler_hash[32],
+                       const uint8_t law_hash[32], uint8_t out[32]) {
+  uint8_t pre[68];
+  memcpy(pre, "plgc", 4);
+  memcpy(pre + 4, compiler_hash, 32);
+  memcpy(pre + 36, law_hash, 32);
+  ax_sha256(pre, sizeof(pre), out);
+}
+
+/* stb_ds lookups write back through their table argument, so every tier
+ * access goes through a local and stores the table pointer again. */
+static pl_code* tier_get_locked(pl_store* s, pl_hash key, bool opt) {
+  pl_code_cache_entry* cache = opt ? s->opt_cache : s->code_cache;
+  ptrdiff_t at = ax_hmgeti(cache, key);
+  pl_code* code = at >= 0 ? cache[at].value : NULL;
+  if (opt)
+    s->opt_cache = cache;
+  else
+    s->code_cache = cache;
+  return code;
+}
+
+static void tier_attach_locked(pl_store* s, pl_hash key, pl_code* code) {
+  ptrdiff_t at = ax_hmgeti(s->code_targets, key);
+  if (at < 0)
+    return;
+  for (ptrdiff_t i = 0; i < ax_arrlen(s->code_targets[at].value); i++)
+    pl_pin_set_code(pl_ptr(s->code_targets[at].value[i]), code);
+}
+
+bool pl_store_code_have(pl_store* s, const uint8_t law_hash[32], bool opt) {
+  pl_hash key;
+  memcpy(key.b, law_hash, sizeof(key.b));
+  pl_store_lock(s);
+  bool have = tier_get_locked(s, key, opt) != NULL;
+  pl_store_unlock(s);
+  return have;
+}
+
+void pl_store_code_publish(pl_store* s, const uint8_t law_hash[32],
+                           pl_code* code, bool opt) {
+  pl_hash key;
+  memcpy(key.b, law_hash, sizeof(key.b));
+  pl_store_lock(s);
+  pl_code_cache_entry* cache = opt ? s->opt_cache : s->code_cache;
+  ptrdiff_t at = ax_hmgeti(cache, key);
+  if (at >= 0) {
+    pl_bytecode_free(code); /* a re-entrant compile won this tier */
+    code = cache[at].value;
+  } else {
+    ax_arrpush(s->codes, code);
+    ax_hmput(cache, key, code);
+  }
+  if (opt)
+    s->opt_cache = cache;
+  else
+    s->code_cache = cache;
+  /* An upgrade always wins: a fast row that finishes after one must not
+   * displace it (and never does, since both are already published). */
+  if (opt || tier_get_locked(s, key, true) == NULL)
+    tier_attach_locked(s, key, code);
+  pl_store_unlock(s);
+}
+
+/* Persistent (compiler, law) -> code-row cache.  The compiler is a
+ * pure function, so a row computed by any earlier process (or an
+ * earlier Install of the same compiler in this one) is THE answer:
+ * a hit skips the compiler entirely.  Rows are persisted as ordinary
+ * anonymous root pins; the mapping entry stores the row pin's hash
+ * under a tagged key, so keys can never dangle across snapshots.
+ * Keyed by compiler hash, a new compiler simply opens a fresh
+ * keyspace — no invalidation.  save_mu is recursive, so the save /
+ * load / backend re-entry below is safe. */
+bool pl_store_code_serve(pl_store* s, pl_thread* t, const uint8_t law_hash[32],
+                         const uint8_t cache_key[32], bool opt) {
+  if (s->be.get == NULL || s->be.put == NULL)
+    return false;
+  uint8_t* got = NULL;
+  size_t gn = 0;
+  if (pl_store_backend_get(s, cache_key, &got, &gn)) {
+    volatile bool served = false;
+    if (gn == 32 && (s->be.has == NULL || s->be.has(s->be.ctx, got))) {
+      pl_catch cc;
+      pl_catch_init(t, &cc);
+      if (setjmp(cc.jb) != 0) {
+        /* stale or unreadable cache row: recompile below */
+        pl_catch_unwind(t, &cc);
+      } else {
+        pl_val rowpin = pl_store_load(t, got);
+        pl_catch_pop(t, &cc);
+        pl_cell* rp = pl_as(PL_TAG_PIN, rowpin);
+        if (rp != NULL) {
+          pl_code* code = pl_bytecode_from_val(pl_pin_body(rp));
+          if (code != NULL)
+            pl_store_code_publish(s, law_hash, code, opt);
+          /* an undecodable cached row (unknown-op wrapper) also
+           * counts: the compile would reproduce it exactly */
+          served = true;
+          /* migrate snap-local entries machine-wide so older snaps'
+           * work survives their deletion */
+          if (s->format == PL_STORE_FORMAT_SILO_V1) {
+            uint8_t* have = NULL;
+            size_t have_n = 0;
+            if (plgc_get(cache_key, &have, &have_n)) {
+              free(have);
+            } else {
+              pl_silo_reader rd = {0};
+              char rerr[192] = {0};
+              if (pl_store_silo_open(s, got, &rd, rerr, sizeof(rerr))) {
+                uint8_t* buf = malloc(rd.len);
+                if (buf != NULL && rd.rewind(rd.ctx) &&
+                    rd.read(rd.ctx, buf, rd.len))
+                  plgc_put(cache_key, buf, rd.len);
+                free(buf);
+                pl_store_silo_close_reader(&rd);
+              }
+            }
+          }
+        }
+      }
+    }
+    free(got);
+    if (served)
+      return true;
+  }
+  /* global (snap-independent) layer: an encoded row stream from any
+   * earlier snap; subpin resolution against this store validates it */
+  uint8_t* gb = NULL;
+  size_t gbn = 0;
+  if (s->format == PL_STORE_FORMAT_SILO_V1 && plgc_get(cache_key, &gb, &gbn)) {
+    volatile bool served = false;
+    pl_catch cc;
+    pl_catch_init(t, &cc);
+    if (setjmp(cc.jb) != 0) {
+      pl_catch_unwind(t, &cc);
+    } else {
+      char lerr[192] = {0};
+      pl_val rowpin = 0;
+      bool loaded =
+          pl_store_load_silo_stream(t, s, gb, gbn, &rowpin, lerr, sizeof(lerr));
+      pl_catch_pop(t, &cc);
+      pl_cell* rp = loaded ? pl_as(PL_TAG_PIN, rowpin) : NULL;
+      if (rp != NULL) {
+        pl_code* code = pl_bytecode_from_val(pl_pin_body(rp));
+        if (code != NULL)
+          pl_store_code_publish(s, law_hash, code, opt);
+        served = true;
+      }
+    }
+    free(gb);
+    if (served)
+      return true;
+  }
+  return false;
+}
+
+void pl_store_code_persist(pl_store* s, pl_thread* t, size_t row_slot,
+                           const uint8_t cache_key[32]) {
+  if (s->be.get == NULL || s->be.put == NULL)
+    return;
+  /* persist the row as a pin and record the (compiler, law) -> row
+   * mapping; cached regardless of whether the row decoded
+   * (undecodable rows still skip future compiles).  The save may
+   * queue compiles for law literals inside the row — the recursive
+   * save_mu and the tier early-returns make the re-entry safe. */
+  pl_catch cc;
+  pl_catch_init(t, &cc);
+  if (setjmp(cc.jb) != 0) {
+    pl_catch_unwind(t, &cc); /* cache write is best-effort */
+    return;
+  }
+  t->vstack[row_slot] = pl_pin(t, t->vstack[row_slot]);
+  pl_catch_pop(t, &cc);
+  uint8_t rowhash[32];
+  char err[192] = {0};
+  if (!pl_store_save_pin(s, t->vstack[row_slot], rowhash, err, sizeof(err)))
+    return;
+  (void)pl_store_backend_put(s, cache_key, rowhash, 32);
+  if (s->format == PL_STORE_FORMAT_SILO_V1) {
+    /* publish the encoded stream machine-wide: read the bytes
+     * the save just wrote back out of the pack */
+    pl_silo_reader rd = {0};
+    char rerr[192] = {0};
+    if (pl_store_silo_open(s, rowhash, &rd, rerr, sizeof(rerr))) {
+      uint8_t* buf = malloc(rd.len);
+      if (buf != NULL && rd.rewind(rd.ctx) && rd.read(rd.ctx, buf, rd.len))
+        plgc_put(cache_key, buf, rd.len);
+      free(buf);
+      pl_store_silo_close_reader(&rd);
+    }
+  }
+}
+
+/*
+ * The fast tier: compile `hash` on the interning thread.  Returns true when
+ * the law still wants a background upgrade — false when staging is off, the
+ * law is not a compilation target, or the optimized row was already on hand.
+ */
+static bool put_code_fast(pl_store* s, const uint8_t hash[32]) {
   pl_store_save_lock(s);
   pl_store_lock(s);
   if (!s->compiler_f || s->compiler_t == NULL) {
     pl_store_unlock(s);
     pl_store_save_unlock(s);
-    return;
+    return false;
   }
   pl_hash key;
   memcpy(key.b, hash, sizeof(key.b));
@@ -566,154 +778,48 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
   if (targets_at < 0) {
     pl_store_unlock(s); /* only persistent LAW PINs execute bytecode */
     pl_store_save_unlock(s);
-    return;
+    return false;
   }
-  ptrdiff_t cached_at = ax_hmgeti(s->code_cache, key);
-  if (cached_at >= 0) {
-    pl_code* code = s->code_cache[cached_at].value;
-    for (ptrdiff_t i = 0; i < ax_arrlen(s->code_targets[targets_at].value); i++)
-      pl_pin_set_code(pl_ptr(s->code_targets[targets_at].value[i]), code);
+  bool staged = s->opt_f;
+  pl_code* cached = tier_get_locked(s, key, true);
+  bool upgraded = cached != NULL;
+  if (cached == NULL)
+    cached = tier_get_locked(s, key, false);
+  if (cached != NULL) {
+    tier_attach_locked(s, key, cached);
     pl_store_unlock(s);
     pl_store_save_unlock(s);
-    return;
+    return staged && !upgraded;
   }
   pl_thread* t = s->compiler_t;
   uint8_t compiler_hash[32];
+  uint8_t opt_hash[32];
   memcpy(compiler_hash, s->compiler, 32);
+  memcpy(opt_hash, s->opt_compiler, 32);
   /* save_mu serializes this single PLAN machine and prevents replacement.
    * The machine's loads and snapshots take mu only around their own arena and
    * registry accesses, so do not retain the general lock while PLAN runs. */
   pl_store_unlock(s);
   PL_STORE_PROFILE("store.compile.law");
-  /* Persistent (compiler, law) -> code-row cache.  The compiler is a
-   * pure function, so a row computed by any earlier process (or an
-   * earlier Install of the same compiler in this one) is THE answer:
-   * a hit skips the compiler entirely.  Rows are persisted as ordinary
-   * anonymous root pins; the mapping entry stores the row pin's hash
-   * under a tagged key, so keys can never dangle across snapshots.
-   * Keyed by compiler hash, a new compiler simply opens a fresh
-   * keyspace — no invalidation.  save_mu is recursive, so the save /
-   * load / backend re-entry below is safe. */
-  uint8_t codecache_key[32];
+  uint8_t codecache_key[32] = {0};
   bool codecache = s->be.get != NULL && s->be.put != NULL;
   if (codecache) {
-    uint8_t pre[68];
-    memcpy(pre, "plgc", 4);
-    memcpy(pre + 4, compiler_hash, 32);
-    memcpy(pre + 36, hash, 32);
-    ax_sha256(pre, sizeof(pre), codecache_key);
-    uint8_t* got = NULL;
-    size_t gn = 0;
-    if (pl_store_backend_get(s, codecache_key, &got, &gn)) {
-      volatile bool served = false;
-      if (gn == 32 && (s->be.has == NULL || s->be.has(s->be.ctx, got))) {
-        pl_catch cc;
-        pl_catch_init(t, &cc);
-        if (setjmp(cc.jb) != 0) {
-          /* stale or unreadable cache row: recompile below */
-          pl_catch_unwind(t, &cc);
-        } else {
-          pl_val rowpin = pl_store_load(t, got);
-          pl_catch_pop(t, &cc);
-          pl_cell* rp = pl_as(PL_TAG_PIN, rowpin);
-          if (rp != NULL) {
-            pl_code* code = pl_bytecode_from_val(pl_pin_body(rp));
-            if (code != NULL) {
-              pl_store_lock(s);
-              ptrdiff_t hit_at = ax_hmgeti(s->code_cache, key);
-              if (hit_at >= 0) {
-                pl_bytecode_free(code);
-                code = s->code_cache[hit_at].value;
-              } else {
-                ax_arrpush(s->codes, code);
-                ax_hmput(s->code_cache, key, code);
-              }
-              targets_at = ax_hmgeti(s->code_targets, key);
-              if (targets_at >= 0)
-                for (ptrdiff_t i = 0;
-                     i < ax_arrlen(s->code_targets[targets_at].value); i++)
-                  pl_pin_set_code(pl_ptr(s->code_targets[targets_at].value[i]),
-                                  code);
-              pl_store_unlock(s);
-            }
-            /* an undecodable cached row (unknown-op wrapper) also
-             * counts: the compile would reproduce it exactly */
-            served = true;
-            /* migrate snap-local entries machine-wide so older snaps'
-             * work survives their deletion */
-            if (s->format == PL_STORE_FORMAT_SILO_V1) {
-              uint8_t* have = NULL;
-              size_t have_n = 0;
-              if (plgc_get(codecache_key, &have, &have_n)) {
-                free(have);
-              } else {
-                pl_silo_reader rd = {0};
-                char rerr[192] = {0};
-                if (pl_store_silo_open(s, got, &rd, rerr, sizeof(rerr))) {
-                  uint8_t* buf = malloc(rd.len);
-                  if (buf != NULL && rd.rewind(rd.ctx) &&
-                      rd.read(rd.ctx, buf, rd.len))
-                    plgc_put(codecache_key, buf, rd.len);
-                  free(buf);
-                  pl_store_silo_close_reader(&rd);
-                }
-              }
-            }
-          }
-        }
-      }
-      free(got);
-      if (served) {
+    /* An earlier run may already have this law's OPTIMIZED row.  Taking it
+     * here skips the fast compile and the queue round trip both: the point
+     * of the fast tier is latency, and a cache hit has none. */
+    if (staged) {
+      uint8_t opt_key[32];
+      pl_store_code_key(opt_hash, hash, opt_key);
+      if (pl_store_code_serve(s, t, hash, opt_key, true)) {
         pl_store_save_unlock(s);
-        return;
+        pl_stage_mark_done(s, hash);
+        return false;
       }
     }
-    /* global (snap-independent) layer: an encoded row stream from any
-     * earlier snap; subpin resolution against this store validates it */
-    uint8_t* gb = NULL;
-    size_t gbn = 0;
-    if (s->format == PL_STORE_FORMAT_SILO_V1 &&
-        plgc_get(codecache_key, &gb, &gbn)) {
-      volatile bool served = false;
-      pl_catch cc;
-      pl_catch_init(t, &cc);
-      if (setjmp(cc.jb) != 0) {
-        pl_catch_unwind(t, &cc);
-      } else {
-        char lerr[192] = {0};
-        pl_val rowpin = 0;
-        bool loaded = pl_store_load_silo_stream(t, s, gb, gbn, &rowpin, lerr,
-                                                sizeof(lerr));
-        pl_catch_pop(t, &cc);
-        pl_cell* rp = loaded ? pl_as(PL_TAG_PIN, rowpin) : NULL;
-        if (rp != NULL) {
-          pl_code* code = pl_bytecode_from_val(pl_pin_body(rp));
-          if (code != NULL) {
-            pl_store_lock(s);
-            ptrdiff_t hit_at = ax_hmgeti(s->code_cache, key);
-            if (hit_at >= 0) {
-              pl_bytecode_free(code);
-              code = s->code_cache[hit_at].value;
-            } else {
-              ax_arrpush(s->codes, code);
-              ax_hmput(s->code_cache, key, code);
-            }
-            targets_at = ax_hmgeti(s->code_targets, key);
-            if (targets_at >= 0)
-              for (ptrdiff_t i = 0;
-                   i < ax_arrlen(s->code_targets[targets_at].value); i++)
-                pl_pin_set_code(pl_ptr(s->code_targets[targets_at].value[i]),
-                                code);
-            pl_store_unlock(s);
-          }
-          served = true;
-        }
-      }
-      free(gb);
-      if (served) {
-        pl_store_save_unlock(s);
-        return;
-      }
+    pl_store_code_key(compiler_hash, hash, codecache_key);
+    if (pl_store_code_serve(s, t, hash, codecache_key, false)) {
+      pl_store_save_unlock(s);
+      return staged;
     }
   }
   /* the compiler is installed PLAN code: a compile failure must not
@@ -725,7 +831,7 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
     fprintf(stderr, "bytecode compile raised: %s\n",
             t->exn_msg != NULL ? t->exn_msg : "PLAN exn");
     pl_store_save_unlock(s);
-    return;
+    return staged;
   }
   struct timespec compile_t0;
   clock_gettime(CLOCK_MONOTONIC, &compile_t0);
@@ -742,24 +848,8 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
   t->vsp = result_at;
   pl_catch_pop(t, &c);
   pl_code* code = pl_bytecode_from_val(stable);
-  if (code != NULL) {
-    /* Attach the cached code to every canonical LAW registered for this hash.
-     */
-    pl_store_lock(s);
-    cached_at = ax_hmgeti(s->code_cache, key);
-    if (cached_at >= 0) {
-      pl_bytecode_free(code); /* a re-entrant compile won the generation */
-      code = s->code_cache[cached_at].value;
-    } else {
-      ax_arrpush(s->codes, code);
-      ax_hmput(s->code_cache, key, code);
-    }
-    targets_at = ax_hmgeti(s->code_targets, key);
-    ax_assume(targets_at >= 0, "compiled law left the hash index");
-    for (ptrdiff_t i = 0; i < ax_arrlen(s->code_targets[targets_at].value); i++)
-      pl_pin_set_code(pl_ptr(s->code_targets[targets_at].value[i]), code);
-    pl_store_unlock(s);
-  }
+  if (code != NULL)
+    pl_store_code_publish(s, hash, code, false);
   struct timespec compile_t1;
   clock_gettime(CLOCK_MONOTONIC, &compile_t1);
   uint64_t compile_ns =
@@ -769,47 +859,21 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
    * save plus an LMDB transaction (~ms), so persisting sub-10ms
    * compiles (the ship compiler's whole range) would slow the sweeps
    * it is meant to speed up. */
-  if (codecache && compile_ns < 10000000u)
-    codecache = false;
-  if (codecache) {
-    /* persist the row as a pin and record the (compiler, law) -> row
-     * mapping; cached regardless of whether the row decoded
-     * (undecodable rows still skip future compiles).  The save may
-     * queue compiles for law literals inside the row — the recursive
-     * save_mu and the code_cache early-return make the re-entry
-     * safe. */
+  if (codecache && compile_ns >= 10000000u) {
     size_t rb = t->vsp;
     pl_vpush(t, stable);
-    pl_catch cc;
-    pl_catch_init(t, &cc);
-    if (setjmp(cc.jb) != 0) {
-      pl_catch_unwind(t, &cc); /* cache write is best-effort */
-    } else {
-      t->vstack[rb] = pl_pin(t, t->vstack[rb]);
-      pl_catch_pop(t, &cc);
-      uint8_t rowhash[32];
-      char err[192] = {0};
-      if (pl_store_save_pin(s, t->vstack[rb], rowhash, err, sizeof(err))) {
-        (void)pl_store_backend_put(s, codecache_key, rowhash, 32);
-        if (s->format == PL_STORE_FORMAT_SILO_V1) {
-          /* publish the encoded stream machine-wide: read the bytes
-           * the save just wrote back out of the pack */
-          pl_silo_reader rd = {0};
-          char rerr[192] = {0};
-          if (pl_store_silo_open(s, rowhash, &rd, rerr, sizeof(rerr))) {
-            uint8_t* buf = malloc(rd.len);
-            if (buf != NULL && rd.rewind(rd.ctx) &&
-                rd.read(rd.ctx, buf, rd.len))
-              plgc_put(codecache_key, buf, rd.len);
-            free(buf);
-            pl_store_silo_close_reader(&rd);
-          }
-        }
-      }
-    }
+    pl_store_code_persist(s, t, rb, codecache_key);
     t->vsp = rb;
   }
   pl_store_save_unlock(s);
+  return staged;
+}
+
+void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
+  /* Queue outside save_mu: the worker takes it for its own loads, and the
+   * interning thread must never wait on a background compile. */
+  if (put_code_fast(s, hash))
+    pl_stage_enqueue(s, hash);
 }
 
 /*
@@ -843,6 +907,8 @@ static void pl_store_invalidate_code_locked(pl_store* s) {
     pl_pin_set_code(pl_ptr(s->pins[i]), NULL);
   ax_hmfree(s->code_cache);
   s->code_cache = NULL;
+  ax_hmfree(s->opt_cache);
+  s->opt_cache = NULL;
 }
 
 static void pl_store_free_code(pl_store* s) {
@@ -854,6 +920,10 @@ static void pl_store_free_code(pl_store* s) {
 
 bool pl_store_put_compiler(pl_store* s, const uint8_t hash[32]) {
   PL_STORE_PROFILE("store.compiler.install");
+  /* Before save_mu: the worker takes save_mu for its own loads, so a
+   * quiesce that held it could never complete.  Everything queued belongs
+   * to the outgoing generation and is about to be invalidated anyway. */
+  pl_stage_reset(s);
   pl_store_save_lock(s);
   pl_store_lock(s);
   bool enabled = hash[0] ? memcmp(hash, hash + 1, 31) != 0 : true;
@@ -884,6 +954,32 @@ bool pl_store_put_compiler(pl_store* s, const uint8_t hash[32]) {
   pl_store_save_unlock(s);
   if (sweep) {
     fprintf(stderr, "store: installing bytecode compiler\r\n");
+    pl_store_compile_existing(s);
+  }
+  return true;
+}
+
+bool pl_store_put_opt_compiler(pl_store* s, const uint8_t hash[32]) {
+  PL_STORE_PROFILE("store.compiler.stage");
+  pl_stage_reset(s); /* the queue describes the outgoing generation */
+  pl_store_lock(s);
+  bool enabled = hash[0] ? memcmp(hash, hash + 1, 31) != 0 : true;
+  if (s->opt_f == enabled &&
+      memcmp(s->opt_compiler, hash, sizeof(s->opt_compiler)) == 0) {
+    pl_store_unlock(s);
+    return false;
+  }
+  s->opt_f = enabled;
+  memcpy(s->opt_compiler, hash, 32);
+  /* Code already attached stays attached: rows from the outgoing optimizer
+   * are still correct, so there is no window where laws run interpreted.
+   * They are simply recompiled by the incoming one. */
+  bool sweep = enabled && s->compiler_f;
+  pl_store_unlock(s);
+  if (sweep) {
+    fprintf(stderr, "store: staging optimizing compiler\r\n");
+    /* Every interned law is a candidate; put_code takes the cheap path for
+     * laws that already have code and queues them for the upgrade. */
     pl_store_compile_existing(s);
   }
   return true;
@@ -1066,6 +1162,7 @@ void pl_store_free(pl_store* s) {
   if (s == NULL)
     return;
   PL_STORE_PROFILE("store.close");
+  pl_stage_shutdown(s); /* joins the workers before anything they use dies */
   if (s->compiler_t != NULL)
     pl_thread_free(s->compiler_t);
   if (s->compiler_h != NULL)

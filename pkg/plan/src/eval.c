@@ -1833,8 +1833,12 @@ void pl_thread_start_call_nf(pl_thread* t, pl_val f, pl_val x) {
 void pl_thread_abandon(pl_thread* t) {
   ax_assume(!t->suspendable && t->centry_depth == 0,
             "pl_thread_abandon: thread is running");
-  ax_assume(t->status == PL_RUN_BLOCKED,
-            "pl_thread_abandon: thread is not blocked");
+  /* A stopped thread's whole continuation is its stacks plus the resume
+   * slots, so dropping it is the same operation whether it stopped for an
+   * effect it will never get (BLOCKED) or for fuel (YIELDED — the staging
+   * worker interrupting a compile). */
+  ax_assume(t->status == PL_RUN_BLOCKED || t->status == PL_RUN_YIELDED,
+            "pl_thread_abandon: thread is not stopped");
   pl_thread_unwind_run(t);
 }
 

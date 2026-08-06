@@ -1017,8 +1017,56 @@ static pl_val op_install(pl_thread* t, size_t ab) {
   pl_store_unlock(s);
   if (replacing_self)
     pl_raise_msg(t, "Install: compiler cannot replace its own machine");
+  if (pl_stage_in_worker())
+    pl_raise_msg(t, "Install: cannot install from a staging worker");
   (void)pl_store_put_compiler(s, hash);
   return 1;
+}
+
+/*
+ * Install the optimizing compiler.  Unlike Install, this one never runs on
+ * the calling thread: laws are compiled by the installed (fast) compiler at
+ * intern time and re-compiled by this one in the background, so a program
+ * pays the cheap compiler's latency and gets the expensive compiler's code.
+ */
+static pl_val op_upgrade(pl_thread* t, size_t ab) {
+  pl_val a = pl_resolve(ARG(0));
+  pl_cell* p = pl_as(PL_TAG_PIN, a);
+  if (!p) {
+    fprintf(stderr, "optimizing compiler not pin, ignoring\n");
+    return 0;
+  }
+  const uint8_t* hash = pl_pin_hash(a);
+  if (hash == NULL)
+    pl_raise_msg(t, "Upgrade: compiler PIN must be saved first");
+  pl_store* s = pl_heap_store(t->heap);
+  pl_store_lock(s);
+  bool replacing_self = t == s->compiler_t;
+  pl_store_unlock(s);
+  if (replacing_self)
+    pl_raise_msg(t, "Upgrade: compiler cannot stage from its own machine");
+  if (pl_stage_in_worker())
+    pl_raise_msg(t, "Upgrade: cannot stage from a staging worker");
+  (void)pl_store_put_opt_compiler(s, hash);
+  return 1;
+}
+
+/*
+ * Wait for staged compilation to catch up, and answer how many laws the
+ * optimizer has upgraded so far.  Blocks the calling thread — for tools that
+ * want the optimized world before they measure, save, or serve with it.
+ */
+static pl_val op_drain(pl_thread* t, size_t ab) {
+  AX_UNUSED(ab);
+  pl_store* s = pl_heap_store(t->heap);
+  if (s == NULL)
+    return 0;
+  if (pl_stage_in_worker())
+    pl_raise_msg(t, "Drain: a staging worker cannot wait for itself");
+  (void)pl_store_stage_drain(s);
+  uint64_t upgraded = 0;
+  pl_store_stage_stats(s, NULL, &upgraded, NULL, NULL);
+  return pl_is_nat63(upgraded) ? (pl_val)upgraded : 0;
 }
 
 static pl_val op_compile(pl_thread* t, size_t ab) {
@@ -1284,6 +1332,10 @@ const pl_opdesc pl_ops[] = {
 
     /* Memo stays index 133. */
     OP66(ax_s4('M', 'e', 'm', 'o'), 2, 0b11, 0, op_memo),
+
+    /* Upgrade stays index 134, Drain 135. */
+    OP66(ax_s7('U', 'p', 'g', 'r', 'a', 'd', 'e'), 1, 0b1, 0b1, op_upgrade),
+    OP66(ax_s5('D', 'r', 'a', 'i', 'n'), 1, 0b1, 0, op_drain),
 };
 
 const size_t pl_nops = sizeof(pl_ops) / sizeof(pl_ops[0]);
@@ -1300,9 +1352,9 @@ static const uint16_t pl_op0_argc3[] = {1};
 static const uint16_t pl_op0_argc6[] = {2};
 
 static const uint16_t pl_op66_argc1[] = {
-    3,  6,  7,  38, 39, 40, 41, 42, 44,  45,  46,  52,  53, 54,
-    55, 56, 57, 58, 59, 60, 65, 71, 72,  74,  75,  76,  77, 78,
-    79, 80, 81, 82, 83, 85, 86, 99, 100, 101, 103, 104, 130};
+    3,  6,  7,  38, 39, 40, 41,  42,  44,  45,  46,  52,  53, 54, 55,
+    56, 57, 58, 59, 60, 65, 71,  72,  74,  75,  76,  77,  78, 79, 80,
+    81, 82, 83, 85, 86, 99, 100, 101, 103, 104, 130, 134, 135};
 static const uint16_t pl_op66_argc2[] = {
     8,  9,  10, 11, 12, 13, 14, 31, 32, 33, 36, 37, 43, 47, 50,  64, 66,
     69, 70, 73, 84, 87, 88, 89, 92, 93, 94, 95, 96, 97, 98, 102, 133};

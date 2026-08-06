@@ -65,6 +65,8 @@ typedef struct pl_code_cache_entry {
   pl_code* value;
 } pl_code_cache_entry;
 
+typedef struct pl_stage pl_stage; /* staged compilation worker (stage.c) */
+
 typedef struct pl_store {
   /* Serializes persistence transactions and Save publication.  Always acquire
    * this before `mu` on paths that need both locks. */
@@ -76,6 +78,7 @@ typedef struct pl_store {
   pl_intern_entry* intern;             /* stb_ds hashmap: hash -> PIN val */
   pl_code_targets_entry* code_targets; /* law hash -> all runtime PINs */
   pl_code_cache_entry* code_cache;     /* active generation: hash -> code */
+  pl_code_cache_entry* opt_cache;      /* upgraded generation: hash -> code */
   pl_val* pins;                        /* canonical hashed store PINs only */
   /* All decoded code owned by the store.  Replaced compiler generations are
    * retained until store teardown because suspended evaluator frames can
@@ -89,6 +92,11 @@ typedef struct pl_store {
   pl_thread* compiler_t;
   pl_heap* compiler_h;
   bool compiler_f;
+  /* Staged compilation: the optimizing generation and the worker that
+   * runs it.  Read under `mu`; the worker owns its own machines. */
+  uint8_t opt_compiler[32];
+  bool opt_f;
+  pl_stage* stage;
 } pl_store;
 
 pl_store* pl_store_new(pl_store_backend backend);
@@ -170,6 +178,31 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]);
 /* Install a compiler generation.  Returns false when the same hash is already
  * installed and no work was performed. */
 bool pl_store_put_compiler(pl_store* s, const uint8_t hash[32]);
+
+/*
+ * Staged compilation.
+ *
+ * The installed compiler runs on the interning thread and must therefore be
+ * cheap; an optimizing compiler installed here runs on a background worker
+ * instead.  Every law the fast tier compiles is queued for the optimizer,
+ * and its result replaces the attached code in place once it is ready
+ * (pl_pin_set_code publishes atomically and retired code is never freed, so
+ * a concurrent reader either sees the old code or the new one).  Both tiers
+ * must compile a law to the same meaning — only their cost differs.
+ *
+ * Returns false when the same optimizing compiler is already installed.
+ */
+bool pl_store_put_opt_compiler(pl_store* s, const uint8_t hash[32]);
+
+/* Block until every queued upgrade has been compiled.  False when staging
+ * is not active.  For tests, benchmarks, and batch tools that want the
+ * optimized world before they measure it. */
+bool pl_store_stage_drain(pl_store* s);
+
+/* Upgrade counters: laws queued, compiled by the worker, served from the
+ * persistent cache without a queue round trip, and failed. */
+void pl_store_stage_stats(pl_store* s, uint64_t* queued, uint64_t* upgraded,
+                          uint64_t* served, uint64_t* failed);
 
 /* Register a LAW PIN after its persistent hash becomes visible. */
 void pl_store_index_hashed_law(pl_store* s, pl_val pin);

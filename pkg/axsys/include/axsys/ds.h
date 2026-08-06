@@ -14,11 +14,12 @@
 #include "axsys/stb_ds.h"
 
 /* dynamic arrays */
-#define ax_arrlen  stbds_arrlen
-#define ax_arrlenu stbds_arrlenu
-#define ax_arrpush stbds_arrput
-#define ax_arraddn stbds_arraddnptr
-#define ax_arrfree stbds_arrfree
+#define ax_arrlen    stbds_arrlen
+#define ax_arrlenu   stbds_arrlenu
+#define ax_arrpush   stbds_arrput
+#define ax_arraddn   stbds_arraddnptr
+#define ax_arrsetlen stbds_arrsetlen
+#define ax_arrfree   stbds_arrfree
 
 /* hash maps keyed by a value field named `key` */
 #define ax_hmput  stbds_hmput

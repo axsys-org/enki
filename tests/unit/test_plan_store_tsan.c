@@ -178,6 +178,79 @@ static int test_pin_code_publication_is_atomic(void) {
   return status;
 }
 
+/*
+ * Staged compilation under the race it is built on: the worker publishes
+ * optimized code for laws the main thread is calling at the same time.
+ * Every call must return one generation's answer — the interpreted body
+ * (42) or the optimized program's constant (9) — and never a torn read.
+ */
+enum { STAGE_LAWS = 8 };
+
+static pl_val stage_saved_law(test_rt* rt, uint64_t name, pl_val body,
+                              uint8_t out_hash[32]) {
+  pl_thread* t = rt->t;
+  size_t base = t->vsp;
+  pl_vpush(t, test_law(t, 1, name, body));
+  pl_val proxy = pl_pin(t, t->vstack[base]);
+  t->vstack[base] = proxy;
+  char err[192] = {0};
+  ASSERT(pl_store_save_root(rt->store, t->vstack[base], out_hash, err,
+                            sizeof(err)),
+         "%s", err);
+  pl_val canonical = pl_pin_proxy_target(pl_ptr(t->vstack[base]));
+  ASSERT_NEQ(canonical, 0);
+  t->vsp = base;
+  return canonical;
+}
+
+TEST(store_tsan, staged_upgrades_race_with_law_entry) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  pl_store* s = rt.store;
+  size_t base = t->vsp;
+
+  /* an arity-1 law whose literal body is the code row "return 9" */
+  pl_val ops[3] = {OP_PUSH_LIT, 9, OP_RET};
+  pl_vpush(t, test_app(t, 99, 3, ops));
+  pl_val compiler_law = test_law(t, 1, ax_s3('o', 'p', 't'), t->vstack[base]);
+  t->vstack[base] = compiler_law;
+  pl_val proxy = pl_pin(t, t->vstack[base]);
+  t->vstack[base] = proxy;
+  uint8_t opt_hash[32] = {0};
+  char err[192] = {0};
+  ASSERT(pl_store_save_root(s, t->vstack[base], opt_hash, err, sizeof(err)),
+         "%s", err);
+  pl_val compiler = pl_pin_proxy_target(pl_ptr(t->vstack[base]));
+  t->vsp = base;
+
+  uint8_t fast_hash[32];
+  for (size_t i = 0; i < sizeof(fast_hash); i++)
+    fast_hash[i] = (uint8_t)i;
+  ASSERT(pl_store_put_compiler(s, fast_hash));
+  ASSERT(pl_store_put_opt_compiler(s, opt_hash));
+  ASSERT(pl_store_stage_drain(s));
+  pl_pin_set_code(pl_ptr(compiler), NULL); /* the constant compiler is not
+                                              self-hosting */
+
+  pl_val laws[STAGE_LAWS];
+  for (size_t i = 0; i < STAGE_LAWS; i++) {
+    uint8_t law_hash[32] = {0};
+    laws[i] = stage_saved_law(&rt, ax_s2('l', (char)('a' + i)), 42, law_hash);
+  }
+  /* the worker is upgrading these while this loop enters them */
+  for (size_t round = 0; round < 200; round++) {
+    for (size_t i = 0; i < STAGE_LAWS; i++) {
+      pl_val r = test_call1(t, laws[i], 0);
+      ASSERT(r == 42 || r == 9, "law entry saw neither generation: %llu",
+             (unsigned long long)r);
+    }
+  }
+  ASSERT(pl_store_stage_drain(s));
+  for (size_t i = 0; i < STAGE_LAWS; i++)
+    ASSERT_EQ(test_call1(t, laws[i], 0), 9);
+  test_rt_free(&rt);
+}
+
 TEST(store_tsan, concurrent_saves_publish_equal_and_distinct_values) {
   ASSERT_EQ(test_concurrent_saves_publish_equal_and_distinct_values(), 0);
 }

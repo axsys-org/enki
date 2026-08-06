@@ -50,4 +50,8 @@ typedef enum pl_op {
 pl_code* pl_bytecode_from_val(pl_val val);
 void pl_bytecode_free(pl_code* code);
 
+/* False under PL_NO_BYTECODE=1, where every decode is refused so the system
+ * runs interpreted.  Callers use it to skip work whose only product is code. */
+bool pl_bytecode_enabled(void);
+
 #endif

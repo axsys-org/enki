@@ -65,6 +65,16 @@ static pl_val test_law(pl_thread* t, uint64_t arity, pl_val name, pl_val body) {
   return out;
 }
 
+/* Apply a saturated arity-1 law (or its pin) and force the result. */
+static pl_val test_call1(pl_thread* t, pl_val f, pl_val arg) {
+  size_t base = t->vsp;
+  pl_vpush(t, f);
+  pl_vpush(t, arg);
+  pl_val out = pl_apply(t, t->vstack[base], t->vstack[base + 1]);
+  t->vsp = base;
+  return out;
+}
+
 /* The pin of nat 66, the extended-op set. */
 static pl_val test_p66(pl_thread* t) {
   size_t base = t->vsp;

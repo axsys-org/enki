@@ -1,6 +1,7 @@
 #include "plan/bytecode.h"
 #include "stdio.h"
 #include "inttypes.h"
+#include "stdatomic.h"
 #include "stdlib.h"
 
 #include "internal.h"
@@ -23,14 +24,23 @@
  * snapshots are unaffected.
  */
 
+/* PL_NO_BYTECODE=1: refuse every decode, so the whole system runs
+ * interpreted — the differential-testing ground truth.  Decoding happens on
+ * the interning thread and on the staging worker, so the cached answer is
+ * atomic; both threads compute the same value. */
+bool pl_bytecode_enabled(void) {
+  static _Atomic int enabled = -1;
+  int on = atomic_load_explicit(&enabled, memory_order_relaxed);
+  if (on < 0) {
+    on = getenv("PL_NO_BYTECODE") == NULL;
+    atomic_store_explicit(&enabled, on, memory_order_relaxed);
+  }
+  return on != 0;
+}
+
 /** mallocs (and leaks) */
 pl_code* pl_bytecode_from_val(pl_val val) {
-  /* PL_NO_BYTECODE=1: refuse every decode, so the whole system runs
-   * interpreted — the differential-testing ground truth */
-  static int no_bytecode = -1;
-  if (no_bytecode < 0)
-    no_bytecode = getenv("PL_NO_BYTECODE") != NULL;
-  if (no_bytecode)
+  if (!pl_bytecode_enabled())
     return NULL;
 
   char* msg = NULL;
