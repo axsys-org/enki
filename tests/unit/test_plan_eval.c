@@ -1309,3 +1309,135 @@ TEST(exec, call_slow_forces_head_then_applies) {
   pl_pin_set_code(pl_as(PL_TAG_PIN, t->vstack[base + 1]), NULL);
   test_rt_free(&rt);
 }
+
+/* ── op 66 Memo (doc/sigoflaw-memo-spec.md) ────────────────────────────── */
+
+/* Pin v and persist it so the pin carries a content hash. */
+static pl_val test_saved_pin(test_rt* rt, pl_val v) {
+  pl_thread* t = rt->t;
+  size_t base = t->vsp;
+  pl_vpush(t, v);
+  t->vstack[base] = pl_pin(t, t->vstack[base]);
+  char err[192] = {0};
+  ASSERT(pl_store_save_root(rt->store, t->vstack[base], NULL, err, sizeof(err)),
+         "%s", err);
+  pl_val pin = t->vstack[base];
+  t->vsp = base;
+  return pin;
+}
+
+static pl_val test_memo(pl_thread* t, pl_val f, pl_val x) {
+  return test_op66_2(t, ax_s4('M', 'e', 'm', 'o'), f, x);
+}
+
+TEST(memo, unpinned_args_apply_without_caching) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  uint64_t rec0;
+  uint64_t rec1;
+  pl_memo_stats(NULL, NULL, &rec0);
+  /* raw (unpinned) law: (Memo f 7) is exactly (f 7), never recorded */
+  pl_vpush(t, test_law(t, 1, ax_s4('m', 'm', '_', 'a'), test_app1(t, 0, 42)));
+  ASSERT_EQ(test_memo(t, t->vstack[base], 7), 42);
+  pl_memo_stats(NULL, NULL, &rec1);
+  ASSERT_EQ(rec0, rec1);
+  test_rt_free(&rt);
+}
+
+TEST(memo, pinned_nat_result_is_recorded_and_served) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  pl_vpush(t, test_law(t, 1, ax_s4('m', 'm', '_', 'b'), test_app1(t, 0, 42)));
+  t->vstack[base] = test_saved_pin(&rt, t->vstack[base]);
+  pl_vpush(t, test_saved_pin(&rt, ax_s4('m', 'm', 'x', 'b')));
+  ASSERT_EQ(test_memo(t, t->vstack[base], t->vstack[base + 1]), 42);
+  uint64_t got = 0;
+  ASSERT(pl_memo_probe(pl_pin_hash(t->vstack[base]),
+                       pl_pin_hash(t->vstack[base + 1]), &got));
+  ASSERT_EQ(got, 42);
+  test_rt_free(&rt);
+}
+
+TEST(memo, cached_value_is_served_without_reevaluation) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  /* plant a sentinel for a never-evaluated pair: a probe hit must be
+   * served verbatim, proving the serve path short-circuits the apply */
+  pl_vpush(t, test_law(t, 1, ax_s4('m', 'm', '_', 'c'), test_app1(t, 0, 42)));
+  t->vstack[base] = test_saved_pin(&rt, t->vstack[base]);
+  pl_vpush(t, test_saved_pin(&rt, ax_s4('m', 'm', 'x', 'c')));
+  pl_memo_record(pl_pin_hash(t->vstack[base]), pl_pin_hash(t->vstack[base + 1]),
+                 99);
+  ASSERT_EQ(test_memo(t, t->vstack[base], t->vstack[base + 1]), 99);
+  test_rt_free(&rt);
+}
+
+TEST(memo, effectful_evaluation_is_never_recorded) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  /* f's body runs (Trace 1 5): the effect-epoch bump must block the
+   * record even though the result (5) is a cacheable nat63 */
+  pl_val trace_args[2] = {1, 5};
+  pl_vpush(t, test_app(t, ax_s5('T', 'r', 'a', 'c', 'e'), 2, trace_args));
+  pl_vpush(t, test_app1(t, 0, t->vstack[base])); /* (0 row) literal */
+  pl_vpush(t, test_app1(t, 0, test_p66(t)));     /* (0 P66) literal */
+  pl_vpush(t, test_app2(t, 0, t->vstack[base + 2], t->vstack[base + 1]));
+  pl_vpush(t, test_law(t, 1, ax_s4('m', 'm', '_', 'd'), t->vstack[base + 3]));
+  t->vstack[base] = test_saved_pin(&rt, t->vstack[base + 4]);
+  t->vsp = base + 1;
+  pl_vpush(t, test_saved_pin(&rt, ax_s4('m', 'm', 'x', 'd')));
+  ASSERT_EQ(test_memo(t, t->vstack[base], t->vstack[base + 1]), 5);
+  uint64_t got = 0;
+  ASSERT(!pl_memo_probe(pl_pin_hash(t->vstack[base]),
+                        pl_pin_hash(t->vstack[base + 1]), &got));
+  test_rt_free(&rt);
+}
+
+TEST(memo, non_nat_result_evaluates_but_never_caches) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  /* identity law: (f x) is the x pin itself — not a nat63, so the
+   * application runs uncached and nothing is recorded */
+  pl_vpush(t, test_law(t, 1, ax_s4('m', 'm', '_', 'e'), 1));
+  t->vstack[base] = test_saved_pin(&rt, t->vstack[base]);
+  pl_vpush(t,
+           test_saved_pin(&rt, test_law(t, 2, ax_s4('m', 'm', 'x', 'e'), 1)));
+  pl_val r = test_memo(t, t->vstack[base], t->vstack[base + 1]);
+  ASSERT(!pl_is_nat63(r));
+  ASSERT_NOT_NULL(pl_as(PL_TAG_PIN, r));
+  ASSERT(memcmp(pl_pin_hash(r), pl_pin_hash(t->vstack[base + 1]), 32) == 0);
+  uint64_t got = 0;
+  ASSERT(!pl_memo_probe(pl_pin_hash(t->vstack[base]),
+                        pl_pin_hash(t->vstack[base + 1]), &got));
+  test_rt_free(&rt);
+}
+
+TEST(ops, equal_survives_very_deep_structures) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  /* two structurally-equal 200k-deep app chains (distinct cells): the
+   * old recursive pl_eq_deep overflowed the C stack near ~80k */
+  enum { DEPTH = 200000 };
+  pl_vpush(t, 7);
+  pl_vpush(t, 7);
+  pl_vpush(t, 8);
+  for (int i = 0; i < DEPTH; i++) {
+    t->vstack[base] = test_app1(t, 0, t->vstack[base]);
+    t->vstack[base + 1] = test_app1(t, 0, t->vstack[base + 1]);
+    t->vstack[base + 2] = test_app1(t, 0, t->vstack[base + 2]);
+  }
+  ASSERT_EQ(test_op66_2(t, ax_s5('E', 'q', 'u', 'a', 'l'), t->vstack[base],
+                        t->vstack[base + 1]),
+            1);
+  /* same shape, different leaf */
+  ASSERT_EQ(test_op66_2(t, ax_s5('E', 'q', 'u', 'a', 'l'), t->vstack[base],
+                        t->vstack[base + 2]),
+            0);
+  test_rt_free(&rt);
+}

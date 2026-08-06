@@ -856,9 +856,40 @@ static pl_val op_try(pl_thread* t, size_t ab) {
   return ARG(0);
 }
 
+/*
+ * (Memo f x) ≡ (f x), unconditionally — the identity on application
+ * (spec: doc/sigoflaw-memo-spec.md).  When both args are canonical
+ * hashed pins the runtime may serve the pair from the machine-global
+ * nat cache: probe here, and on a miss run the application beneath an
+ * F_MEMO barrier — ret_memo records the result only if it is a nat63
+ * and the thread's effect epoch never moved (caching may skip work,
+ * never effects).  Purity of f is the caller's contract; anything
+ * uncacheable — raw laws, unsaved pins, non-nat results — simply
+ * evaluates as a plain application.
+ */
+static pl_val op_memo(pl_thread* t, size_t ab) {
+  pl_val f = pl_resolve(ARG(0));
+  pl_val x = pl_resolve(ARG(1));
+  const uint8_t* fh = pl_as(PL_TAG_PIN, f) != NULL ? pl_pin_hash(f) : NULL;
+  const uint8_t* xh = pl_as(PL_TAG_PIN, x) != NULL ? pl_pin_hash(x) : NULL;
+  if (fh != NULL && xh != NULL) {
+    uint64_t cached;
+    if (pl_memo_probe(fh, xh, &cached))
+      return (pl_val)cached;
+    pl_frame* fr = pl_fpush(t);
+    fr->kind = PL_F_MEMO;
+    fr->a = f;
+    fr->b = x;
+    fr->epoch = t->effect_epoch;
+  }
+  pl_push_apply(t, x);
+  return f;
+}
+
 /* ── Misc ──────────────────────────────────────────────────────────────── */
 
 static pl_val op_trace(pl_thread* t, size_t ab) {
+  t->effect_epoch++; /* observable output: never cached across (F_MEMO) */
   /* arg 0 deep via mask: the reference shows the value deeply */
   char* s = pl_show_val(ax_allocator_system(), ARG(0), NULL);
   fprintf(stderr, "%s\n", s);
@@ -866,46 +897,103 @@ static pl_val op_trace(pl_thread* t, size_t ab) {
   return ARG(1);
 }
 
-static bool pl_eq_deep(pl_val a, pl_val b) {
-  a = pl_resolve(a);
-  b = pl_resolve(b);
-  if (a == b)
-    return true;
-  if (pl_is_nat(a) && pl_is_nat(b))
-    return pl_nat_eq(a, b);
-  if (pl_is_nat63(a) || pl_is_nat63(b))
-    return false;
-  if (pl_tag(a) != pl_tag(b))
-    return false;
-  switch (pl_tag(a)) {
-  case PL_TAG_PIN: {
-    const uint8_t* ah = pl_pin_hash(a);
-    const uint8_t* bh = pl_pin_hash(b);
-    if (ah != NULL && bh != NULL)
-      return memcmp(ah, bh, 32) == 0;
-    return pl_eq_deep(pl_pin_body(pl_ptr(a)), pl_pin_body(pl_ptr(b)));
+/*
+ * Structural equality over already-normal values, driven by an
+ * explicit worklist instead of C recursion: op-66 Equal runs on
+ * arbitrarily deep data (the compiler compares whole IR trees for its
+ * fixed point), so graph depth must never translate into C stack
+ * depth.  The worklist holds bare pl_vals with no GC protection —
+ * legal only because nothing here allocates; both roots stay live on
+ * the caller's vstack.
+ */
+typedef struct {
+  pl_val a, b;
+} pl_eq_pair;
+
+typedef struct {
+  pl_eq_pair* items;
+  size_t n, cap;
+  pl_eq_pair inline_buf[64];
+} pl_eq_stack;
+
+static void pl_eq_push(pl_eq_stack* s, pl_val a, pl_val b) {
+  if (s->n == s->cap) {
+    size_t cap2 = s->cap * 2;
+    if (s->items == s->inline_buf) {
+      pl_eq_pair* grown = malloc(cap2 * sizeof(pl_eq_pair));
+      ax_assume(grown != NULL, "oom");
+      memcpy(grown, s->items, s->n * sizeof(pl_eq_pair));
+      s->items = grown;
+    } else {
+      s->items = realloc(s->items, cap2 * sizeof(pl_eq_pair));
+      ax_assume(s->items != NULL, "oom");
+    }
+    s->cap = cap2;
   }
-  case PL_TAG_LAW: {
-    pl_cell *pa = pl_ptr(a), *pb = pl_ptr(b);
-    return pl_law_arity(pa) == pl_law_arity(pb) &&
-           pl_eq_deep(pl_law_name(pa), pl_law_name(pb)) &&
-           pl_eq_deep(pl_law_body(pa), pl_law_body(pb));
+  s->items[s->n++] = (pl_eq_pair){a, b};
+}
+
+static bool pl_eq_deep(pl_val a0, pl_val b0) {
+  pl_eq_stack s;
+  s.items = s.inline_buf;
+  s.n = 0;
+  s.cap = sizeof(s.inline_buf) / sizeof(s.inline_buf[0]);
+  pl_eq_push(&s, a0, b0);
+  bool eq = true;
+  while (eq && s.n > 0) {
+    pl_eq_pair p = s.items[--s.n];
+    pl_val a = pl_resolve(p.a);
+    pl_val b = pl_resolve(p.b);
+    if (a == b)
+      continue;
+    if (pl_is_nat(a) && pl_is_nat(b)) {
+      eq = pl_nat_eq(a, b);
+      continue;
+    }
+    if (pl_is_nat63(a) || pl_is_nat63(b) || pl_tag(a) != pl_tag(b)) {
+      eq = false;
+      continue;
+    }
+    switch (pl_tag(a)) {
+    case PL_TAG_PIN: {
+      const uint8_t* ah = pl_pin_hash(a);
+      const uint8_t* bh = pl_pin_hash(b);
+      if (ah != NULL && bh != NULL)
+        eq = memcmp(ah, bh, 32) == 0;
+      else
+        pl_eq_push(&s, pl_pin_body(pl_ptr(a)), pl_pin_body(pl_ptr(b)));
+      break;
+    }
+    case PL_TAG_LAW: {
+      pl_cell *pa = pl_ptr(a), *pb = pl_ptr(b);
+      if (pl_law_arity(pa) != pl_law_arity(pb)) {
+        eq = false;
+        break;
+      }
+      pl_eq_push(&s, pl_law_name(pa), pl_law_name(pb));
+      pl_eq_push(&s, pl_law_body(pa), pl_law_body(pb));
+      break;
+    }
+    case PL_TAG_APP: {
+      pl_cell *pa = pl_ptr(a), *pb = pl_ptr(b);
+      uint32_t n = pl_app_n(pa);
+      if (n != pl_app_n(pb)) {
+        eq = false;
+        break;
+      }
+      pl_eq_push(&s, pl_app_head(pa), pl_app_head(pb));
+      for (uint32_t i = 0; i < n; i++)
+        pl_eq_push(&s, pl_app_args(pa)[i], pl_app_args(pb)[i]);
+      break;
+    }
+    default:
+      eq = false;
+      break;
+    }
   }
-  case PL_TAG_APP: {
-    pl_cell *pa = pl_ptr(a), *pb = pl_ptr(b);
-    uint32_t n = pl_app_n(pa);
-    if (n != pl_app_n(pb))
-      return false;
-    if (!pl_eq_deep(pl_app_head(pa), pl_app_head(pb)))
-      return false;
-    for (uint32_t i = 0; i < n; i++)
-      if (!pl_eq_deep(pl_app_args(pa)[i], pl_app_args(pb)[i]))
-        return false;
-    return true;
-  }
-  default:
-    return false;
-  }
+  if (s.items != s.inline_buf)
+    free(s.items);
+  return eq;
 }
 
 static pl_val op_equal(pl_thread* t, size_t ab) {
@@ -981,6 +1069,7 @@ static void save_pin_only(pl_thread* t, pl_val pin) {
 }
 
 static pl_val op_save(pl_thread* t, size_t ab) {
+  t->effect_epoch++; /* persistence effect: never cached across (F_MEMO) */
   pl_cell* pp = pl_as(PL_TAG_PIN, ARG(0));
   if (pp == NULL)
     pl_raise_msg(t, "Save: expected a pin");
@@ -1192,6 +1281,9 @@ const pl_opdesc pl_ops[] = {
     /* Reaver exposes these provisional string operations through splan. */
     OP83_LOCAL_DEEP("scan8", 4, 0b1111, 0, op_scan8),
     OP83_LOCAL_DEEP("StrTree", 1, 0b1, 0b1, op_strtree),
+
+    /* Memo stays index 133. */
+    OP66(ax_s4('M', 'e', 'm', 'o'), 2, 0b11, 0, op_memo),
 };
 
 const size_t pl_nops = sizeof(pl_ops) / sizeof(pl_ops[0]);
@@ -1212,8 +1304,8 @@ static const uint16_t pl_op66_argc1[] = {
     55, 56, 57, 58, 59, 60, 65, 71, 72,  74,  75,  76,  77, 78,
     79, 80, 81, 82, 83, 85, 86, 99, 100, 101, 103, 104, 130};
 static const uint16_t pl_op66_argc2[] = {
-    8,  9,  10, 11, 12, 13, 14, 31, 32, 33, 36, 37, 43, 47, 50, 64,
-    66, 69, 70, 73, 84, 87, 88, 89, 92, 93, 94, 95, 96, 97, 98, 102};
+    8,  9,  10, 11, 12, 13, 14, 31, 32, 33, 36, 37, 43, 47, 50,  64, 66,
+    69, 70, 73, 84, 87, 88, 89, 92, 93, 94, 95, 96, 97, 98, 102, 133};
 static const uint16_t pl_op66_argc3[] = {4,  15, 30, 34, 35, 48, 51,
                                          61, 62, 63, 67, 68, 90, 91};
 static const uint16_t pl_op66_argc4[] = {16, 49, 129};

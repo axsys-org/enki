@@ -539,6 +539,7 @@ static pl_run_status pl_run(pl_thread* t, pl_val v, size_t base,
       [PL_F_UPD] = &&ret_upd,       [PL_F_TRY] = &&ret_try,
       [PL_F_JUDGE] = &&ret_judge,   [PL_F_NIL] = &&ret_nil,
       [PL_F_PROF] = &&ret_prof,     [PL_F_APPLYN] = &&ret_applyn,
+      [PL_F_MEMO] = &&ret_memo,
   };
 
   if (entry == PL_RES_RETURN)
@@ -1475,6 +1476,16 @@ ret_prof:
   t->fsp--;
   goto ret;
 
+ret_memo:
+  /* (f x) completed beneath the op-66 Memo barrier: record only nat63
+   * results computed without initiating any effect (the epoch
+   * watermark still matches).  An unwound or abandoned F_MEMO simply
+   * never records; delivery is unconditional. */
+  if (pl_is_nat63(v) && fr->epoch == t->effect_epoch)
+    pl_memo_record(pl_pin_hash(fr->a), pl_pin_hash(fr->b), v);
+  t->fsp--;
+  goto ret;
+
 ret_applyn: {
   /* v is the WHNF head; the pending args sit at [pbase, pbase+m) with
    * the reserved head slot at pbase-1.  The head's arity decides the
@@ -1677,6 +1688,10 @@ op_body:
     size_t argbase = fr->argbase;
     t->fsp--;          /* pop before the body so its frames take this slot */
     t->centry_depth++; /* op bodies are C-entry regions */
+    if (ax_unlikely(d->opset >= 82))
+      t->effect_epoch++; /* effect initiation: F_MEMO barriers above must
+                          * not record (covers direct ops, the io hook,
+                          * and coordination requests alike) */
     pl_val r;
     if (ax_unlikely(d->host_effect && t->rplan_effect_f != NULL))
       t->rplan_effect_f(t);

@@ -146,6 +146,15 @@ bool pl_store_save_root(pl_store* s, pl_val pin, uint8_t out_hash[32],
 /* Intern-or-load a pin by hash; raises if the backend lacks it. */
 pl_val pl_store_load(pl_thread* t, const uint8_t hash[32]);
 
+/* op-66 Memo nat cache (doc/sigoflaw-memo-spec.md): machine-global
+ * memoisation of (f x) keyed by the two pin hashes.  Values are nat63
+ * only; the persistent layer shares the code cache's LMDB and knobs. */
+bool pl_memo_probe(const uint8_t f_hash[32], const uint8_t x_hash[32],
+                   uint64_t* out);
+void pl_memo_record(const uint8_t f_hash[32], const uint8_t x_hash[32],
+                    uint64_t value);
+void pl_memo_stats(uint64_t* probes, uint64_t* hits, uint64_t* records);
+
 /* Persist / fetch the root hash (event-log replay seam). */
 bool pl_store_put_root(pl_store* s, const uint8_t hash[32]);
 bool pl_store_get_root(pl_store* s, uint8_t hash[32]);
