@@ -38,6 +38,7 @@
             ./Makefile
             ./pkg
             ./tests
+            ./web
           ];
         };
 
@@ -120,6 +121,29 @@
         enkiRelease = mkenki "pgo";
         enkiReleaseNoPGO = mkenki "release";
 
+        jplanDemo = stdenv.mkDerivation {
+          pname = "enki-jplan-demo";
+          version = "0.1.0";
+          inherit src;
+
+          nativeBuildInputs = [pkgs.nodejs];
+
+          dontConfigure = true;
+
+          buildPhase = ''
+            runHook preBuild
+            node web/compile-jplan-demo.mjs ${enkiReleaseNoPGO}/bin/wisp ${reaver}/src build/jplan-demo
+            runHook postBuild
+          '';
+
+          installPhase = ''
+            runHook preInstall
+            mkdir -p $out
+            cp -R build/jplan-demo/. $out/
+            runHook postInstall
+          '';
+        };
+
         mkBinPackage = name: extraInstall:
           pkgs.runCommand "enki-${name}-0.1.0" {
             meta = {
@@ -139,6 +163,56 @@
           cp -R ${reaver}/src $out/share/enki/reaver/src
         '';
         assemblerPackage = mkBinPackage "assembler" "";
+        wasmPkgs = pkgs.pkgsCross.wasi32;
+        enkiWasm = wasmPkgs.stdenv.mkDerivation {
+          pname = "enki-wasm";
+          version = "0.1.0";
+          inherit src;
+
+          nativeBuildInputs = [
+            pkgs.gnumake
+            pkgs.nodejs
+          ];
+
+          dontConfigure = true;
+          enableParallelBuilding = true;
+          hardeningDisable = ["fortify" "fortify3"];
+
+          buildPhase = ''
+            runHook preBuild
+            make BUILD_TYPE=wasm REAVER_SRC=${reaver}/src JPLAN_DEMO_DIR=${jplanDemo} lib wasm-test-binaries wasm-browser
+            node web/wisp-smoke.mjs build/wasm/browser/wisp.wasm .
+            runHook postBuild
+          '';
+
+          installPhase = ''
+            runHook preInstall
+            install -d $out/lib $out/include/axsys $out/include/plan $out/include/enki $out/share/enki/wasm-tests $out/share/enki/browser
+            install -m 0644 build/wasm/lib/*.a $out/lib/
+            install -m 0644 pkg/axsys/include/axsys/*.h $out/include/axsys/
+            install -m 0644 pkg/plan/include/plan/*.h $out/include/plan/
+            install -m 0644 pkg/enki/include/enki/*.h $out/include/enki/
+            cp -R build/wasm/tests/unit $out/share/enki/wasm-tests/
+            cp -R build/wasm/tests/property $out/share/enki/wasm-tests/
+            install -m 0644 build/wasm/browser/wisp.wasm $out/share/enki/browser/wisp.wasm
+            install -m 0644 build/wasm/browser/reaver-src.json $out/share/enki/browser/reaver-src.json
+            install -m 0644 web/wisp.html $out/share/enki/browser/wisp.html
+            install -m 0644 web/wisp.js $out/share/enki/browser/wisp.js
+            install -m 0644 web/jplan.html $out/share/enki/browser/jplan.html
+            install -m 0644 web/jplan.js $out/share/enki/browser/jplan.js
+            install -m 0644 web/jplan-host.mjs $out/share/enki/browser/jplan-host.mjs
+            install -m 0644 web/wormhole-table.mjs $out/share/enki/browser/wormhole-table.mjs
+            install -m 0755 web/reaver-bundle.mjs $out/share/enki/browser/reaver-bundle.mjs
+            install -m 0755 web/wisp-devserver.mjs $out/share/enki/browser/wisp-devserver.mjs
+            runHook postInstall
+          '';
+
+          meta = {
+            description = "enki libraries, tests, and browser Wisp harness cross-compiled to wasm32-wasi modules";
+            license = lib.licenses.mit;
+            platforms = ["wasm32-wasi"];
+          };
+        };
 
         mkCheckArgs = buildType: suffix: makeArgs:
           (mkWithCompiler buildType {
@@ -239,6 +313,8 @@
           enki-release = enkiReleaseNoPGO;
           wisp = wispPackage;
           assembler = assemblerPackage;
+          jplan-demo = jplanDemo;
+          enki-wasm = enkiWasm;
           enki-debug = mkenki "debug";
           enki-asan = mkenki "asan";
           enki-ubsan = mkenki "ubsan";
@@ -250,6 +326,7 @@
         checks =
           testChecks
           // {
+            wasm = enkiWasm;
             format = treefmtEval.config.build.check self;
           };
 

@@ -1,10 +1,14 @@
 #include "axsys/arena.h"
 
 #include <stdint.h>
+#ifndef ENKI_WASM
 #include <sys/mman.h>
+#endif
 
+#ifndef ENKI_WASM
 #ifndef MAP_ANONYMOUS
 #define MAP_ANONYMOUS MAP_ANON
+#endif
 #endif
 
 ax_arena* ax_arena_create(const ax_allocator* loc_a, size_t cap_s) {
@@ -34,6 +38,9 @@ ax_arena* ax_arena_create(const ax_allocator* loc_a, size_t cap_s) {
 /** TODO: added MAP_NORESERVE which will create a SIGBUS at fault time instead
  * of failing at allocation time on OOM. ADD SIGNAL HANDLING!!*/
 ax_arena* ax_arena_create_overcommit(size_t cap_s) {
+#ifdef ENKI_WASM
+  return ax_arena_create(ax_allocator_system(), cap_s);
+#else
   if (cap_s > SIZE_MAX - sizeof(ax_arena))
     return NULL;
   size_t siz_s = sizeof(ax_arena) + cap_s;
@@ -54,15 +61,18 @@ ax_arena* ax_arena_create_overcommit(size_t cap_s) {
       .free = ax_arena_free,
   };
   return a;
+#endif
 }
 
 void ax_arena_destroy(ax_arena* a) {
   if (!a)
     return;
+#ifndef ENKI_WASM
   if (a->mmap_f) {
     (void)munmap(a, a->cap_s);
     return;
   }
+#endif
   a->our_a.free(a->our_a.ctx, a);
 }
 void* ax_arena_alloc(void* ctx, size_t size_s) {

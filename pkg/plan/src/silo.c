@@ -5,7 +5,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifndef ENKI_WASM
 #include <openssl/evp.h>
+#endif
 
 #include "axsys/assume.h"
 #include "axsys/ds.h"
@@ -565,6 +567,7 @@ bool pl_silo_encode_buffer(pl_val root, const pl_val* subpins, size_t nsub,
   return true;
 }
 
+#ifndef ENKI_WASM
 typedef struct silo_hash_sink {
   EVP_MD_CTX* digest;
 } silo_hash_sink;
@@ -573,11 +576,23 @@ static bool silo_hash_write(void* ctx, const uint8_t* bytes, size_t len) {
   silo_hash_sink* sink = ctx;
   return EVP_DigestUpdate(sink->digest, bytes, len) == 1;
 }
+#endif
 
 bool pl_silo_hash(pl_val root, const pl_val* subpins, size_t nsub,
                   uint8_t out[32], char* err, size_t err_cap) {
   if (out == NULL)
     return silo_error(err, err_cap, "invalid Silo hash output");
+#ifdef ENKI_WASM
+  /* The browser target has no OpenSSL. Keep the encoded stream in linear
+   * memory, then use axsys' portable SHA-256 implementation. */
+  silo_buffer_sink sink = {0};
+  pl_silo_writer writer = {.ctx = &sink, .write = silo_buffer_write};
+  bool ok = pl_silo_encode(&writer, root, subpins, nsub, err, err_cap);
+  if (ok)
+    ax_sha256(sink.bytes, (size_t)ax_arrlen(sink.bytes), out);
+  ax_arrfree(sink.bytes);
+  return ok;
+#else
   EVP_MD_CTX* digest = EVP_MD_CTX_new();
   if (digest == NULL)
     return silo_error(err, err_cap, "cannot allocate Silo hash context");
@@ -594,6 +609,7 @@ bool pl_silo_hash(pl_val root, const pl_val* subpins, size_t nsub,
     ok = silo_error(err, err_cap, "cannot finalize Silo hash");
   EVP_MD_CTX_free(digest);
   return ok;
+#endif
 }
 
 /* ----------------------------------------------------------------------- */

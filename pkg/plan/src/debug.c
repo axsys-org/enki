@@ -1,13 +1,18 @@
 #include "plan/debug.h"
 
 #include <ctype.h>
+#ifndef ENKI_WASM
 #include <gmp.h>
+#endif
+#include <stdlib.h>
 #include <string.h>
 
+#include "axsys/assume.h"
 #include "axsys/sb.h"
 #include "plan/nat.h"
 #include "plan/value.h"
 
+#ifndef ENKI_WASM
 static void pl_gmp_free(void* ptr, size_t size_s) {
   if (ptr == NULL)
     return;
@@ -15,6 +20,7 @@ static void pl_gmp_free(void* ptr, size_t size_s) {
   mp_get_memory_functions(NULL, NULL, &free_fn);
   free_fn(ptr, size_s);
 }
+#endif
 
 static bool pl_nat_printable(pl_val v) {
   size_t n = pl_nat_byte_len(v);
@@ -40,6 +46,31 @@ static void pl_show_nat(ax_sb* sb, pl_val v) {
     ax_sb_append_u64(sb, v);
     return;
   }
+#ifdef ENKI_WASM
+  size_t n = pl_nat_limb_len(v);
+  uint64_t* tmp = malloc(n * sizeof(uint64_t));
+  ax_assume(tmp != NULL, "oom");
+  for (size_t i = 0; i < n; i++)
+    tmp[i] = pl_nat_limb_at(v, i);
+  char* digits = malloc(n * 20 + 1);
+  ax_assume(digits != NULL, "oom");
+  size_t nd = 0;
+  while (n > 0) {
+    unsigned __int128 rem = 0;
+    for (size_t i = n; i > 0; i--) {
+      unsigned __int128 cur = (rem << 64u) | tmp[i - 1];
+      tmp[i - 1] = (uint64_t)(cur / 10u);
+      rem = cur % 10u;
+    }
+    digits[nd++] = (char)('0' + (char)rem);
+    while (n > 0 && tmp[n - 1] == 0)
+      n--;
+  }
+  while (nd > 0)
+    ax_sb_append_char(sb, digits[--nd]);
+  free(digits);
+  free(tmp);
+#else
   mpz_t z;
   mpz_init(z);
   size_t limbs = pl_nat_limb_len(v);
@@ -48,6 +79,7 @@ static void pl_show_nat(ax_sb* sb, pl_val v) {
   ax_sb_append_cstr(sb, dec);
   pl_gmp_free(dec, strlen(dec) + 1);
   mpz_clear(z);
+#endif
 }
 
 static bool pl_show_name_raw(ax_sb* sb, pl_val name) {
@@ -103,9 +135,12 @@ void pl_show_sb(ax_sb* sb, pl_val v) {
     ax_sb_append_lit(sb, ">");
     return;
   case PL_TAG_DEFER:
-    if (pl_hdr_kind(p[0]) == PL_K_BH)
-      ax_sb_append_lit(sb, "<bh>");
-    else
+    if (pl_hdr_kind(p[0]) == PL_K_BH) {
+      if ((pl_hdr_flags(p[0]) & PL_F_WORM) != 0)
+        ax_sb_append_lit(sb, "<wormhole>");
+      else
+        ax_sb_append_lit(sb, "<bh>");
+    } else
       ax_sb_append_lit(sb, "<thk>");
     return;
   default:

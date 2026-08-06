@@ -3,15 +3,22 @@
 
 #define GREATEST_USE_ABBREVS 0
 #define GREATEST_USE_LONGJMP 1
+#ifdef ENKI_WASM
+#define GREATEST_USE_TIME 0
+#endif
 #include "greatest.h"
 
+#ifndef ENKI_WASM
 #include <signal.h>
+#endif
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef ENKI_WASM
 #include <unistd.h>
+#endif
 
 #ifndef ENKI_TEST_TIMEOUT_SECONDS
 #define ENKI_TEST_TIMEOUT_SECONDS 60
@@ -193,6 +200,7 @@ static void enki_test_skip(const char* message) {
 
 GREATEST_MAIN_DEFS();
 
+#ifndef ENKI_WASM
 static void enki_test_timeout(int signal_number) {
   (void)signal_number;
   static const char message[] =
@@ -203,6 +211,7 @@ static void enki_test_timeout(int signal_number) {
   (void)ignored;
   _exit(124);
 }
+#endif
 
 static void enki_test_teardown(void* data) {
   (void)data;
@@ -235,17 +244,21 @@ static void enki_test_run_suite(void) {
 }
 
 int main(int argc, char** argv) {
+#ifndef ENKI_WASM
   if (signal(SIGALRM, enki_test_timeout) == SIG_ERR) {
     perror("greatest: cannot install test timeout");
     return EXIT_FAILURE;
   }
   (void)alarm(ENKI_TEST_TIMEOUT_SECONDS);
+#endif
   GREATEST_MAIN_BEGIN();
   for (size_t i = 0; i < enki_test_suite_count; i++) {
     enki_test_active_suite = i;
     greatest_run_suite(enki_test_run_suite, enki_test_suites[i].name);
   }
+#ifndef ENKI_WASM
   (void)alarm(0);
+#endif
   GREATEST_MAIN_END();
 }
 

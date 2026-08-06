@@ -58,6 +58,8 @@ typedef enum {
 void pl_thread_start(pl_thread* t, pl_val v);
 /* As pl_thread_start, but drive a deep normalization of v. */
 void pl_thread_start_nf(pl_thread* t, pl_val v);
+/* Arm a weak-head evaluation of (f x). */
+void pl_thread_start_call(pl_thread* t, pl_val f, pl_val x);
 /* Arm a deep normalization of (f x) — the actor boot shape, the
  * reference `force (fn % N 0)`. */
 void pl_thread_start_call_nf(pl_thread* t, pl_val f, pl_val x);
@@ -90,18 +92,14 @@ pl_val pl_thread_request(pl_thread* t);
 /* ── Direct-effect interception (the record/replay seam) ───────────────── */
 
 /*
- * When set, the machine consults the hook instead of the handler for
+ * When set on a pl_thread (plan/host.h), the machine consults the hook for
  * every direct (non-coordination) op-82 effect.  Return true with *out
  * filled to substitute a result (replay: no syscall happens); return
- * false to run the real handler.  A live-logging hook performs the
+ * false to run the process-global host.  A live-logging hook performs the
  * effect itself via pl_io_run and records the result.  The hook runs
  * inside the op's C-entry region; out must be WHNF.
  */
-typedef bool (*pl_io_hook)(pl_thread* t, uint32_t op, size_t argbase,
-                           pl_val* out);
-void pl_set_io_hook(pl_io_hook hook);
-
-/* Run the real handler of direct op `op` (hooks only). */
+/* Run the process-global host for direct op-table index `op` (hooks only). */
 pl_val pl_io_run(pl_thread* t, uint32_t op, size_t argbase);
 /* Stable identity for the log: the op's name and arg count. */
 const char* pl_io_name(uint32_t op);

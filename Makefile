@@ -12,7 +12,7 @@ LINUX_PLATFORM ?= linux/amd64
 LINUX_PLATFORM_ID := $(subst /,-,$(LINUX_PLATFORM))
 LINUX_NIX_VOLUME ?= enki-nix-2-34-7-$(LINUX_PLATFORM_ID)
 
-VALID_BUILD_TYPES := debug release asan ubsan tsan coverage profile
+VALID_BUILD_TYPES := debug release asan ubsan tsan coverage profile wasm
 VALID_BUILD_TYPES += pgo-generate pgo
 
 PGO_CC ?= clang
@@ -26,6 +26,7 @@ PGO_PROFILE ?= $(PGO_DIR)/enki.profdata
 PGO_PROFILE_PATTERN ?= $(CURDIR)/$(PGO_RAW_DIR)/wisp-%m.profraw
 PGO_ASSEMBLER_PROFILE_PATTERN ?= $(CURDIR)/$(PGO_RAW_DIR)/assembler-%m.profraw
 PGO_REAVER_SRC ?= $(CURDIR)/reaver/src
+REAVER_SRC ?= reaver/src
 PGO_WORKLOAD ?= --file-root ./reaver/src ./reaver/src/plan reaver main
 
 # Per-package include paths enforce the layering (axsys < plan < enki):
@@ -35,7 +36,7 @@ PLAN_INC := -Ipkg/plan/include $(AXSYS_INC)
 ENKI_INC := -Ipkg/enki/include $(PLAN_INC)
 
 BASE_CPPFLAGS := -Itests/support -Itests/property/vendor/theft $(NIX_CFLAGS_COMPILE)
-BASE_CFLAGS := -std=c23 -MMD -MP -D_GNU_SOURCE -pthread
+BASE_CFLAGS := -std=c23 -MMD -MP -D_GNU_SOURCE
 
 WARN_COMMON := -Wall -Wextra  \
 	-Wpedantic -Wshadow -Wconversion -Wstrict-prototypes \
@@ -82,6 +83,9 @@ BUILD_CFLAGS_asan := -O1 -g3 -fsanitize=address -fno-omit-frame-pointer $(HARDEN
 BUILD_CFLAGS_ubsan := -O1 -g3 -fsanitize=undefined -fno-omit-frame-pointer $(HARDEN_CFLAGS)
 BUILD_CFLAGS_tsan := -O1 -g3 -fsanitize=thread -fno-omit-frame-pointer $(HARDEN_CFLAGS)
 BUILD_CFLAGS_coverage := -O1 -g3 --coverage -Wno-pedantic $(HARDEN_CFLAGS)
+BUILD_CFLAGS_wasm := -O3 -DNDEBUG -DENKI_WASM -mllvm -wasm-enable-sjlj \
+	-Wno-shorten-64-to-32 -Wno-error=unused-command-line-argument \
+	-Wno-error=main
 
 BUILD_LDFLAGS_debug :=
 BUILD_LDFLAGS_release := $(LTO_CFLAGS)
@@ -92,9 +96,14 @@ BUILD_LDFLAGS_asan := -fsanitize=address
 BUILD_LDFLAGS_ubsan := -fsanitize=undefined
 BUILD_LDFLAGS_tsan := -fsanitize=thread
 BUILD_LDFLAGS_coverage := --coverage
+BUILD_LDFLAGS_wasm := -mllvm -wasm-enable-sjlj -lsetjmp
 
 ifeq ($(filter $(BUILD_TYPE),$(VALID_BUILD_TYPES)),)
 $(error BUILD_TYPE must be one of $(VALID_BUILD_TYPES))
+endif
+
+ifneq ($(BUILD_TYPE),wasm)
+BASE_CFLAGS += -pthread
 endif
 
 # GC stress: every reserve collects (see pkg/plan/include/plan/heap.h)
@@ -114,7 +123,11 @@ APP_BINS := $(patsubst $(APP_DIR)/%.c,$(BUILD_DIR)/bin/%,$(APP_SRCS))
 
 CPPFLAGS_ALL := $(BASE_CPPFLAGS) $(CPPFLAGS)
 CFLAGS_ALL := $(BASE_CFLAGS) $(WARN_CFLAGS) $(BUILD_CFLAGS_$(BUILD_TYPE)) $(CFLAGS)
+ifeq ($(BUILD_TYPE),wasm)
+LDFLAGS_ALL := $(BUILD_LDFLAGS_$(BUILD_TYPE)) $(LDFLAGS)
+else
 LDFLAGS_ALL := $(BUILD_LDFLAGS_$(BUILD_TYPE)) $(LDFLAGS) -pthread $(HOST_LDFLAGS) -lgmp -llmdb -lcrypto -lcurl
+endif
 
 ifeq ($(PROFILE),tracy)
 CPPFLAGS_ALL += -I/opt/homebrew/opt/tracy/include/tracy
@@ -123,8 +136,17 @@ LDFLAGS_ALL += -L/opt/homebrew/opt/tracy/lib -Wl,-rpath,/opt/homebrew/opt/tracy/
 endif
 
 AXSYS_SRCS := $(wildcard pkg/axsys/src/*.c)
-PLAN_SRCS := $(wildcard pkg/plan/src/*.c)
-ENKI_SRCS := $(wildcard pkg/enki/src/*.c)
+PLAN_SRCS := $(filter-out pkg/plan/src/host_wasm_io.c pkg/plan/src/nat_wasm.c \
+	pkg/plan/src/host_wasm.c pkg/plan/src/store_silo_wasm.c,\
+	$(wildcard pkg/plan/src/*.c))
+ENKI_SRCS := $(filter-out pkg/enki/src/wisp_browser.c,$(wildcard pkg/enki/src/*.c))
+ifeq ($(BUILD_TYPE),wasm)
+PLAN_SRCS := $(filter-out pkg/plan/src/host_native_io.c pkg/plan/src/nat.c \
+	pkg/plan/src/host_native.c pkg/plan/src/store_silo.c,$(PLAN_SRCS)) \
+	pkg/plan/src/nat_wasm.c pkg/plan/src/host_wasm_io.c \
+	pkg/plan/src/host_wasm.c pkg/plan/src/store_silo_wasm.c
+ENKI_SRCS := $(filter-out pkg/enki/src/http.c,$(ENKI_SRCS))
+endif
 HEADERS := $(wildcard pkg/axsys/include/axsys/*.h) \
 	$(wildcard pkg/plan/include/plan/*.h) \
 	$(wildcard pkg/plan/src/*.h) \
@@ -154,11 +176,63 @@ PROPERTY_BINS := $(patsubst %.c,$(BUILD_DIR)/%,$(PROPERTY_SRCS))
 THEFT_OBJS := $(patsubst %.c,$(BUILD_DIR)/%.o,$(THEFT_SRCS))
 FUZZ_BINS := $(patsubst %.c,$(BUILD_DIR)/%,$(FUZZ_SRCS))
 PERF_BINS := $(patsubst %.c,$(BUILD_DIR)/%,$(PERF_SRCS))
+WASM_UNSUPPORTED_UNIT_SRCS := $(UNIT_DIR)/test_axsys_fd.c \
+	$(UNIT_DIR)/test_enki_actor.c \
+	$(UNIT_DIR)/test_enki_http.c \
+	$(UNIT_DIR)/test_enki_replay.c \
+	$(UNIT_DIR)/test_enki_wisp.c \
+	$(UNIT_DIR)/test_plan_host_native.c \
+	$(UNIT_DIR)/test_plan_op82.c \
+	$(UNIT_DIR)/test_plan_op83.c \
+	$(UNIT_DIR)/test_plan_store.c \
+	$(UNIT_DIR)/test_wisp_cli.c
+WASM_UNIT_SRCS := $(filter-out $(WASM_UNSUPPORTED_UNIT_SRCS),$(UNIT_SRCS))
+WASM_UNIT_BINS := $(patsubst %.c,$(BUILD_DIR)/%,$(WASM_UNIT_SRCS))
+WASM_TEST_BINS := $(WASM_UNIT_BINS) $(PROPERTY_BINS)
 
 LIB_AXSYS := $(BUILD_DIR)/lib/libaxsys.a
 LIB_PLAN := $(BUILD_DIR)/lib/libplan.a
 LIB_ENKI := $(BUILD_DIR)/lib/libenki.a
 LIBS := $(LIB_AXSYS) $(LIB_PLAN) $(LIB_ENKI)
+WISP_BROWSER_OBJ := $(BUILD_DIR)/pkg/enki/src/wisp_browser.o
+WISP_BROWSER_WASM := $(BUILD_DIR)/browser/wisp.wasm
+WISP_BROWSER_REAVER := $(BUILD_DIR)/browser/reaver-src.json
+JPLAN_DEMO_DIR ?= build/jplan-demo
+JPLAN_DEMO_PLAN := $(JPLAN_DEMO_DIR)/jplan-demo.plan
+JPLAN_DEMO_SNAP := $(JPLAN_DEMO_DIR)/jplan-demo-snap
+JPLAN_DEMO_WISP ?= build/debug/bin/wisp
+JPLAN_DEMO_REAVER ?= reaver/src
+WISP_BROWSER_EXPORTS := \
+	-Wl,--export=wisp_alloc \
+	-Wl,--export=wisp_free \
+	-Wl,--export=wisp_reset \
+	-Wl,--export=wisp_mount_file \
+	-Wl,--export=wisp_clear_files \
+	-Wl,--export=wisp_set_input \
+	-Wl,--export=wisp_set_file_root \
+	-Wl,--export=wisp_set_now \
+	-Wl,--export=wisp_set_emit_top_level \
+	-Wl,--export=wisp_run \
+	-Wl,--export=wisp_jplan_run \
+	-Wl,--export=wisp_jplan_dispatch \
+	-Wl,--export=wisp_output_ptr \
+	-Wl,--export=wisp_output_len \
+	-Wl,--export=wisp_error_ptr \
+	-Wl,--export=wisp_error_len \
+	-Wl,--export=wisp_file_count \
+	-Wl,--export=wisp_file_path_ptr \
+	-Wl,--export=wisp_file_path_len \
+	-Wl,--export=wisp_file_data_ptr \
+	-Wl,--export=wisp_file_data_len \
+	-Wl,--export=wisp_file_written \
+	-Wl,--export=wisp_dispose \
+	-Wl,--export=wisp_wormhole_heap_new \
+	-Wl,--export=wisp_wormhole_adopt \
+	-Wl,--export=wisp_wormhole_clone \
+	-Wl,--export=wisp_wormhole_close \
+	-Wl,--export=wisp_wormhole_drop \
+	-Wl,--export=wisp_wormhole_collect \
+	-Wl,--export=wisp_wormhole_heap_dispose
 
 ifeq ($(BUILD_TYPE),tsan)
 ACTIVE_UNIT_BINS := $(UNIT_BINS) $(TSAN_UNIT_BINS)
@@ -178,6 +252,7 @@ TIDY_FILES := $(AXSYS_SRCS) $(PLAN_SRCS) $(ENKI_SRCS) $(UNIT_SRCS) $(PROPERTY_SR
 TIDY_FILES_ABS := $(addprefix $(CURDIR)/,$(TIDY_FILES))
 
 FORMAT_FILES := $(HEADERS) $(AXSYS_SRCS) $(PLAN_SRCS) $(ENKI_SRCS) $(APP_SRCS) \
+	pkg/enki/src/wisp_browser.c \
 	$(UNIT_SRCS) $(TSAN_UNIT_SRCS) $(PROPERTY_SRCS) $(FUZZ_SRCS) \
 	$(VENDOR_THEFT_DIR)/theft.h $(VENDOR_THEFT_DIR)/theft.c \
 	tests/support/fff.h tests/support/test.h tests/support/test_plan.h \
@@ -195,7 +270,7 @@ LCOV_IGNORE_ERRORS ?= --ignore-errors inconsistent,inconsistent,mismatch,mismatc
 LCOV_NORMALIZE_AWK = function emit(tag, count, i) { printf "%s%s", tag, field[1]; for (i = 2; i <= count; i++) printf ",%s", field[i]; printf "\n" } /^SF:/ { prefix = "SF:" source_root "/"; if (index($$0, prefix) == 1) print "SF:" substr($$0, length(prefix) + 1); else print; next } /^DA:/ { count = split(substr($$0, 4), field, ","); field[2] = field[2] == "0" ? "0" : "1"; emit("DA:", count); next } /^FNA:/ { count = split(substr($$0, 5), field, ","); field[2] = field[2] == "0" ? "0" : "1"; emit("FNA:", count); next } /^BRDA:/ { count = split(substr($$0, 6), field, ","); if (field[4] != "-") field[4] = field[4] == "0" ? "0" : "1"; emit("BRDA:", count); next } { print }
 LCOV_NORMALIZE_HTML_AWK = function replace(line, position) { while ((position = index(line, source_root)) != 0) line = substr(line, 1, position - 1) "." substr(line, position + length(source_root)); return line } { print replace($$0) }
 
-.PHONY: all lib bin install test test-binaries test-unit test-property fuzz fuzz-bin perf-binaries pgo \
+.PHONY: all lib bin wasm wasm-browser wasm-browser-artifacts jplan-demo wasm-test-binaries install test test-binaries test-unit test-property fuzz fuzz-bin perf-binaries pgo \
 	pgo-profile coverage tidy check-layering format format-check compile-commands nix-ci linux-check \
 	linux-shell clean distclean
 
@@ -223,6 +298,25 @@ linux-shell:
 		--workdir /src \
 		$(NIX_DOCKER_IMAGE) \
 		nix --extra-experimental-features 'nix-command flakes' develop path:/src
+
+wasm:
+	$(MAKE) BUILD_TYPE=wasm lib wasm-test-binaries
+
+wasm-browser-artifacts: $(WISP_BROWSER_WASM) $(WISP_BROWSER_REAVER)
+
+ifeq ($(BUILD_TYPE),wasm)
+wasm-browser: wasm-browser-artifacts
+else
+wasm-browser:
+	nix build .#enki-wasm
+endif
+
+jplan-demo: $(JPLAN_DEMO_PLAN)
+
+ifeq ($(JPLAN_DEMO_DIR),build/jplan-demo)
+$(JPLAN_DEMO_PLAN): web/compile-jplan-demo.mjs web/jplan-demo.rvr $(JPLAN_DEMO_WISP) $(shell find $(JPLAN_DEMO_REAVER) -type f 2>/dev/null)
+	node web/compile-jplan-demo.mjs $(JPLAN_DEMO_WISP) $(JPLAN_DEMO_REAVER) $(JPLAN_DEMO_DIR)
+endif
 
 bin: $(APP_BINS)
 
@@ -257,6 +351,15 @@ $(BUILD_DIR)/pkg/plan/%.o: pkg/plan/%.c
 $(BUILD_DIR)/pkg/enki/%.o: pkg/enki/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS_ALL) $(ENKI_INC) $(CFLAGS_ALL) -c $< -o $@
+
+$(WISP_BROWSER_WASM): $(WISP_BROWSER_OBJ) $(LIBS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS_ALL) $(ENKI_INC) $(CFLAGS_ALL) $< $(LIB_ENKI) $(LIB_PLAN) $(LIB_AXSYS) \
+		$(LDFLAGS_ALL) -Wl,--no-entry -Wl,--export-memory $(WISP_BROWSER_EXPORTS) -o $@
+
+$(WISP_BROWSER_REAVER): web/reaver-bundle.mjs web/jplan-demo.rvr $(JPLAN_DEMO_PLAN) $(shell find $(JPLAN_DEMO_SNAP) -type f 2>/dev/null) $(shell find $(REAVER_SRC) -type f 2>/dev/null)
+	@mkdir -p $(dir $@)
+	node web/reaver-bundle.mjs $(REAVER_SRC) $@ $(JPLAN_DEMO_DIR)
 
 $(BUILD_DIR)/tests/%.o: tests/%.c
 	@mkdir -p $(dir $@)
@@ -295,6 +398,8 @@ install: lib bin
 	install -m 0644 pkg/enki/include/enki/*.h $(PREFIX)/include/enki/
 
 test-binaries: $(ACTIVE_UNIT_BINS) $(PROPERTY_BINS)
+
+wasm-test-binaries: $(WASM_TEST_BINS)
 
 test: check-layering test-unit test-property
 

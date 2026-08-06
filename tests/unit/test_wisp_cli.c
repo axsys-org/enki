@@ -181,6 +181,47 @@ TEST(wisp_cli, save_text_hash_snapshot_round_trip) {
                   "resumed program did not print; got `%s`", out);
 }
 
+TEST(wisp_cli, silo_snapshot_exports_browser_loadable_text_closure) {
+  char dir[] = "/tmp/enki-silo-export-XXXXXX";
+  ASSERT_NOT_NULL(mkdtemp(dir), "failed to make temp dir");
+
+  char path[512];
+  (void)snprintf(path, sizeof(path), "%s/save1.plan", dir);
+  FILE* f = fopen(path, "w");
+  ASSERT_NOT_NULL(f);
+  fprintf(f,
+          "(#bind Print\n"
+          "  (#pin (#law \"Print\" (Print x) ((#pin \"R\") (\"Print\" x)))))\n"
+          "(#bind Save (#pin (#law \"Save\" (Save x) ((#pin \"B\") (\"Save\" "
+          "x)))))\n"
+          "(#bind prog\n"
+          "  (#pin (#law \"prog\" (prog args) ((#pin \"R\") (\"Print\" "
+          "\"export-ok\")))))\n"
+          "(Save prog)\n");
+  fclose(f);
+
+  char cmd[1024];
+  char out[256];
+  (void)snprintf(cmd, sizeof(cmd),
+                 "cd %s && %s --export-text-snapshot exported %s save1 "
+                 ">/dev/null 2>&1",
+                 dir, wisp_bin(), dir);
+  int st = system(cmd);
+  ASSERT(WIFEXITED(st) && WEXITSTATUS(st) == 0, "Silo export failed");
+
+  (void)snprintf(path, sizeof(path), "%s/exported/root.plan", dir);
+  ASSERT_EQ(access(path, F_OK), 0, "exported root.plan not written");
+
+  (void)snprintf(cmd, sizeof(cmd),
+                 "cd %s && %s --text-hash exported root _ 2>/dev/null", dir,
+                 wisp_bin());
+  st = run_cmd(cmd, out, sizeof(out));
+  ASSERT(WIFEXITED(st) && WEXITSTATUS(st) == 0,
+         "exported text closure did not load");
+  ASSERT_NOT_NULL(strstr(out, "export-ok"),
+                  "exported program did not print; got `%s`", out);
+}
+
 TEST(wisp_cli, rplan_op_rejected_in_bplan) {
   char dir[] = "/tmp/enki-bplan-XXXXXX";
   ASSERT_NOT_NULL(mkdtemp(dir));

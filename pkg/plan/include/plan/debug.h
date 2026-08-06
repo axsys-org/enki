@@ -3,7 +3,8 @@
 
 /*
  * Value printer.  Pure read: never forces, never allocates on the plan
- * heap.  Unevaluated thunks print as <thk>, blackholes as <bh>.
+ * heap.  Unevaluated thunks print as <thk>, blackholes as <bh>, and opaque
+ * wormhole handles as <wormhole> without exposing their host token.
  */
 
 #include <stddef.h>

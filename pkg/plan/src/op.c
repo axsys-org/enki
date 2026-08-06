@@ -14,18 +14,22 @@
 #include "plan/build.h"
 #include "plan/canon.h"
 #include "plan/debug.h"
+#include "plan/host.h"
 #include "plan/value.h"
 #include "plan/nat.h"
 #include "plan/store.h"
 #include "store_internal.h"
+#ifdef ENKI_WASM
+#include "plan/wasm_io.h"
+#endif
 
 /*
  * Primops, normative semantics from the Haskell reference (Plan.hs).
  * op 0:  core PLAN ops (pin / law / case).
  * op 66: named extended ops.
- * op 82: rplan I/O (rplan.c) — RPLAN-mode gated.  Console/file/socket
- *        ops run inline; the actor ops are coordination effects that
- *        suspend the thread for an executor to service.
+ * op 82: RPLAN-mode gated effects.  Console/file/socket operations cross
+ *        the process host; actor coordination stays in the core runtime and
+ *        suspends the thread for an executor to service.
  * op 83: staging area for provisional primops whose PLAN-level semantics
  *        are not yet settled.  Its current entries are serviced in pkg/enki.
  */
@@ -860,8 +864,20 @@ static pl_val op_try(pl_thread* t, size_t ab) {
 
 static pl_val op_trace(pl_thread* t, size_t ab) {
   /* arg 0 deep via mask: the reference shows the value deeply */
-  char* s = pl_show_val(ax_allocator_system(), ARG(0), NULL);
+  size_t n = 0;
+  char* s = pl_show_val(ax_allocator_system(), ARG(0), &n);
+#ifdef ENKI_WASM
+  const pl_host* host = pl_host_get();
+  const pl_wasm_io* io = host != NULL ? host->ctx : NULL;
+  if (io != NULL && io->output != NULL) {
+    io->output(io->ctx, PL_WASM_IO_STDERR, (const uint8_t*)s, n);
+    io->output(io->ctx, PL_WASM_IO_STDERR, (const uint8_t*)"\n", 1);
+  } else {
+    fprintf(stderr, "%s\n", s);
+  }
+#else
   fprintf(stderr, "%s\n", s);
+#endif
   ax_free(ax_allocator_system(), s);
   return ARG(1);
 }
@@ -954,14 +970,69 @@ static pl_val op_compile(pl_thread* t, size_t ab) {
  * the canonical text whose SHA-256 is the pin hash, so any PLAN
  * assembler can resume from the snapshot directory.
  */
+#ifdef ENKI_WASM
+static const pl_wasm_io* save_wasm_io(pl_thread* t) {
+  const pl_host* host = pl_host_get();
+  const pl_wasm_io* io = host != NULL ? host->ctx : NULL;
+  if (io == NULL || io->write_file == NULL)
+    pl_raise_msg(t, "Save: browser I/O is not configured");
+  return io;
+}
+
+static bool save_wasm_exists(pl_thread* t, const char* path) {
+  const pl_wasm_io* io = save_wasm_io(t);
+  if (io->read_file == NULL)
+    return false;
+  uint8_t* bytes = NULL;
+  size_t len = 0;
+  bool ok = io->read_file(io->ctx, "", path, &bytes, &len);
+  free(bytes);
+  return ok;
+}
+
+static bool save_wasm_write(pl_thread* t, const char* path,
+                            const uint8_t* bytes, size_t len) {
+  const pl_wasm_io* io = save_wasm_io(t);
+  return io->write_file(io->ctx, "", path, bytes, len);
+}
+
+static bool save_wasm_append(pl_thread* t, const char* path,
+                             const uint8_t* bytes, size_t len) {
+  const pl_wasm_io* io = save_wasm_io(t);
+  uint8_t* old = NULL;
+  size_t old_len = 0;
+  if (io->read_file != NULL &&
+      !io->read_file(io->ctx, "", path, &old, &old_len)) {
+    old = NULL;
+    old_len = 0;
+  }
+
+  uint8_t* joined = malloc(old_len + len);
+  ax_assume(joined != NULL, "oom");
+  if (old_len > 0)
+    memcpy(joined, old, old_len);
+  if (len > 0)
+    memcpy(joined + old_len, bytes, len);
+  bool ok = io->write_file(io->ctx, "", path, joined, old_len + len);
+  free(joined);
+  free(old);
+  return ok;
+}
+#endif
+
 static void save_pin_only(pl_thread* t, pl_val pin) {
   pl_cell* p = pl_ptr(pin);
   char b58[AX_BASE58_CAP(32)];
   ax_base58(pl_pin_hash(pin), 32, b58);
   char path[AX_BASE58_CAP(32) + 16];
   (void)snprintf(path, sizeof(path), "snap/%s.plan", b58);
+#ifdef ENKI_WASM
+  if (save_wasm_exists(t, path))
+    return;
+#else
   if (access(path, F_OK) == 0)
     return;
+#endif
 
   uint32_t np = pl_pin_npins(p);
   for (uint32_t i = 0; i < np; i++)
@@ -969,6 +1040,13 @@ static void save_pin_only(pl_thread* t, pl_val pin) {
 
   size_t n;
   char* text = pl_canonize(ax_allocator_system(), pin, &n);
+#ifdef ENKI_WASM
+  if (!save_wasm_write(t, path, (const uint8_t*)text, n)) {
+    ax_free(ax_allocator_system(), text);
+    pl_raise_msg(t, "Save: cannot write snapshot file");
+  }
+  ax_free(ax_allocator_system(), text);
+#else
   FILE* f = fopen(path, "wb");
   if (f == NULL) {
     ax_free(ax_allocator_system(), text);
@@ -978,6 +1056,7 @@ static void save_pin_only(pl_thread* t, pl_val pin) {
   ax_free(ax_allocator_system(), text);
   if (fclose(f) != 0 || wrote != n)
     pl_raise_msg(t, "Save: short write");
+#endif
 }
 
 static pl_val op_save(pl_thread* t, size_t ab) {
@@ -992,18 +1071,65 @@ static pl_val op_save(pl_thread* t, size_t ab) {
     return 0;
   }
 
+#ifndef ENKI_WASM
   (void)mkdir("./snap", 0777); /* EEXIST is fine */
+#endif
   save_pin_only(t, ARG(0));
 
   char b58[AX_BASE58_CAP(32)];
   ax_base58(pl_pin_hash(ARG(0)), 32, b58);
+#ifdef ENKI_WASM
+  char line[AX_BASE58_CAP(32) + 4];
+  int len = snprintf(line, sizeof(line), "@%s\n", b58);
+  if (len < 0 || (size_t)len >= sizeof(line) ||
+      !save_wasm_append(t, "snap/root.plan", (const uint8_t*)line, (size_t)len))
+    pl_raise_msg(t, "Save: cannot append snap/root.plan");
+#else
   FILE* f = fopen("snap/root.plan", "a");
   if (f == NULL)
     pl_raise_msg(t, "Save: cannot append snap/root.plan");
   fprintf(f, "@%s\n", b58);
   if (fclose(f) != 0)
     pl_raise_msg(t, "Save: short write");
+#endif
   return 0;
+}
+
+/* Terminal representation of an existing PLAN identity.  The pin must have
+ * already crossed the persistence/finalization boundary; this operation does
+ * not normalize, traverse, save, or otherwise publish its body.  A row keeps
+ * all 32 bytes explicit, including leading zeroes. */
+static pl_val op_pin_hash(pl_thread* t, size_t ab) {
+  pl_cell* pp = pl_as(PL_TAG_PIN, ARG(0));
+  if (pp == NULL)
+    pl_raise_msg(t, "PinHash: expected a pin");
+  if (!pl_pin_is_hashed(ARG(0)))
+    pl_raise_msg(t, "PinHash: provisional pin");
+
+  pl_gc_reserve(t, PL_APP_CELLS(32));
+  const uint8_t* hash = pl_pin_hash(ARG(0));
+  ax_assume(hash != NULL, "finalized PIN lost its hash");
+  pl_val bytes[32];
+  for (size_t i = 0; i < 32; i++)
+    bytes[i] = hash[i];
+  return pl_mk_app_from(t, 0, 32, bytes);
+}
+
+/* Persist and finalize a PIN closure without publishing it as the store root.
+ * This is the mechanical commit boundary for derived/runtime artifacts: it
+ * returns the same PIN, now carrying canonical identity, so consumers can call
+ * PinHash without gaining the authority to replace the process snapshot. */
+static pl_val op_pin_save(pl_thread* t, size_t ab) {
+  pl_cell* pp = pl_as(PL_TAG_PIN, ARG(0));
+  if (pp == NULL)
+    pl_raise_msg(t, "PinSave: expected a pin");
+  pl_store* store = pl_heap_store(t->heap);
+  char err[192] = {0};
+  if (!pl_store_save_pin(store, ARG(0), NULL, err, sizeof(err)))
+    pl_raise_msgf(t, "PinSave: %s", err[0] != '\0' ? err : "store failure");
+  ax_assume(pl_pin_is_hashed(ARG(0)),
+            "successful PinSave left a provisional pin");
+  return ARG(0);
 }
 
 static pl_val op_load(pl_thread* t, size_t ab) {
@@ -1015,27 +1141,29 @@ static pl_val op_load(pl_thread* t, size_t ab) {
 
 #define M2(a, b) ax_s2(a, b)
 #define OP66(name, argc, mask, deep, body)                                     \
-  {66, name, NULL, argc, mask, deep, false, false, body}
-#define OP82(name, argc, mask, body)                                           \
-  {82, 0, name, argc, mask, 0, true, false, body}
+  {66, name, NULL, argc, mask, deep, 0, 0, PL_HOST_OP_NONE, false, false, body}
+#define OP74(name, argc, mask, opaque, opaque_row, host)                       \
+  {74, 0, name, argc, mask, 0, opaque, opaque_row, host, false, true, NULL}
+#define OP82(name, argc, mask, host)                                           \
+  {82, 0, name, argc, mask, 0, 0, 0, host, false, false, NULL}
 /* coordination effects: the machine blocks instead of executing;
  * deep is the initiation-time payload normalization */
 #define OP82C(name, argc, mask, deep, body)                                    \
-  {82, 0, name, argc, mask, deep, true, true, body}
-/* Evaluator-local op 83 entries: no host-effect worker affinity. */
+  {82, 0, name, argc, mask, deep, 0, 0, PL_HOST_OP_NONE, true, false, body}
+/* Evaluator-local op 83 entries do not cross the host boundary. */
 #define OP83_LOCAL(name, argc, mask, body)                                     \
-  {83, 0, name, argc, mask, 0, false, false, body}
+  {83, 0, name, argc, mask, 0, 0, 0, PL_HOST_OP_NONE, false, false, body}
 #define OP83_LOCAL_DEEP(name, argc, mask, deep, body)                          \
-  {83, 0, name, argc, mask, deep, false, false, body}
+  {83, 0, name, argc, mask, deep, 0, 0, PL_HOST_OP_NONE, false, false, body}
 /* Coordination effects are serviced in pkg/enki. */
 #define OP83C(name, argc, mask, deep, body)                                    \
-  {83, 0, name, argc, mask, deep, true, true, body}
+  {83, 0, name, argc, mask, deep, 0, 0, PL_HOST_OP_NONE, true, false, body}
 
 const pl_opdesc pl_ops[] = {
     /* op 0: core PLAN */
-    {0, 0, NULL, 1, 0b1, 0, false, false, op_pin},
-    {0, 1, NULL, 3, 0b111, 0, false, false, op_law},
-    {0, 2, NULL, 6, 0b100000, 0, false, false, op_elim},
+    {0, 0, NULL, 1, 0b1, 0, 0, 0, PL_HOST_OP_NONE, false, false, op_pin},
+    {0, 1, NULL, 3, 0b111, 0, 0, 0, PL_HOST_OP_NONE, false, false, op_law},
+    {0, 2, NULL, 6, 0b100000, 0, 0, 0, PL_HOST_OP_NONE, false, false, op_elim},
 
     OP66(ax_s3('P', 'i', 'n'), 1, 0b1, 0, op_pin),
     OP66(ax_s3('L', 'a', 'w'), 3, 0b111, 0, op_law),
@@ -1146,19 +1274,19 @@ const pl_opdesc pl_ops[] = {
     OP66(ax_s7('C', 'o', 'm', 'p', 'i', 'l', 'e'), 1, 0b1, 0b1, op_compile),
 
     /* op 82: rplan I/O (mode-gated in eval.c) */
-    OP82("Input", 1, 0b1, pl_op82_input),
-    OP82("Output", 1, 0b1, pl_op82_output),
-    OP82("Warn", 1, 0b1, pl_op82_warn),
-    OP82("ReadFile", 1, 0b1, pl_op82_read_file),
-    OP82("WriteFile", 2, 0b11, pl_op82_write_file),
-    OP82("Print", 1, 0b1, pl_op82_print),
-    OP82("Stamp", 1, 0b1, pl_op82_stamp),
-    OP82("Now", 1, 0, pl_op82_now),
-    OP82("CloseFd", 1, 0b1, pl_op82_closefd),
-    OP82("Listen", 1, 0b1, pl_op82_listen),
-    OP82("Accept", 1, 0b1, pl_op82_accept),
-    OP82("Read", 2, 0b11, pl_op82_read),
-    OP82("Write", 2, 0b11, pl_op82_write),
+    OP82("Input", 1, 0b1, PL_HOST_OP_INPUT),
+    OP82("Output", 1, 0b1, PL_HOST_OP_OUTPUT),
+    OP82("Warn", 1, 0b1, PL_HOST_OP_WARN),
+    OP82("ReadFile", 1, 0b1, PL_HOST_OP_READ_FILE),
+    OP82("WriteFile", 2, 0b11, PL_HOST_OP_WRITE_FILE),
+    OP82("Print", 1, 0b1, PL_HOST_OP_PRINT),
+    OP82("Stamp", 1, 0b1, PL_HOST_OP_STAMP),
+    OP82("Now", 1, 0, PL_HOST_OP_NOW),
+    OP82("CloseFd", 1, 0b1, PL_HOST_OP_CLOSE_FD),
+    OP82("Listen", 1, 0b1, PL_HOST_OP_LISTEN),
+    OP82("Accept", 1, 0b1, PL_HOST_OP_ACCEPT),
+    OP82("Read", 2, 0b11, PL_HOST_OP_READ),
+    OP82("Write", 2, 0b11, PL_HOST_OP_WRITE),
     /* payloads deep-normalize at initiation: forcing — and any
      * effects within it — runs as the sender's own execution, before
      * the request parks; the service pins already-normal values */
@@ -1167,7 +1295,7 @@ const pl_opdesc pl_ops[] = {
     OP82C("SendCaps", 3, 0b1, 0b110, pl_op82_send_caps),
     OP82C("Recv", 1, 0b1, 0, pl_op82_recv),
     OP82C("CloseHandle", 1, 0b1, 0, pl_op82_close_handle),
-    OP82("Connect", 3, 0b111, pl_op82_connect),
+    OP82("Connect", 3, 0b111, PL_HOST_OP_CONNECT),
 
     /* op 83: provisional primops; their PLAN-level semantics are deliberately
      * not yet committed.  Coordination operations are executor-serviced and
@@ -1192,6 +1320,16 @@ const pl_opdesc pl_ops[] = {
     /* Reaver exposes these provisional string operations through splan. */
     OP83_LOCAL_DEEP("scan8", 4, 0b1111, 0, op_scan8),
     OP83_LOCAL_DEEP("StrTree", 1, 0b1, 0b1, op_strtree),
+
+    /* op 74: process-local JavaScript values.  Eval's environment and row
+     * elements may terminate at wormholes, and its wormhole result is
+     * delivered directly to the continuation. */
+    OP74("Eval", 3, 0b110, 0b001, 0b010, PL_HOST_OP_JPLAN_EVAL),
+
+    /* Append-only: established primop indices are part of compiled artifacts.
+     */
+    OP66(ax_s7('P', 'i', 'n', 'H', 'a', 's', 'h'), 1, 0b1, 0, op_pin_hash),
+    OP66(ax_s7('P', 'i', 'n', 'S', 'a', 'v', 'e'), 1, 0b1, 0b1, op_pin_save),
 };
 
 const size_t pl_nops = sizeof(pl_ops) / sizeof(pl_ops[0]);
@@ -1208,9 +1346,9 @@ static const uint16_t pl_op0_argc3[] = {1};
 static const uint16_t pl_op0_argc6[] = {2};
 
 static const uint16_t pl_op66_argc1[] = {
-    3,  6,  7,  38, 39, 40, 41, 42, 44,  45,  46,  52,  53, 54,
-    55, 56, 57, 58, 59, 60, 65, 71, 72,  74,  75,  76,  77, 78,
-    79, 80, 81, 82, 83, 85, 86, 99, 100, 101, 103, 104, 130};
+    3,  6,  7,  38, 39, 40, 41,  42,  44,  45,  46,  52,  53, 54, 55,
+    56, 57, 58, 59, 60, 65, 71,  72,  74,  75,  76,  77,  78, 79, 80,
+    81, 82, 83, 85, 86, 99, 100, 101, 103, 104, 130, 134, 135};
 static const uint16_t pl_op66_argc2[] = {
     8,  9,  10, 11, 12, 13, 14, 31, 32, 33, 36, 37, 43, 47, 50, 64,
     66, 69, 70, 73, 84, 87, 88, 89, 92, 93, 94, 95, 96, 97, 98, 102};
@@ -1239,6 +1377,8 @@ static const uint16_t pl_op82_argc3[] = {120, 123};
 static const uint16_t pl_op83_argc1[] = {124, 126, 127, 128, 132};
 static const uint16_t pl_op83_argc2[] = {125};
 static const uint16_t pl_op83_argc4[] = {131};
+
+static const uint16_t pl_op74_argc3[] = {133};
 
 static pl_opbucket pl_op_lookup_bucket(uint64_t opset, uint32_t argc) {
   switch (opset) {
@@ -1289,6 +1429,10 @@ static pl_opbucket pl_op_lookup_bucket(uint64_t opset, uint32_t argc) {
     case 17:
       return PL_IX_BUCKET(pl_op66_argc17);
     }
+    break;
+  case 74:
+    if (argc == 3)
+      return PL_IX_BUCKET(pl_op74_argc3);
     break;
   case 82:
     switch (argc) {
