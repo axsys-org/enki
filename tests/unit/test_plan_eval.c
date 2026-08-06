@@ -557,6 +557,90 @@ TEST(ops, pin_keeps_nested_fields_lazy) {
   test_rt_free(&rt);
 }
 
+TEST(ops, pin_hash_returns_the_finalized_digest_bytes) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  pl_vpush(t, pl_pin(t, 42));
+  char err[192] = {0};
+  ASSERT(pl_store_save_pin(rt.store, t->vstack[base], NULL, err, sizeof(err)),
+         "%s", err);
+  const uint8_t* hash = pl_pin_hash(t->vstack[base]);
+  ASSERT_NOT_NULL(hash);
+  uint8_t expected[32];
+  memcpy(expected, hash, sizeof(expected));
+
+  pl_val args[1] = {t->vstack[base]};
+  pl_vpush(t, test_op66(t, ax_s7('P', 'i', 'n', 'H', 'a', 's', 'h'), 1, args));
+  pl_cell* row = pl_as(PL_TAG_APP, t->vstack[base + 1]);
+  ASSERT_NOT_NULL(row);
+  ASSERT_EQ(pl_app_head(row), 0);
+  ASSERT_EQ(pl_app_n(row), 32);
+  for (uint32_t i = 0; i < 32; i++)
+    ASSERT_EQ(pl_app_args(row)[i], expected[i]);
+  test_rt_free(&rt);
+}
+
+TEST(ops, pin_hash_refuses_a_provisional_pin) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  pl_val pin = pl_pin(t, 42);
+  pl_val args[1] = {pin};
+  pl_catch c;
+  pl_catch_init(t, &c);
+  if (setjmp(c.jb) == 0) {
+    (void)test_op66(t, ax_s7('P', 'i', 'n', 'H', 'a', 's', 'h'), 1, args);
+    FAIL_TEST("expected provisional PIN refusal");
+  }
+  pl_catch_unwind(t, &c);
+  ASSERT_STR_EQ(t->exn_msg, "PinHash: provisional pin");
+  test_rt_free(&rt);
+}
+
+TEST(ops, pin_save_finalizes_without_replacing_the_store_root) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  pl_vpush(t, pl_pin(t, 7));
+  char err[192] = {0};
+  uint8_t original_root[32];
+  ASSERT(pl_store_save_root(rt.store, t->vstack[base], original_root, err,
+                            sizeof(err)),
+         "%s", err);
+
+  pl_vpush(t, test_app1_thunk_to(t, 42));
+  t->vstack[base + 1] = pl_pin(t, t->vstack[base + 1]);
+  pl_val args[1] = {t->vstack[base + 1]};
+  pl_val result =
+      test_op66(t, ax_s7('P', 'i', 'n', 'S', 'a', 'v', 'e'), 1, args);
+  ASSERT_EQ(result, t->vstack[base + 1]);
+  ASSERT(pl_pin_is_hashed(result));
+  pl_cell* body = pl_as(PL_TAG_APP, pl_pin_body(pl_ptr(result)));
+  ASSERT_NOT_NULL(body);
+  ASSERT_EQ(pl_app_args(body)[0], 42);
+  ASSERT((pl_hdr_flags(body[0]) & PL_F_NORMAL) != 0);
+
+  uint8_t current_root[32];
+  ASSERT(pl_store_get_root(rt.store, current_root));
+  ASSERT_EQ(memcmp(original_root, current_root, sizeof(original_root)), 0);
+  test_rt_free(&rt);
+}
+
+TEST(ops, pin_save_refuses_a_non_pin) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  pl_val args[1] = {42};
+  pl_catch c;
+  pl_catch_init(t, &c);
+  if (setjmp(c.jb) == 0) {
+    (void)test_op66(t, ax_s7('P', 'i', 'n', 'S', 'a', 'v', 'e'), 1, args);
+    FAIL_TEST("expected non-PIN refusal");
+  }
+  pl_catch_unwind(t, &c);
+  ASSERT_STR_EQ(t->exn_msg, "PinSave: expected a pin");
+  test_rt_free(&rt);
+}
+
 TEST(ops, deepseq_normalizes_first_and_returns_second_lazily) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;

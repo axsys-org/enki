@@ -1184,6 +1184,43 @@ static pl_val op_save(pl_thread* t, size_t ab) {
   return 0;
 }
 
+/* Terminal representation of an existing PLAN identity.  The pin must have
+ * already crossed the persistence/finalization boundary; this operation does
+ * not normalize, traverse, save, or otherwise publish its body.  A row keeps
+ * all 32 bytes explicit, including leading zeroes. */
+static pl_val op_pin_hash(pl_thread* t, size_t ab) {
+  pl_cell* pp = pl_as(PL_TAG_PIN, ARG(0));
+  if (pp == NULL)
+    pl_raise_msg(t, "PinHash: expected a pin");
+  if (!pl_pin_is_hashed(ARG(0)))
+    pl_raise_msg(t, "PinHash: provisional pin");
+
+  pl_gc_reserve(t, PL_APP_CELLS(32));
+  const uint8_t* hash = pl_pin_hash(ARG(0));
+  ax_assume(hash != NULL, "finalized PIN lost its hash");
+  pl_val bytes[32];
+  for (size_t i = 0; i < 32; i++)
+    bytes[i] = hash[i];
+  return pl_mk_app_from(t, 0, 32, bytes);
+}
+
+/* Persist and finalize a PIN closure without publishing it as the store root.
+ * This is the mechanical commit boundary for derived/runtime artifacts: it
+ * returns the same PIN, now carrying canonical identity, so consumers can call
+ * PinHash without gaining the authority to replace the process snapshot. */
+static pl_val op_pin_save(pl_thread* t, size_t ab) {
+  pl_cell* pp = pl_as(PL_TAG_PIN, ARG(0));
+  if (pp == NULL)
+    pl_raise_msg(t, "PinSave: expected a pin");
+  pl_store* store = pl_heap_store(t->heap);
+  char err[192] = {0};
+  if (!pl_store_save_pin(store, ARG(0), NULL, err, sizeof(err)))
+    pl_raise_msgf(t, "PinSave: %s", err[0] != '\0' ? err : "store failure");
+  ax_assume(pl_pin_is_hashed(ARG(0)),
+            "successful PinSave left a provisional pin");
+  return ARG(0);
+}
+
 static pl_val op_load(pl_thread* t, size_t ab) {
   AX_UNUSED(ab);
   pl_raise_msg(t, "load ./snap/root.plan"); /* loadSnapshot, verbatim */
@@ -1380,6 +1417,11 @@ const pl_opdesc pl_ops[] = {
      * elements may terminate at wormholes, and its wormhole result is
      * delivered directly to the continuation. */
     OP74("Eval", 3, 0b110, 0b001, 0b010, PL_HOST_OP_JPLAN_EVAL),
+
+    /* Append-only: established primop indices are part of compiled artifacts.
+     */
+    OP66(ax_s7('P', 'i', 'n', 'H', 'a', 's', 'h'), 1, 0b1, 0, op_pin_hash),
+    OP66(ax_s7('P', 'i', 'n', 'S', 'a', 'v', 'e'), 1, 0b1, 0b1, op_pin_save),
 };
 
 const size_t pl_nops = sizeof(pl_ops) / sizeof(pl_ops[0]);
@@ -1396,9 +1438,9 @@ static const uint16_t pl_op0_argc3[] = {1};
 static const uint16_t pl_op0_argc6[] = {2};
 
 static const uint16_t pl_op66_argc1[] = {
-    3,  6,  7,  38, 39, 40, 41, 42, 44,  45,  46,  52,  53, 54,
-    55, 56, 57, 58, 59, 60, 65, 71, 72,  74,  75,  76,  77, 78,
-    79, 80, 81, 82, 83, 85, 86, 99, 100, 101, 103, 104, 130};
+    3,  6,  7,  38, 39, 40, 41,  42,  44,  45,  46,  52,  53, 54, 55,
+    56, 57, 58, 59, 60, 65, 71,  72,  74,  75,  76,  77,  78, 79, 80,
+    81, 82, 83, 85, 86, 99, 100, 101, 103, 104, 130, 134, 135};
 static const uint16_t pl_op66_argc2[] = {
     8,  9,  10, 11, 12, 13, 14, 31, 32, 33, 36, 37, 43, 47, 50,  64, 66,
     69, 70, 73, 84, 87, 88, 89, 92, 93, 94, 95, 96, 97, 98, 102, 133};
