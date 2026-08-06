@@ -820,6 +820,40 @@ static void cleanup_store_dir(const char* dir, bool pack) {
   (void)rmdir(dir);
 }
 
+static void named_ref_roundtrip_via(pl_store* (*factory)(const char*),
+                                    const char* dir) {
+  static const uint8_t ref_name[] = "shrine.lain.revision.v1";
+  uint8_t expected[32];
+
+  pl_store* s = factory(dir);
+  ASSERT_NOT_NULL(s);
+  pl_heap* h = pl_heap_new(1 << 16, s);
+  pl_thread* t = pl_thread_new(h);
+  pl_vpush(t, 42);
+  pl_val pin = pl_pin(t, t->vstack[t->vsp - 1]);
+  char err[192] = {0};
+  ASSERT(pl_store_save_pin(s, pin, expected, err, sizeof(err)), "%s", err);
+  ASSERT(pl_store_put_ref(s, ref_name, sizeof(ref_name) - 1, expected));
+  pl_thread_free(t);
+  pl_heap_free(h);
+  pl_store_free(s);
+
+  s = factory(dir);
+  ASSERT_NOT_NULL(s);
+  uint8_t found[32];
+  ASSERT_EQ(pl_store_get_ref(s, ref_name, sizeof(ref_name) - 1, found),
+            PL_STORE_REF_FOUND);
+  ASSERT_EQ(memcmp(found, expected, sizeof(expected)), 0);
+  h = pl_heap_new(1 << 16, s);
+  t = pl_thread_new(h);
+  pin = pl_store_load(t, found);
+  ASSERT(pl_pin_is_hashed(pin));
+  ASSERT_EQ(pl_pin_body(pl_ptr(pin)), 42);
+  pl_thread_free(t);
+  pl_heap_free(h);
+  pl_store_free(s);
+}
+
 static void silo_pin_nat(const char* dir, uint64_t natural, uint8_t hash[32]) {
   pl_store* s = mk_silo(dir);
   ASSERT_NOT_NULL(s);
@@ -1033,6 +1067,15 @@ TEST(store, lmdb_round_trip) {
   rmdir(dir);
 }
 
+TEST(store, lmdb_named_pin_reference_survives_reopen) {
+  char dir[72];
+  snprintf(dir, sizeof(dir), "/tmp/enki-test-ref-lmdb-%lu",
+           (unsigned long)getpid());
+  ASSERT(mkdir(dir, 0700) == 0 || errno == EEXIST);
+  named_ref_roundtrip_via(mk_lmdb, dir);
+  cleanup_store_dir(dir, false);
+}
+
 TEST(store, silo_pack_round_trip) {
   char dir[64];
   snprintf(dir, sizeof(dir), "/tmp/enki-test-silo-%lu",
@@ -1045,6 +1088,15 @@ TEST(store, silo_pack_round_trip) {
   struct stat st;
   ASSERT_EQ(stat(path, &st), 0);
   ASSERT_GT(st.st_size, 0);
+  cleanup_store_dir(dir, true);
+}
+
+TEST(store, silo_named_pin_reference_survives_reopen) {
+  char dir[72];
+  snprintf(dir, sizeof(dir), "/tmp/enki-test-ref-silo-%lu",
+           (unsigned long)getpid());
+  ASSERT(mkdir(dir, 0700) == 0 || errno == EEXIST);
+  named_ref_roundtrip_via(mk_silo, dir);
   cleanup_store_dir(dir, true);
 }
 
