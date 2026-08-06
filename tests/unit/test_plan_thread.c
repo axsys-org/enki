@@ -170,3 +170,48 @@ TEST(thread, deposit_resumes_with_response) {
   ASSERT_EQ(pl_thread_result(t), 9);
   test_rt_free(&rt);
 }
+
+/* Memo (op 66) under suspension: the F_MEMO barrier must survive fuel
+ * yields mid-application and still record on completion. */
+TEST(thread, memo_barrier_survives_fuel_yields) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  /* f: arity-1 law computing ((K 42) 8) -> 42 through real steps */
+  pl_vpush(t, test_app1(t, 0, test_law(t, 2, 0, 1)));   /* (0 K)  */
+  pl_vpush(t, test_app2(t, 0, t->vstack[base], 42));    /* (0 K' 42) */
+  pl_vpush(t, test_app2(t, 0, t->vstack[base + 1], 8)); /* body   */
+  pl_vpush(t, test_law(t, 1, ax_s4('m', 'm', 't', 'f'), t->vstack[base + 2]));
+  t->vstack[base] = pl_pin(t, t->vstack[base + 3]);
+  char err[192] = {0};
+  ASSERT(pl_store_save_root(rt.store, t->vstack[base], NULL, err, sizeof(err)),
+         "%s", err);
+  t->vsp = base + 1;
+  pl_vpush(t, pl_pin(t, ax_s4('m', 'm', 't', 'x')));
+  ASSERT(
+      pl_store_save_root(rt.store, t->vstack[base + 1], NULL, err, sizeof(err)),
+      "%s", err);
+  /* thunk body: (0 (0 P66) (0 ("Memo" f x))) */
+  pl_val margs[2] = {t->vstack[base], t->vstack[base + 1]};
+  pl_vpush(t, test_app(t, ax_s4('M', 'e', 'm', 'o'), 2, margs));
+  pl_vpush(t, test_app1(t, 0, t->vstack[base + 2]));
+  pl_vpush(t, test_app1(t, 0, test_p66(t)));
+  pl_vpush(t, test_app2(t, 0, t->vstack[base + 4], t->vstack[base + 3]));
+  pl_vpush(t, test_thunk(t, t->vstack[base + 5]));
+  pl_thread_start(t, t->vstack[base + 6]);
+  int quanta = 0;
+  pl_run_status s;
+  do {
+    s = pl_thread_run(t, 2);
+    quanta++;
+    ASSERT_LT(quanta, 1 << 20, "runaway resume loop");
+  } while (s == PL_RUN_YIELDED);
+  ASSERT_EQ(s, PL_RUN_DONE);
+  ASSERT_EQ(pl_thread_result(t), 42);
+  ASSERT_GT(quanta, 1, "expected at least one yield under the barrier");
+  uint64_t got = 0;
+  ASSERT(pl_memo_probe(pl_pin_hash(t->vstack[base]),
+                       pl_pin_hash(t->vstack[base + 1]), &got));
+  ASSERT_EQ(got, 42);
+  test_rt_free(&rt);
+}

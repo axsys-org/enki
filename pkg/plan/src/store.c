@@ -187,6 +187,123 @@ static void plgc_put(const uint8_t key[32], const uint8_t* b, size_t n) {
   pthread_mutex_unlock(&plgc_mu);
 }
 
+/* ── Memoised-application cache (op 66 Memo) ───────────────────────────
+ *
+ * (Memo f x) ≡ (f x); when f and x are canonical hashed pins and the
+ * result is a nat63 computed without initiating any effect, the pair
+ * may be served from this machine-global cache (spec:
+ * doc/sigoflaw-memo-spec.md).  Two layers: an in-process map (always
+ * on) and the same LMDB environment as the code cache under a "plgm"
+ * key tag (subject to the PL_CODECACHE knobs via plgc_open).  A
+ * persistent value that fails to parse as a nat63 is a miss. */
+
+typedef struct {
+  uint8_t b[32];
+} pl_memo_hash;
+
+typedef struct {
+  pl_memo_hash key;
+  uint64_t value;
+} pl_memo_ent;
+
+static pthread_mutex_t memo_mu = PTHREAD_MUTEX_INITIALIZER;
+static pl_memo_ent* memo_map; /* stb_ds hashmap, keyed on the 32 bytes */
+static uint64_t memo_probes, memo_hits, memo_recorded;
+
+static void memo_key(const uint8_t f_hash[32], const uint8_t x_hash[32],
+                     uint8_t out[32]) {
+  uint8_t pre[68];
+  memcpy(pre, "plgm", 4);
+  memcpy(pre + 4, f_hash, 32);
+  memcpy(pre + 36, x_hash, 32);
+  ax_sha256(pre, sizeof(pre), out);
+}
+
+static void memo_stats_print(void) {
+  fprintf(stderr,
+          "plan: memo probes=%" PRIu64 " hits=%" PRIu64 " records=%" PRIu64
+          "\n",
+          memo_probes, memo_hits, memo_recorded);
+}
+
+static bool memo_stats_wanted(void) {
+  static int wanted = -1;
+  if (wanted < 0) {
+    const char* flag = getenv("PL_MEMO_STATS");
+    wanted = flag != NULL && strcmp(flag, "1") == 0;
+    if (wanted)
+      atexit(memo_stats_print);
+  }
+  return wanted > 0;
+}
+
+bool pl_memo_probe(const uint8_t f_hash[32], const uint8_t x_hash[32],
+                   uint64_t* out) {
+  pl_memo_hash key;
+  memo_key(f_hash, x_hash, key.b);
+  bool ok = false;
+  pthread_mutex_lock(&memo_mu);
+  (void)memo_stats_wanted();
+  memo_probes++;
+  ptrdiff_t at = ax_hmgeti(memo_map, key);
+  if (at >= 0) {
+    *out = memo_map[at].value;
+    memo_hits++;
+    ok = true;
+  }
+  pthread_mutex_unlock(&memo_mu);
+  if (ok)
+    return true;
+  uint8_t* b = NULL;
+  size_t n = 0;
+  if (!plgc_get(key.b, &b, &n))
+    return false;
+  if (n == 8) {
+    uint64_t v = 0;
+    for (int i = 7; i >= 0; i--)
+      v = (v << 8) | b[i];
+    if (pl_is_nat63(v)) {
+      *out = v;
+      ok = true;
+      pthread_mutex_lock(&memo_mu);
+      memo_hits++;
+      if (ax_hmgeti(memo_map, key) < 0)
+        ax_hmput(memo_map, key, v); /* backfill: later probes skip LMDB */
+      pthread_mutex_unlock(&memo_mu);
+    }
+  }
+  free(b);
+  return ok;
+}
+
+void pl_memo_record(const uint8_t f_hash[32], const uint8_t x_hash[32],
+                    uint64_t value) {
+  if (!pl_is_nat63(value))
+    return;
+  pl_memo_hash key;
+  memo_key(f_hash, x_hash, key.b);
+  pthread_mutex_lock(&memo_mu);
+  memo_recorded++;
+  if (ax_hmgeti(memo_map, key) < 0)
+    ax_hmput(memo_map, key, value);
+  pthread_mutex_unlock(&memo_mu);
+  uint8_t b[8];
+  for (int i = 0; i < 8; i++)
+    b[i] = (uint8_t)(value >> (8 * i));
+  plgc_put(key.b, b, sizeof(b));
+}
+
+void pl_memo_stats(uint64_t* probes, uint64_t* hits, uint64_t* records) {
+  pthread_mutex_lock(&memo_mu);
+  if (probes != NULL)
+    *probes = memo_probes;
+  if (hits != NULL)
+    *hits = memo_hits;
+  if (records != NULL)
+    *records = memo_recorded;
+  pthread_mutex_unlock(&memo_mu);
+}
+
 /* Lock order is save_mu -> mu.  save_mu serializes persistence operations and
  * the compiler machine; mu protects the arena and in-memory registries. */
 

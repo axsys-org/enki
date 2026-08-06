@@ -61,6 +61,8 @@ typedef enum {
   PL_F_PROF,       /* Tracy law-attribution boundary; a: law head       */
   PL_F_APPLYN,     /* n-ary apply: argc pending args parked on the      */
                    /* vstack at argbase; the head slot is argbase-1     */
+  PL_F_MEMO,       /* memo barrier (op 66 Memo); a: f pin, b: x pin,    */
+                   /* epoch: effect-epoch watermark at entry            */
   PL_F_KIND_COUNT, /* sentinel: sizes pl_run's RETURN dispatch table    */
 } pl_frame_kind;
 
@@ -76,6 +78,7 @@ typedef struct pl_frame {
     pl_code* code;         /*   bytecode (F_EXEC) */
     uint32_t op;           /*   op descriptor index (F_OPARG/F_OPDEEP) */
     uint64_t profile_mark; /* profile generation watermark (F_TRY) */
+    uint64_t epoch;        /* effect-epoch watermark (F_MEMO) */
   };
 #ifdef TRACY_ENABLE
   ax_profile_zone_ctx profile_ctx;
@@ -129,6 +132,11 @@ struct pl_thread {
   pl_val resume_val;     /* root: value to EVAL or RETURN on re-entry */
   pl_val blocked_on;     /* root: effect request while blocked */
   pl_val result;         /* root: final value after PL_RUN_DONE */
+
+  /* Bumped at every effect initiation (op 82/83, Trace, Save): an
+   * F_MEMO barrier records its result only if this is unchanged, so
+   * caching can skip work but never effects. */
+  uint64_t effect_epoch;
 
   /* Explicit op-83 profiling zones.  Logical zones survive suspension and
    * normal entry returns; physical Tracy/JSON segments do not. */
