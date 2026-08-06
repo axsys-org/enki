@@ -1416,3 +1416,28 @@ TEST(memo, non_nat_result_evaluates_but_never_caches) {
                         pl_pin_hash(t->vstack[base + 1]), &got));
   test_rt_free(&rt);
 }
+
+TEST(ops, equal_survives_very_deep_structures) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  /* two structurally-equal 200k-deep app chains (distinct cells): the
+   * old recursive pl_eq_deep overflowed the C stack near ~80k */
+  enum { DEPTH = 200000 };
+  pl_vpush(t, 7);
+  pl_vpush(t, 7);
+  pl_vpush(t, 8);
+  for (int i = 0; i < DEPTH; i++) {
+    t->vstack[base] = test_app1(t, 0, t->vstack[base]);
+    t->vstack[base + 1] = test_app1(t, 0, t->vstack[base + 1]);
+    t->vstack[base + 2] = test_app1(t, 0, t->vstack[base + 2]);
+  }
+  ASSERT_EQ(test_op66_2(t, ax_s5('E', 'q', 'u', 'a', 'l'), t->vstack[base],
+                        t->vstack[base + 1]),
+            1);
+  /* same shape, different leaf */
+  ASSERT_EQ(test_op66_2(t, ax_s5('E', 'q', 'u', 'a', 'l'), t->vstack[base],
+                        t->vstack[base + 2]),
+            0);
+  test_rt_free(&rt);
+}

@@ -897,46 +897,103 @@ static pl_val op_trace(pl_thread* t, size_t ab) {
   return ARG(1);
 }
 
-static bool pl_eq_deep(pl_val a, pl_val b) {
-  a = pl_resolve(a);
-  b = pl_resolve(b);
-  if (a == b)
-    return true;
-  if (pl_is_nat(a) && pl_is_nat(b))
-    return pl_nat_eq(a, b);
-  if (pl_is_nat63(a) || pl_is_nat63(b))
-    return false;
-  if (pl_tag(a) != pl_tag(b))
-    return false;
-  switch (pl_tag(a)) {
-  case PL_TAG_PIN: {
-    const uint8_t* ah = pl_pin_hash(a);
-    const uint8_t* bh = pl_pin_hash(b);
-    if (ah != NULL && bh != NULL)
-      return memcmp(ah, bh, 32) == 0;
-    return pl_eq_deep(pl_pin_body(pl_ptr(a)), pl_pin_body(pl_ptr(b)));
+/*
+ * Structural equality over already-normal values, driven by an
+ * explicit worklist instead of C recursion: op-66 Equal runs on
+ * arbitrarily deep data (the compiler compares whole IR trees for its
+ * fixed point), so graph depth must never translate into C stack
+ * depth.  The worklist holds bare pl_vals with no GC protection —
+ * legal only because nothing here allocates; both roots stay live on
+ * the caller's vstack.
+ */
+typedef struct {
+  pl_val a, b;
+} pl_eq_pair;
+
+typedef struct {
+  pl_eq_pair* items;
+  size_t n, cap;
+  pl_eq_pair inline_buf[64];
+} pl_eq_stack;
+
+static void pl_eq_push(pl_eq_stack* s, pl_val a, pl_val b) {
+  if (s->n == s->cap) {
+    size_t cap2 = s->cap * 2;
+    if (s->items == s->inline_buf) {
+      pl_eq_pair* grown = malloc(cap2 * sizeof(pl_eq_pair));
+      ax_assume(grown != NULL, "oom");
+      memcpy(grown, s->items, s->n * sizeof(pl_eq_pair));
+      s->items = grown;
+    } else {
+      s->items = realloc(s->items, cap2 * sizeof(pl_eq_pair));
+      ax_assume(s->items != NULL, "oom");
+    }
+    s->cap = cap2;
   }
-  case PL_TAG_LAW: {
-    pl_cell *pa = pl_ptr(a), *pb = pl_ptr(b);
-    return pl_law_arity(pa) == pl_law_arity(pb) &&
-           pl_eq_deep(pl_law_name(pa), pl_law_name(pb)) &&
-           pl_eq_deep(pl_law_body(pa), pl_law_body(pb));
+  s->items[s->n++] = (pl_eq_pair){a, b};
+}
+
+static bool pl_eq_deep(pl_val a0, pl_val b0) {
+  pl_eq_stack s;
+  s.items = s.inline_buf;
+  s.n = 0;
+  s.cap = sizeof(s.inline_buf) / sizeof(s.inline_buf[0]);
+  pl_eq_push(&s, a0, b0);
+  bool eq = true;
+  while (eq && s.n > 0) {
+    pl_eq_pair p = s.items[--s.n];
+    pl_val a = pl_resolve(p.a);
+    pl_val b = pl_resolve(p.b);
+    if (a == b)
+      continue;
+    if (pl_is_nat(a) && pl_is_nat(b)) {
+      eq = pl_nat_eq(a, b);
+      continue;
+    }
+    if (pl_is_nat63(a) || pl_is_nat63(b) || pl_tag(a) != pl_tag(b)) {
+      eq = false;
+      continue;
+    }
+    switch (pl_tag(a)) {
+    case PL_TAG_PIN: {
+      const uint8_t* ah = pl_pin_hash(a);
+      const uint8_t* bh = pl_pin_hash(b);
+      if (ah != NULL && bh != NULL)
+        eq = memcmp(ah, bh, 32) == 0;
+      else
+        pl_eq_push(&s, pl_pin_body(pl_ptr(a)), pl_pin_body(pl_ptr(b)));
+      break;
+    }
+    case PL_TAG_LAW: {
+      pl_cell *pa = pl_ptr(a), *pb = pl_ptr(b);
+      if (pl_law_arity(pa) != pl_law_arity(pb)) {
+        eq = false;
+        break;
+      }
+      pl_eq_push(&s, pl_law_name(pa), pl_law_name(pb));
+      pl_eq_push(&s, pl_law_body(pa), pl_law_body(pb));
+      break;
+    }
+    case PL_TAG_APP: {
+      pl_cell *pa = pl_ptr(a), *pb = pl_ptr(b);
+      uint32_t n = pl_app_n(pa);
+      if (n != pl_app_n(pb)) {
+        eq = false;
+        break;
+      }
+      pl_eq_push(&s, pl_app_head(pa), pl_app_head(pb));
+      for (uint32_t i = 0; i < n; i++)
+        pl_eq_push(&s, pl_app_args(pa)[i], pl_app_args(pb)[i]);
+      break;
+    }
+    default:
+      eq = false;
+      break;
+    }
   }
-  case PL_TAG_APP: {
-    pl_cell *pa = pl_ptr(a), *pb = pl_ptr(b);
-    uint32_t n = pl_app_n(pa);
-    if (n != pl_app_n(pb))
-      return false;
-    if (!pl_eq_deep(pl_app_head(pa), pl_app_head(pb)))
-      return false;
-    for (uint32_t i = 0; i < n; i++)
-      if (!pl_eq_deep(pl_app_args(pa)[i], pl_app_args(pb)[i]))
-        return false;
-    return true;
-  }
-  default:
-    return false;
-  }
+  if (s.items != s.inline_buf)
+    free(s.items);
+  return eq;
 }
 
 static pl_val op_equal(pl_thread* t, size_t ab) {
