@@ -641,6 +641,54 @@ TEST(ops, pin_save_refuses_a_non_pin) {
   test_rt_free(&rt);
 }
 
+TEST(ops, pin_ref_get_returns_zero_when_missing) {
+  test_rt rt = test_rt_new();
+  pl_val args[1] = {ax_s4('h', 'e', 'a', 'd')};
+  ASSERT_EQ(test_op66(rt.t, ax_s7('P', 'R', 'e', 'f', 'G', 'e', 't'), 1,
+                      args),
+            0);
+  test_rt_free(&rt);
+}
+
+TEST(ops, pin_ref_put_and_get_round_trip_a_finalized_pin) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  pl_vpush(t, pl_pin(t, 42));
+  char err[192] = {0};
+  ASSERT(pl_store_save_pin(rt.store, t->vstack[base], NULL, err, sizeof(err)),
+         "%s", err);
+  uint8_t expected[32];
+  memcpy(expected, pl_pin_hash(t->vstack[base]), sizeof(expected));
+
+  pl_val put_args[2] = {ax_s4('h', 'e', 'a', 'd'), t->vstack[base]};
+  ASSERT_EQ(test_op66(t, ax_s7('P', 'R', 'e', 'f', 'P', 'u', 't'), 2,
+                      put_args),
+            t->vstack[base]);
+  pl_val get_args[1] = {ax_s4('h', 'e', 'a', 'd')};
+  pl_val found =
+      test_op66(t, ax_s7('P', 'R', 'e', 'f', 'G', 'e', 't'), 1, get_args);
+  ASSERT(pl_pin_is_hashed(found));
+  ASSERT_EQ(memcmp(pl_pin_hash(found), expected, sizeof(expected)), 0);
+  ASSERT_EQ(pl_pin_body(pl_ptr(found)), 42);
+  test_rt_free(&rt);
+}
+
+TEST(ops, pin_ref_put_refuses_a_provisional_pin) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  pl_val args[2] = {ax_s4('h', 'e', 'a', 'd'), pl_pin(t, 42)};
+  pl_catch c;
+  pl_catch_init(t, &c);
+  if (setjmp(c.jb) == 0) {
+    (void)test_op66(t, ax_s7('P', 'R', 'e', 'f', 'P', 'u', 't'), 2, args);
+    FAIL_TEST("expected provisional PIN refusal");
+  }
+  pl_catch_unwind(t, &c);
+  ASSERT_STR_EQ(t->exn_msg, "PRefPut: provisional pin");
+  test_rt_free(&rt);
+}
+
 TEST(ops, deepseq_normalizes_first_and_returns_second_lazily) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;

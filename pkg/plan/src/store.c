@@ -374,6 +374,51 @@ bool pl_store_get_root(pl_store* s, uint8_t hash[32]) {
   return ok;
 }
 
+static void pl_store_ref_key(const uint8_t* name, size_t name_len,
+                             uint8_t key[32]) {
+  static const uint8_t domain[] = "PLAN_REF\0";
+  size_t pre_len = sizeof(domain) - 1;
+  uint8_t* bytes = malloc(pre_len + name_len);
+  ax_assume(bytes != NULL, "oom");
+  memcpy(bytes, domain, pre_len);
+  if (name_len != 0)
+    memcpy(bytes + pre_len, name, name_len);
+  ax_sha256(bytes, pre_len + name_len, key);
+  free(bytes);
+}
+
+bool pl_store_put_ref(pl_store* s, const uint8_t* name, size_t name_len,
+                      const uint8_t hash[32]) {
+  PL_STORE_PROFILE("store.ref.put");
+  uint8_t key[32];
+  pl_store_ref_key(name, name_len, key);
+  pl_store_save_lock(s);
+  bool ok = s->be.has(s->be.ctx, hash) &&
+            s->be.put(s->be.ctx, key, hash, 32);
+  pl_store_save_unlock(s);
+  return ok;
+}
+
+pl_store_ref_status pl_store_get_ref(pl_store* s, const uint8_t* name,
+                                     size_t name_len, uint8_t hash[32]) {
+  PL_STORE_PROFILE("store.ref.get");
+  uint8_t key[32];
+  pl_store_ref_key(name, name_len, key);
+  pl_store_save_lock(s);
+  uint8_t* value = NULL;
+  size_t value_len = 0;
+  if (!s->be.get(s->be.ctx, key, &value, &value_len)) {
+    pl_store_save_unlock(s);
+    return PL_STORE_REF_MISSING;
+  }
+  bool valid = value_len == 32 && s->be.has(s->be.ctx, value);
+  if (valid)
+    memcpy(hash, value, 32);
+  free(value);
+  pl_store_save_unlock(s);
+  return valid ? PL_STORE_REF_FOUND : PL_STORE_REF_CORRUPT;
+}
+
 /* ── Explicit non-persistent lifetime boundary ────────────────────────── */
 
 typedef struct pl_snapshot_entry {

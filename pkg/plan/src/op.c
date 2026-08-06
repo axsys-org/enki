@@ -1132,6 +1132,58 @@ static pl_val op_pin_save(pl_thread* t, size_t ab) {
   return ARG(0);
 }
 
+#define PL_PIN_REF_NAME_MAX 4096u
+
+static uint8_t* pin_ref_name(pl_thread* t, pl_val value, size_t* out_len,
+                             const char* opname) {
+  if (!pl_is_nat(value))
+    pl_raise_msgf(t, "%s: expected a natural name", opname);
+  size_t len = pl_nat_byte_len(value);
+  if (len > PL_PIN_REF_NAME_MAX)
+    pl_raise_msgf(t, "%s: name is too long", opname);
+  uint8_t* bytes = malloc(len != 0 ? len : 1);
+  ax_assume(bytes != NULL, "oom");
+  for (size_t i = 0; i < len; i++)
+    bytes[i] = pl_nat_byte_at(value, i);
+  *out_len = len;
+  return bytes;
+}
+
+/* Resolve a named pointer to an already-persisted PIN.  Missing references are
+ * ordinary zero; a present but invalid pointer is store corruption and must not
+ * be mistaken for absence. */
+static pl_val op_pin_ref_get(pl_thread* t, size_t ab) {
+  size_t name_len;
+  uint8_t* name = pin_ref_name(t, ARG(0), &name_len, "PRefGet");
+  uint8_t hash[32];
+  pl_store_ref_status status =
+      pl_store_get_ref(pl_heap_store(t->heap), name, name_len, hash);
+  free(name);
+  if (status == PL_STORE_REF_MISSING)
+    return 0;
+  if (status == PL_STORE_REF_CORRUPT)
+    pl_raise_msg(t, "PRefGet: corrupt reference");
+  return pl_store_load(t, hash);
+}
+
+/* Publish a named pointer only after its target has crossed the PIN persistence
+ * boundary.  This operation does not save, normalize, or alter the target. */
+static pl_val op_pin_ref_put(pl_thread* t, size_t ab) {
+  pl_cell* pp = pl_as(PL_TAG_PIN, ARG(1));
+  if (pp == NULL)
+    pl_raise_msg(t, "PRefPut: expected a pin");
+  if (!pl_pin_is_hashed(ARG(1)))
+    pl_raise_msg(t, "PRefPut: provisional pin");
+  size_t name_len;
+  uint8_t* name = pin_ref_name(t, ARG(0), &name_len, "PRefPut");
+  bool ok = pl_store_put_ref(pl_heap_store(t->heap), name, name_len,
+                             pl_pin_hash(ARG(1)));
+  free(name);
+  if (!ok)
+    pl_raise_msg(t, "PRefPut: store failure");
+  return ARG(1);
+}
+
 static pl_val op_load(pl_thread* t, size_t ab) {
   AX_UNUSED(ab);
   pl_raise_msg(t, "load ./snap/root.plan"); /* loadSnapshot, verbatim */
@@ -1330,6 +1382,10 @@ const pl_opdesc pl_ops[] = {
      */
     OP66(ax_s7('P', 'i', 'n', 'H', 'a', 's', 'h'), 1, 0b1, 0, op_pin_hash),
     OP66(ax_s7('P', 'i', 'n', 'S', 'a', 'v', 'e'), 1, 0b1, 0b1, op_pin_save),
+    OP66(ax_s7('P', 'R', 'e', 'f', 'G', 'e', 't'), 1, 0b1, 0,
+         op_pin_ref_get),
+    OP66(ax_s7('P', 'R', 'e', 'f', 'P', 'u', 't'), 2, 0b11, 0,
+         op_pin_ref_put),
 };
 
 const size_t pl_nops = sizeof(pl_ops) / sizeof(pl_ops[0]);
@@ -1348,10 +1404,11 @@ static const uint16_t pl_op0_argc6[] = {2};
 static const uint16_t pl_op66_argc1[] = {
     3,  6,  7,  38, 39, 40, 41,  42,  44,  45,  46,  52,  53, 54, 55,
     56, 57, 58, 59, 60, 65, 71,  72,  74,  75,  76,  77,  78, 79, 80,
-    81, 82, 83, 85, 86, 99, 100, 101, 103, 104, 130, 134, 135};
+    81, 82, 83, 85, 86, 99, 100, 101, 103, 104, 130, 134, 135, 136};
 static const uint16_t pl_op66_argc2[] = {
     8,  9,  10, 11, 12, 13, 14, 31, 32, 33, 36, 37, 43, 47, 50, 64,
-    66, 69, 70, 73, 84, 87, 88, 89, 92, 93, 94, 95, 96, 97, 98, 102};
+    66, 69, 70, 73, 84, 87, 88, 89, 92, 93, 94, 95, 96, 97, 98, 102,
+    137};
 static const uint16_t pl_op66_argc3[] = {4,  15, 30, 34, 35, 48, 51,
                                          61, 62, 63, 67, 68, 90, 91};
 static const uint16_t pl_op66_argc4[] = {16, 49, 129};

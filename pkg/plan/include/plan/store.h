@@ -32,6 +32,12 @@ typedef enum pl_store_format {
   PL_STORE_FORMAT_SILO_V1 = 1,
 } pl_store_format;
 
+typedef enum pl_store_ref_status {
+  PL_STORE_REF_MISSING = 0,
+  PL_STORE_REF_FOUND = 1,
+  PL_STORE_REF_CORRUPT = 2,
+} pl_store_ref_status;
+
 typedef struct pl_store_backend {
   void* ctx;
   /* get returns a malloc'd buffer the caller frees; false if missing. */
@@ -149,6 +155,14 @@ pl_val pl_store_load(pl_thread* t, const uint8_t hash[32]);
 /* Persist / fetch the root hash (event-log replay seam). */
 bool pl_store_put_root(pl_store* s, const uint8_t hash[32]);
 bool pl_store_get_root(pl_store* s, uint8_t hash[32]);
+
+/* A named recovery pointer to an already-persisted PIN.  References are
+ * mechanical store metadata: they do not normalize, persist, or grant
+ * authority to their target.  The target hash must already exist. */
+bool pl_store_put_ref(pl_store* s, const uint8_t* name, size_t name_len,
+                      const uint8_t hash[32]);
+pl_store_ref_status pl_store_get_ref(pl_store* s, const uint8_t* name,
+                                     size_t name_len, uint8_t hash[32]);
 
 /* Runtime singletons used by lazy Row construction (see op.c). */
 pl_val pl_store_ix0_expr(pl_store* s);
