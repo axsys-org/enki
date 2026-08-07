@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <lmdb.h>
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -114,6 +115,80 @@ static bool pack_pwrite_exact(int fd, const uint8_t* bytes, size_t len,
     done += (size_t)n;
   }
   return true;
+}
+
+/*
+ * Durability barrier for pins.pack.
+ *
+ * What a commit needs here is ordering, not immediate persistence: the
+ * pack bytes must reach stable storage no later than the LMDB index entry
+ * that points at them.  Losing both to a power cut is a consistent store —
+ * the batch simply did not happen — but an index entry addressing pack
+ * bytes still sitting in the drive's write cache is a torn one.
+ *
+ * F_BARRIERFSYNC says exactly that (fsync, then a drive barrier ordering
+ * everything before it ahead of everything after) and is the default:
+ * ~250us against ~3.2ms for the full cache flush F_FULLFSYNC forces.
+ * PL_SILO_FSYNC=full restores that flush; it roughly doubles commit
+ * latency, because mdb_txn_commit issues its own F_FULLFSYNC immediately
+ * afterwards and a drive flush costs the same whoever asks for it.
+ *
+ * =data (plain fsync) and =none keep the bytes ordered only by accident:
+ * they survive today because LMDB's flush is device-wide and lands right
+ * after, so do not pair them with MDB_NOSYNC/MDB_NOMETASYNC on the env —
+ * that combination silently gives up the invariant above.  Elsewhere the
+ * fsync fallback is itself the ordering primitive.
+ *
+ * Cached like pl_bytecode_enabled: every thread computes the same answer.
+ */
+enum pack_sync_mode {
+  PACK_SYNC_FULL = 0,
+  PACK_SYNC_BARRIER = 1,
+  PACK_SYNC_DATA = 2,
+  PACK_SYNC_NONE = 3,
+};
+
+#ifdef F_BARRIERFSYNC
+#define PACK_SYNC_DEFAULT PACK_SYNC_BARRIER
+#else
+#define PACK_SYNC_DEFAULT PACK_SYNC_DATA
+#endif
+
+static int pack_sync(int fd) {
+  static _Atomic int mode = -1;
+  int m = atomic_load_explicit(&mode, memory_order_relaxed);
+  if (m < 0) {
+    const char* flag = getenv("PL_SILO_FSYNC");
+    m = PACK_SYNC_DEFAULT;
+    if (flag != NULL && strcmp(flag, "full") == 0)
+      m = PACK_SYNC_FULL;
+    else if (flag != NULL && strcmp(flag, "barrier") == 0)
+      m = PACK_SYNC_BARRIER;
+    else if (flag != NULL && strcmp(flag, "data") == 0)
+      m = PACK_SYNC_DATA;
+    else if (flag != NULL && strcmp(flag, "none") == 0)
+      m = PACK_SYNC_NONE;
+    atomic_store_explicit(&mode, m, memory_order_relaxed);
+  }
+  if (m == PACK_SYNC_NONE)
+    return 0;
+#ifdef F_BARRIERFSYNC
+  if (m == PACK_SYNC_BARRIER) {
+    if (fcntl(fd, F_BARRIERFSYNC, 0) == 0)
+      return 0;
+    if (errno != ENOTSUP && errno != EINVAL)
+      return -1;
+    /* No barrier on this filesystem.  Fall through to the full flush,
+     * which is strictly stronger than what we asked for, and stop asking. */
+    m = PACK_SYNC_FULL;
+    atomic_store_explicit(&mode, m, memory_order_relaxed);
+  }
+#endif
+#ifdef F_FULLFSYNC
+  if (m == PACK_SYNC_FULL)
+    return fcntl(fd, F_FULLFSYNC, 0);
+#endif
+  return fsync(fd);
 }
 
 static bool pack_reader_read(void* ctx, uint8_t* bytes, size_t len) {
@@ -423,12 +498,7 @@ bool pl_store_silo_batch_commit(pl_silo_batch* batch,
     return false;
   }
   if (batch->pack_dirty) {
-#ifdef F_FULLFSYNC
-    int sync_rc = fcntl(batch->backend->pack_fd, F_FULLFSYNC, 0);
-#else
-    int sync_rc = fsync(batch->backend->pack_fd);
-#endif
-    if (sync_rc != 0) {
+    if (pack_sync(batch->backend->pack_fd) != 0) {
       pl_store_silo_batch_abort(batch);
       return pack_error(err, err_cap, "cannot sync pins.pack");
     }
