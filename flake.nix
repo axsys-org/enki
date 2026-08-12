@@ -285,6 +285,7 @@
               pkgs.lcov
               pkgs.gcovr
               pkgs.compiledb
+              pkgs.qemu
               pkgs.alejandra
               pkgs.mdformat
               pkgs.samply
