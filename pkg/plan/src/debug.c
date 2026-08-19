@@ -6,6 +6,7 @@
 
 #include "axsys/sb.h"
 #include "plan/nat.h"
+#include "plan/store.h"
 #include "plan/value.h"
 
 static void pl_gmp_free(void* ptr, size_t size_s) {
@@ -112,6 +113,85 @@ void pl_show_sb(ax_sb* sb, pl_val v) {
     ax_sb_append_lit(sb, "<<bad>>");
     return;
   }
+}
+
+#define PL_SHOW_NAT_MAX_BYTES 64u
+
+static void pl_show_limited_rec(ax_sb* sb, pl_val v, size_t depth,
+                                size_t max_width) {
+  while (!pl_is_nat63(v) && pl_tag(v) == PL_TAG_DEFER &&
+         pl_hdr_kind(*pl_ptr(v)) == PL_K_IND)
+    v = pl_ind_target(pl_ptr(v));
+
+  if (pl_is_nat(v)) {
+    if (pl_nat_byte_len(v) > PL_SHOW_NAT_MAX_BYTES) {
+      ax_sb_append_lit(sb, "<nat:");
+      ax_sb_append_u64(sb, pl_nat_byte_len(v));
+      ax_sb_append_lit(sb, " bytes>");
+    } else {
+      pl_show_nat(sb, v);
+    }
+    return;
+  }
+  if (depth == 0) {
+    ax_sb_append_lit(sb, "…");
+    return;
+  }
+  pl_cell* p = pl_ptr(v);
+  switch (pl_tag(v)) {
+  case PL_TAG_APP: {
+    ax_sb_append_lit(sb, "(");
+    pl_show_limited_rec(sb, pl_app_head(p), depth - 1, max_width);
+    uint32_t n = pl_app_n(p);
+    uint32_t shown = n < max_width ? n : (uint32_t)max_width;
+    for (uint32_t i = 0; i < shown; i++) {
+      ax_sb_append_lit(sb, " ");
+      pl_show_limited_rec(sb, pl_app_args(p)[i], depth - 1, max_width);
+    }
+    if (shown < n) {
+      ax_sb_append_lit(sb, " …+");
+      ax_sb_append_u64(sb, n - shown);
+    }
+    ax_sb_append_lit(sb, ")");
+    return;
+  }
+  case PL_TAG_LAW: {
+    ax_sb_append_lit(sb, "{");
+    if (!pl_show_name_raw(sb, pl_law_name(p)))
+      pl_show_limited_rec(sb, pl_law_name(p), depth - 1, max_width);
+    ax_sb_append_lit(sb, "/");
+    ax_sb_append_u64(sb, pl_law_arity(p));
+    ax_sb_append_lit(sb, " ");
+    pl_show_limited_rec(sb, pl_law_body(p), depth - 1, max_width);
+    ax_sb_append_lit(sb, "}");
+    return;
+  }
+  case PL_TAG_PIN: {
+    const uint8_t* hash = pl_pin_hash(v);
+    if (hash != NULL) {
+      ax_sb_append_lit(sb, "<pin ");
+      for (size_t i = 0; i < 4; i++) {
+        static const char hex[] = "0123456789abcdef";
+        ax_sb_append_char(sb, hex[hash[i] >> 4]);
+        ax_sb_append_char(sb, hex[hash[i] & 0xf]);
+      }
+      ax_sb_append_lit(sb, ">");
+      return;
+    }
+    ax_sb_append_lit(sb, "<");
+    pl_show_limited_rec(sb, pl_pin_body(p), depth - 1, max_width);
+    ax_sb_append_lit(sb, ">");
+    return;
+  }
+  default:
+    pl_show_sb(sb, v);
+    return;
+  }
+}
+
+void pl_show_limited_sb(ax_sb* sb, pl_val v, size_t max_depth,
+                        size_t max_width) {
+  pl_show_limited_rec(sb, v, max_depth, max_width);
 }
 
 char* pl_show(const ax_allocator* a, pl_val v, size_t* out_s) {

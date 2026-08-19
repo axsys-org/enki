@@ -10,6 +10,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "axsys/ds.h"
@@ -22,7 +23,10 @@ typedef struct silo_backend {
   MDB_dbi objects;
   MDB_dbi meta;
   MDB_dbi codecache; /* side KV: (compiler, law) -> code-row pin hash */
+  MDB_dbi roots;     /* root journal: BE u64 seq -> {hash, ns, pack size} */
   int pack_fd;
+  bool has_roots; /* absent when inspecting a pre-journal store read-only */
+  bool rdonly;
 } silo_backend;
 
 typedef struct pack_reader {
@@ -254,8 +258,87 @@ static bool silo_meta_get(silo_backend* b, const void* key_bytes,
   return ok;
 }
 
+/* Root journal entry: 32-byte root hash, then LE u64 wall-clock ns and LE
+ * u64 pins.pack size at publication.  Keys are big-endian u64 sequence
+ * numbers so LMDB cursor order is publication order. */
+#define SILO_ROOT_ENTRY_BYTES 48u
+
+static void journal_put_seq(uint8_t out[8], uint64_t seq) {
+  for (unsigned i = 0; i < 8; i++)
+    out[i] = (uint8_t)(seq >> (8u * (7 - i)));
+}
+
+static uint64_t journal_get_seq(const uint8_t in[8]) {
+  uint64_t v = 0;
+  for (unsigned i = 0; i < 8; i++)
+    v = (v << 8) | in[i];
+  return v;
+}
+
+static uint64_t journal_now_ns(void) {
+  struct timespec ts;
+  if (clock_gettime(CLOCK_REALTIME, &ts) != 0)
+    return 0;
+  return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
+}
+
+/* Append inside the caller's transaction so the journal entry commits
+ * exactly when the root it describes does. */
+static bool silo_journal_append(silo_backend* b, MDB_txn* txn,
+                                const uint8_t hash[32], uint64_t pack_bytes) {
+  MDB_cursor* cur;
+  if (mdb_cursor_open(txn, b->roots, &cur) != 0)
+    return false;
+  uint64_t seq = 1;
+  MDB_val last_k, last_v;
+  int rc = mdb_cursor_get(cur, &last_k, &last_v, MDB_LAST);
+  if (rc == 0 && last_k.mv_size == 8)
+    seq = journal_get_seq(last_k.mv_data) + 1;
+  mdb_cursor_close(cur);
+  if (rc != 0 && rc != MDB_NOTFOUND)
+    return false;
+
+  uint8_t key_bytes[8];
+  journal_put_seq(key_bytes, seq);
+  uint8_t entry[SILO_ROOT_ENTRY_BYTES];
+  memcpy(entry, hash, 32);
+  index_put64(entry + 32, journal_now_ns());
+  index_put64(entry + 40, pack_bytes);
+  MDB_val key = {.mv_size = sizeof(key_bytes), .mv_data = key_bytes};
+  MDB_val value = {.mv_size = sizeof(entry), .mv_data = entry};
+  return mdb_put(txn, b->roots, &key, &value, MDB_NOOVERWRITE) == 0;
+}
+
 static bool silo_put_root(void* ctx, const uint8_t hash[32]) {
-  return silo_meta_put(ctx, root_key, sizeof(root_key) - 1, hash, 32);
+  silo_backend* b = ctx;
+  if (b->rdonly)
+    return false;
+  MDB_txn* txn;
+  if (mdb_txn_begin(b->env, NULL, 0, &txn) != 0)
+    return false;
+  MDB_val key = {.mv_size = sizeof(root_key) - 1, .mv_data = (void*)root_key};
+  MDB_val old;
+  int rc = mdb_get(txn, b->meta, &key, &old);
+  if (rc != 0 && rc != MDB_NOTFOUND) {
+    mdb_txn_abort(txn);
+    return false;
+  }
+  if (rc == 0 && old.mv_size == 32 && memcmp(old.mv_data, hash, 32) == 0) {
+    mdb_txn_abort(txn);
+    return true;
+  }
+  struct stat st;
+  if (fstat(b->pack_fd, &st) != 0 || st.st_size < 0) {
+    mdb_txn_abort(txn);
+    return false;
+  }
+  MDB_val value = {.mv_size = 32, .mv_data = (void*)hash};
+  if (mdb_put(txn, b->meta, &key, &value, 0) != 0 ||
+      !silo_journal_append(b, txn, hash, (uint64_t)st.st_size)) {
+    mdb_txn_abort(txn);
+    return false;
+  }
+  return mdb_txn_commit(txn) == 0;
 }
 
 static bool silo_get_root(void* ctx, uint8_t hash[32]) {
@@ -289,6 +372,8 @@ static bool silo_kv_get(void* ctx, const uint8_t hash[32], uint8_t** out_b,
 static bool silo_kv_put(void* ctx, const uint8_t hash[32], const uint8_t* bytes,
                         size_t len) {
   silo_backend* b = ctx;
+  if (b->rdonly)
+    return false;
   MDB_txn* txn;
   if (mdb_txn_begin(b->env, NULL, 0, &txn) != 0)
     return false;
@@ -308,6 +393,8 @@ static void silo_close(void* ctx) {
   mdb_dbi_close(b->env, b->objects);
   mdb_dbi_close(b->env, b->meta);
   mdb_dbi_close(b->env, b->codecache);
+  if (b->has_roots)
+    mdb_dbi_close(b->env, b->roots);
   mdb_env_close(b->env);
   free(b);
 }
@@ -353,6 +440,8 @@ bool pl_store_silo_batch_begin(pl_store* store, pl_silo_batch** out, char* err,
   *out = NULL;
   if (store == NULL || store->format != PL_STORE_FORMAT_SILO_V1)
     return pack_error(err, err_cap, "store is not a Silo backend");
+  if (((silo_backend*)store->be.ctx)->rdonly)
+    return pack_error(err, err_cap, "Silo store is read-only");
   pl_silo_batch* batch = calloc(1, sizeof(*batch));
   if (batch == NULL)
     return pack_error(err, err_cap, "out of memory for Silo batch");
@@ -505,7 +594,9 @@ bool pl_store_silo_batch_commit(pl_silo_batch* batch,
   }
   if (root_changed) {
     MDB_val root_v = {.mv_size = 32, .mv_data = (void*)root_hash};
-    if (mdb_put(batch->txn, batch->backend->meta, &root_k, &root_v, 0) != 0) {
+    if (mdb_put(batch->txn, batch->backend->meta, &root_k, &root_v, 0) != 0 ||
+        !silo_journal_append(batch->backend, batch->txn, root_hash,
+                             batch->pack_end)) {
       pl_store_silo_batch_abort(batch);
       return pack_error(err, err_cap, "cannot publish Silo root");
     }
@@ -589,7 +680,7 @@ pl_store* pl_store_new_silo(const char* path, size_t map_size) {
   if (b == NULL)
     return NULL;
   b->pack_fd = -1;
-  if (mdb_env_create(&b->env) != 0 || mdb_env_set_maxdbs(b->env, 3) != 0 ||
+  if (mdb_env_create(&b->env) != 0 || mdb_env_set_maxdbs(b->env, 4) != 0 ||
       mdb_env_set_mapsize(b->env, map_size) != 0 ||
       mdb_env_open(b->env, path, 0, 0664) != 0)
     goto fail_env;
@@ -607,10 +698,12 @@ pl_store* pl_store_new_silo(const char* path, size_t map_size) {
     goto fail_pack;
   if (mdb_dbi_open(txn, "objects", MDB_CREATE, &b->objects) != 0 ||
       mdb_dbi_open(txn, "meta", MDB_CREATE, &b->meta) != 0 ||
-      mdb_dbi_open(txn, "codecache", MDB_CREATE, &b->codecache) != 0) {
+      mdb_dbi_open(txn, "codecache", MDB_CREATE, &b->codecache) != 0 ||
+      mdb_dbi_open(txn, "roots", MDB_CREATE, &b->roots) != 0) {
     mdb_txn_abort(txn);
     goto fail_pack;
   }
+  b->has_roots = true;
   MDB_val fkey = {.mv_size = sizeof(format_key) - 1,
                   .mv_data = (void*)format_key};
   MDB_val found;
@@ -651,4 +744,184 @@ fail_env:
     mdb_env_close(b->env);
   free(b);
   return NULL;
+}
+
+pl_store* pl_store_new_silo_ro(const char* path, size_t map_size) {
+  silo_backend* b = calloc(1, sizeof(*b));
+  if (b == NULL)
+    return NULL;
+  b->pack_fd = -1;
+  b->rdonly = true;
+  if (mdb_env_create(&b->env) != 0 || mdb_env_set_maxdbs(b->env, 4) != 0 ||
+      mdb_env_set_mapsize(b->env, map_size) != 0 ||
+      mdb_env_open(b->env, path, MDB_RDONLY, 0664) != 0)
+    goto fail_env;
+
+  char pack_path[4096];
+  int path_len = snprintf(pack_path, sizeof(pack_path), "%s/pins.pack", path);
+  if (path_len < 0 || (size_t)path_len >= sizeof(pack_path))
+    goto fail_env;
+  b->pack_fd = open(pack_path, O_RDONLY);
+  if (b->pack_fd < 0)
+    goto fail_env;
+
+  MDB_txn* txn;
+  if (mdb_txn_begin(b->env, NULL, MDB_RDONLY, &txn) != 0)
+    goto fail_pack;
+  if (mdb_dbi_open(txn, "objects", 0, &b->objects) != 0 ||
+      mdb_dbi_open(txn, "meta", 0, &b->meta) != 0 ||
+      mdb_dbi_open(txn, "codecache", 0, &b->codecache) != 0) {
+    mdb_txn_abort(txn);
+    goto fail_pack;
+  }
+  /* Pre-journal stores lack the roots DBI; inspect them without history. */
+  b->has_roots = mdb_dbi_open(txn, "roots", 0, &b->roots) == 0;
+  MDB_val fkey = {.mv_size = sizeof(format_key) - 1,
+                  .mv_data = (void*)format_key};
+  MDB_val found;
+  if (mdb_get(txn, b->meta, &fkey, &found) != 0 ||
+      found.mv_size != sizeof(format_value) ||
+      memcmp(found.mv_data, format_value, sizeof(format_value)) != 0) {
+    mdb_txn_abort(txn);
+    goto fail_pack;
+  }
+  /* Commit rather than abort: DBI handles opened in an aborted read
+   * transaction must not be reused. */
+  if (mdb_txn_commit(txn) != 0)
+    goto fail_pack;
+
+  pl_store* store = pl_store_new((pl_store_backend){
+      .ctx = b,
+      .get = silo_kv_get,
+      .put = silo_kv_put,
+      .has = silo_has,
+      .put_root = silo_put_root,
+      .get_root = silo_get_root,
+      .close = silo_close,
+  });
+  store->format = PL_STORE_FORMAT_SILO_V1;
+  return store;
+
+fail_pack:
+  if (b->pack_fd >= 0)
+    (void)close(b->pack_fd);
+fail_env:
+  if (b->env != NULL)
+    mdb_env_close(b->env);
+  free(b);
+  return NULL;
+}
+
+uint64_t pl_store_root_log_head(pl_store* store) {
+  if (store == NULL || store->format != PL_STORE_FORMAT_SILO_V1)
+    return 0;
+  silo_backend* b = store->be.ctx;
+  if (!b->has_roots)
+    return 0;
+  MDB_txn* txn;
+  if (mdb_txn_begin(b->env, NULL, MDB_RDONLY, &txn) != 0)
+    return 0;
+  uint64_t seq = 0;
+  MDB_cursor* cur;
+  if (mdb_cursor_open(txn, b->roots, &cur) == 0) {
+    MDB_val key, value;
+    if (mdb_cursor_get(cur, &key, &value, MDB_LAST) == 0 && key.mv_size == 8)
+      seq = journal_get_seq(key.mv_data);
+    mdb_cursor_close(cur);
+  }
+  mdb_txn_abort(txn);
+  return seq;
+}
+
+size_t pl_store_root_log(pl_store* store, uint64_t from,
+                         pl_store_root_entry* out, size_t cap) {
+  if (store == NULL || store->format != PL_STORE_FORMAT_SILO_V1 || out == NULL)
+    return 0;
+  silo_backend* b = store->be.ctx;
+  if (!b->has_roots)
+    return 0;
+  MDB_txn* txn;
+  if (mdb_txn_begin(b->env, NULL, MDB_RDONLY, &txn) != 0)
+    return 0;
+  size_t n = 0;
+  MDB_cursor* cur;
+  if (mdb_cursor_open(txn, b->roots, &cur) == 0) {
+    uint8_t key_bytes[8];
+    journal_put_seq(key_bytes, from);
+    MDB_val key = {.mv_size = sizeof(key_bytes), .mv_data = key_bytes};
+    MDB_val value;
+    int rc = mdb_cursor_get(cur, &key, &value, MDB_SET_RANGE);
+    while (rc == 0 && n < cap) {
+      if (key.mv_size == 8 && value.mv_size == SILO_ROOT_ENTRY_BYTES) {
+        const uint8_t* vb = value.mv_data;
+        out[n].seq = journal_get_seq(key.mv_data);
+        memcpy(out[n].hash, vb, 32);
+        out[n].unix_ns = index_get64(vb + 32);
+        out[n].pack_bytes = index_get64(vb + 40);
+        n++;
+      }
+      rc = mdb_cursor_get(cur, &key, &value, MDB_NEXT);
+    }
+    mdb_cursor_close(cur);
+  }
+  mdb_txn_abort(txn);
+  return n;
+}
+
+size_t pl_store_silo_objects(pl_store* store, pl_store_silo_object_fn fn,
+                             void* ctx) {
+  if (store == NULL || store->format != PL_STORE_FORMAT_SILO_V1 || fn == NULL)
+    return 0;
+  silo_backend* b = store->be.ctx;
+  MDB_txn* txn;
+  if (mdb_txn_begin(b->env, NULL, MDB_RDONLY, &txn) != 0)
+    return 0;
+  size_t n = 0;
+  MDB_cursor* cur;
+  if (mdb_cursor_open(txn, b->objects, &cur) == 0) {
+    MDB_val key, value;
+    int rc = mdb_cursor_get(cur, &key, &value, MDB_FIRST);
+    while (rc == 0) {
+      uint64_t off = 0, len = 0;
+      if (key.mv_size == 32 && index_decode(&value, &off, &len)) {
+        fn(ctx, key.mv_data, off, len);
+        n++;
+      }
+      rc = mdb_cursor_get(cur, &key, &value, MDB_NEXT);
+    }
+    mdb_cursor_close(cur);
+  }
+  mdb_txn_abort(txn);
+  return n;
+}
+
+bool pl_store_silo_object_info(pl_store* store, const uint8_t hash[32],
+                               uint64_t* out_len, pl_hash** out_subpins,
+                               size_t* out_nsub, char* err, size_t err_cap) {
+  if (out_len == NULL || out_subpins == NULL || out_nsub == NULL)
+    return pack_error(err, err_cap, "invalid Silo object info query");
+  *out_len = 0;
+  *out_subpins = NULL;
+  *out_nsub = 0;
+  pl_silo_reader r;
+  if (!pl_store_silo_open(store, hash, &r, err, err_cap))
+    return false;
+  pl_silo_scan scan = {0};
+  bool ok = pl_silo_scan_stream(&r, true, &scan, err, err_cap);
+  if (ok) {
+    *out_len = r.len;
+    *out_nsub = scan.pin_count;
+    if (scan.pin_count != 0) {
+      *out_subpins = malloc(scan.pin_count * sizeof(pl_hash));
+      if (*out_subpins == NULL) {
+        ok = pack_error(err, err_cap, "out of memory for Silo subpin list");
+        *out_nsub = 0;
+      } else {
+        memcpy(*out_subpins, scan.pins, scan.pin_count * sizeof(pl_hash));
+      }
+    }
+  }
+  pl_silo_scan_free(&scan);
+  pl_store_silo_close_reader(&r);
+  return ok;
 }
