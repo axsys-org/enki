@@ -46,7 +46,11 @@ static void pl_show_nat(ax_sb* sb, pl_val v) {
   size_t limbs = pl_nat_limb_len(v);
   mpz_import(z, limbs, -1, sizeof(uint64_t), 0, 0, pl_nat_limb_ptr(pl_ptr(v)));
   char* dec = mpz_get_str(NULL, 10, z);
-  ax_sb_append_cstr(sb, dec);
+  /* ax_sb defers: appended strings are referenced until materialization,
+   * so the digits must be copied in — appending dec and then freeing it
+   * reads freed memory at build time. */
+  for (const char* q = dec; *q != '\0'; q++)
+    ax_sb_append_char(sb, *q);
   pl_gmp_free(dec, strlen(dec) + 1);
   mpz_clear(z);
 }
