@@ -507,3 +507,25 @@ TEST(gc, bytecode_thunk_scans_env_and_args) {
 
   test_rt_free(&rt);
 }
+
+TEST(value, show_big_nat_decimal_owns_its_digits) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+
+  /* A non-printable two-limb nat forces pl_show_nat's GMP decimal path.
+   * The digits must be copied into the builder: ax_sb defers, so a
+   * referenced-then-freed digit buffer reads freed memory at build time
+   * (rendered as stable-length garbage that varies run to run). */
+  pl_gc_reserve(t, PL_NAT_CELLS(2));
+  uint64_t* limbs;
+  pl_val v = pl_mk_nat_limbs(t, 2, &limbs);
+  limbs[0] = 0;
+  limbs[1] = 1; /* 2^64 */
+  v = pl_nat_trim(v);
+
+  char* s = pl_show(ax_allocator_system(), v, NULL);
+  ASSERT_STR_EQ(s, "18446744073709551616");
+  ax_free(ax_allocator_system(), s);
+
+  test_rt_free(&rt);
+}

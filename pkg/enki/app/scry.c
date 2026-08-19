@@ -13,6 +13,7 @@
 #include "plan/debug.h"
 #include "plan/eval.h"
 #include "plan/heap.h"
+#include "plan/nat.h"
 #include "plan/store.h"
 #include "plan/value.h"
 
@@ -137,8 +138,29 @@ static pl_store_root_entry* journal_fetch(pl_store* s, size_t* out_n) {
   return entries;
 }
 
+typedef struct prefix_scan {
+  const uint8_t* prefix;
+  size_t plen;
+  uint8_t hash[32];
+  size_t matches;
+} prefix_scan;
+
+static void prefix_scan_object(void* ctx, const uint8_t hash[32], uint64_t off,
+                               uint64_t len) {
+  (void)off;
+  (void)len;
+  prefix_scan* ps = ctx;
+  if (memcmp(hash, ps->prefix, ps->plen) != 0)
+    return;
+  if (ps->matches == 0 || memcmp(ps->hash, hash, 32) != 0) {
+    memcpy(ps->hash, hash, 32);
+    ps->matches++;
+  }
+}
+
 /* Resolve a snapshot argument: a journal sequence number, or a hex hash
- * prefix matched against the journal and the current root. */
+ * prefix matched against the journal, the current root, and finally the
+ * whole object index (any stored pin is inspectable, not just roots). */
 static bool resolve_snapshot(pl_store* s, const char* arg, uint8_t out[32],
                              uint64_t* out_seq) {
   *out_seq = 0;
@@ -183,6 +205,14 @@ static bool resolve_snapshot(pl_store* s, const char* arg, uint8_t out[32],
       memcmp(current, prefix, plen) == 0) {
     memcpy(out, current, 32);
     matches = 1;
+  }
+  if (matches == 0) {
+    prefix_scan ps = {.prefix = prefix, .plen = plen};
+    (void)pl_store_silo_objects(s, prefix_scan_object, &ps);
+    if (ps.matches > 0) {
+      memcpy(out, ps.hash, 32);
+      matches = ps.matches;
+    }
   }
   free(entries);
   if (matches == 0)
@@ -255,7 +285,9 @@ static void print_value(pl_val v, size_t depth, size_t width) {
   size_t n = 0;
   char* text = ax_sb_build(&sb, &n);
   ax_sb_free(&sb);
-  printf("%s\n", text);
+  /* fwrite, not printf: renderings of binary-ish nats can embed NULs. */
+  (void)fwrite(text, 1, n, stdout);
+  (void)fputc('\n', stdout);
   ax_free(ax_allocator_system(), text);
 }
 
@@ -624,6 +656,90 @@ static void cmd_packmap(scry* sc, const char* arg) {
   free(entries);
 }
 
+/* Representation diagnostics for the cursor value: tag, header, limb
+ * count, byte length, and the low bytes — for debugging renderer or
+ * decoder anomalies without trusting either. */
+static void cmd_raw(scry* sc) {
+  if (!need_checkout(sc))
+    return;
+  pl_val v = sc->path[sc->path_n - 1];
+  printf("val=%016llx tag=%llu is_nat63=%d is_nat=%d\n", (unsigned long long)v,
+         (unsigned long long)pl_tag(v), pl_is_nat63(v), pl_is_nat(v));
+  if (pl_is_nat63(v)) {
+    printf("nat63=%llu\n", (unsigned long long)v);
+    return;
+  }
+  pl_cell* p = pl_ptr(v);
+  printf("hdr=%016llx kind=%u\n", (unsigned long long)p[0],
+         (unsigned)pl_hdr_kind(p[0]));
+  if (pl_is_nat(v)) {
+    size_t limbs = pl_nat_limb_len(v);
+    size_t bytes = pl_nat_byte_len(v);
+    printf("limbs=%zu byte_len=%zu bits=%zu\n", limbs, bytes,
+           pl_nat_bit_len(v));
+    size_t show = bytes < 48 ? bytes : 48;
+    printf("low bytes: ");
+    for (size_t i = 0; i < show; i++)
+      printf("%02x", pl_nat_byte_at(v, i));
+    printf("%s\n", show < bytes ? "…" : "");
+    if (limbs > 0)
+      printf("top limb: %016llx\n",
+             (unsigned long long)pl_nat_limb_at(v, limbs - 1));
+  }
+  /* Render through pl_show_sb and hexdump the builder's bytes, so the
+   * renderer + string builder are inspected without the tty in the way. */
+  ax_sb sb;
+  ax_sb_init(&sb, ax_allocator_system());
+  pl_show_sb(&sb, v);
+  size_t n = 0;
+  char* text = ax_sb_build(&sb, &n);
+  ax_sb_free(&sb);
+  printf("render len=%zu hex: ", n);
+  for (size_t i = 0; i < n && i < 96; i++)
+    printf("%02x", (uint8_t)text[i]);
+  printf("%s\n", n > 96 ? "…" : "");
+  ax_free(ax_allocator_system(), text);
+}
+
+typedef struct where_scan {
+  uint8_t hash[32];
+  uint64_t off;
+  uint64_t len;
+  bool found;
+} where_scan;
+
+static void where_object(void* ctx, const uint8_t hash[32], uint64_t off,
+                         uint64_t len) {
+  where_scan* w = ctx;
+  if (!w->found && memcmp(hash, w->hash, 32) == 0) {
+    w->off = off;
+    w->len = len;
+    w->found = true;
+  }
+}
+
+/* Pack placement of one object: "<hash> <offset> <length>" for tools
+ * that read pins.pack directly. */
+static void cmd_where(scry* sc, const char* arg) {
+  if (arg == NULL) {
+    fprintf(stderr, "scry: where <seq|hash>\n");
+    return;
+  }
+  where_scan w = {0};
+  uint64_t seq;
+  if (!resolve_snapshot(sc->store, arg, w.hash, &seq))
+    return;
+  (void)pl_store_silo_objects(sc->store, where_object, &w);
+  if (!w.found) {
+    fprintf(stderr, "scry: object is not indexed\n");
+    return;
+  }
+  char hex[65];
+  hash_hex(w.hash, 32, hex);
+  printf("%s %llu %llu\n", hex, (unsigned long long)w.off,
+         (unsigned long long)w.len);
+}
+
 static void cmd_help(void) {
   printf("commands:\n"
          "  log [n]            last n journal entries with pack growth\n"
@@ -663,6 +779,10 @@ static bool dispatch(scry* sc, int argc, char** argv) {
     cmd_diff(sc, a1, a2);
   else if (strcmp(cmd, "packmap") == 0)
     cmd_packmap(sc, a1);
+  else if (strcmp(cmd, "where") == 0)
+    cmd_where(sc, a1);
+  else if (strcmp(cmd, "raw") == 0)
+    cmd_raw(sc);
   else if (strcmp(cmd, "help") == 0)
     cmd_help();
   else if (strcmp(cmd, "quit") == 0 || strcmp(cmd, "exit") == 0)
