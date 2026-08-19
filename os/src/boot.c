@@ -250,9 +250,23 @@ void os_idt_init(void) {
 }
 
 [[noreturn]] void os_exception(exception_frame* frame) {
+  os_rplan_set_output_enabled(true);
+  unsigned long cr2;
+  unsigned long cr3;
+  __asm__ volatile("mov %%cr2,%0" : "=r"(cr2));
+  __asm__ volatile("mov %%cr3,%0" : "=r"(cr3));
+  const uint64_t* pml4 = (const uint64_t*)(cr3 & ~UINT64_C(0xfff));
+  uint64_t pml4e = pml4[(cr2 >> 39) & 0x1ff];
+  const uint64_t* pdpt = (const uint64_t*)(pml4e & ~UINT64_C(0xfff));
+  uint64_t pdpte = pdpt[(cr2 >> 30) & 0x1ff];
+  const uint64_t* pd = (const uint64_t*)(pdpte & ~UINT64_C(0xfff));
+  uint64_t pde = pd[(cr2 >> 21) & 0x1ff];
   fprintf(stderr,
-          "\nFATAL: x86 exception %lu error=0x%lx rip=0x%lx cr2=0x%lx\n",
-          frame->vector, frame->error, frame->rip,
-          ({ unsigned long cr2; __asm__ volatile("mov %%cr2,%0" : "=r"(cr2)); cr2; }));
+          "\nFATAL: x86 exception %lu error=0x%lx rip=0x%lx cr2=0x%lx "
+          "cr3=0x%lx pml4e=0x%llx pdpte=0x%llx pde=0x%llx\n",
+          frame->vector, frame->error, frame->rip, cr2, cr3,
+          (unsigned long long)pml4e, (unsigned long long)pdpte,
+          (unsigned long long)pde);
+  os_qemu_exit(5);
   os_halt();
 }

@@ -8,10 +8,12 @@ typedef long off_t;
 #define STDOUT_FILENO 1
 #define STDERR_FILENO 2
 #define F_OK 0
+#define _SC_NPROCESSORS_ONLN 1
 ssize_t read(int fd, void* buf, size_t count);
 ssize_t write(int fd, const void* buf, size_t count);
 int close(int fd);
 int access(const char* path, int mode);
 int isatty(int fd);
 unsigned sleep(unsigned seconds);
+long sysconf(int name);
 #endif

@@ -113,7 +113,11 @@ pd1:  .skip 4096
 pd2:  .skip 4096
 pd3:  .skip 4096
 .align 16
-boot_stack: .skip 65536
+/* Wisp's native assembly and Shrine's closure compilation recurse through
+ * substantially deeper host-side save/canonicalization paths than the small
+ * interactive boot.  Match a normal hosted process stack so those paths
+ * cannot grow down into the identity page tables immediately below us. */
+boot_stack: .skip 8388608
 boot_stack_top:
 .align 4
 mb_magic: .skip 4

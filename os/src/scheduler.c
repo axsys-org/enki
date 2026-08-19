@@ -1,13 +1,32 @@
-#include "enki/actor.h"
+#include <stddef.h>
 
-er_drive_status er_scheduler_drive(er_scheduler* scheduler, er_actor* root) {
+#include "actor_internal.h"
+
+/* The deterministic actor executor lives unchanged in pkg/enki/src/actor.c.
+ * Only its optional libcurl backend is absent from the guest. */
+void er_http_service(er_scheduler* scheduler, er_actor* actor, uint32_t argc,
+                     pl_val* args) {
   (void)scheduler;
-  (void)root;
-  return ER_DRIVE_EXN;
+  (void)argc;
+  (void)args;
+  er_crash_msg(actor, "unsupported on enki-os");
 }
 
-er_drive_status er_mt_executor_drive(er_mt_executor* executor, er_actor* root) {
-  (void)executor;
-  (void)root;
-  return ER_DRIVE_EXN;
+void er_http_pump(er_scheduler* scheduler) { (void)scheduler; }
+bool er_http_idle(er_scheduler* scheduler) {
+  (void)scheduler;
+  return false;
+}
+bool er_http_outstanding(const er_scheduler* scheduler) {
+  (void)scheduler;
+  return false;
+}
+bool er_http_mt_pump(er_scheduler* scheduler) {
+  (void)scheduler;
+  return false;
+}
+void er_http_teardown(er_scheduler* scheduler) { (void)scheduler; }
+size_t er_http_inflight_count(const er_scheduler* scheduler) {
+  (void)scheduler;
+  return 0;
 }

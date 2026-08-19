@@ -24,6 +24,7 @@ int vfprintf(FILE* stream, const char* fmt, va_list ap);
 int snprintf(char* dst, size_t cap, const char* fmt, ...);
 int vsnprintf(char* dst, size_t cap, const char* fmt, va_list ap);
 int fputc(int c, FILE* stream);
+int fgetc(FILE* stream);
 int putchar(int c);
 int puts(const char* s);
 int fflush(FILE* stream);

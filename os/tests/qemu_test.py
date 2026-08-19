@@ -15,13 +15,21 @@ READY = b"enki> "
 
 
 class Guest:
-    def __init__(self, qemu: str, kernel: str, *, command_line: str = "") -> None:
+    def __init__(
+        self,
+        qemu: str,
+        kernel: str,
+        *,
+        command_line: str = "",
+        memory: str = "1024M",
+    ) -> None:
+        machine = "pc,max-ram-below-4g=3072M" if memory == "3072M" else "q35"
         command = [
             qemu,
-            "-machine", "q35",
+            "-machine", machine,
             "-cpu", "max",
             "-smp", "1",
-            "-m", "1024M",
+            "-m", memory,
             "-kernel", kernel,
             "-display", "none",
             "-serial", "stdio",
@@ -168,7 +176,59 @@ def integration(qemu: str, kernel: str) -> None:
         if status != 1:
             raise AssertionError(f"unexpected QEMU debug-exit status {status}")
     finally:
-        if os.environ.get("ENKI_OS_TEST_TRANSCRIPT"):
+        if os.environ.get("ENKI_OS_TEST_TRANSCRIPT") or sys.exc_info()[0] is not None:
+            sys.stderr.buffer.write(guest.transcript)
+        guest.stop()
+
+
+def shrine_window(
+    guest: Guest,
+    line: bytes,
+    expected: bytes,
+    *,
+    timeout: float = 180,
+) -> bytes:
+    guest.send(line + b"\n")
+    window = guest.read_until(b"sept> ", timeout)
+    if expected not in window:
+        raise AssertionError(
+            f"expected {expected!r} after {line!r}, got {window[-8000:]!r}"
+        )
+    return window
+
+
+def shrine(qemu: str, kernel: str) -> None:
+    guest = Guest(qemu, kernel, command_line="shrine", memory="3072M")
+    try:
+        # This is a source-native cold boot: Reaver, the Helm dependency
+        # closure, and four Foil applications all compile inside QEMU.
+        guest.read_until(b"sept> ", 1800)
+        shrine_window(guest, b"(add 2 3)", b"value: 5")
+
+        shrine_window(guest, b":http GET /chat", b"HTTP 200")
+        shrine_window(guest, b":http GET /nenex", b"HTTP 200")
+        shrine_window(guest, b":http GET /ns/app/demo", b"HTTP 200")
+        shrine_window(guest, b":http GET /ns/app/life", b"HTTP 200")
+
+        shrine_window(
+            guest,
+            b":http POST /post/chat/log who=a&text=enki-os&back=%2Fchat",
+            b"HTTP 200",
+        )
+        shrine_window(guest, b":http GET /chat", b"enki-os")
+
+        shrine_window(guest, b"(add 1", b"error:")
+        shrine_window(guest, b"(add 4 5)", b"value: 9")
+        shrine_window(guest, b":t weft", b"passed", timeout=600)
+
+        guest.send(b":q\n")
+        guest.read_until(b"bye", 30)
+        guest.read_until(b"enki-os: halted", 30)
+        status = guest.process.wait(timeout=5)
+        if status != 1:
+            raise AssertionError(f"unexpected QEMU debug-exit status {status}")
+    finally:
+        if os.environ.get("ENKI_OS_TEST_TRANSCRIPT") or sys.exc_info()[0] is not None:
             sys.stderr.buffer.write(guest.transcript)
         guest.stop()
 
@@ -180,10 +240,13 @@ def main() -> int:
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--selftest", action="store_true")
     mode.add_argument("--integration", action="store_true")
+    mode.add_argument("--shrine", action="store_true")
     args = parser.parse_args()
     try:
         if args.selftest:
             selftest(args.qemu, args.kernel)
+        elif args.shrine:
+            shrine(args.qemu, args.kernel)
         else:
             integration(args.qemu, args.kernel)
     except Exception as error:

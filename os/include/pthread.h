@@ -29,5 +29,8 @@ int pthread_cond_signal(pthread_cond_t* cond);
 int pthread_cond_broadcast(pthread_cond_t* cond);
 int pthread_once(pthread_once_t* once, void (*routine)(void));
 pthread_t pthread_self(void);
+int pthread_create(pthread_t* thread, const void* attr,
+                   void* (*start)(void*), void* arg);
+int pthread_join(pthread_t thread, void** result);
 
 #endif

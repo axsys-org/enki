@@ -13,6 +13,7 @@ int atexit(void (*fn)(void));
 char* getenv(const char* name);
 long strtol(const char* s, char** end, int base);
 unsigned long strtoul(const char* s, char** end, int base);
+unsigned long long strtoull(const char* s, char** end, int base);
 double strtod(const char* s, char** end);
 void qsort(void* base, size_t count, size_t size,
            int (*compare)(const void*, const void*));

@@ -546,6 +546,8 @@ int snprintf(char* dst, size_t cap, const char* fmt, ...) {
 }
 
 int vfprintf(FILE* stream, const char* fmt, va_list ap) {
+  if (stream == stderr && !os_rplan_output_enabled())
+    return 0;
   format_out out = {.stream = stream};
   va_list copy;
   va_copy(copy, ap);
@@ -574,6 +576,11 @@ int fputc(int c, FILE* stream) {
   if (stream->kind != 3)
     os_serial_putc((char)c);
   return (unsigned char)c;
+}
+
+int fgetc(FILE* stream) {
+  unsigned char c;
+  return fread(&c, 1, 1, stream) == 1 ? c : EOF;
 }
 int putchar(int c) { return fputc(c, stdout); }
 int puts(const char* s) { fprintf(stdout, "%s\n", s); return 0; }
@@ -638,6 +645,25 @@ unsigned long strtoul(const char* s, char** end, int base) {
   while (isspace((unsigned char)*s)) s++;
   if (base == 0) base = 10;
   unsigned long value = 0;
+  const char* first = s;
+  for (;;) {
+    int digit;
+    if (isdigit((unsigned char)*s)) digit = *s - '0';
+    else if (*s >= 'a' && *s <= 'f') digit = *s - 'a' + 10;
+    else if (*s >= 'A' && *s <= 'F') digit = *s - 'A' + 10;
+    else break;
+    if (digit >= base) break;
+    value = value * (unsigned)base + (unsigned)digit;
+    s++;
+  }
+  if (end != NULL) *end = (char*)(s == first ? first : s);
+  return value;
+}
+
+unsigned long long strtoull(const char* s, char** end, int base) {
+  while (isspace((unsigned char)*s)) s++;
+  if (base == 0) base = 10;
+  unsigned long long value = 0;
   const char* first = s;
   for (;;) {
     int digit;
@@ -735,6 +761,10 @@ ssize_t write(int fd, const void* buf, size_t count) {
 }
 int isatty(int fd) { return fd >= 0 && fd <= 2; }
 unsigned sleep(unsigned seconds) { (void)seconds; return 0; }
+
+long sysconf(int name) {
+  return name == _SC_NPROCESSORS_ONLN ? 1 : -1;
+}
 
 static uint64_t fake_clock;
 int clock_gettime(int clock_id, struct timespec* ts) {

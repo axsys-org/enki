@@ -1,5 +1,6 @@
 #include <errno.h>
 #include <pthread.h>
+#include <stdio.h>
 
 int pthread_mutex_init(pthread_mutex_t* mutex, const pthread_mutexattr_t* attr) {
   (void)attr;
@@ -34,3 +35,14 @@ int pthread_once(pthread_once_t* once, void (*routine)(void)) {
   return 0;
 }
 pthread_t pthread_self(void) { return 1; }
+int pthread_create(pthread_t* thread, const void* attr,
+                   void* (*start)(void*), void* arg) {
+  (void)thread; (void)attr; (void)start; (void)arg;
+  fprintf(stderr, "unsupported on enki-os\n");
+  return ENOSYS;
+}
+int pthread_join(pthread_t thread, void** result) {
+  (void)thread; (void)result;
+  fprintf(stderr, "unsupported on enki-os\n");
+  return ENOSYS;
+}

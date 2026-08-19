@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "enki/actor.h"
 #include "enki/wisp.h"
 #include "os/boot.h"
 #include "os/loader.h"
@@ -22,6 +23,8 @@ typedef struct os_runtime {
   pl_store* store;
   pl_heap* heap;
   pl_thread* thread;
+  er_scheduler* scheduler;
+  er_actor* root_actor;
 } os_runtime;
 
 static pl_val runnable_pin(pl_val function) {
@@ -33,7 +36,8 @@ static pl_val runnable_pin(pl_val function) {
   }
 }
 
-static bool drive_call(pl_thread* thread, pl_val function, pl_val argument) {
+static bool drive_plain_call(pl_thread* thread, pl_val function,
+                             pl_val argument) {
   pl_thread_start_call_nf(thread, runnable_pin(function), argument);
   for (;;) {
     pl_run_status status = pl_thread_run(thread, UINT64_MAX);
@@ -47,8 +51,17 @@ static bool drive_call(pl_thread* thread, pl_val function, pl_val argument) {
   }
 }
 
-static bool run_saved_session(os_runtime* runtime, const uint8_t* input,
-                              size_t input_size) {
+static bool drive_runtime_call(os_runtime* runtime, pl_val function,
+                               pl_val argument) {
+  if (runtime->scheduler == NULL)
+    return drive_plain_call(runtime->thread, function, argument);
+  pl_thread_start_call_nf(runtime->thread, runnable_pin(function), argument);
+  return er_scheduler_drive(runtime->scheduler, runtime->root_actor) ==
+         ER_DRIVE_DONE;
+}
+
+static bool run_saved_session_mode(os_runtime* runtime, const uint8_t* input,
+                                   size_t input_size, bool then_serial) {
   uint8_t previous_root[32];
   if (!pl_store_get_root(runtime->store, previous_root)) {
     fprintf(stderr, "enki-os: volatile store has no Reaver root\n");
@@ -56,9 +69,13 @@ static bool run_saved_session(os_runtime* runtime, const uint8_t* input,
   }
   pl_val root = pl_store_load(runtime->thread, previous_root);
   runtime->thread->rplan_f = true;
-  os_rplan_set_input(input, input_size);
-  if (!drive_call(runtime->thread, root, 0)) {
+  if (then_serial)
+    os_rplan_set_input_then_serial(input, input_size);
+  else
+    os_rplan_set_input(input, input_size);
+  if (!drive_runtime_call(runtime, root, 0)) {
     (void)pl_store_put_root(runtime->store, previous_root);
+    os_rplan_set_output_enabled(true);
     fprintf(stderr, "enki-os: PLAN error: %s\n",
             runtime->thread->exn_msg != NULL
                 ? runtime->thread->exn_msg
@@ -66,6 +83,25 @@ static bool run_saved_session(os_runtime* runtime, const uint8_t* input,
     return false;
   }
   return true;
+}
+
+static bool run_saved_session(os_runtime* runtime, const uint8_t* input,
+                              size_t input_size) {
+  return run_saved_session_mode(runtime, input, input_size, false);
+}
+
+static bool enable_actors(os_runtime* runtime) {
+  runtime->scheduler = er_scheduler_new(
+      runtime->store,
+      (er_config){.quantum = 4096,
+                  .root_quantum = 4096,
+                  .heap_cells = 8192,
+                  .file_root_c = ""});
+  if (runtime->scheduler == NULL)
+    return false;
+  runtime->root_actor =
+      er_scheduler_adopt(runtime->scheduler, runtime->thread);
+  return runtime->root_actor != NULL;
 }
 
 static bool bootstrap(os_runtime* runtime) {
@@ -99,7 +135,7 @@ static bool bootstrap(os_runtime* runtime) {
       } else {
         wisp->t->rplan_f = true;
         os_rplan_set_input(NULL, 0);
-        ok = drive_call(wisp->t, main_function, 0);
+        ok = drive_plain_call(wisp->t, main_function, 0);
         if (!ok)
           fprintf(stderr, "enki-os: Reaver main failed: %s\n",
                   wisp->t->exn_msg != NULL ? wisp->t->exn_msg : "PLAN exception");
@@ -110,8 +146,10 @@ static bool bootstrap(os_runtime* runtime) {
   os_loader_free(loader);
   en_wisp_free(wisp);
   pl_heap_free(boot_heap);
-  if (!ok)
+  if (!ok) {
+    os_rplan_set_output_enabled(true);
     return false;
+  }
 
   runtime->heap = pl_heap_new(HEAP_CELLS, runtime->store);
   runtime->thread = pl_thread_new(runtime->heap);
@@ -179,6 +217,38 @@ static bool command_is_quit(const char* text, size_t size) {
     size--;
   }
   return size == 5 && memcmp(text, ":quit", 5) == 0;
+}
+
+static bool command_line_has(const char* command_line, const char* wanted) {
+  size_t wanted_size = strlen(wanted);
+  const char* cursor = command_line == NULL ? "" : command_line;
+  while (*cursor != '\0') {
+    while (*cursor == ' ' || *cursor == '\t')
+      cursor++;
+    const char* begin = cursor;
+    while (*cursor != '\0' && *cursor != ' ' && *cursor != '\t')
+      cursor++;
+    if ((size_t)(cursor - begin) == wanted_size &&
+        memcmp(begin, wanted, wanted_size) == 0)
+      return true;
+  }
+  return false;
+}
+
+static bool shrine(os_runtime* runtime) {
+  static const uint8_t boot[] =
+      "(#bind helm-repl (#module helm-repl))\n"
+      "(helm-repl:run-repl-serial 0)\n";
+  if (!enable_actors(runtime)) {
+    fprintf(stderr, "enki-os: unable to initialize actor runtime\n");
+    return false;
+  }
+  printf("enki-os: compiling Shrine core and bundled apps...\n");
+  /* Shrine's user interface writes fd 1 directly.  Keep compiler Trace,
+   * Output, Warn, and Print traffic off polling COM1: it is both internal
+   * noise and orders of magnitude slower than the in-guest compilation. */
+  os_rplan_set_output_enabled(false);
+  return run_saved_session_mode(runtime, boot, sizeof(boot) - 1, true);
 }
 
 static void repl(os_runtime* runtime) {
@@ -324,6 +394,19 @@ static void selftest(void) {
   if (jump_value != 7) abort();
   if (os_rom_find("plan/reaver.plan") == NULL) abort();
 
+  os_rom_child apps[4];
+  static const char* app_names[] = {"chat", "demo", "life", "nenex"};
+  if (os_rom_children("foil/apps", apps, 4) != 4) abort();
+  for (size_t i = 0; i < 4; i++)
+    if (!apps[i].folder || strlen(app_names[i]) != apps[i].name_size ||
+        memcmp(apps[i].name, app_names[i], apps[i].name_size) != 0)
+      abort();
+  if (os_rom_children("/", NULL, 0) == 0 ||
+      os_rom_children("foil/apps/chat", NULL, 0) == 0 ||
+      os_rom_children("foil/apps/missing", NULL, 0) != 0 ||
+      os_rom_children("foil/apps/../plan", NULL, 0) != 0)
+    abort();
+
   printf("ENKI_OS_SELFTEST_OK\n");
   os_qemu_exit(0);
   os_halt();
@@ -341,8 +424,11 @@ void os_boot_entry(uint32_t magic, uint32_t multiboot_address) {
   os_memory_init(boot.heap_begin, boot.heap_end);
   printf("enki-os: x86_64 bare metal, heap=%zu MiB\n",
          os_memory_available() >> 20);
-  if (strstr(boot.command_line, "selftest") != NULL)
+  if (command_line_has(boot.command_line, "selftest"))
     selftest();
+
+  bool shrine_mode = command_line_has(boot.command_line, "shrine");
+  os_arena_set_store_limit(shrine_mode ? (size_t)1 << 30 : (size_t)1 << 27);
 
   os_runtime runtime = {0};
   if (!bootstrap(&runtime)) {
@@ -350,7 +436,16 @@ void os_boot_entry(uint32_t magic, uint32_t multiboot_address) {
     os_qemu_exit(3);
     os_halt();
   }
-  repl(&runtime);
+  if (shrine_mode) {
+    printf("enki-os: Shrine mode (volatile, serial-only)\n");
+    if (!shrine(&runtime)) {
+      fprintf(stderr, "enki-os: Shrine failed\n");
+      os_qemu_exit(4);
+      os_halt();
+    }
+  } else {
+    repl(&runtime);
+  }
   printf("enki-os: halted\n");
   os_qemu_exit(0);
   os_halt();

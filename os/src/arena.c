@@ -3,6 +3,12 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+static size_t store_limit = (size_t)1 << 27;
+
+void os_arena_set_store_limit(size_t size) {
+  store_limit = size;
+}
+
 static ax_arena* arena_create(const ax_allocator* allocator, size_t cap) {
   if (allocator == NULL || cap > SIZE_MAX - sizeof(ax_arena))
     return NULL;
@@ -33,7 +39,12 @@ ax_arena* ax_arena_create_overcommit(size_t cap) {
    * has no demand paging, so cap those scratch reservations. The persistent
    * store's explicit 128 MiB request remains unchanged. */
   const size_t scratch_cap = (size_t)1 << 26;
-  if (cap > ((size_t)1 << 27))
+  /* The PLAN memory store is compiled with a 1 GiB ceiling so Shrine and the
+   * ordinary REPL can share one ELF.  The boot mode selects how much physical
+   * RAM that particular store actually claims. */
+  if (cap == ((size_t)1 << 30))
+    cap = store_limit;
+  else if (cap > ((size_t)1 << 27))
     cap = scratch_cap;
   return arena_create(ax_allocator_system(), cap);
 }

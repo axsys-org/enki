@@ -11,9 +11,9 @@ LLVM_NM ?= llvm-nm
 
 CLANG_RESOURCE := $(shell $(CC) -print-resource-dir)
 CPPFLAGS := -Iinclude -I$(ROOT)/pkg/axsys/include -I$(ROOT)/pkg/plan/include \
-	-I$(ROOT)/pkg/plan/src -I$(ROOT)/pkg/enki/include \
+	-I$(ROOT)/pkg/plan/src -I$(ROOT)/pkg/enki/include -I$(ROOT)/pkg/enki/src \
 	-isystem $(CLANG_RESOURCE)/include \
-	-D_GNU_SOURCE -D_Thread_local= -DPL_STORE_REGION_BYTES='(((size_t)1)<<27)'
+	-D_GNU_SOURCE -D_Thread_local= -DPL_STORE_REGION_BYTES='(((size_t)1)<<30)'
 CFLAGS := --target=x86_64-none-elf -std=c23 -O2 -g -ffreestanding -fno-builtin \
 	-fno-stack-protector -fno-pic -fno-pie -mno-red-zone -mcmodel=kernel \
 	-mgeneral-regs-only -Wall -Wextra -Wno-unused-function \
@@ -43,7 +43,7 @@ PLAN_SRCS := \
 	$(ROOT)/pkg/plan/src/store.c \
 	$(ROOT)/pkg/plan/src/xtract.c
 
-ENKI_SRCS := $(ROOT)/pkg/enki/src/wisp.c
+ENKI_SRCS := $(ROOT)/pkg/enki/src/actor.c $(ROOT)/pkg/enki/src/wisp.c
 
 OS_C_SRCS := \
 	src/arena.c src/boot.c src/gmp.c src/kernel.c src/libc.c src/loader.c \
@@ -63,7 +63,7 @@ OBJS := $(foreach s,$(ALL_C_SRCS),$(call objname,$(s))) \
 	$(foreach s,$(ALL_S_SRCS),$(call objname,$(s)))
 DEPS := $(OBJS:.o=.d)
 
-.PHONY: all run check test test-self clean check-reaver
+.PHONY: all run run-shrine check test test-self test-shrine clean check-reaver
 
 all: $(TARGET)
 
@@ -107,6 +107,12 @@ run: $(TARGET)
 		-display none -serial stdio -monitor none -no-reboot \
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04
 
+run-shrine: $(TARGET)
+	$(QEMU) -machine pc,max-ram-below-4g=3072M -cpu max -smp 1 \
+		-m 3072M -kernel $(TARGET) \
+		-append shrine -display none -serial stdio -monitor none -no-reboot \
+		-device isa-debug-exit,iobase=0xf4,iosize=0x04
+
 check: $(TARGET)
 	$(LLVM_READELF) -h $(TARGET) | grep -q 'Machine:.*Advanced Micro Devices X86-64'
 	$(LLVM_READELF) -l $(TARGET) | grep -q 'LOAD'
@@ -119,6 +125,9 @@ test-self: $(TARGET)
 
 test: check test-self
 	$(PYTHON) tests/qemu_test.py --qemu $(QEMU) --kernel $(TARGET) --integration
+
+test-shrine: check
+	$(PYTHON) tests/qemu_test.py --qemu $(QEMU) --kernel $(TARGET) --shrine
 
 clean:
 	rm -rf $(BUILD)
