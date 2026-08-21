@@ -983,8 +983,8 @@ static bool pl_eq_deep(pl_val a0, pl_val b0) {
         eq = false;
         break;
       }
-      pl_eq_push(&s, pl_law_name(pa), pl_law_name(pb));
       pl_eq_push(&s, pl_law_body(pa), pl_law_body(pb));
+      pl_eq_push(&s, pl_law_name(pa), pl_law_name(pb));
       break;
     }
     case PL_TAG_APP: {
@@ -994,9 +994,9 @@ static bool pl_eq_deep(pl_val a0, pl_val b0) {
         eq = false;
         break;
       }
+      for (uint32_t i = n; i > 0; i--)
+        pl_eq_push(&s, pl_app_args(pa)[i - 1], pl_app_args(pb)[i - 1]);
       pl_eq_push(&s, pl_app_head(pa), pl_app_head(pb));
-      for (uint32_t i = 0; i < n; i++)
-        pl_eq_push(&s, pl_app_args(pa)[i], pl_app_args(pb)[i]);
       break;
     }
     default:
