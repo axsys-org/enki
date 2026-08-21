@@ -33,12 +33,6 @@
 #define ARG(i) (t->vstack[ab + (i)])
 
 /* ── Small helpers ─────────────────────────────────────────────────────── */
-static pl_val pl_resolve(pl_val v) {
-  while (!pl_is_nat63(v) && pl_tag(v) == PL_TAG_DEFER &&
-         pl_hdr_kind(*pl_ptr(v)) == PL_K_IND)
-    v = pl_ind_target(pl_ptr(v));
-  return v;
-}
 
 /* Equal compares identity after both evaluator indirections and published
  * PIN-proxy indirections.  Save deliberately preserves the public proxy

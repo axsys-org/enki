@@ -331,6 +331,13 @@ static inline pl_val pl_ind_target(pl_cell* p) {
   return (pl_val)p[1];
 }
 
+static pl_val pl_resolve(pl_val v) {
+  while (!pl_is_nat63(v) && pl_tag(v) == PL_TAG_DEFER &&
+         pl_hdr_kind(*pl_ptr(v)) == PL_K_IND)
+    v = pl_ind_target(pl_ptr(v));
+  return v;
+}
+
 /* ── Convenience predicates (WHNF inputs) ──────────────────────────────── */
 
 static inline bool pl_is_nat(pl_val v) {
