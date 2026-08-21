@@ -645,6 +645,26 @@ TEST(ops, equal_deep_and_pin_identity) {
   ASSERT_EQ(test_op66_2(t, ax_s5('E', 'q', 'u', 'a', 'l'), t->vstack[base + 2],
                         t->vstack[base + 3]),
             1);
+
+  /* Save keeps the two public proxies distinct but deduplicates their
+   * canonical target.  Equal must chase that target before its identity
+   * check, including when only one operand is still the public proxy. */
+  char err[192] = {0};
+  ASSERT(
+      pl_store_save_root(rt.store, t->vstack[base + 2], NULL, err, sizeof(err)),
+      "%s", err);
+  ASSERT(
+      pl_store_save_root(rt.store, t->vstack[base + 3], NULL, err, sizeof(err)),
+      "%s", err);
+  pl_val canonical = pl_pin_proxy_target(pl_ptr(t->vstack[base + 2]));
+  ASSERT_NEQ(canonical, 0);
+  ASSERT_EQ(canonical, pl_pin_proxy_target(pl_ptr(t->vstack[base + 3])));
+  ASSERT_EQ(test_op66_2(t, ax_s5('E', 'q', 'u', 'a', 'l'), t->vstack[base + 2],
+                        t->vstack[base + 3]),
+            1);
+  ASSERT_EQ(test_op66_2(t, ax_s5('E', 'q', 'u', 'a', 'l'), t->vstack[base + 2],
+                        canonical),
+            1);
   test_rt_free(&rt);
 }
 
