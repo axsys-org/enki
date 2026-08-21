@@ -97,6 +97,9 @@ pl_store* pl_store_new_mem(void);
 pl_store* pl_store_new_lmdb(const char* path, size_t map_size);
 /* Canonical Silo streams in pins.pack, indexed by LMDB. */
 pl_store* pl_store_new_silo(const char* path, size_t map_size);
+/* Inspector open: MDB_RDONLY environment, pins.pack O_RDONLY.  Coexists
+ * with a live writer; every mutating store operation fails cleanly. */
+pl_store* pl_store_new_silo_ro(const char* path, size_t map_size);
 void pl_store_free(pl_store* s);
 
 /* Address-range test used by the collector (store vals are terminal).  The
@@ -158,6 +161,42 @@ void pl_memo_stats(uint64_t* probes, uint64_t* hits, uint64_t* records);
 /* Persist / fetch the root hash (event-log replay seam). */
 bool pl_store_put_root(pl_store* s, const uint8_t hash[32]);
 bool pl_store_get_root(pl_store* s, uint8_t hash[32]);
+
+/*
+ * Root journal (Silo only).  Every root publication appends an entry in
+ * the transaction that commits it: the root hash, the wall clock, and
+ * the pins.pack size at publication — consecutive pack sizes give the
+ * bytes each snapshot appended.  Pre-journal stores read as empty.
+ */
+typedef struct pl_store_root_entry {
+  uint64_t seq; /* 1-based, ascending */
+  uint8_t hash[32];
+  uint64_t unix_ns;
+  uint64_t pack_bytes;
+} pl_store_root_entry;
+
+/* Highest journal sequence number, or 0 when the journal is empty. */
+uint64_t pl_store_root_log_head(pl_store* s);
+/* Fill `out` with up to `cap` entries ascending from seq >= from;
+ * returns the count written. */
+size_t pl_store_root_log(pl_store* s, uint64_t from, pl_store_root_entry* out,
+                         size_t cap);
+
+/* Inspector access to the persisted object graph (Silo only): these read
+ * the LMDB index and stream headers, never the evaluator heap. */
+
+/* Visit every indexed object (hash order) with its pack placement. */
+typedef void (*pl_store_silo_object_fn)(void* ctx, const uint8_t hash[32],
+                                        uint64_t off, uint64_t len);
+size_t pl_store_silo_objects(pl_store* s, pl_store_silo_object_fn fn,
+                             void* ctx);
+
+/* Stream length and direct subpin hashes of one stored object.  On
+ * success *out_subpins is malloc'd (NULL when *out_nsub == 0); the
+ * caller frees it. */
+bool pl_store_silo_object_info(pl_store* s, const uint8_t hash[32],
+                               uint64_t* out_len, pl_hash** out_subpins,
+                               size_t* out_nsub, char* err, size_t err_cap);
 
 /* Runtime singletons used by lazy Row construction (see op.c). */
 pl_val pl_store_ix0_expr(pl_store* s);

@@ -55,8 +55,14 @@ uint64_t pl_nat_limb_at(pl_val v, size_t i) {
 
 int pl_nat_cmp(pl_val a, pl_val b) {
   mp_limb_t ta, tb;
-  pl_limbs la = pl_limb_view(&a, &ta);
-  pl_limbs lb = pl_limb_view(&b, &tb);
+  pl_val va = pl_resolve(a);
+  pl_val vb = pl_resolve(b);
+  if (va == vb) {
+    return 0;
+  }
+  pl_limbs la = pl_limb_view(&va, &ta);
+  pl_limbs lb = pl_limb_view(&vb, &tb);
+
   if (la.n != lb.n)
     return la.n < lb.n ? -1 : 1;
   if (la.n == 0)

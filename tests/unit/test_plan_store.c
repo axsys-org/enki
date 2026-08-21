@@ -1744,3 +1744,156 @@ TEST(store, chrome_json_profiles_slow_store_operations) {
   ASSERT_EQ(unlink(db_path), 0);
   ASSERT_EQ(rmdir(dir), 0);
 }
+
+TEST(store, silo_root_journal_records_publications) {
+  char dir[64];
+  snprintf(dir, sizeof(dir), "/tmp/enki-test-silo-journal-%lu",
+           (unsigned long)getpid());
+  ASSERT(mkdir(dir, 0700) == 0 || errno == EEXIST);
+  pl_store* s = mk_silo(dir);
+  ASSERT_NOT_NULL(s);
+  pl_heap* h = pl_heap_new(1 << 16, s);
+  pl_thread* t = pl_thread_new(h);
+  char err[192] = {0};
+
+  ASSERT_EQ(pl_store_root_log_head(s), 0);
+
+  uint8_t first[32], second[32];
+  pl_vpush(t, 1);
+  pl_val pin1 = pl_pin(t, t->vstack[t->vsp - 1]);
+  pl_vpush(t, pin1);
+  ASSERT(pl_store_save_root(s, pin1, first, err, sizeof(err)), "%s", err);
+  ASSERT_EQ(pl_store_root_log_head(s), 1);
+
+  /* Republishing an unchanged root appends nothing. */
+  pl_val again = t->vstack[t->vsp - 1];
+  ASSERT(pl_store_save_root(s, again, NULL, err, sizeof(err)), "%s", err);
+  ASSERT_EQ(pl_store_root_log_head(s), 1);
+
+  pl_vpush(t, 2);
+  pl_val pin2 = pl_pin(t, t->vstack[t->vsp - 1]);
+  ASSERT(pl_store_save_root(s, pin2, second, err, sizeof(err)), "%s", err);
+  ASSERT_EQ(pl_store_root_log_head(s), 2);
+
+  pl_store_root_entry entries[4];
+  ASSERT_EQ(pl_store_root_log(s, 1, entries, 4), 2);
+  ASSERT_EQ(entries[0].seq, 1);
+  ASSERT_EQ(memcmp(entries[0].hash, first, 32), 0);
+  ASSERT_GT(entries[0].unix_ns, 0);
+  ASSERT_GT(entries[0].pack_bytes, 0);
+  ASSERT_EQ(entries[1].seq, 2);
+  ASSERT_EQ(memcmp(entries[1].hash, second, 32), 0);
+  ASSERT_GTE(entries[1].pack_bytes, entries[0].pack_bytes);
+
+  char path[96];
+  struct stat st;
+  snprintf(path, sizeof(path), "%s/pins.pack", dir);
+  ASSERT_EQ(stat(path, &st), 0);
+  ASSERT_EQ((uint64_t)st.st_size, entries[1].pack_bytes);
+
+  /* The replay seam journals too — but only actual root changes. */
+  ASSERT(pl_store_put_root(s, first));
+  ASSERT_EQ(pl_store_root_log_head(s), 3);
+  ASSERT(pl_store_put_root(s, first));
+  ASSERT_EQ(pl_store_root_log_head(s), 3);
+  ASSERT_EQ(pl_store_root_log(s, 3, entries, 4), 1);
+  ASSERT_EQ(entries[0].seq, 3);
+  ASSERT_EQ(memcmp(entries[0].hash, first, 32), 0);
+
+  pl_thread_free(t);
+  pl_heap_free(h);
+  pl_store_free(s);
+  cleanup_store_dir(dir, true);
+}
+
+TEST(store, silo_read_only_open_inspects_the_store) {
+  char dir[64];
+  snprintf(dir, sizeof(dir), "/tmp/enki-test-silo-ro-%lu",
+           (unsigned long)getpid());
+  ASSERT(mkdir(dir, 0700) == 0 || errno == EEXIST);
+
+  uint8_t hash[32];
+  pl_store* rw = mk_silo(dir);
+  ASSERT_NOT_NULL(rw);
+  pin_sample(rw, hash);
+  pl_store_free(rw);
+
+  pl_store* s = pl_store_new_silo_ro(dir, (size_t)64 << 20);
+  ASSERT_NOT_NULL(s);
+  uint8_t root[32];
+  ASSERT(pl_store_get_root(s, root));
+  ASSERT_EQ(memcmp(root, hash, 32), 0);
+  ASSERT_EQ(pl_store_root_log_head(s), 1);
+
+  /* Loading works read-only… */
+  pl_heap* h = pl_heap_new(1 << 16, s);
+  pl_thread* t = pl_thread_new(h);
+  pl_val pin = pl_store_load(t, hash);
+  ASSERT_EQ(memcmp(pl_pin_hash(pin), hash, 32), 0);
+
+  /* …while every mutation path fails cleanly. */
+  char err[192] = {0};
+  pl_silo_batch* batch = NULL;
+  ASSERT_FALSE(pl_store_silo_batch_begin(s, &batch, err, sizeof(err)));
+  ASSERT_NULL(batch);
+  ASSERT_FALSE(pl_store_put_root(s, hash));
+  size_t base = t->vsp;
+  pl_vpush(t, 7);
+  pl_val fresh = pl_pin(t, t->vstack[base]);
+  uint8_t fresh_hash[32];
+  ASSERT_FALSE(pl_store_save_root(s, fresh, fresh_hash, err, sizeof(err)));
+
+  pl_thread_free(t);
+  pl_heap_free(h);
+  pl_store_free(s);
+  cleanup_store_dir(dir, true);
+}
+
+TEST(store, silo_object_info_reports_stream_and_subpins) {
+  char dir[64];
+  snprintf(dir, sizeof(dir), "/tmp/enki-test-silo-info-%lu",
+           (unsigned long)getpid());
+  ASSERT(mkdir(dir, 0700) == 0 || errno == EEXIST);
+  pl_store* s = mk_silo(dir);
+  ASSERT_NOT_NULL(s);
+  pl_heap* h = pl_heap_new(1 << 16, s);
+  pl_thread* t = pl_thread_new(h);
+
+  size_t base = t->vsp;
+  pl_vpush(t, 42);
+  t->vstack[base] = pl_pin(t, t->vstack[base]);
+  pl_vpush(t, test_app2(t, 0, t->vstack[base], 5));
+  pl_val root = pl_pin(t, t->vstack[base + 1]);
+  char err[192] = {0};
+  uint8_t hash[32];
+  ASSERT(pl_store_save_root(s, root, hash, err, sizeof(err)), "%s", err);
+  const uint8_t* inner_hash = pl_pin_hash(t->vstack[base]);
+  ASSERT_NOT_NULL(inner_hash);
+
+  uint64_t len = 0;
+  pl_hash* subs = NULL;
+  size_t nsub = 0;
+  ASSERT(
+      pl_store_silo_object_info(s, hash, &len, &subs, &nsub, err, sizeof(err)),
+      "%s", err);
+  ASSERT_GT(len, 0);
+  ASSERT_EQ(nsub, 1);
+  ASSERT_EQ(memcmp(subs[0].b, inner_hash, 32), 0);
+  free(subs);
+
+  ASSERT(pl_store_silo_object_info(s, inner_hash, &len, &subs, &nsub, err,
+                                   sizeof(err)),
+         "%s", err);
+  ASSERT_GT(len, 0);
+  ASSERT_EQ(nsub, 0);
+  ASSERT_NULL(subs);
+
+  uint8_t missing[32] = {0xff};
+  ASSERT_FALSE(pl_store_silo_object_info(s, missing, &len, &subs, &nsub, err,
+                                         sizeof(err)));
+
+  pl_thread_free(t);
+  pl_heap_free(h);
+  pl_store_free(s);
+  cleanup_store_dir(dir, true);
+}

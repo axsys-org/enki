@@ -33,11 +33,14 @@
 #define ARG(i) (t->vstack[ab + (i)])
 
 /* ── Small helpers ─────────────────────────────────────────────────────── */
-static pl_val pl_resolve(pl_val v) {
-  while (!pl_is_nat63(v) && pl_tag(v) == PL_TAG_DEFER &&
-         pl_hdr_kind(*pl_ptr(v)) == PL_K_IND)
-    v = pl_ind_target(pl_ptr(v));
-  return v;
+
+/* Equal compares identity after both evaluator indirections and published
+ * PIN-proxy indirections.  Save deliberately preserves the public proxy
+ * values while making equal proxies point at one canonical store PIN; chase
+ * that target here so those values still take Equal's pointer fast path. */
+static pl_val pl_eq_resolve_pin(pl_val v) {
+  pl_val target = pl_pin_proxy_target(pl_ptr(v));
+  return target != 0 ? target : v;
 }
 
 /* ── op 0 / shared bodies ──────────────────────────────────────────────── */
@@ -956,6 +959,10 @@ static bool pl_eq_deep(pl_val a0, pl_val b0) {
     }
     switch (pl_tag(a)) {
     case PL_TAG_PIN: {
+      a = pl_eq_resolve_pin(a);
+      b = pl_eq_resolve_pin(b);
+      if (a == b)
+        break;
       const uint8_t* ah = pl_pin_hash(a);
       const uint8_t* bh = pl_pin_hash(b);
       if (ah != NULL && bh != NULL)
@@ -970,8 +977,8 @@ static bool pl_eq_deep(pl_val a0, pl_val b0) {
         eq = false;
         break;
       }
-      pl_eq_push(&s, pl_law_name(pa), pl_law_name(pb));
       pl_eq_push(&s, pl_law_body(pa), pl_law_body(pb));
+      pl_eq_push(&s, pl_law_name(pa), pl_law_name(pb));
       break;
     }
     case PL_TAG_APP: {
@@ -981,9 +988,9 @@ static bool pl_eq_deep(pl_val a0, pl_val b0) {
         eq = false;
         break;
       }
+      for (uint32_t i = n; i > 0; i--)
+        pl_eq_push(&s, pl_app_args(pa)[i - 1], pl_app_args(pb)[i - 1]);
       pl_eq_push(&s, pl_app_head(pa), pl_app_head(pb));
-      for (uint32_t i = 0; i < n; i++)
-        pl_eq_push(&s, pl_app_args(pa)[i], pl_app_args(pb)[i]);
       break;
     }
     default:
