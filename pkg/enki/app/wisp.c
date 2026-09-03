@@ -62,9 +62,13 @@ typedef struct boot_ctx {
   bool emit_top_level_f;
 } boot_ctx;
 
-static void boot_trace_env(pl_root_visit visit, void* gc_ctx,
+static void boot_trace_env(boot_ctx* ctx, pl_root_visit visit, void* gc_ctx,
                            en_env_entry* env) {
+#ifndef PL_CACHE_STATS
+  (void)ctx;
+#endif
   for (en_env_entry* e = env; e != NULL; e = e->next) {
+    pl_cache_stat_env_roots(ctx->w->t, 2);
     visit(&e->key_v, gc_ctx);
     visit(&e->val_v, gc_ctx);
   }
@@ -74,10 +78,10 @@ static void boot_roots(pl_root_visit visit, void* gc_ctx, void* src_ctx) {
   boot_ctx* ctx = src_ctx;
   for (boot_module* mod = ctx->mod_v; mod != NULL; mod = mod->next) {
     visit(&mod->key_v, gc_ctx);
-    boot_trace_env(visit, gc_ctx, mod->env);
+    boot_trace_env(ctx, visit, gc_ctx, mod->env);
   }
   for (size_t i = 0; i < ctx->tmp_env_s; i++)
-    boot_trace_env(visit, gc_ctx, ctx->tmp_env_v[i]);
+    boot_trace_env(ctx, visit, gc_ctx, ctx->tmp_env_v[i]);
 }
 
 static void boot_env_root_push(boot_ctx* ctx, en_env_entry* env) {
@@ -106,11 +110,23 @@ static void boot_env_free(boot_ctx* ctx, en_env_entry* env) {
   }
 }
 
-static en_env_entry* boot_env_find(en_env_entry* env, pl_val key) {
+static en_env_entry* boot_env_find(boot_ctx* ctx, en_env_entry* env,
+                                   pl_val key) {
+#ifndef PL_CACHE_STATS
+  (void)ctx;
+#else
+  size_t probes = 0;
+#endif
   for (en_env_entry* e = env; e != NULL; e = e->next) {
-    if (pl_nat_eq(e->key_v, key))
+#ifdef PL_CACHE_STATS
+    probes++;
+#endif
+    if (pl_nat_eq(e->key_v, key)) {
+      pl_cache_stat_env_lookup(ctx->w->t, probes, true);
       return e;
+    }
   }
+  pl_cache_stat_env_lookup(ctx->w->t, probes, false);
   return NULL;
 }
 
@@ -118,6 +134,7 @@ static en_env_entry* boot_env_clone(boot_ctx* ctx, en_env_entry* env) {
   en_env_entry* head = NULL;
   en_env_entry** tail = &head;
   for (en_env_entry* e = env; e != NULL; e = e->next) {
+    pl_cache_stat_env_clone(ctx->w->t);
     en_env_entry* copy = ax_calloc(ctx->loc_a, en_env_entry, 1);
     if (copy == NULL)
       return NULL;
@@ -130,12 +147,13 @@ static en_env_entry* boot_env_clone(boot_ctx* ctx, en_env_entry* env) {
 }
 
 static bool boot_env_put(boot_ctx* ctx, en_env_entry** env, en_env_entry* src) {
-  en_env_entry* old = boot_env_find(*env, src->key_v);
+  en_env_entry* old = boot_env_find(ctx, *env, src->key_v);
   if (old != NULL) {
     old->val_v = src->val_v;
     old->mac_f = src->mac_f;
     return true;
   }
+  pl_cache_stat_env_clone(ctx->w->t);
   en_env_entry* copy = ax_calloc(ctx->loc_a, en_env_entry, 1);
   if (copy == NULL)
     return false;

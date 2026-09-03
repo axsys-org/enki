@@ -190,7 +190,7 @@ static inline uint64_t pl_tag_for_kind(pl_kind k) {
 #define PL_THUNK_CELLS      3u
 #define PL_ENV_CELLS(n)     (1u + (uint32_t)(n))
 #define PL_IND_CELLS        2u
-#define PL_THKE_CELLS(n)    (3u + (uint32_t)(n))
+#define PL_THKE_CELLS(n)    (2u + (uint32_t)(n))
 
 /* K_NAT { hdr(meta=used limbs); limb[..] } — mpn limbs, little-endian. */
 static inline uint32_t pl_nat_limbs(pl_cell* p) {
@@ -310,23 +310,19 @@ static inline pl_val pl_thunk_expr(pl_cell* p) {
   return (pl_val)p[2];
 }
 
-/* K_THKE { hdr; env; exec; ...items; } */
-static inline pl_val pl_thke_env(pl_cell* p) {
-  return (pl_val)p[1];
-}
-
+/* K_THKE { hdr; bane; arg[n]; } */
 /* The full bane word: low 3 bits the bane, bit 3 NOUPD, bits >= 8 a
  * strict-entry mask hint (FAST only). */
 static inline uint64_t pl_thke_bane(pl_cell* p) {
-  return (uint64_t)p[2];
+  return (uint64_t)p[1];
 }
 
 static inline uint32_t pl_thke_n(pl_cell* p) {
-  return pl_hdr_cells(p[0]) - 3u;
+  return pl_hdr_cells(p[0]) - 2u;
 }
 
 static inline pl_val* pl_thke_args(pl_cell* p) {
-  return (pl_val*)(p + 3);
+  return (pl_val*)(p + 2);
 }
 
 /* K_ENV { hdr(n=cells-1); slot[n] } — law activation [self, args…, binds…]. */

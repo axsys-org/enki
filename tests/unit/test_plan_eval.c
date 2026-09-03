@@ -172,7 +172,7 @@ TEST(apply, slow_bytecode_thunk_applies_unknown_arity) {
   pl_vpush(t, 5);
   pl_vpush(t, test_throwing(t, 7));
   pl_gc_reserve(t, PL_THKE_CELLS(3));
-  pl_val thke = pl_mk_thke(t, 0, PL_BAN_SLOW, 3, &t->vstack[base]);
+  pl_val thke = pl_mk_thke(t, PL_BAN_SLOW, 3, &t->vstack[base]);
   t->vsp = base;
 
   ASSERT_EQ(pl_whnf(t, thke), 5);
@@ -187,7 +187,7 @@ TEST(apply, fast_bytecode_thunk_applies_deferred_head) {
   pl_vpush(t, 5);
   pl_vpush(t, test_throwing(t, 7));
   pl_gc_reserve(t, PL_THKE_CELLS(3));
-  pl_val thke = pl_mk_thke(t, 0, PL_BAN_FAST, 3, &t->vstack[base]);
+  pl_val thke = pl_mk_thke(t, PL_BAN_FAST, 3, &t->vstack[base]);
   t->vsp = base;
 
   ASSERT_EQ(pl_whnf(t, thke), 5);
@@ -202,7 +202,7 @@ TEST(apply, slow_thke_under_applied_builds_flat_app) {
   pl_vpush(t, 5);
   pl_vpush(t, 6);
   pl_gc_reserve(t, PL_THKE_CELLS(3));
-  pl_val thke = pl_mk_thke(t, 0, PL_BAN_SLOW, 3, &t->vstack[base]);
+  pl_val thke = pl_mk_thke(t, PL_BAN_SLOW, 3, &t->vstack[base]);
   t->vsp = base;
 
   pl_val r = pl_whnf(t, thke);
@@ -223,7 +223,7 @@ TEST(apply, slow_thke_under_applied_partial_head_stays_flat) {
   pl_vpush(t, test_app1(t, t->vstack[base], 5)); /* (K3 5), need 2 */
   pl_vpush(t, 6);
   pl_gc_reserve(t, PL_THKE_CELLS(2));
-  pl_val thke = pl_mk_thke(t, 0, PL_BAN_SLOW, 2, &t->vstack[base + 1]);
+  pl_val thke = pl_mk_thke(t, PL_BAN_SLOW, 2, &t->vstack[base + 1]);
   t->vsp = base + 1;
 
   /* the result must extend the spine (flat), not nest an app head */
@@ -244,7 +244,7 @@ TEST(apply, slow_thke_data_head_extends_row) {
   pl_vpush(t, test_app2(t, 0, 7, 8)); /* the row [7 8] */
   pl_vpush(t, 9);
   pl_gc_reserve(t, PL_THKE_CELLS(2));
-  pl_val thke = pl_mk_thke(t, 0, PL_BAN_SLOW, 2, &t->vstack[base]);
+  pl_val thke = pl_mk_thke(t, PL_BAN_SLOW, 2, &t->vstack[base]);
   t->vsp = base;
 
   /* snoc onto a row: [7 8 9], still flat and 0-headed */
@@ -265,7 +265,7 @@ TEST(apply, slow_thke_splices_partial_app_head) {
   pl_vpush(t, test_app1(t, test_law(t, 2, 0, 1), 5));
   pl_vpush(t, 9);
   pl_gc_reserve(t, PL_THKE_CELLS(2));
-  pl_val thke = pl_mk_thke(t, 0, PL_BAN_SLOW, 2, &t->vstack[base]);
+  pl_val thke = pl_mk_thke(t, PL_BAN_SLOW, 2, &t->vstack[base]);
   t->vsp = base;
 
   ASSERT_EQ(pl_whnf(t, thke), 5);
@@ -325,7 +325,7 @@ TEST(apply, tailcall_loops_in_constant_frame_space) {
   pl_vpush(t, pin);
   pl_vpush(t, 5);
   pl_gc_reserve(t, PL_THKE_CELLS(2));
-  pl_val thke = pl_mk_thke(t, 0, PL_BAN_FAST, 2, &t->vstack[base]);
+  pl_val thke = pl_mk_thke(t, PL_BAN_FAST, 2, &t->vstack[base]);
   t->vsp = base;
   pl_thread_start(t, thke);
   for (int i = 0; i < 200; i++)
@@ -349,7 +349,7 @@ TEST(apply, slow_thke_over_applied_order) {
   pl_vpush(t, 6);
   pl_vpush(t, 7);
   pl_gc_reserve(t, PL_THKE_CELLS(5));
-  pl_val thke = pl_mk_thke(t, 0, PL_BAN_SLOW, 5, &t->vstack[base]);
+  pl_val thke = pl_mk_thke(t, PL_BAN_SLOW, 5, &t->vstack[base]);
   t->vsp = base;
 
   ASSERT_EQ(pl_whnf(t, thke), 6);
@@ -962,7 +962,7 @@ static pl_val test_run_call1(pl_thread* t, pl_val pin, pl_val arg) {
   pl_vpush(t, pin);
   pl_vpush(t, arg);
   pl_gc_reserve(t, PL_THKE_CELLS(2));
-  pl_val thke = pl_mk_thke(t, 0, PL_BAN_FAST, 2, &t->vstack[base]);
+  pl_val thke = pl_mk_thke(t, PL_BAN_FAST, 2, &t->vstack[base]);
   t->vsp = base;
   pl_thread_start(t, thke);
   pl_run_status s;
@@ -1024,7 +1024,7 @@ TEST(exec, br_selects_arm_and_bounds) {
   pl_vpush(t, t->vstack[base]);
   pl_vpush(t, 2);
   pl_gc_reserve(t, PL_THKE_CELLS(2));
-  pl_val thke = pl_mk_thke(t, 0, PL_BAN_FAST, 2, &t->vstack[mark]);
+  pl_val thke = pl_mk_thke(t, PL_BAN_FAST, 2, &t->vstack[mark]);
   t->vsp = mark;
   pl_thread_start(t, thke);
   pl_run_status s;
@@ -1046,7 +1046,7 @@ TEST(exec, jmp_loop_stays_preemptable) {
   pl_vpush(t, t->vstack[base]);
   pl_vpush(t, 5);
   pl_gc_reserve(t, PL_THKE_CELLS(2));
-  pl_val thke = pl_mk_thke(t, 0, PL_BAN_FAST, 2, &t->vstack[base + 1]);
+  pl_val thke = pl_mk_thke(t, PL_BAN_FAST, 2, &t->vstack[base + 1]);
   t->vsp = base + 1;
   pl_thread_start(t, thke);
   for (int i = 0; i < 50; i++)
@@ -1092,8 +1092,8 @@ TEST(exec, noupd_thke_reevaluates) {
   pl_gc_reserve(t, 2 * PL_THKE_CELLS(2));
   PL_GC_FORBID(t);
   pl_val no_upd =
-      pl_mk_thke(t, 0, PL_BAN_FAST | PL_BAN_NOUPD, 2, &t->vstack[base + 1]);
-  pl_val upd = pl_mk_thke(t, 0, PL_BAN_FAST, 2, &t->vstack[base + 1]);
+      pl_mk_thke(t, PL_BAN_FAST | PL_BAN_NOUPD, 2, &t->vstack[base + 1]);
+  pl_val upd = pl_mk_thke(t, PL_BAN_FAST, 2, &t->vstack[base + 1]);
   PL_GC_ALLOW(t);
   t->vsp = base + 1;
   pl_vpush(t, no_upd);
@@ -1180,7 +1180,7 @@ TEST(exec, strict_entry_dual_entrypoints) {
   pl_vpush(t, t->vstack[base]);
   pl_vpush(t, test_throwing(t, 77));
   pl_gc_reserve(t, PL_THKE_CELLS(2));
-  pl_val thke = pl_mk_thke(t, 0, PL_BAN_FAST, 2, &t->vstack[base + 1]);
+  pl_val thke = pl_mk_thke(t, PL_BAN_FAST, 2, &t->vstack[base + 1]);
   t->vsp = base + 1;
   pl_thread_start(t, thke);
   while ((s = pl_thread_run(t, 100000)) == PL_RUN_YIELDED)
@@ -1190,7 +1190,7 @@ TEST(exec, strict_entry_dual_entrypoints) {
   pl_vpush(t, t->vstack[base]);
   pl_vpush(t, test_throwing(t, 77));
   pl_gc_reserve(t, PL_THKE_CELLS(2));
-  thke = pl_mk_thke(t, 0, PL_BAN_FAST | (1u << 8), 2, &t->vstack[base + 1]);
+  thke = pl_mk_thke(t, PL_BAN_FAST | (1u << 8), 2, &t->vstack[base + 1]);
   t->vsp = base + 1;
   pl_thread_start(t, thke);
   while ((s = pl_thread_run(t, 100000)) == PL_RUN_YIELDED)
@@ -1201,7 +1201,7 @@ TEST(exec, strict_entry_dual_entrypoints) {
   pl_vpush(t, t->vstack[base]);
   pl_vpush(t, test_throwing(t, 77));
   pl_gc_reserve(t, PL_THKE_CELLS(2));
-  thke = pl_mk_thke(t, 0, PL_BAN_FAST | (2u << 8), 2, &t->vstack[base + 1]);
+  thke = pl_mk_thke(t, PL_BAN_FAST | (2u << 8), 2, &t->vstack[base + 1]);
   t->vsp = base + 1;
   pl_thread_start(t, thke);
   while ((s = pl_thread_run(t, 100000)) == PL_RUN_YIELDED)

@@ -43,6 +43,7 @@ static pl_val en_local_nam(en_wisp* w, const en_local* l) {
 static void en_wisp_roots(pl_root_visit visit, void* gc_ctx, void* src_ctx) {
   en_wisp* w = src_ctx;
   for (en_env_entry* e = w->env; e != NULL; e = e->next) {
+    pl_cache_stat_env_roots(w->t, 2);
     visit(&e->key_v, gc_ctx);
     visit(&e->val_v, gc_ctx);
   }
@@ -547,12 +548,23 @@ pl_val en_wisp_parse(en_wisp* w, char** str_c) {
 /* ── Environment ───────────────────────────────────────────────────────── */
 
 en_env_entry* en_wisp_getenv(en_wisp* w, pl_val key) {
-  if (!en_is_nat(key))
+  if (!en_is_nat(key)) {
+    pl_cache_stat_env_lookup(w->t, 0, false);
     return NULL;
-  for (en_env_entry* e = w->env; e != NULL; e = e->next) {
-    if (pl_nat_eq(e->key_v, key))
-      return e;
   }
+#ifdef PL_CACHE_STATS
+  size_t probes = 0;
+#endif
+  for (en_env_entry* e = w->env; e != NULL; e = e->next) {
+#ifdef PL_CACHE_STATS
+    probes++;
+#endif
+    if (pl_nat_eq(e->key_v, key)) {
+      pl_cache_stat_env_lookup(w->t, probes, true);
+      return e;
+    }
+  }
+  pl_cache_stat_env_lookup(w->t, probes, false);
   return NULL;
 }
 
