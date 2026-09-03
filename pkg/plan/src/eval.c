@@ -59,6 +59,49 @@ static _Thread_local char pl_msgbuf[256];
   pl_raise_msg(t, pl_msgbuf);
 }
 
+static void pl_restore_thke(pl_val thke) {
+  pl_cell* p = pl_ptr(thke);
+  ax_assume(pl_hdr_kind(p[0]) == PL_K_THKE,
+            "unwound update target is not a THKE");
+  ax_assume((pl_hdr_flags(p[0]) & PL_F_HOLE) != 0,
+            "unwound THKE is not blackholed");
+  uint32_t flags = pl_hdr_flags(p[0]) & ~PL_F_HOLE;
+  p[0] = pl_hdr_make(PL_K_THKE, flags, pl_hdr_meta(p[0]), pl_hdr_cells(p[0]));
+}
+
+/* Roll back the in-place blackholes owned by frames that an exception or
+ * abandoned computation is about to discard.  Coalesced update slices are
+ * suffixes of ustack, so reverse frame order also releases them in LIFO
+ * order. */
+static void pl_unwind_frames(pl_thread* t, size_t base) {
+  ax_assume(base <= t->fsp, "frame unwind below live stack");
+  for (size_t i = t->fsp; i > base; i--) {
+    pl_frame* fr = &t->fstack[i - 1];
+    if (fr->kind == PL_F_UPDATE) {
+      pl_cell* p = pl_ptr(fr->a);
+      ax_assume(pl_hdr_kind(p[0]) == PL_K_BH,
+                "unwound legacy thunk is not blackholed");
+      p[0] = pl_hdr_make(PL_K_THUNK, pl_hdr_flags(p[0]), pl_hdr_meta(p[0]),
+                         pl_hdr_cells(p[0]));
+      p[2] = fr->b;
+      continue;
+    }
+    if (fr->kind != PL_F_UPD)
+      continue;
+    if (fr->argc == 1) {
+      pl_restore_thke(fr->a);
+      continue;
+    }
+    ax_assume(fr->argc >= 2 && (size_t)fr->argbase + fr->argc - 1 == t->usp,
+              "coalesced update stack is not a frame suffix");
+    for (size_t j = fr->argc - 1; j > 0; j--)
+      pl_restore_thke(t->ustack[(size_t)fr->argbase + j - 1]);
+    pl_restore_thke(fr->a);
+    t->usp = fr->argbase;
+  }
+  t->fsp = base;
+}
+
 void pl_catch_init(pl_thread* t, pl_catch* c) {
   c->prev = t->handler;
   c->vsp = t->vsp;
@@ -76,7 +119,7 @@ void pl_catch_unwind(pl_thread* t, pl_catch* c) {
   t->handler = c->prev;
   pl_profile_pause_all(t);
   t->vsp = c->vsp;
-  t->fsp = c->fsp;
+  pl_unwind_frames(t, c->fsp);
   pl_profile_drop_since_paused(t, c->profile_mark);
   t->centry_depth = c->centry; /* longjmp skipped the region epilogues */
   if (t->centry_depth > 0 || t->suspendable)
@@ -524,6 +567,37 @@ static bool pl_yield_now(pl_thread* t) {
   return false;
 }
 
+/* Consecutive THKE updates all receive the same result.  Keep the common
+ * singleton in its ordinary frame; on the second update, turn that frame into
+ * a marker for a dense ustack suffix and append subsequent targets there. */
+static void pl_push_thke_update(pl_thread* t, size_t base, pl_val thke) {
+  if (t->fsp > base) {
+    pl_frame* fr = &t->fstack[t->fsp - 1];
+    if (fr->kind == PL_F_UPD) {
+      ax_assume(fr->argc < UINT32_MAX, "update chain is too large");
+      if (fr->argc == 1) {
+        size_t start = t->usp;
+        pl_upush(t, thke);
+        fr->argbase = (uint32_t)start;
+        fr->argc = 2;
+      } else {
+        ax_assume(fr->argc >= 2 && (size_t)fr->argbase + fr->argc - 1 == t->usp,
+                  "coalesced update stack is not a frame suffix");
+        pl_upush(t, thke);
+        fr->argc++;
+      }
+      pl_cache_stat_upd_push(t, fr->argc);
+      return;
+    }
+  }
+
+  pl_frame* fr = pl_fpush(t);
+  fr->kind = PL_F_UPD;
+  fr->a = thke;
+  fr->argc = 1;
+  pl_cache_stat_upd_push(t, 1);
+}
+
 /* ── The machine ───────────────────────────────────────────────────────── */
 
 static pl_run_status pl_run_caught(pl_thread* t, pl_val v0, size_t base,
@@ -636,12 +710,13 @@ defer_thunk: {
   env = pl_thunk_env(p);
   expr = pl_thunk_expr(p);
   /* blackhole; the F_UPDATE frame writes the result back */
-  p[0] = pl_hdr_make(PL_K_BH, 0, 0, pl_hdr_cells(p[0]));
-  p[1] = 0;
+  p[0] = pl_hdr_make(PL_K_BH, pl_hdr_flags(p[0]), pl_hdr_meta(p[0]),
+                     pl_hdr_cells(p[0]));
   p[2] = 0;
   fr = pl_fpush(t);
   fr->kind = PL_F_UPDATE;
   fr->a = v;
+  fr->b = expr; /* retained so exceptional unwind can restore the thunk */
   goto eval_expr;
 }
 
@@ -653,14 +728,9 @@ defer_thke: {
   if ((pl_hdr_flags(p[0]) & PL_F_HOLE) != 0)
     pl_raise_msg(t, "<<loop>>");
   p[0] = pl_hdr_set_flag(p[0], PL_F_HOLE);
-  fr = pl_fpush(t);
-  fr->kind = PL_F_UPD;
-  fr->a = v;
-  goto eval_thke;
+  pl_push_thke_update(t, base, v);
+  goto eval_thke_v;
 }
-eval_thke:
-  fr = &t->fstack[t->fsp - 1];
-  v = fr->a;
 eval_thke_v: {
   pl_val* args;
   pl_bane ban = (pl_bane)(pl_thke_bane(pl_ptr(v)) & PL_BAN_MASK);
@@ -1260,7 +1330,16 @@ ret_update:
   goto ret;
 
 ret_upd:
-  pl_thke_update(t, fr->a, v);
+  if (fr->argc == 1) {
+    pl_thke_update(t, fr->a, v);
+  } else {
+    ax_assume(fr->argc >= 2 && (size_t)fr->argbase + fr->argc - 1 == t->usp,
+              "coalesced update stack is not a frame suffix");
+    for (size_t i = fr->argc - 1; i > 0; i--)
+      pl_thke_update(t, t->ustack[(size_t)fr->argbase + i - 1], v);
+    pl_thke_update(t, fr->a, v);
+    t->usp = fr->argbase;
+  }
   t->fsp--;
   goto ret;
 
@@ -1835,7 +1914,7 @@ static pl_run_status pl_run_caught(pl_thread* t, pl_val v0, size_t base,
         uint64_t profile_mark = t->fstack[i - 1].profile_mark;
         uint32_t argbase = t->fstack[i - 1].argbase;
         pl_profile_pause_all(t);
-        t->fsp = i - 1;
+        pl_unwind_frames(t, i - 1);
         t->vsp = argbase;
         pl_profile_drop_since_paused(t, profile_mark);
         pl_profile_resume_all(t);
@@ -1851,7 +1930,9 @@ static pl_run_status pl_run_caught(pl_thread* t, pl_val v0, size_t base,
     /* uncaught within this entry: unwind it and propagate */
     pl_profile_pause_all(t);
     t->vsp = c.vsp;
-    t->fsp = c.fsp;
+    /* c.fsp may include an initially-pushed delivery frame which has already
+     * returned.  base is the entry boundary and the actual unwind target. */
+    pl_unwind_frames(t, base);
     pl_profile_drop_since_paused(t, c.profile_mark);
     if (c.centry > 0)
       pl_profile_resume_all(t);
@@ -1866,7 +1947,7 @@ static pl_run_status pl_run_caught(pl_thread* t, pl_val v0, size_t base,
 static void pl_thread_unwind_run(pl_thread* t) {
   pl_profile_pause_all(t);
   t->vsp = t->base_vsp;
-  t->fsp = t->base_fsp;
+  pl_unwind_frames(t, t->base_fsp);
   pl_profile_drop_since_paused(t, t->profile_run_mark);
 }
 

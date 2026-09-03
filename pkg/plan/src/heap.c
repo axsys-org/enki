@@ -75,13 +75,23 @@ static void pl_cache_stats_print(void) {
           s->gc_indirections);
   fprintf(stderr,
           "PLAN_CACHE_STATS stacks vpushes=%" PRIu64 " max_vsp=%" PRIu64
-          " frame_pushes=%" PRIu64 " max_fsp=%" PRIu64 " move_calls=%" PRIu64
+          " frame_pushes=%" PRIu64 " max_fsp=%" PRIu64
+          " max_stack_bytes=%" PRIu64 " move_calls=%" PRIu64
           " move_bytes=%" PRIu64 "\n",
           s->vpushes, s->max_vsp, s->frame_pushes, s->max_fsp,
-          s->vstack_move_calls, s->vstack_move_bytes);
+          s->max_stack_bytes, s->vstack_move_calls, s->vstack_move_bytes);
   fprintf(stderr, "PLAN_CACHE_STATS frame_depth");
   for (unsigned i = 0; i < PL_CACHE_DEPTH_BUCKETS; i++)
     fprintf(stderr, " b%u=%" PRIu64, i, s->frame_depth[i]);
+  fputc('\n', stderr);
+  fprintf(stderr,
+          "PLAN_CACHE_STATS upd_chain frames=%" PRIu64 " chains=%" PRIu64
+          " max_run=%" PRIu64 " side_pushes=%" PRIu64 " max_usp=%" PRIu64 "\n",
+          s->upd_frames, s->upd_chains, s->upd_max_run, s->upd_side_pushes,
+          s->upd_max_usp);
+  fprintf(stderr, "PLAN_CACHE_STATS upd_run_depth");
+  for (unsigned i = 0; i < PL_CACHE_DEPTH_BUCKETS; i++)
+    fprintf(stderr, " b%u=%" PRIu64, i, s->upd_run_depth[i]);
   fputc('\n', stderr);
   for (unsigned i = 0; i < PL_CACHE_FRAME_CAP; i++) {
     if (s->gc_frame_kinds[i] == 0)
@@ -131,6 +141,9 @@ static void pl_cache_stats_merge(const pl_cache_stats* s) {
   PL_CACHE_ADD(gc_indirections);
   PL_CACHE_ADD(vpushes);
   PL_CACHE_ADD(frame_pushes);
+  PL_CACHE_ADD(upd_frames);
+  PL_CACHE_ADD(upd_chains);
+  PL_CACHE_ADD(upd_side_pushes);
   PL_CACHE_ADD(vstack_move_calls);
   PL_CACHE_ADD(vstack_move_bytes);
   PL_CACHE_ADD(env_lookups);
@@ -143,10 +156,18 @@ static void pl_cache_stats_merge(const pl_cache_stats* s) {
     pl_cache_stats_total.max_vsp = s->max_vsp;
   if (s->max_fsp > pl_cache_stats_total.max_fsp)
     pl_cache_stats_total.max_fsp = s->max_fsp;
+  if (s->max_stack_bytes > pl_cache_stats_total.max_stack_bytes)
+    pl_cache_stats_total.max_stack_bytes = s->max_stack_bytes;
+  if (s->upd_max_run > pl_cache_stats_total.upd_max_run)
+    pl_cache_stats_total.upd_max_run = s->upd_max_run;
+  if (s->upd_max_usp > pl_cache_stats_total.upd_max_usp)
+    pl_cache_stats_total.upd_max_usp = s->upd_max_usp;
   if (s->env_max_probes > pl_cache_stats_total.env_max_probes)
     pl_cache_stats_total.env_max_probes = s->env_max_probes;
-  for (unsigned i = 0; i < PL_CACHE_DEPTH_BUCKETS; i++)
+  for (unsigned i = 0; i < PL_CACHE_DEPTH_BUCKETS; i++) {
     pl_cache_stats_total.frame_depth[i] += s->frame_depth[i];
+    pl_cache_stats_total.upd_run_depth[i] += s->upd_run_depth[i];
+  }
   for (unsigned i = 0; i < PL_CACHE_FRAME_CAP; i++)
     pl_cache_stats_total.gc_frame_kinds[i] += s->gc_frame_kinds[i];
   for (unsigned i = 0; i < PL_CACHE_MOVE_COUNT; i++) {
@@ -541,6 +562,8 @@ static void pl_thread_roots(pl_root_visit visit, void* gc_ctx, void* src_ctx) {
   pl_thread* t = src_ctx;
   for (size_t i = 0; i < t->vsp; i++)
     visit(&t->vstack[i], gc_ctx);
+  for (size_t i = 0; i < t->usp; i++)
+    visit(&t->ustack[i], gc_ctx);
   for (size_t i = 0; i < t->fsp; i++) {
 #ifdef PL_CACHE_STATS
     if ((unsigned)t->fstack[i].kind < PL_CACHE_FRAME_CAP)
@@ -589,6 +612,7 @@ void pl_thread_free(pl_thread* t) {
   pl_gc_del_root_source(t->heap, pl_thread_roots, t);
   free(t->vstack);
   free(t->fstack);
+  free(t->ustack);
   free(t);
 }
 
@@ -604,4 +628,14 @@ void pl_fstack_grow(pl_thread* t) {
   t->fcap *= 2;
   t->fstack = realloc(t->fstack, t->fcap * sizeof(pl_frame));
   ax_assume(t->fstack != NULL, "oom");
+}
+
+void pl_ustack_grow(pl_thread* t) {
+  size_t next = t->ucap == 0 ? 64 : t->ucap * 2;
+  ax_assume(next > t->ucap && next <= UINT32_MAX &&
+                next <= SIZE_MAX / sizeof(pl_val),
+            "update stack exceeds u32 frame offsets");
+  t->ustack = realloc(t->ustack, next * sizeof(pl_val));
+  ax_assume(t->ustack != NULL, "oom");
+  t->ucap = next;
 }

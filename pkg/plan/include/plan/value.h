@@ -333,7 +333,8 @@ static inline pl_val* pl_env_slots(pl_cell* p) {
   return (pl_val*)(p + 1);
 }
 
-/* K_IND / K_BH { hdr; target } */
+/* K_IND { hdr; target }.  While a legacy K_BH is under evaluation, cell 1
+ * retains the thunk env and its expression is rooted by F_UPDATE.b. */
 static inline pl_val pl_ind_target(pl_cell* p) {
   return (pl_val)p[1];
 }

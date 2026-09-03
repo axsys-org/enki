@@ -628,6 +628,45 @@ TEST(ops, try_catches_plan_exn_only) {
   test_rt_free(&rt);
 }
 
+TEST(ops, try_restores_unwound_thunk_chain) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  enum { DEPTH = 8 };
+
+  /* Model a lazy import/elaboration chain whose innermost thunk throws.
+   * Every THKE is blackholed before Try catches the PLAN exception. */
+  pl_vpush(t, test_throwing(t, 7));
+  for (unsigned i = 0; i < DEPTH; i++) {
+    pl_gc_reserve(t, PL_THKE_CELLS(1));
+    t->vstack[base] = pl_mk_thke(t, PL_BAN_SLOW, 1, &t->vstack[base]);
+  }
+  pl_vpush(t, test_law(t, 1, 0, 1)); /* identity forces its argument */
+
+  for (unsigned attempt = 0; attempt < 2; attempt++) {
+    pl_val args[2] = {t->vstack[base + 1], t->vstack[base]};
+    pl_val r = test_op66(t, ax_s3('T', 'r', 'y'), 2, args);
+    pl_cell* p = pl_as(PL_TAG_APP, r);
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(pl_app_head(p), 1);
+    ASSERT_EQ(pl_app_args(p)[0], 7);
+
+    pl_val cursor = t->vstack[base];
+    for (unsigned i = 0; i < DEPTH; i++) {
+      p = pl_as(PL_TAG_DEFER, cursor);
+      ASSERT_NOT_NULL(p);
+      ASSERT_EQ(pl_hdr_kind(p[0]), PL_K_THKE);
+      ASSERT_EQ(pl_hdr_flags(p[0]) & PL_F_HOLE, 0);
+      cursor = pl_thke_args(p)[0];
+    }
+    p = pl_as(PL_TAG_DEFER, cursor);
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(pl_hdr_kind(p[0]), PL_K_THUNK);
+  }
+
+  test_rt_free(&rt);
+}
+
 TEST(ops, equal_deep_and_pin_identity) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
@@ -1073,6 +1112,65 @@ TEST(exec, jmp_loop_stays_preemptable) {
     ASSERT_EQ(pl_thread_run(t, 10000), PL_RUN_YIELDED);
   ASSERT_EQ(t->fcap, fcap0); /* the loop runs in constant frame space */
   pl_pin_set_code(pl_as(PL_TAG_PIN, t->vstack[base]), NULL);
+  test_rt_free(&rt);
+}
+
+TEST(exec, update_chain_coalesces_and_survives_gc) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  enum { DEPTH = 6000 };
+
+  pl_vpush(t, 7);
+  for (unsigned i = 0; i < DEPTH; i++) {
+    pl_gc_reserve(t, PL_THKE_CELLS(1));
+    t->vstack[base] = pl_mk_thke(t, PL_BAN_SLOW, 1, &t->vstack[base]);
+  }
+
+  pl_thread_start(t, t->vstack[base]);
+  ASSERT_EQ(pl_thread_run(t, DEPTH / 2), PL_RUN_YIELDED);
+  ASSERT_EQ(t->fsp, 1);
+  ASSERT_EQ(t->fstack[0].kind, PL_F_UPD);
+  ASSERT_EQ(t->fstack[0].argc, t->usp + 1);
+  ASSERT(t->usp > 1000);
+  ASSERT_EQ(t->fcap, 4096); /* the generic frame stack never grew */
+
+  /* The compact target suffix is an independent GC root source. */
+  pl_gc_collect_now(t);
+  pl_run_status s;
+  while ((s = pl_thread_run(t, 100000)) == PL_RUN_YIELDED)
+    ;
+  ASSERT_EQ(s, PL_RUN_DONE);
+  ASSERT_EQ(pl_thread_result(t), 7);
+  ASSERT_EQ(t->fsp, 0);
+  ASSERT_EQ(t->usp, 0);
+  ASSERT_EQ(pl_hdr_kind(pl_ptr(t->vstack[base])[0]), PL_K_IND);
+
+  test_rt_free(&rt);
+}
+
+TEST(exec, runtime_error_restores_unwound_thke) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+
+  pl_vpush(t, 0);
+  pl_gc_reserve(t, PL_THKE_CELLS(0));
+  t->vstack[base] = pl_mk_thke(t, PL_BAN_SLOW, 0, &t->vstack[base]);
+
+  for (unsigned attempt = 0; attempt < 2; attempt++) {
+    pl_thread_start(t, t->vstack[base]);
+    pl_run_status s;
+    while ((s = pl_thread_run(t, 1000)) == PL_RUN_YIELDED)
+      ;
+    ASSERT_EQ(s, PL_RUN_EXN);
+    ASSERT_STR_EQ(t->exn_msg, "bad empty bytecode thunk");
+    pl_cell* p = pl_as(PL_TAG_DEFER, t->vstack[base]);
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(pl_hdr_kind(p[0]), PL_K_THKE);
+    ASSERT_EQ(pl_hdr_flags(p[0]) & PL_F_HOLE, 0);
+  }
+
   test_rt_free(&rt);
 }
 

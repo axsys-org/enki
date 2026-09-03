@@ -38,7 +38,7 @@ void pl_gc_del_root_source(pl_heap* h, pl_root_source src, void* src_ctx);
 /* ── Machine frames (eval) — pl_val fields are roots ───────────────────── */
 
 typedef enum {
-  PL_F_UPDATE = 1, /* a: thunk/blackhole to update with the result      */
+  PL_F_UPDATE = 1, /* a: thunk/blackhole, b: saved expr for unwind      */
   PL_F_APPLY,      /* b: pending (lazy) argument                        */
   PL_F_SEQ,        /* b: value to evaluate after discarding the result  */
   PL_F_KAL,        /* a: env; resume body-expr decomposition            */
@@ -54,7 +54,8 @@ typedef enum {
                       stays on the vstack at b (a nat index); argc =
                       group size; a = 0 until an op that captures an
                       env reifies one on demand.  RET resets to b.     */
-  PL_F_UPD,        /* a: newstyle thunk update */
+  PL_F_UPD,        /* newstyle thunk update chain: a is the first target;
+                      argbase owns argc-1 further targets in ustack */
   PL_F_TRY,        /* exception barrier (op 66 Try); argbase: vsp mark  */
   PL_F_JUDGE,      /* forcing a law-body chain node; argbase: hbase     */
   PL_F_NIL,        /* RETURN planNil(v): 1 if the value is 0, else 0    */
@@ -120,8 +121,15 @@ typedef struct pl_cache_stats {
   uint64_t max_vsp;
   uint64_t frame_pushes;
   uint64_t max_fsp;
+  uint64_t max_stack_bytes;
   uint64_t frame_depth[PL_CACHE_DEPTH_BUCKETS];
   uint64_t gc_frame_kinds[PL_CACHE_FRAME_CAP];
+  uint64_t upd_frames;
+  uint64_t upd_chains;
+  uint64_t upd_max_run;
+  uint64_t upd_run_depth[PL_CACHE_DEPTH_BUCKETS];
+  uint64_t upd_side_pushes;
+  uint64_t upd_max_usp;
 
   uint64_t vstack_move_calls;
   uint64_t vstack_move_bytes;
@@ -162,6 +170,11 @@ struct pl_thread {
 
   pl_frame* fstack; /* machine frames — root source */
   size_t fsp, fcap;
+
+  /* Dense roots owned by coalesced PL_F_UPD frames.  A singleton remains
+   * entirely in its ordinary frame; only a consecutive chain spills here. */
+  pl_val* ustack;
+  size_t usp, ucap;
 
   pl_val exn;          /* pending PLAN_EXN value — root slot */
   const char* exn_msg; /* non-NULL: runtime error, not catchable by Try */
@@ -249,7 +262,28 @@ static inline void pl_cache_stat_fpush(pl_thread* t) {
   t->cache_stats.frame_pushes++;
   if (t->fsp > t->cache_stats.max_fsp)
     t->cache_stats.max_fsp = t->fsp;
+  size_t bytes = t->fsp * sizeof(pl_frame) + t->usp * sizeof(pl_val);
+  if (bytes > t->cache_stats.max_stack_bytes)
+    t->cache_stats.max_stack_bytes = bytes;
   t->cache_stats.frame_depth[pl_cache_depth_bucket(t->fsp)]++;
+}
+
+static inline void pl_cache_stat_upd_push(pl_thread* t, uint32_t run) {
+  t->cache_stats.upd_frames++;
+  if (run == 1)
+    t->cache_stats.upd_chains++;
+  if (run > t->cache_stats.upd_max_run)
+    t->cache_stats.upd_max_run = run;
+  t->cache_stats.upd_run_depth[pl_cache_depth_bucket(run)]++;
+}
+
+static inline void pl_cache_stat_upush(pl_thread* t) {
+  t->cache_stats.upd_side_pushes++;
+  if (t->usp > t->cache_stats.upd_max_usp)
+    t->cache_stats.upd_max_usp = t->usp;
+  size_t bytes = t->fsp * sizeof(pl_frame) + t->usp * sizeof(pl_val);
+  if (bytes > t->cache_stats.max_stack_bytes)
+    t->cache_stats.max_stack_bytes = bytes;
 }
 
 static inline void pl_cache_stat_vstack_move(pl_thread* t,
@@ -290,6 +324,8 @@ static inline void pl_cache_stat_env_roots(pl_thread* t, size_t slots) {
 #define pl_cache_stat_alloc(t, kind, cells)                       ((void)0)
 #define pl_cache_stat_vpush(t)                                    ((void)0)
 #define pl_cache_stat_fpush(t)                                    ((void)0)
+#define pl_cache_stat_upd_push(t, run)                            ((void)0)
+#define pl_cache_stat_upush(t)                                    ((void)0)
 #define pl_cache_stat_vstack_move(t, kind, bytes, distance_cells) ((void)0)
 #define pl_cache_stat_env_lookup(t, probes, hit)                  ((void)0)
 #define pl_cache_stat_env_clone(t)                                ((void)0)
@@ -340,6 +376,7 @@ void pl_gc_allow(pl_heap* h);
 
 void pl_vstack_grow(pl_thread* t);
 void pl_fstack_grow(pl_thread* t);
+void pl_ustack_grow(pl_thread* t);
 
 static inline void pl_vpush(pl_thread* t, pl_val v) {
   if (t->vsp == t->vcap)
@@ -377,6 +414,13 @@ static inline pl_frame* pl_fpush(pl_thread* t) {
   f->profile_live = false;
 #endif
   return f;
+}
+
+static inline void pl_upush(pl_thread* t, pl_val v) {
+  if (t->usp == t->ucap)
+    pl_ustack_grow(t);
+  t->ustack[t->usp++] = v;
+  pl_cache_stat_upush(t);
 }
 
 #endif
