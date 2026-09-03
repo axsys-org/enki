@@ -750,6 +750,7 @@ pl_val pl_pin(pl_thread* t, pl_val v) {
   pl_gc_reserve(t, PL_PIN_CELLS(0));
   PL_GC_FORBID(t);
   pl_cell* p = pl_bump(t, PL_PIN_CELLS(0));
+  pl_cache_stat_alloc(t, PL_K_PIN, PL_PIN_CELLS(0));
   p[0] = pl_hdr_make(PL_K_PIN, PL_F_PIN_PROXY, 0, PL_PIN_CELLS(0));
   memset(p + 1, 0, 4 * sizeof(pl_cell));
   p[5] = t->vstack[root];

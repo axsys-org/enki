@@ -19,6 +19,7 @@ pl_val pl_mk_nat_u64(pl_thread* t, uint64_t n) {
   if (n <= PL_NAT63_MAX)
     return n;
   pl_cell* p = pl_bump(t, PL_NAT_CELLS(1));
+  pl_cache_stat_alloc(t, PL_K_NAT, PL_NAT_CELLS(1));
   p[0] = pl_hdr_make(PL_K_NAT, PL_F_NORMAL, 1, PL_NAT_CELLS(1));
   p[1] = n;
   return pl_make(PL_TAG_NAT, p);
@@ -27,6 +28,7 @@ pl_val pl_mk_nat_u64(pl_thread* t, uint64_t n) {
 pl_val pl_mk_nat_limbs(pl_thread* t, size_t limbs, uint64_t** out) {
   ax_assume(limbs >= 1 && limbs < (1u << 20), "nat limb count out of range");
   pl_cell* p = pl_bump(t, PL_NAT_CELLS(limbs));
+  pl_cache_stat_alloc(t, PL_K_NAT, PL_NAT_CELLS(limbs));
   p[0] =
       pl_hdr_make(PL_K_NAT, PL_F_NORMAL, (uint32_t)limbs, PL_NAT_CELLS(limbs));
   *out = (uint64_t*)(p + 1);
@@ -89,6 +91,7 @@ pl_val pl_mk_app_from(pl_thread* t, pl_val head, uint32_t n,
                       const pl_val* args) {
   ax_assume(n >= 1, "empty app");
   pl_cell* p = pl_bump(t, PL_APP_CELLS(n));
+  pl_cache_stat_alloc(t, PL_K_APP, PL_APP_CELLS(n));
   p[0] = pl_hdr_make(PL_K_APP, 0, pl_need_after(head, n), PL_APP_CELLS(n));
   p[1] = head;
   memcpy(p + 2, args, n * sizeof(pl_val));
@@ -102,6 +105,7 @@ pl_val pl_mk_app_cat(pl_thread* t, pl_val f, uint32_t m, const pl_val* args) {
     return pl_mk_app_from(t, f, m, args);
   uint32_t n = pl_app_n(fp);
   pl_cell* p = pl_bump(t, PL_APP_CELLS(n + m));
+  pl_cache_stat_alloc(t, PL_K_APP, PL_APP_CELLS(n + m));
   p[0] = pl_hdr_make(PL_K_APP, 0, pl_need_after(pl_app_head(fp), n + m),
                      PL_APP_CELLS(n + m));
   p[1] = fp[1];
@@ -116,6 +120,7 @@ pl_val pl_mk_app_snoc(pl_thread* t, pl_val f, pl_val x) {
     uint32_t n = pl_app_n(fp);
     uint32_t need = pl_app_need(fp);
     pl_cell* p = pl_bump(t, PL_APP_CELLS(n + 1));
+    pl_cache_stat_alloc(t, PL_K_APP, PL_APP_CELLS(n + 1));
     p[0] =
         pl_hdr_make(PL_K_APP, 0, need == 0 ? 0 : need - 1, PL_APP_CELLS(n + 1));
     p[1] = fp[1];
@@ -124,6 +129,7 @@ pl_val pl_mk_app_snoc(pl_thread* t, pl_val f, pl_val x) {
     return pl_make(PL_TAG_APP, p);
   }
   pl_cell* p = pl_bump(t, PL_APP_CELLS(1));
+  pl_cache_stat_alloc(t, PL_K_APP, PL_APP_CELLS(1));
   p[0] = pl_hdr_make(PL_K_APP, 0, pl_need_after(f, 1), PL_APP_CELLS(1));
   p[1] = f;
   p[2] = x;
@@ -134,6 +140,7 @@ pl_val pl_mk_app_take(pl_thread* t, pl_val app, uint32_t n) {
   pl_cell* ap = pl_as(PL_TAG_APP, app);
   ax_assume(ap != NULL && n >= 1 && n < pl_app_n(ap), "bad app take");
   pl_cell* p = pl_bump(t, PL_APP_CELLS(n));
+  pl_cache_stat_alloc(t, PL_K_APP, PL_APP_CELLS(n));
   p[0] = pl_hdr_make(PL_K_APP, 0, pl_need_after(pl_app_head(ap), n),
                      PL_APP_CELLS(n));
   p[1] = ap[1];
@@ -145,6 +152,7 @@ pl_val pl_mk_app_take(pl_thread* t, pl_val app, uint32_t n) {
 
 pl_val pl_mk_law(pl_thread* t, uint64_t arity, pl_val name, pl_val body) {
   pl_cell* p = pl_bump(t, PL_LAW_CELLS);
+  pl_cache_stat_alloc(t, PL_K_LAW, PL_LAW_CELLS);
   p[0] = pl_hdr_make(PL_K_LAW, 0, 0, PL_LAW_CELLS);
   p[1] = arity;
   p[2] = name;
@@ -154,6 +162,7 @@ pl_val pl_mk_law(pl_thread* t, uint64_t arity, pl_val name, pl_val body) {
 
 pl_val pl_mk_env_uninit(pl_thread* t, uint32_t nslots) {
   pl_cell* p = pl_bump(t, PL_ENV_CELLS(nslots));
+  pl_cache_stat_alloc(t, PL_K_ENV, PL_ENV_CELLS(nslots));
   p[0] = pl_hdr_make(PL_K_ENV, 0, 0, PL_ENV_CELLS(nslots));
   return pl_make(PL_TAG_ENV, p);
 }
@@ -166,32 +175,32 @@ pl_val pl_mk_env(pl_thread* t, uint32_t nslots) {
 
 pl_val pl_mk_thunk(pl_thread* t, pl_val env, pl_val expr) {
   pl_cell* p = pl_bump(t, PL_THUNK_CELLS);
+  pl_cache_stat_alloc(t, PL_K_THUNK, PL_THUNK_CELLS);
   p[0] = pl_hdr_make(PL_K_THUNK, 0, 0, PL_THUNK_CELLS);
   p[1] = env;
   p[2] = expr;
   return pl_make(PL_TAG_DEFER, p);
 }
 
-pl_val pl_mk_thke(pl_thread* t, pl_val env, uint64_t bane, uint32_t nargs,
-                  pl_val* args) {
+pl_val pl_mk_thke(pl_thread* t, uint64_t bane, uint32_t nargs, pl_val* args) {
   uint32_t size = PL_THKE_CELLS(nargs);
   pl_cell* p = pl_bump(t, PL_THKE_CELLS(nargs));
+  pl_cache_stat_alloc(t, PL_K_THKE, size);
   p[0] = pl_hdr_make(PL_K_THKE, 0, 0, size);
-  p[1] = env;
-  p[2] = bane;
-  memcpy(p + 3, args, sizeof(pl_val) * nargs);
+  p[1] = bane;
+  memcpy(p + 2, args, sizeof(pl_val) * nargs);
   return pl_make(PL_TAG_DEFER, p);
 }
 
-pl_val pl_mk_thke_known(pl_thread* t, pl_val env, uint32_t idx, uint32_t nargs,
+pl_val pl_mk_thke_known(pl_thread* t, uint32_t idx, uint32_t nargs,
                         pl_val* args) {
   uint32_t size = PL_THKE_CELLS(nargs + 1);
   pl_cell* p = pl_bump(t, size);
+  pl_cache_stat_alloc(t, PL_K_THKE, size);
   p[0] = pl_hdr_make(PL_K_THKE, 0, 0, size);
-  p[1] = env;
-  p[2] = PL_BAN_PRIM_KNOWN;
-  p[3] = idx; /* the ingest-resolved pl_ops index, a nat63 */
-  memcpy(p + 4, args, sizeof(pl_val) * nargs);
+  p[1] = PL_BAN_PRIM_KNOWN;
+  p[2] = idx; /* the ingest-resolved pl_ops index, a nat63 */
+  memcpy(p + 3, args, sizeof(pl_val) * nargs);
   return pl_make(PL_TAG_DEFER, p);
 }
 

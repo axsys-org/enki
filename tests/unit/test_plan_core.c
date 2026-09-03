@@ -7,6 +7,19 @@
 
 /* ── Value representation ──────────────────────────────────────────────── */
 
+TEST(value, tagged_pointer_address_views) {
+  pl_cell cells[2] = {UINT64_C(0x123456789abcdef0), 0};
+  pl_val v = pl_make(PL_TAG_APP, cells);
+
+  ASSERT_EQ(pl_addr(v), (uintptr_t)cells);
+  ASSERT_EQ(pl_ptr(v)[0], cells[0]);
+#if AX_USE_TBI
+  ASSERT_EQ((uintptr_t)pl_ptr(v), (uintptr_t)v);
+#else
+  ASSERT_EQ((uintptr_t)pl_ptr(v), (uintptr_t)cells);
+#endif
+}
+
 TEST(value, direct_nat_boundary) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
@@ -474,7 +487,7 @@ TEST(gc, ind_short_circuit_on_evacuation) {
   test_rt_free(&rt);
 }
 
-TEST(gc, bytecode_thunk_scans_env_and_args) {
+TEST(gc, bytecode_thunk_scans_args) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
 
@@ -482,9 +495,8 @@ TEST(gc, bytecode_thunk_scans_env_and_args) {
   pl_vpush(t, test_law(t, 1, 0, 1));
   pl_vpush(t, test_app2(t, 0, 11, 12));
 
-  pl_gc_reserve(t, PL_ENV_CELLS(1) + PL_THKE_CELLS(2));
-  pl_val env = pl_mk_env(t, 1);
-  pl_val thke = pl_mk_thke(t, env, PL_BAN_SLOW, 2, &t->vstack[base]);
+  pl_gc_reserve(t, PL_THKE_CELLS(2));
+  pl_val thke = pl_mk_thke(t, PL_BAN_SLOW, 2, &t->vstack[base]);
   t->vsp = base;
   pl_vpush(t, thke);
 
@@ -492,11 +504,8 @@ TEST(gc, bytecode_thunk_scans_env_and_args) {
 
   pl_cell* p = pl_ptr(t->vstack[base]);
   ASSERT_EQ(pl_hdr_kind(p[0]), PL_K_THKE);
+  ASSERT_EQ(pl_hdr_cells(p[0]), PL_THKE_CELLS(2));
   ASSERT_EQ(pl_thke_bane(p), PL_BAN_SLOW);
-
-  pl_cell* ep = pl_as(PL_TAG_ENV, pl_thke_env(p));
-  ASSERT_NOT_NULL(ep);
-  ASSERT_EQ(pl_env_n(ep), 1);
 
   pl_val* args = pl_thke_args(p);
   ASSERT_EQ(pl_kind_of(args[0]), PL_K_LAW);

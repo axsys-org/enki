@@ -718,6 +718,7 @@ static pl_val op_weld(pl_thread* t, size_t ab) {
   pl_gc_reserve(t, PL_APP_CELLS(nx + ny));
   PL_GC_FORBID(t);
   pl_cell* p = pl_bump(t, PL_APP_CELLS(nx + ny));
+  pl_cache_stat_alloc(t, PL_K_APP, PL_APP_CELLS(nx + ny));
   p[0] = pl_hdr_make(PL_K_APP, 0, 0, PL_APP_CELLS(nx + ny));
   p[1] = 0;
   xp = pl_as(PL_TAG_APP, ARG(0));
@@ -741,6 +742,7 @@ static pl_val op_rep(pl_thread* t, size_t ab) {
   pl_gc_reserve(t, PL_APP_CELLS(n));
   PL_GC_FORBID(t);
   pl_cell* p = pl_bump(t, PL_APP_CELLS(n));
+  pl_cache_stat_alloc(t, PL_K_APP, PL_APP_CELLS(n));
   p[0] = pl_hdr_make(PL_K_APP, 0, 0, PL_APP_CELLS(n));
   p[1] = ARG(0);
   for (uint64_t i = 0; i < n; i++)
@@ -769,6 +771,7 @@ static pl_val op_row(pl_thread* t, size_t ab) {
   pl_val ix1e = pl_store_ix1_expr(s);
   PL_GC_FORBID(t);
   pl_cell* p = pl_bump(t, PL_APP_CELLS(n));
+  pl_cache_stat_alloc(t, PL_K_APP, PL_APP_CELLS(n));
   p[0] = pl_hdr_make(PL_K_APP, 0, 0, PL_APP_CELLS(n));
   p[1] = ARG(0);
   pl_val prefix = ARG(2);

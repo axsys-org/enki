@@ -1,6 +1,8 @@
 #include "plan/heap.h"
 
+#include <inttypes.h>
 #include <stdatomic.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -8,6 +10,162 @@
 #include "axsys/perf.h"
 #include "internal.h"
 #include "plan/store.h"
+
+#ifdef PL_CACHE_STATS
+static pthread_mutex_t pl_cache_stats_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_once_t pl_cache_stats_once = PTHREAD_ONCE_INIT;
+static pl_cache_stats pl_cache_stats_total;
+static uint64_t pl_cache_stats_threads;
+
+static const char* const pl_cache_kind_names[PL_CACHE_KIND_CAP] = {
+    [PL_K_NAT] = "NAT",   [PL_K_APP] = "APP",     [PL_K_LAW] = "LAW",
+    [PL_K_PIN] = "PIN",   [PL_K_THUNK] = "THUNK", [PL_K_ENV] = "ENV",
+    [PL_K_IND] = "IND",   [PL_K_BH] = "BH",       [PL_K_FWD] = "FWD",
+    [PL_K_THKE] = "THKE",
+};
+
+static const char* const pl_cache_frame_names[PL_CACHE_FRAME_CAP] = {
+    [PL_F_UPDATE] = "UPDATE", [PL_F_APPLY] = "APPLY",
+    [PL_F_SEQ] = "SEQ",       [PL_F_KAL] = "KAL",
+    [PL_F_KAPP] = "KAPP",     [PL_F_OPENT] = "OPENT",
+    [PL_F_OPARG] = "OPARG",   [PL_F_OPDEEP] = "OPDEEP",
+    [PL_F_NF] = "NF",         [PL_F_NFOBJ] = "NFOBJ",
+    [PL_F_EXEC] = "EXEC",     [PL_F_EXECV] = "EXECV",
+    [PL_F_UPD] = "UPD",       [PL_F_TRY] = "TRY",
+    [PL_F_JUDGE] = "JUDGE",   [PL_F_NIL] = "NIL",
+    [PL_F_PROF] = "PROF",     [PL_F_APPLYN] = "APPLYN",
+    [PL_F_MEMO] = "MEMO",
+};
+
+static const char* const pl_cache_move_names[PL_CACHE_MOVE_COUNT] = {
+    [PL_CACHE_MOVE_TAIL_FAST] = "tail_fast",
+    [PL_CACHE_MOVE_TAIL_KNOWN] = "tail_known",
+    [PL_CACHE_MOVE_TAIL_SLOW] = "tail_slow",
+    [PL_CACHE_MOVE_CALL_KNOWN] = "call_known",
+    [PL_CACHE_MOVE_APPLY_SPLICE] = "apply_splice",
+};
+
+static void pl_cache_stats_print(void) {
+  const pl_cache_stats* s = &pl_cache_stats_total;
+  uint64_t alloc_objects = 0, alloc_cells = 0;
+  for (unsigned i = 0; i < PL_CACHE_KIND_CAP; i++) {
+    alloc_objects += s->alloc_objects[i];
+    alloc_cells += s->alloc_cells[i];
+  }
+  fprintf(stderr,
+          "PLAN_CACHE_STATS summary threads=%" PRIu64 " alloc_objects=%" PRIu64
+          " alloc_cells=%" PRIu64 "\n",
+          pl_cache_stats_threads, alloc_objects, alloc_cells);
+  for (unsigned i = 0; i < PL_CACHE_KIND_CAP; i++) {
+    if (s->alloc_objects[i] == 0)
+      continue;
+    fprintf(stderr,
+            "PLAN_CACHE_STATS alloc kind=%s objects=%" PRIu64 " cells=%" PRIu64
+            "\n",
+            pl_cache_kind_names[i] == NULL ? "UNKNOWN" : pl_cache_kind_names[i],
+            s->alloc_objects[i], s->alloc_cells[i]);
+  }
+  fprintf(stderr,
+          "PLAN_CACHE_STATS gc collections=%" PRIu64 " copied_objects=%" PRIu64
+          " copied_cells=%" PRIu64 " root_slots=%" PRIu64
+          " pointer_slots=%" PRIu64 " store_terminals=%" PRIu64
+          " indirections=%" PRIu64 "\n",
+          s->gc_collections, s->gc_copied_objects, s->gc_copied_cells,
+          s->gc_root_slots, s->gc_pointer_slots, s->gc_store_terminals,
+          s->gc_indirections);
+  fprintf(stderr,
+          "PLAN_CACHE_STATS stacks vpushes=%" PRIu64 " max_vsp=%" PRIu64
+          " frame_pushes=%" PRIu64 " max_fsp=%" PRIu64 " move_calls=%" PRIu64
+          " move_bytes=%" PRIu64 "\n",
+          s->vpushes, s->max_vsp, s->frame_pushes, s->max_fsp,
+          s->vstack_move_calls, s->vstack_move_bytes);
+  fprintf(stderr, "PLAN_CACHE_STATS frame_depth");
+  for (unsigned i = 0; i < PL_CACHE_DEPTH_BUCKETS; i++)
+    fprintf(stderr, " b%u=%" PRIu64, i, s->frame_depth[i]);
+  fputc('\n', stderr);
+  for (unsigned i = 0; i < PL_CACHE_FRAME_CAP; i++) {
+    if (s->gc_frame_kinds[i] == 0)
+      continue;
+    fprintf(stderr, "PLAN_CACHE_STATS gc_frame kind=%s visits=%" PRIu64 "\n",
+            pl_cache_frame_names[i] == NULL ? "UNKNOWN"
+                                            : pl_cache_frame_names[i],
+            s->gc_frame_kinds[i]);
+  }
+  for (unsigned i = 0; i < PL_CACHE_MOVE_COUNT; i++) {
+    fprintf(stderr,
+            "PLAN_CACHE_STATS move site=%s calls=%" PRIu64 " bytes=%" PRIu64
+            " same_calls=%" PRIu64 " same_bytes=%" PRIu64 " one_calls=%" PRIu64
+            " one_bytes=%" PRIu64 "\n",
+            pl_cache_move_names[i], s->vstack_move_site_calls[i],
+            s->vstack_move_site_bytes[i], s->vstack_move_same_calls[i],
+            s->vstack_move_same_bytes[i], s->vstack_move_one_calls[i],
+            s->vstack_move_one_bytes[i]);
+  }
+  fprintf(stderr,
+          "PLAN_CACHE_STATS env lookups=%" PRIu64 " hits=%" PRIu64
+          " probes=%" PRIu64 " max_probes=%" PRIu64 " cloned_entries=%" PRIu64
+          " root_slots=%" PRIu64 "\n",
+          s->env_lookups, s->env_hits, s->env_probes, s->env_max_probes,
+          s->env_cloned_entries, s->env_root_slots);
+}
+
+static void pl_cache_stats_register(void) {
+  ax_assume(atexit(pl_cache_stats_print) == 0,
+            "could not register cache-stat reporter");
+}
+
+static void pl_cache_stats_merge(const pl_cache_stats* s) {
+  pthread_mutex_lock(&pl_cache_stats_mu);
+  pl_cache_stats_threads++;
+  for (unsigned i = 0; i < PL_CACHE_KIND_CAP; i++) {
+    pl_cache_stats_total.alloc_objects[i] += s->alloc_objects[i];
+    pl_cache_stats_total.alloc_cells[i] += s->alloc_cells[i];
+  }
+#define PL_CACHE_ADD(field) pl_cache_stats_total.field += s->field
+  PL_CACHE_ADD(gc_collections);
+  PL_CACHE_ADD(gc_copied_objects);
+  PL_CACHE_ADD(gc_copied_cells);
+  PL_CACHE_ADD(gc_root_slots);
+  PL_CACHE_ADD(gc_pointer_slots);
+  PL_CACHE_ADD(gc_store_terminals);
+  PL_CACHE_ADD(gc_indirections);
+  PL_CACHE_ADD(vpushes);
+  PL_CACHE_ADD(frame_pushes);
+  PL_CACHE_ADD(vstack_move_calls);
+  PL_CACHE_ADD(vstack_move_bytes);
+  PL_CACHE_ADD(env_lookups);
+  PL_CACHE_ADD(env_hits);
+  PL_CACHE_ADD(env_probes);
+  PL_CACHE_ADD(env_cloned_entries);
+  PL_CACHE_ADD(env_root_slots);
+#undef PL_CACHE_ADD
+  if (s->max_vsp > pl_cache_stats_total.max_vsp)
+    pl_cache_stats_total.max_vsp = s->max_vsp;
+  if (s->max_fsp > pl_cache_stats_total.max_fsp)
+    pl_cache_stats_total.max_fsp = s->max_fsp;
+  if (s->env_max_probes > pl_cache_stats_total.env_max_probes)
+    pl_cache_stats_total.env_max_probes = s->env_max_probes;
+  for (unsigned i = 0; i < PL_CACHE_DEPTH_BUCKETS; i++)
+    pl_cache_stats_total.frame_depth[i] += s->frame_depth[i];
+  for (unsigned i = 0; i < PL_CACHE_FRAME_CAP; i++)
+    pl_cache_stats_total.gc_frame_kinds[i] += s->gc_frame_kinds[i];
+  for (unsigned i = 0; i < PL_CACHE_MOVE_COUNT; i++) {
+    pl_cache_stats_total.vstack_move_site_calls[i] +=
+        s->vstack_move_site_calls[i];
+    pl_cache_stats_total.vstack_move_site_bytes[i] +=
+        s->vstack_move_site_bytes[i];
+    pl_cache_stats_total.vstack_move_same_calls[i] +=
+        s->vstack_move_same_calls[i];
+    pl_cache_stats_total.vstack_move_same_bytes[i] +=
+        s->vstack_move_same_bytes[i];
+    pl_cache_stats_total.vstack_move_one_calls[i] +=
+        s->vstack_move_one_calls[i];
+    pl_cache_stats_total.vstack_move_one_bytes[i] +=
+        s->vstack_move_one_bytes[i];
+  }
+  pthread_mutex_unlock(&pl_cache_stats_mu);
+}
+#endif
 
 typedef struct pl_root_entry {
   pl_root_source fn;
@@ -105,6 +263,9 @@ typedef struct pl_gc_ctx {
   pl_heap* h;
   pl_cell* target;
   pl_cell* target_free;
+#ifdef PL_CACHE_STATS
+  pl_thread* thread;
+#endif
 } pl_gc_ctx;
 
 #ifndef NDEBUG
@@ -133,8 +294,8 @@ static void pl_gc_check_store_pin(pl_gc_ctx* gc, pl_val v) {
   }
 }
 
-static void pl_gc_check_local_pointer(pl_gc_ctx* gc, pl_cell* p) {
-  uintptr_t addr = (uintptr_t)p;
+static void pl_gc_check_local_pointer(pl_gc_ctx* gc, pl_val v) {
+  uintptr_t addr = pl_addr(v);
   uintptr_t lo = (uintptr_t)gc->h->from;
   uintptr_t hi = (uintptr_t)gc->h->free;
   ax_assume((addr & (sizeof(pl_cell) - 1u)) == 0 && addr >= lo && addr < hi,
@@ -143,10 +304,16 @@ static void pl_gc_check_local_pointer(pl_gc_ctx* gc, pl_cell* p) {
 #endif
 
 static pl_val pl_forward(pl_gc_ctx* gc, pl_val v) {
+#ifdef PL_CACHE_STATS
+  gc->thread->cache_stats.gc_pointer_slots++;
+#endif
   for (;;) {
     if (pl_is_nat63(v))
       return v;
     if (gc->h->store != NULL && pl_store_owns(gc->h->store, v)) {
+#ifdef PL_CACHE_STATS
+      gc->thread->cache_stats.gc_store_terminals++;
+#endif
 #ifndef NDEBUG
       pl_gc_check_store_pin(gc, v);
 #endif
@@ -154,13 +321,16 @@ static pl_val pl_forward(pl_gc_ctx* gc, pl_val v) {
     }
     pl_cell* p = pl_ptr(v);
 #ifndef NDEBUG
-    pl_gc_check_local_pointer(gc, p);
+    pl_gc_check_local_pointer(gc, v);
 #endif
     pl_cell hdr = p[0];
     pl_kind kind = pl_hdr_kind(hdr);
     if (kind == PL_K_FWD)
       return (pl_val)p[1];
     if (kind == PL_K_IND) {
+#ifdef PL_CACHE_STATS
+      gc->thread->cache_stats.gc_indirections++;
+#endif
       /* Short-circuit indirections during evacuation; the slot gets the
        * target's stable tag for free. */
       v = (pl_val)p[1];
@@ -170,11 +340,15 @@ static pl_val pl_forward(pl_gc_ctx* gc, pl_val v) {
 #ifndef NDEBUG
     ax_assume(cells != 0 &&
                   (size_t)cells <=
-                      ((uintptr_t)gc->h->free - (uintptr_t)p) / sizeof(pl_cell),
+                      ((uintptr_t)gc->h->free - pl_addr(v)) / sizeof(pl_cell),
               "collector observed an invalid heap object size");
 #endif
     pl_cell* np = gc->target_free;
     gc->target_free += cells;
+#ifdef PL_CACHE_STATS
+    gc->thread->cache_stats.gc_copied_objects++;
+    gc->thread->cache_stats.gc_copied_cells += cells;
+#endif
     memcpy(np, p, cells * sizeof(pl_cell));
     pl_val nv = pl_make(pl_tag_for_kind(kind), np);
     p[0] = pl_hdr_make(PL_K_FWD, 0, 0, cells);
@@ -185,6 +359,9 @@ static pl_val pl_forward(pl_gc_ctx* gc, pl_val v) {
 
 static void pl_gc_visit(pl_val* slot, void* gc_ctx) {
   pl_gc_ctx* gc = gc_ctx;
+#ifdef PL_CACHE_STATS
+  gc->thread->cache_stats.gc_root_slots++;
+#endif
   *slot = pl_forward(gc, *slot);
 }
 
@@ -211,16 +388,10 @@ static void pl_cheney_scan(pl_gc_ctx* gc) {
       first = 1;
       count = 2;
       break;
-    case PL_K_THKE: {
-      pl_val* env = (pl_val*)&scan[1];
-      *env = pl_forward(gc, *env);
-      for (uint32_t i = 3; i < cells; i++) {
-        pl_val* f = (pl_val*)&scan[i];
-        *f = pl_forward(gc, *f);
-      }
-      scan += cells;
-      continue;
-    }
+    case PL_K_THKE:
+      first = 2;
+      count = cells - 2;
+      break;
     case PL_K_IND:
     case PL_K_BH:
       first = 1;
@@ -263,11 +434,24 @@ static void pl_cheney_scan(pl_gc_ctx* gc) {
   }
 }
 
-static void pl_collect_into(pl_heap* h, pl_cell* target) {
+static void pl_collect_into(pl_thread* t, pl_heap* h, pl_cell* target) {
+#ifndef PL_CACHE_STATS
+  (void)t;
+#endif
 #ifndef NDEBUG
   ax_assume(h->forbid_depth == 0, "collection inside a no-collect window (I1)");
 #endif
-  pl_gc_ctx gc = {.h = h, .target = target, .target_free = target};
+  pl_gc_ctx gc = {.h = h,
+                  .target = target,
+                  .target_free = target
+#ifdef PL_CACHE_STATS
+                  ,
+                  .thread = t
+#endif
+  };
+#ifdef PL_CACHE_STATS
+  t->cache_stats.gc_collections++;
+#endif
   for (size_t i = 0; i < h->nroots; i++)
     h->roots[i].fn(pl_gc_visit, &gc, h->roots[i].ctx);
   pl_cheney_scan(&gc);
@@ -275,15 +459,15 @@ static void pl_collect_into(pl_heap* h, pl_cell* target) {
   h->free = gc.target_free;
 }
 
-static void pl_gc_collect(pl_heap* h) {
-  pl_collect_into(h, h->to);
+static void pl_gc_collect(pl_thread* t, pl_heap* h) {
+  pl_collect_into(t, h, h->to);
   pl_cell* old_from = h->from;
   h->from = h->to;
   h->to = old_from;
   h->limit = h->from + h->cells;
 }
 
-static void pl_gc_grow(pl_heap* h, size_t need_cells) {
+static void pl_gc_grow(pl_thread* t, pl_heap* h, size_t need_cells) {
   size_t want = h->cells;
   while (want < h->live_cells + need_cells + (h->live_cells / 2) + 4096)
     want *= 2;
@@ -292,7 +476,7 @@ static void pl_gc_grow(pl_heap* h, size_t need_cells) {
   /* live data currently sits in h->from; evacuate it into nfrom */
   pl_cell* old_from = h->from;
   pl_cell* old_to = h->to;
-  pl_collect_into(h, nfrom);
+  pl_collect_into(t, h, nfrom);
   h->from = nfrom;
   h->to = nto;
   h->cells = want;
@@ -304,13 +488,13 @@ static void pl_gc_grow(pl_heap* h, size_t need_cells) {
 void pl_gc_reserve(pl_thread* t, size_t cells) {
   pl_heap* h = t->heap;
 #ifdef PL_GC_STRESS
-  pl_gc_collect(h);
+  pl_gc_collect(t, h);
 #endif
   if (ax_likely(h->free + cells <= h->limit))
     return;
-  pl_gc_collect(h);
+  pl_gc_collect(t, h);
   if (h->free + cells > h->limit)
-    pl_gc_grow(h, cells);
+    pl_gc_grow(t, h, cells);
   ax_assume(h->free + cells <= h->limit, "heap exhausted after grow");
 }
 
@@ -341,12 +525,12 @@ bool pl_gc_collect_if_pressure(pl_thread* t, size_t allocation_floor_cells) {
                          : allocation_floor_cells;
   if (allocated_cells == 0 || allocated_cells < threshold)
     return false;
-  pl_gc_collect(h);
+  pl_gc_collect(t, h);
   return true;
 }
 
 void pl_gc_collect_now(pl_thread* t) {
-  pl_gc_collect(t->heap);
+  pl_gc_collect(t, t->heap);
 }
 
 /* ── Thread ────────────────────────────────────────────────────────────── */
@@ -358,6 +542,10 @@ static void pl_thread_roots(pl_root_visit visit, void* gc_ctx, void* src_ctx) {
   for (size_t i = 0; i < t->vsp; i++)
     visit(&t->vstack[i], gc_ctx);
   for (size_t i = 0; i < t->fsp; i++) {
+#ifdef PL_CACHE_STATS
+    if ((unsigned)t->fstack[i].kind < PL_CACHE_FRAME_CAP)
+      t->cache_stats.gc_frame_kinds[t->fstack[i].kind]++;
+#endif
     visit(&t->fstack[i].a, gc_ctx);
     visit(&t->fstack[i].b, gc_ctx);
   }
@@ -378,6 +566,10 @@ pl_thread* pl_thread_new(pl_heap* h) {
   t->fcap = 4096;
   t->fstack = malloc(t->fcap * sizeof(pl_frame));
   ax_assume(t->vstack != NULL && t->fstack != NULL, "oom");
+#ifdef PL_CACHE_STATS
+  ax_assume(pthread_once(&pl_cache_stats_once, pl_cache_stats_register) == 0,
+            "pthread_once");
+#endif
   t->fuel = UINT64_MAX; /* fuel is inert outside pl_thread_run */
   t->profile_next_generation = 1;
   t->profile_lane =
@@ -391,6 +583,9 @@ void pl_thread_free(pl_thread* t) {
   if (t == NULL)
     return;
   pl_profile_thread_free(t);
+#ifdef PL_CACHE_STATS
+  pl_cache_stats_merge(&t->cache_stats);
+#endif
   pl_gc_del_root_source(t->heap, pl_thread_roots, t);
   free(t->vstack);
   free(t->fstack);

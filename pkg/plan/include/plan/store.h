@@ -106,7 +106,7 @@ void pl_store_free(pl_store* s);
  * region bounds are immutable after construction, and this runs for every
  * non-immediate edge visited by GC. */
 static inline bool pl_store_owns(const pl_store* s, pl_val v) {
-  uintptr_t p = (uintptr_t)pl_ptr(v);
+  uintptr_t p = pl_addr(v);
   return p >= (uintptr_t)s->lo && p < (uintptr_t)s->hi;
 }
 

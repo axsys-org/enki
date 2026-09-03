@@ -1,10 +1,12 @@
 #include "plan/eval.h"
 
+#include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
 #include <inttypes.h>
+#include <pthread.h>
 #include <string.h>
 
 #include "axsys/assume.h"
@@ -156,6 +158,36 @@ static pl_code* pl_law_code(pl_val law) {
 /* ── Tracy law attribution ─────────────────────────────────────────────── */
 
 #ifdef TRACY_ENABLE
+#define PL_TRACY_DEFAULT_LAW_SAMPLE_RATE UINT64_C(1)
+
+static pthread_once_t pl_profile_sample_once = PTHREAD_ONCE_INIT;
+static uint64_t pl_profile_law_sample_rate = PL_TRACY_DEFAULT_LAW_SAMPLE_RATE;
+static _Thread_local uint64_t pl_profile_law_sample_countdown;
+
+static void pl_profile_sample_init(void) {
+  const char* sample_c = getenv("ENKI_TRACY_LAW_SAMPLE_RATE");
+  if (sample_c == NULL || sample_c[0] == '\0' || sample_c[0] == '-')
+    return;
+  char* end;
+  errno = 0;
+  unsigned long long sample = strtoull(sample_c, &end, 10);
+  if (errno == 0 && end != sample_c && *end == '\0')
+    pl_profile_law_sample_rate = (uint64_t)sample;
+}
+
+static bool pl_profile_law_sample(void) {
+  ax_assume(pthread_once(&pl_profile_sample_once, pl_profile_sample_init) == 0,
+            "pthread_once");
+  if (pl_profile_law_sample_rate == 0)
+    return false;
+  if (pl_profile_law_sample_countdown == 0) {
+    pl_profile_law_sample_countdown = pl_profile_law_sample_rate - 1;
+    return true;
+  }
+  pl_profile_law_sample_countdown--;
+  return false;
+}
+
 static size_t pl_profile_append(char* buf, size_t pos, size_t cap,
                                 const char* s) {
   if (pos >= cap)
@@ -202,9 +234,13 @@ static size_t pl_profile_law_name(pl_cell* lp, char* buf, size_t cap) {
 
 static void pl_profile_frame_begin(pl_frame* fr) {
   char name[160];
-  pl_cell* lp = pl_lawp(fr->a);
-  size_t name_s = pl_profile_law_name(lp, name, sizeof(name));
-  AX_PROFILE_ZONE_BEGIN_ALLOC_NAME(fr->profile_ctx, name, name_s);
+  size_t name_s = 0;
+  bool emit = pl_tag(fr->a) == PL_TAG_PIN && TracyCIsConnected &&
+              pl_profile_law_sample();
+  if (emit)
+    name_s = pl_profile_law_name(pl_lawp(fr->a), name, sizeof(name));
+  AX_PROFILE_ZONE_BEGIN_DYNAMIC_NAME_ACTIVE(fr->profile_ctx, name, name_s,
+                                            emit);
   fr->profile_live = true;
 }
 
@@ -215,11 +251,12 @@ static void pl_profile_frame_end(pl_frame* fr) {
   }
 }
 
-static void pl_profile_law_push(pl_thread* t, pl_val head) {
+static bool pl_profile_law_push(pl_thread* t, pl_val head) {
   pl_frame* fr = pl_fpush(t);
   fr->kind = PL_F_PROF;
   fr->a = head;
   pl_profile_frame_begin(fr);
+  return true;
 }
 
 static void pl_profile_close_above(pl_thread* t, size_t base) {
@@ -240,9 +277,10 @@ static void pl_profile_frame_end(pl_frame* fr) {
   (void)fr;
 }
 
-static void pl_profile_law_push(pl_thread* t, pl_val head) {
+static bool pl_profile_law_push(pl_thread* t, pl_val head) {
   (void)t;
   (void)head;
+  return false;
 }
 
 static void pl_profile_close_above(pl_thread* t, size_t base) {
@@ -255,6 +293,19 @@ static void pl_profile_reopen_above(pl_thread* t, size_t base) {
   (void)base;
 }
 #endif
+
+/* A fused tail call replaces the current law invocation.  Drop its profiling
+ * boundary together with the execution frame so tail recursion remains
+ * constant-space even when Tracy attribution is enabled. */
+static void pl_profile_tail_pop(pl_thread* t) {
+  if (t->fsp == 0)
+    return;
+  pl_frame* fr = &t->fstack[t->fsp - 1];
+  if (fr->kind != PL_F_PROF)
+    return;
+  pl_profile_frame_end(fr);
+  t->fsp--;
+}
 
 /* ── Explicit SPLAN profiling zones ───────────────────────────────────── */
 
@@ -288,8 +339,8 @@ static void pl_profile_zone_begin(pl_thread* t, pl_profile_zone* zone) {
   if (zone->live || !pl_profile_physical_enabled())
     return;
 #ifdef TRACY_ENABLE
-  AX_PROFILE_ZONE_BEGIN_ALLOC_NAME(zone->tracy_ctx, (const char*)zone->name,
-                                   zone->name_n);
+  AX_PROFILE_ZONE_BEGIN_DYNAMIC_NAME(zone->tracy_ctx, (const char*)zone->name,
+                                     zone->name_n);
 #endif
   if (ax_profile_json_enabled()) {
     pl_profile_json_name_thread(t);
@@ -737,8 +788,8 @@ x_push_lit:
   DISPATCH();
 
 x_mk_thk: {
-  /* no reify: a thke's env slot is vestigial (never read) — fr->a may
-   * be 0 under a stack-resident frame */
+  /* No reify: bytecode thunks capture their executable argument vector,
+   * not the activation environment. */
   argc = (uint32_t)NEXT();
   pl_op_t rawbane = NEXT();
   pl_bane bane = (pl_bane)(rawbane & PL_BAN_MASK);
@@ -751,9 +802,9 @@ x_mk_thk: {
     (void)NEXT();
     pl_gc_reserve(t, PL_THKE_CELLS(argc + 1));
     PL_GC_FORBID(t);
-    pl_val thke = pl_mk_thke_known(t, fr->a, idx, argc, pl_vpeek(t, argc));
+    pl_val thke = pl_mk_thke_known(t, idx, argc, pl_vpeek(t, argc));
     if (rawbane & PL_BAN_NOUPD)
-      pl_ptr(thke)[2] = PL_BAN_PRIM_KNOWN | PL_BAN_NOUPD;
+      pl_ptr(thke)[1] = PL_BAN_PRIM_KNOWN | PL_BAN_NOUPD;
     pl_vreplace(t, argc, thke);
     PL_GC_ALLOW(t);
     DISPATCH();
@@ -762,7 +813,7 @@ x_mk_thk: {
     pl_raise_msg(t, "exec: bad bane");
   pl_gc_reserve(t, PL_THKE_CELLS(argc));
   PL_GC_FORBID(t);
-  pl_val thke = pl_mk_thke(t, fr->a, (pl_bane)rawbane, argc, pl_vpeek(t, argc));
+  pl_val thke = pl_mk_thke(t, (pl_bane)rawbane, argc, pl_vpeek(t, argc));
   pl_vreplace(t, argc, thke);
   PL_GC_ALLOW(t);
   DISPATCH();
@@ -843,9 +894,13 @@ x_tail: {
       lp = pl_ptr(pl_pin_body(pl_ptr(head)));
     if (lp == NULL || pl_law_arity(lp) != argc - 1)
       goto tail_fallback; /* mis-hinted: the generic path via the thunk */
+    pl_cache_stat_vstack_move(t, PL_CACHE_MOVE_TAIL_FAST,
+                              (size_t)argc * sizeof(pl_val),
+                              (ptrdiff_t)tbase - (ptrdiff_t)g);
     memmove(&t->vstack[tbase], &t->vstack[g], (size_t)argc * sizeof(pl_val));
     t->vsp = tbase + argc;
     t->fsp--;
+    pl_profile_tail_pop(t);
     hbase = tbase;
     argc--;
     jhint = rawbane >> 8;
@@ -856,11 +911,15 @@ x_tail: {
     if (pl_ops[idx].opset >= 82 && !t->rplan_f)
       pl_raise_msg(t, "Not in RPLAN Mode");
     pl_vpush(t, 0); /* room for the name slot when g == tbase */
+    pl_cache_stat_vstack_move(t, PL_CACHE_MOVE_TAIL_KNOWN,
+                              (size_t)argc * sizeof(pl_val),
+                              (ptrdiff_t)(tbase + 1) - (ptrdiff_t)g);
     memmove(&t->vstack[tbase + 1], &t->vstack[g],
             (size_t)argc * sizeof(pl_val));
     t->vstack[tbase] = idx; /* after the move: aliased when g == tbase */
     t->vsp = tbase + 1 + argc;
     t->fsp--;
+    pl_profile_tail_pop(t);
     fr = pl_fpush(t);
     fr->kind = PL_F_OPARG;
     fr->op = idx;
@@ -877,6 +936,7 @@ x_tail: {
     v = t->vstack[g + 1];
     t->vsp = tbase;
     t->fsp--;
+    pl_profile_tail_pop(t);
     fr = pl_fpush(t);
     fr->kind = PL_F_OPENT;
     fr->opset = pl_nat_u64_clamp(pl_pin_body(pp));
@@ -887,14 +947,19 @@ x_tail: {
     v = t->vstack[g];
     t->vsp = tbase;
     t->fsp--;
+    pl_profile_tail_pop(t);
     goto eval;
   }
   v = t->vstack[g]; /* before zeroing: aliased when g == tbase */
+  pl_cache_stat_vstack_move(t, PL_CACHE_MOVE_TAIL_SLOW,
+                            (size_t)(argc - 1) * sizeof(pl_val),
+                            (ptrdiff_t)tbase - (ptrdiff_t)g);
   memmove(&t->vstack[tbase + 1], &t->vstack[g + 1],
           (size_t)(argc - 1) * sizeof(pl_val));
   t->vstack[tbase] = 0; /* head slot for ret_applyn */
   t->vsp = tbase + argc;
   t->fsp--;
+  pl_profile_tail_pop(t);
   fr = pl_fpush(t);
   fr->kind = PL_F_APPLYN;
   fr->argbase = (uint32_t)(tbase + 1);
@@ -902,22 +967,21 @@ x_tail: {
   goto eval;
 
 tail_fallback:
-  /* build the thunk after all (fuel boundary or mis-hint) and take
-   * x_ret's exit: the eval: safepoint owns any yield from here (the
-   * thke env slot is vestigial, so fr->a == 0 is fine) */
+  /* Build the thunk after all (fuel boundary or mis-hint) and take
+   * x_ret's exit: the eval: safepoint owns any yield from here. */
   pl_gc_reserve(t, bane == PL_BAN_PRIM_KNOWN ? PL_THKE_CELLS(argc + 1)
                                              : PL_THKE_CELLS(argc));
   PL_GC_FORBID(t);
-  pl_val thke =
-      bane == PL_BAN_PRIM_KNOWN
-          ? pl_mk_thke_known(t, fr->a, idx, argc, pl_vpeek(t, argc))
-          : pl_mk_thke(t, fr->a, (pl_bane)rawbane, argc, pl_vpeek(t, argc));
+  pl_val thke = bane == PL_BAN_PRIM_KNOWN
+                    ? pl_mk_thke_known(t, idx, argc, pl_vpeek(t, argc))
+                    : pl_mk_thke(t, (pl_bane)rawbane, argc, pl_vpeek(t, argc));
   if (bane == PL_BAN_PRIM_KNOWN && (rawbane & PL_BAN_NOUPD))
-    pl_ptr(thke)[2] = PL_BAN_PRIM_KNOWN | PL_BAN_NOUPD;
+    pl_ptr(thke)[1] = PL_BAN_PRIM_KNOWN | PL_BAN_NOUPD;
   PL_GC_ALLOW(t);
   v = thke;
   t->vsp = tbase;
   t->fsp--;
+  pl_profile_tail_pop(t);
   goto eval;
 }
 
@@ -1028,6 +1092,8 @@ x_call_known: {
     pl_raise_msg(t, "Not in RPLAN Mode"); /* the F_OPENT gate */
   size_t abase = t->vsp - nargs;
   pl_vpush(t, 0); /* may realloc the vstack */
+  pl_cache_stat_vstack_move(t, PL_CACHE_MOVE_CALL_KNOWN,
+                            (size_t)nargs * sizeof(pl_val), 1);
   memmove(&t->vstack[abase + 1], &t->vstack[abase],
           (size_t)nargs * sizeof(pl_val));
   t->vstack[abase] = idx; /* the name slot op_body drops */
@@ -1310,19 +1376,17 @@ fast_apply:
 judge: {
   pl_cell* lp = pl_lawp(t->vstack[hbase]);
   ax_assume(pl_law_arity(lp) == argc, "JUDGE: arity mismatch");
-  pl_profile_law_push(t, t->vstack[hbase]);
+  bool profile_frame = pl_profile_law_push(t, t->vstack[hbase]);
   if (pl_hook != NULL) {
     pl_val out;
     t->centry_depth++; /* jets are C-entry regions */
     bool handled = pl_hook(t, hbase, argc, &out);
     t->centry_depth--;
     if (handled) {
-#ifdef TRACY_ENABLE
-      /* pop the PROF frame pl_profile_law_push pushed; without TRACY
-       * nothing was pushed and popping would eat the caller's frame */
-      pl_profile_frame_end(&t->fstack[t->fsp - 1]);
-      t->fsp--;
-#endif
+      if (profile_frame) {
+        pl_profile_frame_end(&t->fstack[t->fsp - 1]);
+        t->fsp--;
+      }
       t->vsp = hbase;
       v = out;
       goto eval;
@@ -1537,6 +1601,8 @@ ret_applyn: {
     uint32_t k = pl_app_n(p);
     for (uint32_t j = 0; j < k; j++)
       pl_vpush(t, 0); /* may realloc the vstack; never collects */
+    pl_cache_stat_vstack_move(t, PL_CACHE_MOVE_APPLY_SPLICE,
+                              (size_t)a * sizeof(pl_val), (ptrdiff_t)k);
     memmove(&t->vstack[pbase + k], &t->vstack[pbase],
             (size_t)a * sizeof(pl_val));
     t->vstack[pbase - 1] = pl_app_head(p);

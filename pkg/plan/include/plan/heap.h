@@ -90,6 +90,57 @@ typedef struct pl_frame {
 static_assert(sizeof(pl_frame) == 40, "pl_frame grew");
 #endif
 
+#ifdef PL_CACHE_STATS
+#define PL_CACHE_KIND_CAP      16u
+#define PL_CACHE_FRAME_CAP     32u
+#define PL_CACHE_DEPTH_BUCKETS 16u
+
+typedef enum {
+  PL_CACHE_MOVE_TAIL_FAST,
+  PL_CACHE_MOVE_TAIL_KNOWN,
+  PL_CACHE_MOVE_TAIL_SLOW,
+  PL_CACHE_MOVE_CALL_KNOWN,
+  PL_CACHE_MOVE_APPLY_SPLICE,
+  PL_CACHE_MOVE_COUNT,
+} pl_cache_move_kind;
+
+typedef struct pl_cache_stats {
+  uint64_t alloc_objects[PL_CACHE_KIND_CAP];
+  uint64_t alloc_cells[PL_CACHE_KIND_CAP];
+
+  uint64_t gc_collections;
+  uint64_t gc_copied_objects;
+  uint64_t gc_copied_cells;
+  uint64_t gc_root_slots;
+  uint64_t gc_pointer_slots;
+  uint64_t gc_store_terminals;
+  uint64_t gc_indirections;
+
+  uint64_t vpushes;
+  uint64_t max_vsp;
+  uint64_t frame_pushes;
+  uint64_t max_fsp;
+  uint64_t frame_depth[PL_CACHE_DEPTH_BUCKETS];
+  uint64_t gc_frame_kinds[PL_CACHE_FRAME_CAP];
+
+  uint64_t vstack_move_calls;
+  uint64_t vstack_move_bytes;
+  uint64_t vstack_move_site_calls[PL_CACHE_MOVE_COUNT];
+  uint64_t vstack_move_site_bytes[PL_CACHE_MOVE_COUNT];
+  uint64_t vstack_move_same_calls[PL_CACHE_MOVE_COUNT];
+  uint64_t vstack_move_same_bytes[PL_CACHE_MOVE_COUNT];
+  uint64_t vstack_move_one_calls[PL_CACHE_MOVE_COUNT];
+  uint64_t vstack_move_one_bytes[PL_CACHE_MOVE_COUNT];
+
+  uint64_t env_lookups;
+  uint64_t env_hits;
+  uint64_t env_probes;
+  uint64_t env_max_probes;
+  uint64_t env_cloned_entries;
+  uint64_t env_root_slots;
+} pl_cache_stats;
+#endif
+
 /* ── Thread ────────────────────────────────────────────────────────────── */
 
 typedef struct pl_profile_zone {
@@ -164,7 +215,86 @@ struct pl_thread {
    * the pl_io_hook can attribute effects); never touched by the plan
    * layer. */
   void* host;
+
+#ifdef PL_CACHE_STATS
+  pl_cache_stats cache_stats;
+#endif
 };
+
+#ifdef PL_CACHE_STATS
+static inline void pl_cache_stat_alloc(pl_thread* t, pl_kind kind,
+                                       size_t cells) {
+  if ((unsigned)kind < PL_CACHE_KIND_CAP) {
+    t->cache_stats.alloc_objects[kind]++;
+    t->cache_stats.alloc_cells[kind] += cells;
+  }
+}
+
+static inline unsigned pl_cache_depth_bucket(size_t depth) {
+  unsigned bucket = 0;
+  while (depth > 1 && bucket + 1 < PL_CACHE_DEPTH_BUCKETS) {
+    depth = (depth + 1) / 2;
+    bucket++;
+  }
+  return bucket;
+}
+
+static inline void pl_cache_stat_vpush(pl_thread* t) {
+  t->cache_stats.vpushes++;
+  if (t->vsp > t->cache_stats.max_vsp)
+    t->cache_stats.max_vsp = t->vsp;
+}
+
+static inline void pl_cache_stat_fpush(pl_thread* t) {
+  t->cache_stats.frame_pushes++;
+  if (t->fsp > t->cache_stats.max_fsp)
+    t->cache_stats.max_fsp = t->fsp;
+  t->cache_stats.frame_depth[pl_cache_depth_bucket(t->fsp)]++;
+}
+
+static inline void pl_cache_stat_vstack_move(pl_thread* t,
+                                             pl_cache_move_kind kind,
+                                             size_t bytes,
+                                             ptrdiff_t distance_cells) {
+  t->cache_stats.vstack_move_calls++;
+  t->cache_stats.vstack_move_bytes += bytes;
+  t->cache_stats.vstack_move_site_calls[kind]++;
+  t->cache_stats.vstack_move_site_bytes[kind] += bytes;
+  if (distance_cells == 0) {
+    t->cache_stats.vstack_move_same_calls[kind]++;
+    t->cache_stats.vstack_move_same_bytes[kind] += bytes;
+  } else if (distance_cells == 1 || distance_cells == -1) {
+    t->cache_stats.vstack_move_one_calls[kind]++;
+    t->cache_stats.vstack_move_one_bytes[kind] += bytes;
+  }
+}
+
+static inline void pl_cache_stat_env_lookup(pl_thread* t, size_t probes,
+                                            bool hit) {
+  t->cache_stats.env_lookups++;
+  t->cache_stats.env_probes += probes;
+  if (hit)
+    t->cache_stats.env_hits++;
+  if (probes > t->cache_stats.env_max_probes)
+    t->cache_stats.env_max_probes = probes;
+}
+
+static inline void pl_cache_stat_env_clone(pl_thread* t) {
+  t->cache_stats.env_cloned_entries++;
+}
+
+static inline void pl_cache_stat_env_roots(pl_thread* t, size_t slots) {
+  t->cache_stats.env_root_slots += slots;
+}
+#else
+#define pl_cache_stat_alloc(t, kind, cells)                       ((void)0)
+#define pl_cache_stat_vpush(t)                                    ((void)0)
+#define pl_cache_stat_fpush(t)                                    ((void)0)
+#define pl_cache_stat_vstack_move(t, kind, bytes, distance_cells) ((void)0)
+#define pl_cache_stat_env_lookup(t, probes, hit)                  ((void)0)
+#define pl_cache_stat_env_clone(t)                                ((void)0)
+#define pl_cache_stat_env_roots(t, slots)                         ((void)0)
+#endif
 
 pl_heap* pl_heap_new(size_t cells, pl_store* store);
 void pl_heap_free(pl_heap* h);
@@ -215,6 +345,7 @@ static inline void pl_vpush(pl_thread* t, pl_val v) {
   if (t->vsp == t->vcap)
     pl_vstack_grow(t);
   t->vstack[t->vsp++] = v;
+  pl_cache_stat_vpush(t);
 }
 
 static inline pl_val pl_vpop(pl_thread* t) {
@@ -238,6 +369,7 @@ static inline pl_frame* pl_fpush(pl_thread* t) {
   if (t->fsp == t->fcap)
     pl_fstack_grow(t);
   pl_frame* f = &t->fstack[t->fsp++];
+  pl_cache_stat_fpush(t);
   f->a = 0;
   f->b = 0;
 #ifdef TRACY_ENABLE
