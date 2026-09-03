@@ -39,6 +39,9 @@
 #define BOOT_DEFAULT_FILE_ROOT         "./reaver/src"
 #define BOOT_DEFAULT_STORE_DIR         "./snap"
 #define BOOT_STORE_MAP_SIZE            ((size_t)1 << 30)
+#ifdef TRACY_ENABLE
+#define BOOT_TRACY_QUANTUM "18446744073709551615"
+#endif
 
 typedef struct boot_module {
   pl_val key_v;
@@ -564,8 +567,25 @@ static void boot_default_codecache(void) {
   (void)setenv("PL_CODECACHE_DIR", dir_c, 0);
 }
 
+/* A normal scheduler quantum repeatedly closes and reopens every live Tracy
+ * zone.  Profiling favors a compact trace over scheduler fairness, so make a
+ * Tracy-enabled wisp run effectively non-preemptive. */
+static bool boot_configure_tracy_quantum(void) {
+#ifdef TRACY_ENABLE
+  return setenv("ENKI_QUANTUM", BOOT_TRACY_QUANTUM, 1) == 0 &&
+         setenv("ENKI_ROOT_QUANTUM", BOOT_TRACY_QUANTUM, 1) == 0;
+#else
+  return true;
+#endif
+}
+
 int main(int argc, char** argv) {
   boot_default_codecache();
+  if (!boot_configure_tracy_quantum()) {
+    fprintf(stderr, "wisp: cannot configure Tracy quantum: %s\n",
+            strerror(errno));
+    return 1;
+  }
   const char* file_root_c = boot_env_file_root();
   const char* profile_json_c = NULL;
   double tracy_wait_s = 0.0;

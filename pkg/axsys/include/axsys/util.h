@@ -46,4 +46,27 @@ static inline void ax_lsan_ignore(const void* p) {
 }
 #endif
 
+#if defined(__APPLE__) && defined(__aarch64__)
+#define AX_HAVE_TBI 1
+#else
+#define AX_HAVE_TBI 0
+#endif
+
+#if defined(__has_feature)
+#define AX_HAS_FEATURE(feature) __has_feature(feature)
+#else
+#define AX_HAS_FEATURE(feature) 0
+#endif
+
+/* Sanitizer instrumentation computes metadata addresses from the pointer value
+ * before the hardware gets a chance to ignore its top byte. */
+#if AX_HAVE_TBI && !AX_HAS_FEATURE(address_sanitizer) &&                       \
+    !AX_HAS_FEATURE(thread_sanitizer) &&                                       \
+    !AX_HAS_FEATURE(undefined_behavior_sanitizer) &&                           \
+    !defined(__SANITIZE_ADDRESS__) && !defined(__SANITIZE_THREAD__)
+#define AX_USE_TBI 1
+#else
+#define AX_USE_TBI 0
+#endif
+
 #endif

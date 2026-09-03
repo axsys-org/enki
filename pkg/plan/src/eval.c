@@ -1,10 +1,12 @@
 #include "plan/eval.h"
 
+#include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
 #include <inttypes.h>
+#include <pthread.h>
 #include <string.h>
 
 #include "axsys/assume.h"
@@ -156,6 +158,36 @@ static pl_code* pl_law_code(pl_val law) {
 /* ── Tracy law attribution ─────────────────────────────────────────────── */
 
 #ifdef TRACY_ENABLE
+#define PL_TRACY_DEFAULT_LAW_SAMPLE_RATE UINT64_C(1)
+
+static pthread_once_t pl_profile_sample_once = PTHREAD_ONCE_INIT;
+static uint64_t pl_profile_law_sample_rate = PL_TRACY_DEFAULT_LAW_SAMPLE_RATE;
+static _Thread_local uint64_t pl_profile_law_sample_countdown;
+
+static void pl_profile_sample_init(void) {
+  const char* sample_c = getenv("ENKI_TRACY_LAW_SAMPLE_RATE");
+  if (sample_c == NULL || sample_c[0] == '\0' || sample_c[0] == '-')
+    return;
+  char* end;
+  errno = 0;
+  unsigned long long sample = strtoull(sample_c, &end, 10);
+  if (errno == 0 && end != sample_c && *end == '\0')
+    pl_profile_law_sample_rate = (uint64_t)sample;
+}
+
+static bool pl_profile_law_sample(void) {
+  ax_assume(pthread_once(&pl_profile_sample_once, pl_profile_sample_init) == 0,
+            "pthread_once");
+  if (pl_profile_law_sample_rate == 0)
+    return false;
+  if (pl_profile_law_sample_countdown == 0) {
+    pl_profile_law_sample_countdown = pl_profile_law_sample_rate - 1;
+    return true;
+  }
+  pl_profile_law_sample_countdown--;
+  return false;
+}
+
 static size_t pl_profile_append(char* buf, size_t pos, size_t cap,
                                 const char* s) {
   if (pos >= cap)
@@ -202,9 +234,13 @@ static size_t pl_profile_law_name(pl_cell* lp, char* buf, size_t cap) {
 
 static void pl_profile_frame_begin(pl_frame* fr) {
   char name[160];
-  pl_cell* lp = pl_lawp(fr->a);
-  size_t name_s = pl_profile_law_name(lp, name, sizeof(name));
-  AX_PROFILE_ZONE_BEGIN_ALLOC_NAME(fr->profile_ctx, name, name_s);
+  size_t name_s = 0;
+  bool emit = pl_tag(fr->a) == PL_TAG_PIN && TracyCIsConnected &&
+              pl_profile_law_sample();
+  if (emit)
+    name_s = pl_profile_law_name(pl_lawp(fr->a), name, sizeof(name));
+  AX_PROFILE_ZONE_BEGIN_DYNAMIC_NAME_ACTIVE(fr->profile_ctx, name, name_s,
+                                            emit);
   fr->profile_live = true;
 }
 
@@ -215,11 +251,12 @@ static void pl_profile_frame_end(pl_frame* fr) {
   }
 }
 
-static void pl_profile_law_push(pl_thread* t, pl_val head) {
+static bool pl_profile_law_push(pl_thread* t, pl_val head) {
   pl_frame* fr = pl_fpush(t);
   fr->kind = PL_F_PROF;
   fr->a = head;
   pl_profile_frame_begin(fr);
+  return true;
 }
 
 static void pl_profile_close_above(pl_thread* t, size_t base) {
@@ -240,9 +277,10 @@ static void pl_profile_frame_end(pl_frame* fr) {
   (void)fr;
 }
 
-static void pl_profile_law_push(pl_thread* t, pl_val head) {
+static bool pl_profile_law_push(pl_thread* t, pl_val head) {
   (void)t;
   (void)head;
+  return false;
 }
 
 static void pl_profile_close_above(pl_thread* t, size_t base) {
@@ -255,6 +293,19 @@ static void pl_profile_reopen_above(pl_thread* t, size_t base) {
   (void)base;
 }
 #endif
+
+/* A fused tail call replaces the current law invocation.  Drop its profiling
+ * boundary together with the execution frame so tail recursion remains
+ * constant-space even when Tracy attribution is enabled. */
+static void pl_profile_tail_pop(pl_thread* t) {
+  if (t->fsp == 0)
+    return;
+  pl_frame* fr = &t->fstack[t->fsp - 1];
+  if (fr->kind != PL_F_PROF)
+    return;
+  pl_profile_frame_end(fr);
+  t->fsp--;
+}
 
 /* ── Explicit SPLAN profiling zones ───────────────────────────────────── */
 
@@ -288,8 +339,8 @@ static void pl_profile_zone_begin(pl_thread* t, pl_profile_zone* zone) {
   if (zone->live || !pl_profile_physical_enabled())
     return;
 #ifdef TRACY_ENABLE
-  AX_PROFILE_ZONE_BEGIN_ALLOC_NAME(zone->tracy_ctx, (const char*)zone->name,
-                                   zone->name_n);
+  AX_PROFILE_ZONE_BEGIN_DYNAMIC_NAME(zone->tracy_ctx, (const char*)zone->name,
+                                     zone->name_n);
 #endif
   if (ax_profile_json_enabled()) {
     pl_profile_json_name_thread(t);
@@ -846,6 +897,7 @@ x_tail: {
     memmove(&t->vstack[tbase], &t->vstack[g], (size_t)argc * sizeof(pl_val));
     t->vsp = tbase + argc;
     t->fsp--;
+    pl_profile_tail_pop(t);
     hbase = tbase;
     argc--;
     jhint = rawbane >> 8;
@@ -861,6 +913,7 @@ x_tail: {
     t->vstack[tbase] = idx; /* after the move: aliased when g == tbase */
     t->vsp = tbase + 1 + argc;
     t->fsp--;
+    pl_profile_tail_pop(t);
     fr = pl_fpush(t);
     fr->kind = PL_F_OPARG;
     fr->op = idx;
@@ -877,6 +930,7 @@ x_tail: {
     v = t->vstack[g + 1];
     t->vsp = tbase;
     t->fsp--;
+    pl_profile_tail_pop(t);
     fr = pl_fpush(t);
     fr->kind = PL_F_OPENT;
     fr->opset = pl_nat_u64_clamp(pl_pin_body(pp));
@@ -887,6 +941,7 @@ x_tail: {
     v = t->vstack[g];
     t->vsp = tbase;
     t->fsp--;
+    pl_profile_tail_pop(t);
     goto eval;
   }
   v = t->vstack[g]; /* before zeroing: aliased when g == tbase */
@@ -895,6 +950,7 @@ x_tail: {
   t->vstack[tbase] = 0; /* head slot for ret_applyn */
   t->vsp = tbase + argc;
   t->fsp--;
+  pl_profile_tail_pop(t);
   fr = pl_fpush(t);
   fr->kind = PL_F_APPLYN;
   fr->argbase = (uint32_t)(tbase + 1);
@@ -918,6 +974,7 @@ tail_fallback:
   v = thke;
   t->vsp = tbase;
   t->fsp--;
+  pl_profile_tail_pop(t);
   goto eval;
 }
 
@@ -1310,19 +1367,17 @@ fast_apply:
 judge: {
   pl_cell* lp = pl_lawp(t->vstack[hbase]);
   ax_assume(pl_law_arity(lp) == argc, "JUDGE: arity mismatch");
-  pl_profile_law_push(t, t->vstack[hbase]);
+  bool profile_frame = pl_profile_law_push(t, t->vstack[hbase]);
   if (pl_hook != NULL) {
     pl_val out;
     t->centry_depth++; /* jets are C-entry regions */
     bool handled = pl_hook(t, hbase, argc, &out);
     t->centry_depth--;
     if (handled) {
-#ifdef TRACY_ENABLE
-      /* pop the PROF frame pl_profile_law_push pushed; without TRACY
-       * nothing was pushed and popping would eat the caller's frame */
-      pl_profile_frame_end(&t->fstack[t->fsp - 1]);
-      t->fsp--;
-#endif
+      if (profile_frame) {
+        pl_profile_frame_end(&t->fstack[t->fsp - 1]);
+        t->fsp--;
+      }
       t->vsp = hbase;
       v = out;
       goto eval;

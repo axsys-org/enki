@@ -7,6 +7,19 @@
 
 /* ── Value representation ──────────────────────────────────────────────── */
 
+TEST(value, tagged_pointer_address_views) {
+  pl_cell cells[2] = {UINT64_C(0x123456789abcdef0), 0};
+  pl_val v = pl_make(PL_TAG_APP, cells);
+
+  ASSERT_EQ(pl_addr(v), (uintptr_t)cells);
+  ASSERT_EQ(pl_ptr(v)[0], cells[0]);
+#if AX_USE_TBI
+  ASSERT_EQ((uintptr_t)pl_ptr(v), (uintptr_t)v);
+#else
+  ASSERT_EQ((uintptr_t)pl_ptr(v), (uintptr_t)cells);
+#endif
+}
+
 TEST(value, direct_nat_boundary) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;

@@ -119,11 +119,22 @@ static inline uint64_t pl_nat63(pl_val v) {
 static inline uint64_t pl_tag(pl_val v) {
   return v >> 56;
 }
+
+/* Canonical numeric address for range checks and foreign interfaces.  TBI only
+ * affects address translation; it does not make a tagged pointer compare equal
+ * to the allocation address that it names. */
+static inline uintptr_t pl_addr(pl_val v) {
+  return (uintptr_t)(v & PL_ADDR_MASK);
+}
+
+/* Dereference view.  Apple arm64 ignores the top byte in data addresses, so the
+ * value tag can remain in place on the evaluator's hot load/store paths. */
 static inline pl_cell* pl_ptr(pl_val v) {
-  /* Pointers MUST be masked before dereference on every target. */
-  return (pl_cell*)(uintptr_t)(v & PL_ADDR_MASK);
-  /* But not on arm64 */
-  // return (pl_cell*)(uintptr_t)(v);
+#if AX_USE_TBI
+  return (pl_cell*)(uintptr_t)(v);
+#else
+  return (pl_cell*)pl_addr(v);
+#endif
 }
 static inline pl_val pl_make(uint64_t tag, void* p) {
   return (tag << 56) | ((uint64_t)(uintptr_t)p & PL_ADDR_MASK);

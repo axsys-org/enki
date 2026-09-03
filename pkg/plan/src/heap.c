@@ -133,8 +133,8 @@ static void pl_gc_check_store_pin(pl_gc_ctx* gc, pl_val v) {
   }
 }
 
-static void pl_gc_check_local_pointer(pl_gc_ctx* gc, pl_cell* p) {
-  uintptr_t addr = (uintptr_t)p;
+static void pl_gc_check_local_pointer(pl_gc_ctx* gc, pl_val v) {
+  uintptr_t addr = pl_addr(v);
   uintptr_t lo = (uintptr_t)gc->h->from;
   uintptr_t hi = (uintptr_t)gc->h->free;
   ax_assume((addr & (sizeof(pl_cell) - 1u)) == 0 && addr >= lo && addr < hi,
@@ -154,7 +154,7 @@ static pl_val pl_forward(pl_gc_ctx* gc, pl_val v) {
     }
     pl_cell* p = pl_ptr(v);
 #ifndef NDEBUG
-    pl_gc_check_local_pointer(gc, p);
+    pl_gc_check_local_pointer(gc, v);
 #endif
     pl_cell hdr = p[0];
     pl_kind kind = pl_hdr_kind(hdr);
@@ -170,7 +170,7 @@ static pl_val pl_forward(pl_gc_ctx* gc, pl_val v) {
 #ifndef NDEBUG
     ax_assume(cells != 0 &&
                   (size_t)cells <=
-                      ((uintptr_t)gc->h->free - (uintptr_t)p) / sizeof(pl_cell),
+                      ((uintptr_t)gc->h->free - pl_addr(v)) / sizeof(pl_cell),
               "collector observed an invalid heap object size");
 #endif
     pl_cell* np = gc->target_free;
