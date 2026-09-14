@@ -577,3 +577,244 @@ TEST(op83, blocked_request_survives_gc) {
   t->vsp = base;
   test_rt_free(&rt);
 }
+
+/* Hex is in wire order; bars store those bytes little-endian plus 0x01. */
+static pl_val test_crypto_bar(pl_thread* t, const char* hex) {
+  size_t n = strlen(hex) / 2;
+  uint8_t bytes[1025];
+  ASSERT_LT(n, sizeof(bytes));
+  for (size_t i = 0; i < n; i++) {
+    unsigned int byte;
+    ASSERT_EQ(sscanf(hex + 2 * i, "%2x", &byte), 1);
+    bytes[i] = (uint8_t)byte;
+  }
+  bytes[n] = 1;
+  return pl_nat_from_bytes(t, bytes, n + 1);
+}
+
+/* Arguments live in rooted slots; copy them after allocating the long name. */
+static pl_val test_crypto_thunk(pl_thread* t, const char* name, size_t n,
+                                size_t args_base) {
+  pl_val op = pl_nat_from_bytes(t, (const uint8_t*)name, strlen(name));
+  pl_val args[3];
+  ASSERT_LT(n, 4);
+  for (size_t i = 0; i < n; i++)
+    args[i] = t->vstack[args_base + i];
+  return test_op83_thunk(t, op, n, args);
+}
+
+static pl_val test_crypto(pl_thread* t, const char* name, size_t n,
+                          size_t args_base) {
+  pl_thread_start(t, test_crypto_thunk(t, name, n, args_base));
+  ASSERT_EQ(test_run(t), PL_RUN_DONE);
+  return pl_thread_result(t);
+}
+
+TEST(op83, crypto_hash_known_answers) {
+  const char* names[] = {"Blake3", "Sha256"};
+  const char* messages[] = {"", "616263", "00"};
+  const char* digests[2][3] = {
+      {"af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262",
+       "6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85",
+       "2d3adedff11b61f14c886e35afa036736dcd87a74d27b5c1510225d0f592e213"},
+      {"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+       "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+       "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d"}};
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  t->rplan_f = true;
+  size_t base = t->vsp;
+  for (size_t alg = 0; alg < 2; alg++) {
+    for (size_t msg = 0; msg < 3; msg++) {
+      pl_vpush(t, test_crypto_bar(t, messages[msg]));
+      pl_vpush(t, test_crypto_bar(t, digests[alg][msg]));
+      pl_val out = test_crypto(t, names[alg], 1, base);
+      ASSERT(pl_nat_eq(out, t->vstack[base + 1]));
+      ASSERT_EQ(pl_nat_byte_len(out), 33);
+      t->vsp = base;
+    }
+  }
+  test_rt_free(&rt);
+}
+
+TEST(op83, ed25519_rfc8032_and_tampering) {
+  /* RFC 8032 section 7.1, test 1 (empty message). */
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  t->rplan_f = true;
+  size_t base = t->vsp;
+  pl_vpush(
+      t,
+      test_crypto_bar(
+          t,
+          "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60"));
+  pl_vpush(t, 1);
+  pl_vpush(
+      t,
+      test_crypto_bar(
+          t,
+          "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e06522490155"
+          "5fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b"));
+  pl_vpush(
+      t,
+      test_crypto_bar(
+          t,
+          "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"));
+  pl_val pk = test_crypto(t, "Ed25519PublicKey", 1, base);
+  ASSERT(pl_nat_eq(pk, t->vstack[base + 3]));
+  pl_val sig = test_crypto(t, "Ed25519Sign", 2, base);
+  ASSERT(pl_nat_eq(sig, t->vstack[base + 2]));
+  ASSERT_EQ(pl_nat_byte_len(sig), 65);
+  t->vstack[base] = t->vstack[base + 3];
+  ASSERT_EQ(test_crypto(t, "Ed25519Verify", 3, base), 1);
+  t->vstack[base + 1] = 256; /* one zero byte, distinct from empty */
+  ASSERT_EQ(test_crypto(t, "Ed25519Verify", 3, base), 0);
+  t->vstack[base + 1] = 1;
+  t->vstack[base + 2] = pl_nat_inc(t, &t->vstack[base + 2]);
+  ASSERT_EQ(test_crypto(t, "Ed25519Verify", 3, base), 0);
+  t->vstack[base + 2] = 1; /* wrong signature length */
+  ASSERT_EQ(test_crypto(t, "Ed25519Verify", 3, base), 0);
+  t->vstack[base] = 1; /* wrong key length */
+  ASSERT_EQ(test_crypto(t, "Ed25519Verify", 3, base), 0);
+  t->vsp = base;
+  test_rt_free(&rt);
+}
+
+TEST(op83, crypto_rejects_malformed_bars_and_wrong_seed_lengths) {
+  const char* names[] = {"Blake3", "Sha256", "Ed25519PublicKey", "Ed25519Sign"};
+  for (size_t op = 0; op < 4; op++) {
+    for (size_t input = 0; input < 4; input++) {
+      test_rt rt = test_rt_new();
+      pl_thread* t = rt.t;
+      t->rplan_f = true;
+      size_t base = t->vsp;
+      pl_val malformed[] = {0, 2, 0x0261};
+      pl_vpush(t, input < 3 ? malformed[input] : test_app1(t, 0, 1));
+      pl_vpush(t, 1);
+      pl_thread_start(t,
+                      test_crypto_thunk(t, names[op], op == 3 ? 2 : 1, base));
+      ASSERT_EQ(test_run(t), PL_RUN_EXN);
+      ASSERT_NOT_NULL(t->exn_msg);
+      t->vsp = base;
+      test_rt_free(&rt);
+    }
+  }
+  for (size_t len = 31; len <= 33; len += 2) {
+    test_rt rt = test_rt_new();
+    pl_thread* t = rt.t;
+    t->rplan_f = true;
+    uint8_t bytes[34] = {0};
+    bytes[len] = 1;
+    size_t base = t->vsp;
+    pl_vpush(t, pl_nat_from_bytes(t, bytes, len + 1));
+    pl_vpush(t, 1);
+    pl_thread_start(t, test_crypto_thunk(t, "Ed25519Sign", 2, base));
+    ASSERT_EQ(test_run(t), PL_RUN_EXN);
+    t->vsp = base;
+    test_rt_free(&rt);
+  }
+}
+
+TEST(op83, crypto_requires_rplan_mode_and_correct_arity) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  pl_vpush(t, 1);
+  pl_vpush(t, 1);
+  pl_thread_start(t, test_crypto_thunk(t, "Blake3", 1, base));
+  ASSERT_EQ(test_run(t), PL_RUN_EXN);
+  t->rplan_f = true;
+  pl_thread_start(t, test_crypto_thunk(t, "Blake3", 2, base));
+  ASSERT_EQ(test_run(t), PL_RUN_EXN);
+  t->vsp = base;
+  test_rt_free(&rt);
+}
+
+TEST(op83, keyed_hash_known_answers) {
+  /* BLAKE3 upstream vectors (input bytes 0..250 repeated), plus HMAC
+   * RFC 4231 cases 1, 2, and 6. Empty/binary cases use Python hmac vectors. */
+  static const struct {
+    const char* op;
+    const char* key;
+    const char* message;
+    const char* digest;
+  } vectors[] = {
+      {"Blake3Keyed",
+       "77686174732074686520456c7669736820776f726420666f7220667269656e64", "",
+       "92b2b75604ed3c761f9d6f62392c8a9227ad0ea3f09573e783f1498a4ed60d26"},
+      {"Blake3Keyed",
+       "77686174732074686520456c7669736820776f726420666f7220667269656e64", "00",
+       "6d7878dfff2f485635d39013278ae14f1454b8c0a3a2d34bc1ab38228a80c95b"},
+      {"HmacSha256", "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+       "4869205468657265",
+       "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"},
+      {"HmacSha256", "4a656665",
+       "7768617420646f2079612077616e7420666f72206e6f7468696e673f",
+       "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"},
+      {"HmacSha256",
+       "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+       "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+       "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+       "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+       "54657374205573696e67204c6172676572205468616e20426c6f636b2d53697a65204b6"
+       "579202d2048617368204b6579204669727374",
+       "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"},
+      {"HmacSha256", "", "",
+       "b613679a0814d9ec772f95d778c35fc5ff1697c493715653c6c712144292c5ad"},
+      {"HmacSha256", "6b00", "6d00",
+       "64d1bce3a9b3c4ed8db8a6c6e63765ca9fcdbe82484c230d9cc92e7fec2ad326"},
+  };
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  t->rplan_f = true;
+  size_t base = t->vsp;
+  for (size_t i = 0; i < sizeof(vectors) / sizeof(vectors[0]); i++) {
+    pl_vpush(t, test_crypto_bar(t, vectors[i].key));
+    pl_vpush(t, test_crypto_bar(t, vectors[i].message));
+    pl_vpush(t, test_crypto_bar(t, vectors[i].digest));
+    pl_val out = test_crypto(t, vectors[i].op, 2, base);
+    ASSERT(pl_nat_eq(out, t->vstack[base + 2]));
+    ASSERT_EQ(pl_nat_byte_len(out), 33);
+    t->vsp = base;
+  }
+  test_rt_free(&rt);
+}
+
+TEST(op83, keyed_hash_rejects_malformed_arguments) {
+  const char* names[] = {"Blake3Keyed", "HmacSha256"};
+  for (size_t op = 0; op < 2; op++) {
+    for (size_t arg = 0; arg < 2; arg++) {
+      for (size_t bad = 0; bad < 4; bad++) {
+        test_rt rt = test_rt_new();
+        pl_thread* t = rt.t;
+        t->rplan_f = true;
+        size_t base = t->vsp;
+        uint8_t key[33] = {0};
+        key[32] = 1;
+        pl_vpush(t, pl_nat_from_bytes(t, key, sizeof(key)));
+        pl_vpush(t, 1);
+        pl_val malformed[] = {0, 2, 0x0261};
+        t->vstack[base + arg] = bad < 3 ? malformed[bad] : test_app1(t, 0, 1);
+        pl_thread_start(t, test_crypto_thunk(t, names[op], 2, base));
+        ASSERT_EQ(test_run(t), PL_RUN_EXN);
+        t->vsp = base;
+        test_rt_free(&rt);
+      }
+    }
+  }
+  const size_t lengths[] = {0, 31, 33, 64};
+  for (size_t i = 0; i < sizeof(lengths) / sizeof(lengths[0]); i++) {
+    test_rt rt = test_rt_new();
+    pl_thread* t = rt.t;
+    t->rplan_f = true;
+    size_t base = t->vsp;
+    uint8_t key[65] = {0};
+    key[lengths[i]] = 1;
+    pl_vpush(t, pl_nat_from_bytes(t, key, lengths[i] + 1));
+    pl_vpush(t, 1);
+    pl_thread_start(t, test_crypto_thunk(t, "Blake3Keyed", 2, base));
+    ASSERT_EQ(test_run(t), PL_RUN_EXN);
+    t->vsp = base;
+    test_rt_free(&rt);
+  }
+}

@@ -1,3 +1,6 @@
+#include <blake3.h>
+#include <sodium.h>
+#include <pthread.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <libgen.h>
@@ -773,4 +776,169 @@ pl_val pl_op83_sleep(pl_thread* t, size_t ab) {
    * only validate the (forced) arg and park as a coordination request. */
   rp_want_nat(t, ARG(0));
   return rp_request(t, ab, 1);
+}
+
+/* ── op 83: deterministic cryptography ────────────────────────────────── */
+
+/* All byte strings are canonical bars (payload followed by 0x01).  Unlike
+ * the permissive I/O decoder, crypto rejects missing/incorrect terminators.
+ * In particular, 1 is the empty message and 0 is not a valid bar. */
+static bool rp_crypto_bar_size(pl_val v, size_t* len) {
+  if (!pl_is_nat(v))
+    return false;
+  size_t n = pl_nat_byte_len(v);
+  if (n == 0 || pl_nat_byte_at(v, n - 1) != 1)
+    return false;
+  *len = n - 1;
+  return true;
+}
+
+static void rp_crypto_copy(pl_val v, uint8_t* out, size_t n) {
+  for (size_t i = 0; i < n; i++)
+    out[i] = pl_nat_byte_at(v, i);
+}
+
+static pthread_once_t rp_sodium_once = PTHREAD_ONCE_INIT;
+static int rp_sodium_status = -1;
+
+static void rp_sodium_init(void) {
+  rp_sodium_status = sodium_init();
+}
+
+static void rp_crypto_init(pl_thread* t) {
+  if (pthread_once(&rp_sodium_once, rp_sodium_init) != 0 ||
+      rp_sodium_status < 0)
+    pl_raise_msg(t, "crypto: sodium initialization failed");
+}
+
+pl_val pl_op83_blake3(pl_thread* t, size_t ab) {
+  size_t n;
+  if (!rp_crypto_bar_size(ARG(0), &n))
+    pl_raise_msg(t, "Blake3: expected a byte bar");
+  uint8_t* message = rp_nat_bytes(ARG(0), true, &n);
+  uint8_t digest[BLAKE3_OUT_LEN];
+  blake3_hasher hasher;
+  blake3_hasher_init(&hasher);
+  blake3_hasher_update(&hasher, message, n);
+  blake3_hasher_finalize(&hasher, digest, sizeof(digest));
+  free(message);
+  return rp_bar(t, digest, sizeof(digest));
+}
+
+pl_val pl_op83_sha256(pl_thread* t, size_t ab) {
+  size_t n;
+  if (!rp_crypto_bar_size(ARG(0), &n))
+    pl_raise_msg(t, "Sha256: expected a byte bar");
+  rp_crypto_init(t);
+  uint8_t* message = rp_nat_bytes(ARG(0), true, &n);
+  uint8_t digest[crypto_hash_sha256_BYTES];
+  crypto_hash_sha256(digest, message, (unsigned long long)n);
+  free(message);
+  return rp_bar(t, digest, sizeof(digest));
+}
+
+/* Blake3Keyed key message -> 32-byte MAC bar, using BLAKE3's native
+ * keyed mode.  This is not the HMAC construction. */
+pl_val pl_op83_blake3_keyed(pl_thread* t, size_t ab) {
+  size_t key_n, n;
+  if (!rp_crypto_bar_size(ARG(0), &key_n) || key_n != BLAKE3_KEY_LEN ||
+      !rp_crypto_bar_size(ARG(1), &n))
+    pl_raise_msg(t, "Blake3Keyed: expected a 32-byte key bar and message bar");
+  uint8_t* message = rp_nat_bytes(ARG(1), true, &n);
+  uint8_t key[BLAKE3_KEY_LEN];
+  uint8_t digest[BLAKE3_OUT_LEN];
+  blake3_hasher hasher;
+  rp_crypto_copy(ARG(0), key, sizeof(key));
+  blake3_hasher_init_keyed(&hasher, key);
+  sodium_memzero(key, sizeof(key));
+  blake3_hasher_update(&hasher, message, n);
+  blake3_hasher_finalize(&hasher, digest, sizeof(digest));
+  sodium_memzero(&hasher, sizeof(hasher));
+  free(message);
+  return rp_bar(t, digest, sizeof(digest));
+}
+
+/* HmacSha256 key message -> 32-byte MAC bar.  The incremental API accepts
+ * arbitrary key lengths (including empty and longer than one hash block). */
+pl_val pl_op83_hmac_sha256(pl_thread* t, size_t ab) {
+  size_t key_n, n;
+  if (!rp_crypto_bar_size(ARG(0), &key_n) || !rp_crypto_bar_size(ARG(1), &n))
+    pl_raise_msg(t, "HmacSha256: expected key and message byte bars");
+  rp_crypto_init(t);
+  uint8_t* message = rp_nat_bytes(ARG(1), true, &n);
+  uint8_t* key = rp_nat_bytes(ARG(0), true, &key_n);
+  uint8_t digest[crypto_auth_hmacsha256_BYTES];
+  crypto_auth_hmacsha256_state state;
+  crypto_auth_hmacsha256_init(&state, key, key_n);
+  sodium_memzero(key, key_n);
+  free(key);
+  crypto_auth_hmacsha256_update(&state, message, (unsigned long long)n);
+  crypto_auth_hmacsha256_final(&state, digest);
+  sodium_memzero(&state, sizeof(state));
+  free(message);
+  return rp_bar(t, digest, sizeof(digest));
+}
+
+/* Derive from a 32-byte seed instead of accepting libsodium's expanded
+ * secret key, which includes a public key that must agree with the seed. */
+static void rp_ed25519_keypair(pl_val seed_bar, uint8_t* pk, uint8_t* sk) {
+  uint8_t seed[crypto_sign_ed25519_SEEDBYTES];
+  rp_crypto_copy(seed_bar, seed, sizeof(seed));
+  crypto_sign_ed25519_seed_keypair(pk, sk, seed);
+  sodium_memzero(seed, sizeof(seed));
+}
+
+pl_val pl_op83_ed25519_public_key(pl_thread* t, size_t ab) {
+  size_t n;
+  if (!rp_crypto_bar_size(ARG(0), &n) || n != crypto_sign_ed25519_SEEDBYTES)
+    pl_raise_msg(t, "Ed25519PublicKey: expected a 32-byte seed bar");
+  rp_crypto_init(t);
+  uint8_t pk[crypto_sign_ed25519_PUBLICKEYBYTES];
+  uint8_t sk[crypto_sign_ed25519_SECRETKEYBYTES];
+  rp_ed25519_keypair(ARG(0), pk, sk);
+  sodium_memzero(sk, sizeof(sk));
+  return rp_bar(t, pk, sizeof(pk));
+}
+
+/* Ed25519Sign seed message -> detached signature bar. */
+pl_val pl_op83_ed25519_sign(pl_thread* t, size_t ab) {
+  size_t seed_n, n;
+  if (!rp_crypto_bar_size(ARG(0), &seed_n) ||
+      seed_n != crypto_sign_ed25519_SEEDBYTES ||
+      !rp_crypto_bar_size(ARG(1), &n))
+    pl_raise_msg(t, "Ed25519Sign: expected a 32-byte seed bar and message bar");
+  rp_crypto_init(t);
+  uint8_t* message = rp_nat_bytes(ARG(1), true, &n);
+  uint8_t pk[crypto_sign_ed25519_PUBLICKEYBYTES];
+  uint8_t sk[crypto_sign_ed25519_SECRETKEYBYTES];
+  uint8_t signature[crypto_sign_ed25519_BYTES];
+  rp_ed25519_keypair(ARG(0), pk, sk);
+  int rc = crypto_sign_ed25519_detached(signature, NULL, message,
+                                        (unsigned long long)n, sk);
+  sodium_memzero(sk, sizeof(sk));
+  free(message);
+  if (rc != 0)
+    pl_raise_msg(t, "Ed25519Sign: signing failed");
+  return rp_bar(t, signature, sizeof(signature));
+}
+
+/* Ed25519Verify public-key message signature -> 1 or 0.  Malformed input
+ * is a verification failure too.  Validate all arguments before allocating. */
+pl_val pl_op83_ed25519_verify(pl_thread* t, size_t ab) {
+  size_t pk_n, n, sig_n;
+  if (!rp_crypto_bar_size(ARG(0), &pk_n) ||
+      pk_n != crypto_sign_ed25519_PUBLICKEYBYTES ||
+      !rp_crypto_bar_size(ARG(1), &n) || !rp_crypto_bar_size(ARG(2), &sig_n) ||
+      sig_n != crypto_sign_ed25519_BYTES)
+    return 0;
+  rp_crypto_init(t);
+  uint8_t pk[crypto_sign_ed25519_PUBLICKEYBYTES];
+  uint8_t signature[crypto_sign_ed25519_BYTES];
+  rp_crypto_copy(ARG(0), pk, sizeof(pk));
+  rp_crypto_copy(ARG(2), signature, sizeof(signature));
+  uint8_t* message = rp_nat_bytes(ARG(1), true, &n);
+  int rc = crypto_sign_ed25519_verify_detached(signature, message,
+                                               (unsigned long long)n, pk);
+  free(message);
+  return rc == 0 ? 1 : 0;
 }

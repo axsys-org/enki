@@ -76,6 +76,13 @@ pl_val pl_op82_close_handle(pl_thread* t, size_t ab);
 pl_val pl_op83_read_folder(pl_thread* t, size_t ab);
 pl_val pl_op83_fetch(pl_thread* t, size_t ab);
 pl_val pl_op83_sleep(pl_thread* t, size_t ab);
+pl_val pl_op83_blake3(pl_thread* t, size_t ab);
+pl_val pl_op83_sha256(pl_thread* t, size_t ab);
+pl_val pl_op83_blake3_keyed(pl_thread* t, size_t ab);
+pl_val pl_op83_hmac_sha256(pl_thread* t, size_t ab);
+pl_val pl_op83_ed25519_public_key(pl_thread* t, size_t ab);
+pl_val pl_op83_ed25519_sign(pl_thread* t, size_t ab);
+pl_val pl_op83_ed25519_verify(pl_thread* t, size_t ab);
 /* op 83 direct profiling controls, implemented beside evaluator profiling. */
 pl_val pl_op83_zone_start(pl_thread* t, size_t ab);
 pl_val pl_op83_zone_end(pl_thread* t, size_t ab);
