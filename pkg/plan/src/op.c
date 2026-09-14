@@ -27,7 +27,7 @@
  *        ops run inline; the actor ops are coordination effects that
  *        suspend the thread for an executor to service.
  * op 83: staging area for provisional primops whose PLAN-level semantics
- *        are not yet settled.  Its current entries are serviced in pkg/enki.
+ *        are not yet settled.  Includes local primitives and executor effects.
  */
 
 #define ARG(i) (t->vstack[ab + (i)])
@@ -1294,6 +1294,15 @@ const pl_opdesc pl_ops[] = {
 
     /* Memo stays index 133. */
     OP66(ax_s4('M', 'e', 'm', 'o'), 2, 0b11, 0, op_memo),
+
+    /* Deterministic crypto; append to preserve established indices. */
+    OP83_LOCAL("Blake3", 1, 0b1, pl_op83_blake3),
+    OP83_LOCAL("Sha256", 1, 0b1, pl_op83_sha256),
+    OP83_LOCAL("Ed25519PublicKey", 1, 0b1, pl_op83_ed25519_public_key),
+    OP83_LOCAL("Ed25519Sign", 2, 0b11, pl_op83_ed25519_sign),
+    OP83_LOCAL("Ed25519Verify", 3, 0b111, pl_op83_ed25519_verify),
+    OP83_LOCAL("Blake3Keyed", 2, 0b11, pl_op83_blake3_keyed),
+    OP83_LOCAL("HmacSha256", 2, 0b11, pl_op83_hmac_sha256),
 };
 
 const size_t pl_nops = sizeof(pl_ops) / sizeof(pl_ops[0]);
@@ -1338,8 +1347,10 @@ static const uint16_t pl_op82_argc1[] = {105, 106, 107, 108, 110, 111, 112,
 static const uint16_t pl_op82_argc2[] = {109, 116, 117, 119};
 static const uint16_t pl_op82_argc3[] = {120, 123};
 
-static const uint16_t pl_op83_argc1[] = {124, 126, 127, 128, 132};
-static const uint16_t pl_op83_argc2[] = {125};
+static const uint16_t pl_op83_argc1[] = {124, 126, 127, 128,
+                                         132, 134, 135, 136};
+static const uint16_t pl_op83_argc2[] = {125, 137, 139, 140};
+static const uint16_t pl_op83_argc3[] = {138};
 static const uint16_t pl_op83_argc4[] = {131};
 
 static pl_opbucket pl_op_lookup_bucket(uint64_t opset, uint32_t argc) {
@@ -1408,6 +1419,8 @@ static pl_opbucket pl_op_lookup_bucket(uint64_t opset, uint32_t argc) {
       return PL_IX_BUCKET(pl_op83_argc1);
     case 2:
       return PL_IX_BUCKET(pl_op83_argc2);
+    case 3:
+      return PL_IX_BUCKET(pl_op83_argc3);
     case 4:
       return PL_IX_BUCKET(pl_op83_argc4);
     }

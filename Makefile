@@ -114,7 +114,7 @@ APP_BINS := $(patsubst $(APP_DIR)/%.c,$(BUILD_DIR)/bin/%,$(APP_SRCS))
 
 CPPFLAGS_ALL := $(BASE_CPPFLAGS) $(CPPFLAGS)
 CFLAGS_ALL := $(BASE_CFLAGS) $(WARN_CFLAGS) $(BUILD_CFLAGS_$(BUILD_TYPE)) $(CFLAGS)
-LDFLAGS_ALL := $(BUILD_LDFLAGS_$(BUILD_TYPE)) $(LDFLAGS) -pthread $(HOST_LDFLAGS) -lgmp -llmdb -lcrypto -lcurl
+LDFLAGS_ALL := $(BUILD_LDFLAGS_$(BUILD_TYPE)) $(LDFLAGS) -pthread $(HOST_LDFLAGS) -lgmp -llmdb -lcrypto -lcurl -lsodium -lblake3
 
 ifeq ($(PROFILE),tracy)
 CPPFLAGS_ALL += -I/opt/homebrew/opt/tracy/include/tracy

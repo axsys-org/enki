@@ -7,6 +7,8 @@
   gmp,
   lmdb,
   openssl,
+  libsodium,
+  libblake3,
   compiler,
   cc,
   extraNativeBuildInputs ? [],
@@ -32,6 +34,8 @@ stdenv.mkDerivation {
     gmp
     lmdb
     openssl
+    libsodium
+    libblake3
   ];
 
   dontConfigure = true;

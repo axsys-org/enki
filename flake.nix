@@ -88,7 +88,7 @@
         in
           import ./nix/mkenki.nix {
             inherit lib src;
-            inherit (pkgs) gnumake curl gmp lmdb openssl;
+            inherit (pkgs) gnumake curl gmp lmdb openssl libsodium libblake3;
             inherit (selected) stdenv compiler cc;
           };
 
@@ -198,6 +198,8 @@
             pkgs.gmp
             pkgs.lmdb
             pkgs.openssl
+            pkgs.libsodium
+            pkgs.libblake3
           ];
           __darwinAllowLocalNetworking = true;
 
@@ -282,6 +284,8 @@
               pkgs.gmp
               pkgs.lmdb
               pkgs.openssl
+              pkgs.libsodium
+              pkgs.libblake3
               pkgs.lcov
               pkgs.gcovr
               pkgs.compiledb
