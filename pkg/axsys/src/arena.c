@@ -71,7 +71,7 @@ void* ax_arena_alloc(void* ctx, size_t size_s) {
     return NULL;
   size_t align_s = _Alignof(max_align_t);
   size_t old_o = (a->off_o + align_s - 1) & ~(align_s - 1);
-  if ((old_o + size_s) > a->cap_s) {
+  if (old_o > a->cap_s || size_s > a->cap_s - old_o) {
     return NULL;
   }
   a->off_o = old_o + size_s;
@@ -79,10 +79,10 @@ void* ax_arena_alloc(void* ctx, size_t size_s) {
 }
 void* ax_arena_alloc_aligned(void* ctx, size_t size_s, size_t align_s) {
   ax_arena* a = ctx;
-  if (!a || align_s == 0)
-    return NULL;
+  if (!a || align_s == 0 || (align_s & (align_s - 1)) != 0)
+    return NULL; /* alignment must be a power of two for the mask below */
   size_t old_o = (a->off_o + align_s - 1) & ~(align_s - 1);
-  if ((old_o + size_s) > a->cap_s) {
+  if (old_o > a->cap_s || size_s > a->cap_s - old_o) {
     return NULL;
   }
   a->off_o = old_o + size_s;

@@ -840,8 +840,9 @@ void er_http_service(er_scheduler* sys, er_actor* a, uint32_t argc,
     er_crash_msg(a, "malformed Fetch request");
     return;
   }
-  uint8_t hash[32];
-  er_http_args_hash(&p, hash);
+  uint8_t hash[32] = {0};
+  if (sys->mode != ER_MODE_LIVE) /* only the event log reads the hash */
+    er_http_args_hash(&p, hash);
 
   int verr = er_http_validate(sys, &p);
   if (verr >= 0) {

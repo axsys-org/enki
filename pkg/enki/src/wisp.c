@@ -119,6 +119,18 @@ void en_root_push(en_wisp* w, pl_val v) {
   w->tmp_v[w->tmp_s++] = v;
 }
 
+/* Guarantee room for n more pushes without a realloc. */
+static void en_root_reserve(en_wisp* w, size_t n) {
+  if (w->tmp_cap - w->tmp_s >= n)
+    return;
+  size_t cap = w->tmp_cap;
+  while (cap - w->tmp_s < n)
+    cap *= 2;
+  w->tmp_v = realloc(w->tmp_v, cap * sizeof(pl_val));
+  ax_assertf(w->tmp_v != NULL, "oom");
+  w->tmp_cap = cap;
+}
+
 /* ── Guarded evaluation ────────────────────────────────────────────────── */
 
 [[noreturn]] static void en_fail_with_val(en_wisp* w, const char* msg,
@@ -185,6 +197,16 @@ pl_val en_run_nf(en_wisp* w, pl_val v) {
 pl_val en_app_make(en_wisp* w, pl_val fn, size_t n, const pl_val* args) {
   ax_assertf(n >= 1, "en_app_make: empty app");
   size_t mark = en_root_mark(w);
+  /* Callers routinely pass args aliased into the root buffer itself
+   * (&w->tmp_v[mark]).  Grow it once up front and re-derive the alias, so
+   * the pushes below can never move the memory args points into. */
+  uintptr_t lo = (uintptr_t)w->tmp_v;
+  uintptr_t hi = lo + w->tmp_cap * sizeof(pl_val);
+  uintptr_t ap = (uintptr_t)args;
+  size_t alias_off = ap >= lo && ap < hi ? (size_t)(ap - lo) : SIZE_MAX;
+  en_root_reserve(w, n + 1);
+  if (alias_off != SIZE_MAX)
+    args = (const pl_val*)((uintptr_t)w->tmp_v + alias_off);
   en_root_push(w, fn);
   for (size_t i = 0; i < n; i++)
     en_root_push(w, args[i]);

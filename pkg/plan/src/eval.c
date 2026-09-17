@@ -198,6 +198,33 @@ static pl_code* pl_law_code(pl_val law) {
   return p != NULL ? (pl_code*)pl_pin_code(p) : NULL;
 }
 
+/* A law compiled with a checked prologue has two entries: the prologue
+ * forces the strict arguments in order and stacks the values; the fast
+ * entry (past OP_ENTRY) stacks the arguments as they are.  Enter fast
+ * exactly when every strict argument already is a value, looking through
+ * indirections (resolved in place, so the fast entry's pushes see values
+ * too).  No caller hint is trusted: this check is what lets ingest treat
+ * the strict variables as WHNF at strict_entry.  args indexes the first
+ * argument on the value stack; argc is the law's arity. */
+static uint32_t pl_strict_entry(pl_thread* t, const pl_code* code, size_t args,
+                                uint32_t argc) {
+  uint64_t mask = code->strict_mask;
+  if (mask == 0 || (argc < 64 && (mask >> argc) != 0))
+    return 0; /* no prologue, or a mask naming arguments the law lacks */
+  do {
+    unsigned i = (unsigned)__builtin_ctzll(mask);
+    pl_val v = t->vstack[args + i];
+    if (!pl_is_whnf(v)) {
+      v = pl_resolve(v);
+      if (!pl_is_whnf(v))
+        return 0;
+      t->vstack[args + i] = v;
+    }
+    mask &= mask - 1;
+  } while (mask != 0);
+  return code->strict_entry;
+}
+
 /* ── Tracy law attribution ─────────────────────────────────────────────── */
 
 #ifdef TRACY_ENABLE
@@ -616,9 +643,8 @@ static pl_run_status pl_run(pl_thread* t, pl_val v, size_t base,
    * (offsets only — the chain itself lives on the value stack) */
   size_t jbase = 0;
   uint32_t jargc = 0;
-  /* strict-entry mask hint for the next judge entry: nonzero only when
-   * a FAST call carries a caller-computed strictness signature */
-  uint64_t jhint = 0;
+  uint32_t op_idx, op_argc;
+  size_t op_base;
 
   /*
    * Computed-goto dispatch tables (labels-as-values; the Makefile
@@ -644,6 +670,10 @@ static pl_run_status pl_run(pl_thread* t, pl_val v, size_t base,
       [OP_INTERP] = &&x_interp,
       [OP_RET] = &&x_ret,
       [OP_FORCE] = &&x_force,
+      [OP_FORCE_READY] = &&x_force_ready,
+      [OP_RET_READY] = &&x_ret_ready,
+      [OP_CALL_READY] = &&x_call_known,
+      [OP_TAIL_READY] = &&x_tail,
       [OP_CALL] = &&x_call,
       [OP_TAILCALL] = &&x_tail,
       [OP_PUSH_SLOT] = &&x_push_slot,
@@ -651,8 +681,15 @@ static pl_run_status pl_run(pl_thread* t, pl_val v, size_t base,
       [OP_JMP] = &&x_jmp,
       [OP_ENTRY] = &&x_entry,
       [OP_CALL_KNOWN] = &&x_call_known,
+      [OP_ADD] = &&x_add,
+      [OP_SUB] = &&x_sub,
+      [OP_CMP] = &&x_cmp,
+      [OP_TAIL_ADD] = &&x_tail_add,
+      [OP_TAIL_SUB] = &&x_tail_sub,
+      [OP_TAIL_CMP] = &&x_tail_cmp,
       [OP_CALL_FAST] = &&x_call_fast,
       [OP_CALL_SLOW] = &&x_call_slow,
+      [OP_NOP] = &&x_nop,
   };
   static void* const ret_tbl[PL_F_KIND_COUNT] = {
       [PL_F_UPDATE] = &&ret_update, [PL_F_APPLY] = &&ret_apply,
@@ -759,7 +796,6 @@ eval_thke_v: {
     for (uint32_t i = 0; i < argc; i++)
       pl_vpush(t, args[i]);
     argc--;
-    jhint = pl_thke_bane(pl_ptr(v)) >> 8;
     goto judge;
   }
   if (ban == PL_BAN_PRIM_KNOWN) {
@@ -773,13 +809,10 @@ eval_thke_v: {
     for (uint32_t i = 0; i < argc; i++)
       pl_vpush(t, args[i]); /* idx fills the name slot: op_body's
                                vsp = argbase - 1 drops it as usual */
-    fr = pl_fpush(t);
-    fr->kind = PL_F_OPARG;
-    fr->op = idx;
-    fr->argbase = (uint32_t)(listbase + 1);
-    fr->argc = argc - 1;
-    fr->k = 0;
-    goto oparg_next;
+    op_idx = idx;
+    op_base = listbase + 1;
+    op_argc = argc - 1;
+    goto op_args;
   }
   if (ban == PL_BAN_PRIM) {
     /* [oppin, arg]: dispatch straight into the primop entry, exactly
@@ -823,8 +856,9 @@ exec: {
   /*
    * Threaded bytecode dispatch: each handler ends in its own indirect
    * branch through op_tbl.  The installed compiler is trusted, so the
-   * fetch and opcode bounds checks are debug-only; unimplemented (but
-   * in-range) opcodes land on x_bad through the table at no cost.
+   * fetch and opcode bounds checks are debug-only; op_tbl has an entry
+   * for every opcode below PL_OP_COUNT, so no handler-NULL check is
+   * needed here (pass 1 of the decoder rejects anything else).
    */
 #define NEXT() (assert(fr->k < fr->code->nops), fr->code->ops[fr->k++])
 #define DISPATCH()                                                             \
@@ -867,9 +901,106 @@ x_mk_thk: {
     pl_raise_msg(t, "bytecode stack underflow");
   if (bane == PL_BAN_PRIM_KNOWN) {
     /* two extra operands: the op index (resolved at ingest from the
-     * emitted opset pin + name) and a dead slot */
+     * emitted opset pin + name) and the speculation code */
     uint32_t idx = (uint32_t)NEXT();
-    (void)NEXT();
+    pl_op_t spec = NEXT();
+    if (spec != PL_SPEC_NONE) {
+      /* Cheap eagerness: a total O(1) nat primop whose arguments are
+       * already direct nats computes to the same value whenever it is
+       * forced, so compute it now instead of allocating a thunk that
+       * would be entered, blackholed and updated later.  Indirections
+       * left by earlier forces are looked through; anything unevaluated
+       * or big keeps the thunk. */
+      pl_val* a = pl_vpeek(t, argc);
+      if (spec == PL_SPEC_BODY) {
+        /* A total, allocation-free field read (row projection or value
+         * inspection): once every strict operand is a value (indirections
+         * resolved in place), run the body itself instead of building a
+         * thunk to run it later.  The result may be an unevaluated
+         * element; it stands in for the projection thunk exactly. */
+        const pl_opdesc* d = &pl_ops[idx];
+        bool ready = true;
+        for (uint32_t k = 0; ready && k < argc; k++) {
+          if (((d->strict_mask >> k) & 1u) == 0)
+            continue;
+          pl_val w = a[k];
+          if (!pl_is_whnf(w)) {
+            w = pl_resolve(w);
+            if (pl_is_whnf(w))
+              a[k] = w;
+            else
+              ready = false;
+          }
+        }
+        if (ready) {
+          pl_val r = d->body(t, t->vsp - argc);
+          pl_vreplace(t, argc, r);
+          DISPATCH();
+        }
+      }
+      pl_val x = pl_resolve(a[0]);
+      pl_val y = argc > 1 ? pl_resolve(a[1]) : 0;
+      if (pl_is_nat63(x) && pl_is_nat63(y)) {
+        pl_val r = 0;
+        bool ok = true;
+        switch (spec) {
+        case PL_SPEC_ADD:
+          r = x + y;
+          ok = pl_is_nat63(r);
+          break;
+        case PL_SPEC_SUB:
+          r = x > y ? x - y : 0;
+          break;
+        case PL_SPEC_MUL: {
+          uint64_t p;
+          ok = !__builtin_mul_overflow(x, y, &p) && pl_is_nat63(p);
+          r = p;
+          break;
+        }
+        case PL_SPEC_INC:
+          ok = x < PL_NAT63_MAX;
+          r = x + 1;
+          break;
+        case PL_SPEC_DEC:
+          r = x == 0 ? 0 : x - 1;
+          break;
+        case PL_SPEC_EQ:
+          r = x == y;
+          break;
+        case PL_SPEC_NE:
+          r = x != y;
+          break;
+        case PL_SPEC_LT:
+          r = x < y;
+          break;
+        case PL_SPEC_LE:
+          r = x <= y;
+          break;
+        case PL_SPEC_GT:
+          r = x > y;
+          break;
+        case PL_SPEC_GE:
+          r = x >= y;
+          break;
+        case PL_SPEC_CMP:
+          r = x < y ? 0 : (x == y ? 1 : 2);
+          break;
+        case PL_SPEC_NIL:
+          r = x == 0;
+          break;
+        case PL_SPEC_TRUTH:
+          r = x != 0;
+          break;
+        default:
+          ok = false;
+          break;
+        }
+        if (ok) {
+          pl_vreplace(t, argc, r);
+          DISPATCH();
+        }
+      }
+    }
     pl_gc_reserve(t, PL_THKE_CELLS(argc + 1));
     PL_GC_FORBID(t);
     pl_val thke = pl_mk_thke_known(t, idx, argc, pl_vpeek(t, argc));
@@ -919,7 +1050,24 @@ x_ret:
    * model expects it */
   t->vsp = fr->kind == PL_F_EXECV ? (size_t)fr->b : fr->argbase;
   t->fsp--;
+  if (t->fuel > 1 && pl_is_whnf(v)) {
+    t->fuel--;
+    goto ret;
+  }
   goto eval;
+
+x_ret_ready:
+  if (t->vsp == fr->argbase)
+    pl_raise_msg(t, "bytecode stack underflow");
+  v = pl_vpop(t);
+  assert(pl_is_whnf(v));
+  t->vsp = fr->kind == PL_F_EXECV ? (size_t)fr->b : fr->argbase;
+  t->fsp--;
+  if (t->fuel > 1) {
+    t->fuel--;
+    goto ret;
+  }
+  goto eval; /* retain the canonical result checkpoint */
 
 x_tail: {
   /*
@@ -929,6 +1077,7 @@ x_tail: {
    * runs in constant frame depth.  The group of n values relocates to
    * tbase, exactly where x_ret's vsp reset would have left the stack.
    */
+  bool args_ready = fr->code->ops[fr->k - 1] == OP_TAIL_READY;
   argc = (uint32_t)NEXT();
   pl_op_t rawbane = NEXT();
   pl_bane bane = (pl_bane)(rawbane & PL_BAN_MASK);
@@ -973,7 +1122,6 @@ x_tail: {
     pl_profile_tail_pop(t);
     hbase = tbase;
     argc--;
-    jhint = rawbane >> 8;
     goto judge;
   }
   if (bane == PL_BAN_PRIM_KNOWN) {
@@ -990,13 +1138,17 @@ x_tail: {
     t->vsp = tbase + 1 + argc;
     t->fsp--;
     pl_profile_tail_pop(t);
-    fr = pl_fpush(t);
-    fr->kind = PL_F_OPARG;
-    fr->op = idx;
-    fr->argbase = (uint32_t)(tbase + 1);
-    fr->argc = argc;
-    fr->k = 0;
-    goto oparg_next;
+    op_idx = idx;
+    op_base = tbase + 1;
+    op_argc = argc;
+    if (args_ready) {
+      unsigned steps = (unsigned)__builtin_popcount(pl_ops[idx].strict_mask);
+      if (t->fuel > steps) {
+        t->fuel -= steps;
+        goto op_args_ready;
+      }
+    }
+    goto op_args;
   }
   if (bane == PL_BAN_PRIM) {
     pl_cell* pp;
@@ -1061,11 +1213,29 @@ x_entry:
   (void)NEXT();
   DISPATCH();
 
+x_nop:
+  /* ingest filler left where a MK_THK KNOWN became a shorter CALL_KNOWN */
+  DISPATCH();
+
+x_force_ready:
+  if (t->vsp == fr->argbase)
+    pl_raise_msg(t, "bytecode stack underflow");
+  assert(pl_is_whnf(t->vstack[t->vsp - 1]));
+  if (t->fuel > 1) {
+    t->fuel--;
+    DISPATCH();
+  }
+  goto x_force;
+
 x_force:
   /* pop and evaluate to WHNF; ret_exec delivers the result back onto
    * the operand stack when the value returns to this frame */
   if (t->vsp == fr->argbase)
     pl_raise_msg(t, "bytecode stack underflow");
+  if (t->fuel > 1 && pl_is_whnf(t->vstack[t->vsp - 1])) {
+    t->fuel--;
+    DISPATCH();
+  }
   v = pl_vpop(t);
   goto eval;
 
@@ -1146,12 +1316,80 @@ x_call: {
   DISPATCH();
 }
 
+/* No allocation or suspension on these paths. Leave the operands and PC
+ * untouched until every guard passes, so fallback uses CALL_KNOWN verbatim.
+ * Three fuel steps cover the two strict arguments and the primitive result;
+ * near a checkpoint the generic path preserves its exact resumable state. */
+#define NUMERIC_ARGS(fallback, steps)                                          \
+  if (t->vsp - fr->argbase < 2)                                                \
+    pl_raise_msg(t, "bytecode stack underflow");                               \
+  pl_val x = t->vstack[t->vsp - 2];                                            \
+  pl_val y = t->vstack[t->vsp - 1];                                            \
+  if (!pl_is_nat63(x) || !pl_is_nat63(y) || t->fuel <= (steps)) {              \
+    goto fallback;                                                             \
+  }
+#define NUMERIC_RETURN(result)                                                 \
+  do {                                                                         \
+    t->fuel -= 3;                                                              \
+    t->vstack[t->vsp - 2] = (result);                                          \
+    t->vsp--;                                                                  \
+    fr->k += 3;                                                                \
+    DISPATCH();                                                                \
+  } while (0)
+x_add: {
+  NUMERIC_ARGS(x_call_known, 3);
+  pl_val sum = x + y;
+  if (!pl_is_nat63(sum))
+    goto x_call_known;
+  NUMERIC_RETURN(sum);
+}
+x_sub: {
+  NUMERIC_ARGS(x_call_known, 3);
+  NUMERIC_RETURN(x > y ? x - y : 0);
+}
+x_cmp: {
+  NUMERIC_ARGS(x_call_known, 3);
+  NUMERIC_RETURN(x < y ? 0 : (x == y ? 1 : 2));
+}
+/* Tail entries also replace the current execution frame and consume the
+ * thunk-entry fuel step. Keep the original tail path for every fallback. */
+#define NUMERIC_TAIL_RETURN(result)                                            \
+  do {                                                                         \
+    v = (result);                                                              \
+    t->fuel -= 4;                                                              \
+    t->vsp = fr->kind == PL_F_EXECV ? (size_t)fr->b : fr->argbase;             \
+    t->fsp--;                                                                  \
+    pl_profile_tail_pop(t);                                                    \
+    goto ret;                                                                  \
+  } while (0)
+x_tail_add: {
+  NUMERIC_ARGS(x_tail, 4);
+  pl_val sum = x + y;
+  if (!pl_is_nat63(sum))
+    goto x_tail;
+  NUMERIC_TAIL_RETURN(sum);
+}
+x_tail_sub: {
+  NUMERIC_ARGS(x_tail, 4);
+  NUMERIC_TAIL_RETURN(x > y ? x - y : 0);
+}
+x_tail_cmp: {
+  NUMERIC_ARGS(x_tail, 4);
+  NUMERIC_TAIL_RETURN(x < y ? 0 : (x == y ? 1 : 2));
+}
+#undef NUMERIC_TAIL_RETURN
+#undef NUMERIC_RETURN
+#undef NUMERIC_ARGS
+
 x_call_known: {
   /* [argc, op, dead]: direct eager call of an ingest-resolved primop —
    * the args are already on the stack, so enter the strict-arg driver
    * without materializing (and immediately forcing) a thunk cell.
    * op_body's vsp = argbase - 1 drops the inserted op-index slot, and
-   * ret_exec delivers the result exactly where MK_THK's cell sat. */
+   * ret_exec delivers the result exactly where MK_THK's cell sat.
+   * (Skipping the slot for bodies that never read it measured within
+   * noise on the plangrm bench, 2026-09-15: not worth the extra path.) */
+  bool args_ready = fr->code->ops[fr->k - 1] == OP_CALL_READY;
   uint32_t nargs = (uint32_t)NEXT();
   uint32_t idx = (uint32_t)NEXT();
   (void)NEXT();
@@ -1167,13 +1405,17 @@ x_call_known: {
   memmove(&t->vstack[abase + 1], &t->vstack[abase],
           (size_t)nargs * sizeof(pl_val));
   t->vstack[abase] = idx; /* the name slot op_body drops */
-  fr = pl_fpush(t);
-  fr->kind = PL_F_OPARG;
-  fr->op = idx;
-  fr->argbase = (uint32_t)(abase + 1);
-  fr->argc = nargs;
-  fr->k = 0;
-  goto oparg_next;
+  op_idx = idx;
+  op_base = abase + 1;
+  op_argc = nargs;
+  if (args_ready) {
+    unsigned steps = (unsigned)__builtin_popcount(pl_ops[idx].strict_mask);
+    if (t->fuel > steps) {
+      t->fuel -= steps;
+      goto op_args_ready;
+    }
+  }
+  goto op_args;
 }
 
 x_call_fast: {
@@ -1186,7 +1428,7 @@ x_call_fast: {
    * verification rejects takes the generic slow-apply path. */
   size_t callf_pc = fr->k - 1;
   uint32_t nargs = (uint32_t)NEXT();
-  pl_op_t hint = NEXT();
+  (void)NEXT(); /* the caller's strictness hint: judge checks the args itself */
   if (nargs + 1 > t->vsp - fr->argbase)
     pl_raise_msg(t, "bytecode stack underflow");
   size_t hb = t->vsp - nargs - 1;
@@ -1206,7 +1448,6 @@ x_call_fast: {
     }
     hbase = hb;
     argc = nargs;
-    jhint = (uint64_t)hint;
     goto judge;
   }
   /* mis-emitted or exotic head: generic apply, hint dropped */
@@ -1423,7 +1664,6 @@ ret_apply: {
   goto fast_apply;
 
 fast_apply:
-  jhint = 0; /* generic entries take the checked prologue */
   argc = (uint32_t)(t->vsp - hbase - 1);
 
   /* dispatch on the ultimate head: a LAW or a pinned law falls
@@ -1493,9 +1733,7 @@ judge: {
       fr->b = (pl_val)hbase;
       fr->argc = (uint32_t)(1 + argc);
       fr->code = scode;
-      fr->k =
-          (jhint != 0 && jhint == scode->strict_mask) ? scode->strict_entry : 0;
-      jhint = 0;
+      fr->k = pl_strict_entry(t, scode, hbase + 1, argc);
       fr->argbase = (uint32_t)t->vsp;
       goto exec;
     }
@@ -1531,13 +1769,10 @@ ret_opent: {
   if (idx < 0)
     pl_raise_msgf(t, "no primop %llu (argc %u)", (unsigned long long)opset,
                   argc);
-  fr = pl_fpush(t);
-  fr->kind = PL_F_OPARG;
-  fr->op = (uint32_t)idx;
-  fr->argbase = (uint32_t)(listbase + 1);
-  fr->argc = argc;
-  fr->k = 0;
-  goto oparg_next;
+  op_idx = (uint32_t)idx;
+  op_base = listbase + 1;
+  op_argc = argc;
+  goto op_args;
 }
 
 ret_oparg: {
@@ -1691,16 +1926,65 @@ ret_applyn: {
   }
 }
 
+/* Ready arguments need no continuation. Materialize one only when forcing,
+ * deep normalization, or a fuel checkpoint needs resumable state. Arguments
+ * remain rooted on vstack throughout; the locals never survive a suspension. */
+op_args: {
+  const pl_opdesc* d = &pl_ops[op_idx];
+  for (uint32_t k = 0; k < op_argc; k++) {
+    if (((d->strict_mask >> k) & 1u) == 0)
+      continue;
+    v = t->vstack[op_base + k];
+    if (!pl_is_whnf(v) || ax_unlikely(t->fuel == 1)) {
+      fr = pl_fpush(t);
+      fr->kind = PL_F_OPARG;
+      fr->op = op_idx;
+      fr->argbase = (uint32_t)op_base;
+      fr->argc = op_argc;
+      fr->k = k;
+      goto eval;
+    }
+    /* Account for the eval step we bypass, including for ready arguments.
+     * At fuel 1 the framed path above lets eval own the exact yield point. */
+    t->fuel--;
+  }
+  goto op_args_ready;
+}
+
+op_args_ready: {
+  const pl_opdesc* d = &pl_ops[op_idx];
+#ifndef NDEBUG
+  for (uint32_t k = 0; k < op_argc; k++)
+    if ((d->strict_mask >> k) & 1u)
+      assert(pl_is_whnf(t->vstack[op_base + k]));
+#endif
+  if (d->deep_mask != 0) {
+    fr = pl_fpush(t);
+    fr->kind = PL_F_OPDEEP;
+    fr->op = op_idx;
+    fr->argbase = (uint32_t)op_base;
+    fr->argc = op_argc;
+    fr->k = 0;
+    goto opdeep_next;
+  }
+  goto op_body_ready;
+}
+
 oparg_next:
   /* fr is the F_OPARG frame on top of the stack */
   fr = &t->fstack[t->fsp - 1];
   {
     const pl_opdesc* d = &pl_ops[fr->op];
-    while (fr->k < fr->argc && ((d->strict_mask >> fr->k) & 1u) == 0)
-      fr->k++;
-    if (fr->k < fr->argc) {
+    while (fr->k < fr->argc) {
+      if (((d->strict_mask >> fr->k) & 1u) == 0) {
+        fr->k++;
+        continue;
+      }
       v = t->vstack[fr->argbase + fr->k];
-      goto eval;
+      if (t->fuel == 1 || !pl_is_whnf(v))
+        goto eval;
+      t->fuel--;
+      fr->k++;
     }
     if (d->deep_mask != 0) {
       fr->kind = PL_F_OPDEEP;
@@ -1755,14 +2039,16 @@ judge_scan:
         fr->b = (pl_val)jbase;
         fr->argc = (uint32_t)(1 + jargc);
         fr->code = scode;
-        fr->k = (jhint != 0 && jhint == scode->strict_mask)
-                    ? scode->strict_entry
-                    : 0;
-        jhint = 0;
+        fr->k = pl_strict_entry(t, scode, jbase + 1, jargc);
         fr->argbase = (uint32_t)t->vsp;
         goto exec;
       }
     }
+    /* Decide the entry while the arguments still sit on the value stack:
+     * the check resolves indirections in place before the env copies them. */
+    pl_code* code = pl_law_code(t->vstack[jbase]);
+    uint32_t fast_k =
+        code != NULL ? pl_strict_entry(t, code, jbase + 1, jargc) : 0;
     uint32_t nslots = 1 + jargc + m;
     pl_gc_reserve(t, PL_ENV_CELLS(nslots) + (size_t)m * PL_THUNK_CELLS);
     PL_GC_FORBID(t);
@@ -1775,7 +2061,6 @@ judge_scan:
       slots[1 + i] = t->vstack[jbase + 1 + i];
     for (uint32_t j = 0; j < m; j++)
       slots[1 + jargc + j] = pl_mk_thunk(t, envv, t->vstack[cursor + 1 + j]);
-    pl_code* code = pl_law_code(t->vstack[jbase]);
     if (code != NULL) {
       t->vsp = jbase;
       fr = pl_fpush(t);
@@ -1784,11 +2069,7 @@ judge_scan:
       fr->b = 0;
       fr->argc = 0; /* env mode: PUSH_VAR reads the env */
       fr->code = code;
-      /* a matching caller-computed strictness hint enters past the
-       * checked prologue; any mismatch degrades to the checked entry */
-      fr->k =
-          (jhint != 0 && jhint == code->strict_mask) ? code->strict_entry : 0;
-      jhint = 0;
+      fr->k = fast_k;
       fr->argbase = (uint32_t)t->vsp;
       PL_GC_ALLOW(t);
       goto exec;
@@ -1798,7 +2079,6 @@ judge_scan:
      * defer_thunk's blackhole + F_UPDATE + dead update).  envv lives only
      * in `env` until eval_expr roots it (frame or vstack) before any
      * allocation. */
-    jhint = 0; /* interpreted body: no fast entry */
     expr = t->vstack[cursor];
     env = envv;
     PL_GC_ALLOW(t);
@@ -1827,50 +2107,56 @@ opdeep_next:
 
 op_body:
   fr = &t->fstack[t->fsp - 1];
-  {
-    const pl_opdesc* d = &pl_ops[fr->op];
-    uint32_t opi = fr->op;
-    size_t argbase = fr->argbase;
-    t->fsp--;          /* pop before the body so its frames take this slot */
-    t->centry_depth++; /* op bodies are C-entry regions */
-    if (ax_unlikely(d->opset >= 82))
-      t->effect_epoch++; /* effect initiation: F_MEMO barriers above must
-                          * not record (covers direct ops, the io hook,
-                          * and coordination requests alike) */
-    pl_val r;
-    if (ax_unlikely(d->host_effect && t->rplan_effect_f != NULL))
-      t->rplan_effect_f(t);
-    /* direct op-82 effects route through the record/replay seam */
-    if (!(d->opset == 82 && !d->coord && pl_io != NULL &&
-          pl_io(t, opi, argbase, &r)))
-      r = d->body(t, argbase);
-    t->centry_depth--;
-    t->vsp = argbase - 1; /* drop args and the name slot */
-    if (ax_unlikely(d->coord)) {
-      /*
-       * Coordination effect: r is the validated request, not a
-       * result.  Initiation is legal only at depth 0 — directly
-       * under pl_thread_run — where the machine parks the request and
-       * suspends at a RETURN point: the deposited response arrives as
-       * the op's value.  At depth > 0 under an executor, blocking is
-       * impossible (live native frames sit between the trampoline and
-       * this step), so reaching here is a contract violation — only a
-       * jet or a host re-entry could do it.  From a plain host entry
-       * there is nobody to service the request, so it is a
-       * (non-Try-catchable) runtime error.
-       */
-      if (t->centry_depth > 0) {
-        ax_assume(!t->suspendable,
-                  "coordination effect initiated in a C-entry region");
-        pl_raise_msg(t, "actor op with no executor");
-      }
-      t->blocked_on = r;
-      pl_profile_pause_all(t);
-      return PL_RUN_BLOCKED;
+  op_idx = fr->op;
+  op_base = fr->argbase;
+  t->fsp--; /* pop before the body so its frames take this slot */
+op_body_ready: {
+  const pl_opdesc* d = &pl_ops[op_idx];
+  uint32_t opi = op_idx;
+  size_t argbase = op_base;
+  t->centry_depth++; /* op bodies are C-entry regions */
+  if (ax_unlikely(d->opset >= 82))
+    t->effect_epoch++; /* effect initiation: F_MEMO barriers above must
+                        * not record (covers direct ops, the io hook,
+                        * and coordination requests alike) */
+  pl_val r;
+  if (ax_unlikely(d->host_effect && t->rplan_effect_f != NULL))
+    t->rplan_effect_f(t);
+  /* direct op-82 effects route through the record/replay seam */
+  if (!(d->opset == 82 && !d->coord && pl_io != NULL &&
+        pl_io(t, opi, argbase, &r)))
+    r = d->body(t, argbase);
+  t->centry_depth--;
+  t->vsp = argbase - 1; /* drop args and the name slot */
+  if (ax_unlikely(d->coord)) {
+    /*
+     * Coordination effect: r is the validated request, not a
+     * result.  Initiation is legal only at depth 0 — directly
+     * under pl_thread_run — where the machine parks the request and
+     * suspends at a RETURN point: the deposited response arrives as
+     * the op's value.  At depth > 0 under an executor, blocking is
+     * impossible (live native frames sit between the trampoline and
+     * this step), so reaching here is a contract violation — only a
+     * jet or a host re-entry could do it.  From a plain host entry
+     * there is nobody to service the request, so it is a
+     * (non-Try-catchable) runtime error.
+     */
+    if (t->centry_depth > 0) {
+      ax_assume(!t->suspendable,
+                "coordination effect initiated in a C-entry region");
+      pl_raise_msg(t, "actor op with no executor");
     }
-    v = r;
-    goto eval;
+    t->blocked_on = r;
+    pl_profile_pause_all(t);
+    return PL_RUN_BLOCKED;
   }
+  v = r;
+  if (t->fuel > 1 && pl_is_whnf(v)) {
+    t->fuel--;
+    goto ret;
+  }
+  goto eval;
+}
 }
 
 /* ── Exception delivery (frame-based Try) ──────────────────────────────── */
@@ -1959,6 +2245,8 @@ void pl_thread_start(pl_thread* t, pl_val v) {
   t->resume_kind = PL_RES_EVAL;
   t->resume_val = v;
   t->blocked_on = 0;
+  /* The old result is no longer observable once the new run is armed. */
+  t->result = 0;
   t->pending_yield = false;
   t->profile_run_mark = t->profile_next_generation;
   t->status = PL_RUN_YIELDED;
@@ -2080,7 +2368,13 @@ static pl_val pl_run_centry(pl_thread* t, pl_val v, size_t base) {
   if (outermost)
     pl_profile_pause_all(t);
   ax_assume(s == PL_RUN_DONE, "C-entry run cannot suspend");
-  return t->result;
+  pl_val result = t->result;
+  /* Nested entries return directly to C; their caller roots what it keeps.
+   * Leaving the scratch result here retains otherwise dead graphs for the
+   * lifetime of the enclosing run. Preserve the outermost host result. */
+  if (!outermost)
+    t->result = 0;
+  return result;
 }
 
 #ifdef PL_YIELD_STRESS
@@ -2125,6 +2419,10 @@ static pl_val pl_stress_drive(pl_thread* t, pl_val v, size_t base) {
   t->resume_kind = save_kind;
   t->status = save_status;
   t->profile_run_mark = save_profile_mark;
+  /* Match pl_run_centry at true depth 0: the outermost host entry leaves its
+   * result rooted in t->result (only nested entries clear it). */
+  if (s == PL_RUN_DONE)
+    t->result = r;
 
   if (s == PL_RUN_EXN) {
     /* re-raise to the caller's handler, as the direct path would */

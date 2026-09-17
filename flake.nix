@@ -110,9 +110,6 @@
             installPhase = ''
               runHook preInstall
               make install BUILD_TYPE=${buildType} PREFIX=$out ${pgoMakeArgs}
-              install -d $out/bin
-              install -m 0755 build/${buildType}/bin/wisp $out/bin/wisp
-              install -m 0755 build/${buildType}/bin/assembler $out/bin/assembler
               runHook postInstall
             '';
           });
@@ -159,7 +156,9 @@
         no TSAN for macOS - causes occasional (nondeterministic) crashes in CI
         ASAN should be disabled until we fix bytecode lifecycles
         */
-        testBuildTypes = ["debug" "ubsan"];
+        # release: the only leg that runs the -O3 -DNDEBUG codegen that ships
+        # (assert() and the PL_GC_FORBID accounting compile out there).
+        testBuildTypes = ["debug" "ubsan" "release"];
         linuxTestBuildTypes = ["tsan"];
         testChecks =
           lib.listToAttrs
@@ -179,6 +178,10 @@
             # YIELD_STRESS (spec §10.1): every depth-0 safepoint suspends
             tests-debug-yield-stress =
               mkCheckArgs "debug" "-yield-stress" "YIELD_STRESS=1";
+            # GC_STRESS (DEVELOP.md): every pl_gc_reserve collects, so a
+            # missing root fails deterministically instead of by luck
+            tests-debug-gc-stress =
+              mkCheckArgs "debug" "-gc-stress" "GC_STRESS=1";
           };
 
         coverageReport = (compilerFor "coverage").stdenv.mkDerivation {

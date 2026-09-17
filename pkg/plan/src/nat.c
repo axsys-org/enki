@@ -54,6 +54,10 @@ uint64_t pl_nat_limb_at(pl_val v, size_t i) {
 }
 
 int pl_nat_cmp(pl_val a, pl_val b) {
+  /* Direct nats are never indirections: compare them in registers before
+   * building limb views.  Every Eq/Ne/Lt/Le/Gt/Ge/Cmp body lands here. */
+  if (pl_is_nat63(a) && pl_is_nat63(b))
+    return a < b ? -1 : (a > b ? 1 : 0);
   mp_limb_t ta, tb;
   pl_val va = pl_resolve(a);
   pl_val vb = pl_resolve(b);
@@ -186,10 +190,10 @@ pl_val pl_nat_add(pl_thread* t, pl_val* a, pl_val* b) {
 }
 
 pl_val pl_nat_sub(pl_thread* t, pl_val* a, pl_val* b) {
+  if (pl_is_nat63(*a) && pl_is_nat63(*b))
+    return *a > *b ? *a - *b : 0;
   if (pl_nat_cmp(*b, *a) >= 0)
     return 0;
-  if (pl_is_nat63(*a) && pl_is_nat63(*b))
-    return *a - *b;
   size_t la = pl_nat_limb_len(*a);
   pl_gc_reserve(t, PL_NAT_CELLS(la));
   PL_GC_FORBID(t);

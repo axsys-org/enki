@@ -198,11 +198,11 @@ static void plgc_put(const uint8_t key[32], const uint8_t* b, size_t n) {
  * persistent value that fails to parse as a nat63 is a miss. */
 
 typedef struct {
-  uint8_t b[32];
-} pl_memo_hash;
+  uint8_t b[64]; /* f_hash ‖ x_hash: the in-process map needs no hashing */
+} pl_memo_key;
 
 typedef struct {
-  pl_memo_hash key;
+  pl_memo_key key;
   uint64_t value;
 } pl_memo_ent;
 
@@ -210,6 +210,16 @@ static pthread_mutex_t memo_mu = PTHREAD_MUTEX_INITIALIZER;
 static pl_memo_ent* memo_map; /* stb_ds hashmap, keyed on the 32 bytes */
 static uint64_t memo_probes, memo_hits, memo_recorded;
 
+static pl_memo_key memo_raw_key(const uint8_t f_hash[32],
+                                const uint8_t x_hash[32]) {
+  pl_memo_key k;
+  memcpy(k.b, f_hash, 32);
+  memcpy(k.b + 32, x_hash, 32);
+  return k;
+}
+
+/* The persistent layer keys on sha256("plgm" ‖ f ‖ x).  Compute it only
+ * when the in-process map misses, so a warm hit is one hashmap lookup. */
 static void memo_key(const uint8_t f_hash[32], const uint8_t x_hash[32],
                      uint8_t out[32]) {
   uint8_t pre[68];
@@ -239,8 +249,7 @@ static bool memo_stats_wanted(void) {
 
 bool pl_memo_probe(const uint8_t f_hash[32], const uint8_t x_hash[32],
                    uint64_t* out) {
-  pl_memo_hash key;
-  memo_key(f_hash, x_hash, key.b);
+  pl_memo_key key = memo_raw_key(f_hash, x_hash);
   bool ok = false;
   pthread_mutex_lock(&memo_mu);
   (void)memo_stats_wanted();
@@ -254,9 +263,11 @@ bool pl_memo_probe(const uint8_t f_hash[32], const uint8_t x_hash[32],
   pthread_mutex_unlock(&memo_mu);
   if (ok)
     return true;
+  uint8_t pkey[32];
+  memo_key(f_hash, x_hash, pkey);
   uint8_t* b = NULL;
   size_t n = 0;
-  if (!plgc_get(key.b, &b, &n))
+  if (!plgc_get(pkey, &b, &n))
     return false;
   if (n == 8) {
     uint64_t v = 0;
@@ -280,8 +291,7 @@ void pl_memo_record(const uint8_t f_hash[32], const uint8_t x_hash[32],
                     uint64_t value) {
   if (!pl_is_nat63(value))
     return;
-  pl_memo_hash key;
-  memo_key(f_hash, x_hash, key.b);
+  pl_memo_key key = memo_raw_key(f_hash, x_hash);
   pthread_mutex_lock(&memo_mu);
   memo_recorded++;
   if (ax_hmgeti(memo_map, key) < 0)
@@ -290,7 +300,9 @@ void pl_memo_record(const uint8_t f_hash[32], const uint8_t x_hash[32],
   uint8_t b[8];
   for (int i = 0; i < 8; i++)
     b[i] = (uint8_t)(value >> (8 * i));
-  plgc_put(key.b, b, sizeof(b));
+  uint8_t pkey[32];
+  memo_key(f_hash, x_hash, pkey);
+  plgc_put(pkey, b, sizeof(b));
 }
 
 void pl_memo_stats(uint64_t* probes, uint64_t* hits, uint64_t* records) {
@@ -309,16 +321,6 @@ void pl_memo_stats(uint64_t* probes, uint64_t* hits, uint64_t* records) {
 
 void pl_store_lock(pl_store* s) {
   ax_assume(pthread_mutex_lock(&s->mu) == 0, "pthread_mutex_lock");
-}
-
-bool pl_store_trylock(pl_store* s) {
-  int rc = pthread_mutex_trylock(&s->mu);
-  if (!rc) {
-    return true;
-  } else {
-    ax_assume(rc == EBUSY, "pthread_mutex_trylock");
-    return false;
-  }
 }
 
 void pl_store_unlock(pl_store* s) {
@@ -890,11 +892,6 @@ bool pl_store_put_compiler(pl_store* s, const uint8_t hash[32]) {
 }
 
 /* ── Store-resident value construction (no GC interaction) ─────────────── */
-
-static pl_val st_nat_small(pl_val n) {
-  ax_assume(pl_is_nat63(n), "st_nat_small");
-  return n;
-}
 
 static pl_val st_app(pl_store* s, pl_val head, uint32_t n, const pl_val* args) {
   pl_cell* p = pl_store_alloc(s, PL_APP_CELLS(n));

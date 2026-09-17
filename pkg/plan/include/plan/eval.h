@@ -81,7 +81,8 @@ void pl_thread_abandon(pl_thread* t);
  * [OpName, args…] with strict args already forced. */
 void pl_thread_deposit(pl_thread* t, pl_val response);
 
-/* Result of the last PL_RUN_DONE. */
+/* Result of a completed run; valid until the next pl_thread_start or the
+ * next outermost host entry (pl_whnf/pl_apply/pl_nf) on this thread. */
 pl_val pl_thread_result(pl_thread* t);
 
 /* The parked effect request of a PL_RUN_BLOCKED thread. */

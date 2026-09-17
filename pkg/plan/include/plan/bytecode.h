@@ -9,7 +9,9 @@ typedef struct pl_code {
   size_t nops;
   uint64_t strict_mask;  /* nonzero: the law pre-forces these args (bit
                             i-1 = arg i) in its checked prologue */
-  uint32_t strict_entry; /* fast entry: skips the checked prologue */
+  uint32_t strict_entry; /* fast entry: skips the checked prologue; judge
+                            takes it iff every strict arg already is a
+                            value (pl_strict_entry), never on a hint */
   uint32_t max_var;      /* highest OP_PUSH_VAR operand (UINT32_MAX when the
                             program contains OP_INTERP, whose expr operands
                             reference env vars invisibly).  max_var <= arity
@@ -41,10 +43,28 @@ typedef enum pl_op {
                        * same slot the cell would have occupied. */
   OP_CALL_KNOWN = 13, /* +argc +op +name: resolved primop, args on stack */
   OP_CALL_FAST = 14,  /* +argc +hint: [head, args…] on stack; verified
-                       * exact-arity law entry (hint = strict mask, may
-                       * be 0); anything else degrades to slow apply    */
+                       * exact-arity law entry; the hint operand is the
+                       * caller's strict mask, informational only (the
+                       * entry is decided by checking the arguments);
+                       * anything else degrades to slow apply           */
   OP_CALL_SLOW = 15,  /* +argc: [head, args…] on stack; generic apply   */
-  PL_OP_COUNT = 16    /* sentinel: sizes pl_run's exec dispatch table */
+  /* Ingest-only numeric specialisations. Operands match CALL_KNOWN for
+   * ordinary calls and MK_THK for tail calls. Never accepted in a row. */
+  OP_ADD = 16,
+  OP_SUB = 17,
+  OP_CMP = 18,
+  OP_TAIL_ADD = 19,
+  OP_TAIL_SUB = 20,
+  OP_TAIL_CMP = 21,
+  /* Ingest-proven WHNF entries; operand widths are unchanged. */
+  OP_FORCE_READY = 22,
+  OP_RET_READY = 23,
+  OP_CALL_READY = 24,
+  OP_TAIL_READY = 25,
+  /* Ingest-only filler: a MK_THK KNOWN (4 operands) rewritten into a
+   * CALL_KNOWN (3 operands) leaves one slot behind. */
+  OP_NOP = 26,
+  PL_OP_COUNT = 27 /* sentinel: sizes pl_run's exec dispatch table */
 } pl_op;
 
 pl_code* pl_bytecode_from_val(pl_val val);
