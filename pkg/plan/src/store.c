@@ -94,6 +94,44 @@ void pl_store_profile_end(pl_store_profile_scope* scope) {
   __attribute__((cleanup(pl_store_profile_end))) pl_store_profile_scope        \
       pl_store_profile_scope_ = pl_store_profile_begin(name, sizeof(name) - 1)
 
+bool pl_staged_put(pl_staged_blob** staged, const uint8_t hash[32],
+                   const uint8_t* bytes, size_t len) {
+  uint8_t* copy = malloc(len != 0 ? len : 1);
+  if (copy == NULL)
+    return false;
+  memcpy(copy, bytes, len);
+  pl_staged_blob entry = {.value = {.bytes = copy, .len = len}};
+  memcpy(entry.key.b, hash, sizeof(entry.key.b));
+  ptrdiff_t at = ax_hmgeti(*staged, entry.key);
+  if (at >= 0)
+    free((*staged)[at].value.bytes);
+  ax_hmput(*staged, entry.key, entry.value);
+  return true;
+}
+
+bool pl_staged_get(pl_staged_blob* staged, const uint8_t hash[32],
+                   uint8_t** out, size_t* len) {
+  pl_hash key;
+  memcpy(key.b, hash, sizeof(key.b));
+  ptrdiff_t at = ax_hmgeti(staged, key);
+  if (at < 0)
+    return false;
+  size_t n = staged[at].value.len;
+  uint8_t* copy = malloc(n != 0 ? n : 1);
+  ax_assume(copy != NULL, "oom");
+  memcpy(copy, staged[at].value.bytes, n);
+  *out = copy;
+  *len = n;
+  return true;
+}
+
+void pl_staged_clear(pl_staged_blob** staged) {
+  for (ptrdiff_t i = 0; i < ax_hmlen(*staged); i++)
+    free((*staged)[i].value.bytes);
+  ax_hmfree(*staged);
+  *staged = NULL;
+}
+
 /* ── Global compile cache ──────────────────────────────────────────────
  *
  * A machine-wide LMDB at PL_CODECACHE_DIR mapping the same
@@ -101,37 +139,55 @@ void pl_store_profile_end(pl_store_profile_scope* scope) {
  * stream of the code-row pin.  Because streams carry their subpin
  * hashes and rebuilds are content-verified, a fresh snap can adopt
  * rows compiled by any earlier snap — `rm -rf snap` no longer means a
- * cold compiler.  Unset dir (library users, tests) or an unopenable
- * path (CI sandboxes) disables it silently.  PL_CODECACHE=0 forces it
- * off. */
+ * cold compiler. Writes remain in memory until Save. An unset dir
+ * (library users, tests) disables it; an unopenable path is a cache miss.
+ * PL_CODECACHE=0 forces it off. */
 static pthread_mutex_t plgc_mu = PTHREAD_MUTEX_INITIALIZER;
 static MDB_env* plgc_env;
 static MDB_dbi plgc_dbi;
 static int plgc_state; /* 0 unopened, 1 open, -1 disabled */
+static bool plgc_writable;
+static pl_staged_blob* plgc_staged;
 
-static bool plgc_open(void) {
-  if (plgc_state != 0)
-    return plgc_state > 0;
-  plgc_state = -1;
+static bool plgc_configured(void) {
   const char* flag = getenv("PL_CODECACHE");
   if (flag != NULL && strcmp(flag, "0") == 0)
     return false;
   const char* dir = getenv("PL_CODECACHE_DIR");
-  if (dir == NULL || dir[0] == '\0')
+  return dir != NULL && dir[0] != '\0';
+}
+
+static bool plgc_open(bool writable) {
+  if (plgc_state < 0)
     return false;
-  (void)mkdir(dir, 0755); /* parent must exist; failure surfaces below */
+  if (plgc_env != NULL && (!writable || plgc_writable))
+    return true;
+  if (!plgc_configured()) {
+    plgc_state = -1;
+    return false;
+  }
+  /* Reads (including compiler lookups during Ice) must not create the
+   * cache or perform a write transaction.  Upgrade only at a Save. */
+  if (plgc_env != NULL) {
+    mdb_env_close(plgc_env);
+    plgc_env = NULL;
+    plgc_state = 0;
+  }
+  const char* dir = getenv("PL_CODECACHE_DIR");
+  if (writable)
+    (void)mkdir(dir, 0755);
   MDB_env* env = NULL;
   if (mdb_env_create(&env) != 0)
     return false;
   if (mdb_env_set_maxdbs(env, 1) != 0 ||
       mdb_env_set_mapsize(env, (size_t)1 << 33) != 0 ||
-      mdb_env_open(env, dir, 0, 0664) != 0) {
+      mdb_env_open(env, dir, writable ? 0 : MDB_RDONLY, 0664) != 0) {
     mdb_env_close(env);
     return false;
   }
   MDB_txn* txn = NULL;
-  if (mdb_txn_begin(env, NULL, 0, &txn) != 0 ||
-      mdb_dbi_open(txn, "cache", MDB_CREATE, &plgc_dbi) != 0) {
+  if (mdb_txn_begin(env, NULL, writable ? 0 : MDB_RDONLY, &txn) != 0 ||
+      mdb_dbi_open(txn, "cache", writable ? MDB_CREATE : 0, &plgc_dbi) != 0) {
     if (txn != NULL)
       mdb_txn_abort(txn);
     mdb_env_close(env);
@@ -143,13 +199,14 @@ static bool plgc_open(void) {
   }
   plgc_env = env;
   plgc_state = 1;
+  plgc_writable = writable;
   return true;
 }
 
 static bool plgc_get(const uint8_t key[32], uint8_t** out_b, size_t* out_n) {
   pthread_mutex_lock(&plgc_mu);
-  bool ok = false;
-  if (plgc_open()) {
+  bool ok = pl_staged_get(plgc_staged, key, out_b, out_n);
+  if (!ok && plgc_open(false)) {
     MDB_txn* txn;
     if (mdb_txn_begin(plgc_env, NULL, MDB_RDONLY, &txn) == 0) {
       MDB_val k = {32, (void*)key};
@@ -171,17 +228,30 @@ static bool plgc_get(const uint8_t key[32], uint8_t** out_b, size_t* out_n) {
 
 static void plgc_put(const uint8_t key[32], const uint8_t* b, size_t n) {
   pthread_mutex_lock(&plgc_mu);
-  if (plgc_open()) {
+  if (plgc_configured())
+    (void)pl_staged_put(&plgc_staged, key, b, n);
+  pthread_mutex_unlock(&plgc_mu);
+}
+
+/* Derived cache persistence is best-effort, but may only sync at Save. */
+void pl_store_cache_checkpoint(void) {
+  pthread_mutex_lock(&plgc_mu);
+  if (ax_hmlen(plgc_staged) != 0 && plgc_open(true)) {
     MDB_txn* txn;
     if (mdb_txn_begin(plgc_env, NULL, 0, &txn) == 0) {
-      MDB_val k = {32, (void*)key};
-      MDB_val v = {n, (void*)b};
-      if (mdb_put(txn, plgc_dbi, &k, &v, 0) == 0) {
-        if (mdb_txn_commit(txn) != 0)
-          txn = NULL; /* commit consumed it either way */
-      } else {
-        mdb_txn_abort(txn);
+      bool ok = true;
+      for (ptrdiff_t i = 0; i < ax_hmlen(plgc_staged); i++) {
+        MDB_val k = {32, plgc_staged[i].key.b};
+        MDB_val v = {plgc_staged[i].value.len, plgc_staged[i].value.bytes};
+        if (mdb_put(txn, plgc_dbi, &k, &v, 0) != 0) {
+          ok = false;
+          break;
+        }
       }
+      if (!ok)
+        mdb_txn_abort(txn);
+      else if (mdb_txn_commit(txn) == 0)
+        pl_staged_clear(&plgc_staged);
     }
   }
   pthread_mutex_unlock(&plgc_mu);
@@ -448,6 +518,8 @@ bool pl_store_put_root(pl_store* s, const uint8_t hash[32]) {
   pl_store_save_lock(s);
   bool ok = s->be.put_root(s->be.ctx, hash);
   pl_store_save_unlock(s);
+  if (ok)
+    pl_store_cache_checkpoint();
   return ok;
 }
 
@@ -566,7 +638,7 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
   memcpy(key.b, hash, sizeof(key.b));
   ptrdiff_t targets_at = ax_hmgeti(s->code_targets, key);
   if (targets_at < 0) {
-    pl_store_unlock(s); /* only persistent LAW PINs execute bytecode */
+    pl_store_unlock(s); /* only canonical LAW PINs execute bytecode */
     pl_store_save_unlock(s);
     return;
   }
@@ -767,10 +839,8 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
   uint64_t compile_ns =
       (uint64_t)(compile_t1.tv_sec - compile_t0.tv_sec) * 1000000000u +
       (uint64_t)(compile_t1.tv_nsec - compile_t0.tv_nsec);
-  /* Only cache compiles worth remembering: a cache write costs a pin
-   * save plus an LMDB transaction (~ms), so persisting sub-10ms
-   * compiles (the ship compiler's whole range) would slow the sweeps
-   * it is meant to speed up. */
+  /* Keep the existing 10ms admission threshold: caching also serializes a
+   * row pin, retains staging memory, and adds work to the next Save. */
   if (codecache && compile_ns < 10000000u)
     codecache = false;
   if (codecache) {
@@ -1177,26 +1247,20 @@ pl_store* pl_store_new_mem(void) {
 typedef struct lmdb_backend {
   MDB_env* env;
   MDB_dbi dbi;
+  pl_staged_blob* staged; /* protected by the owning store's save_mu */
 } lmdb_backend;
 
 static const uint8_t pl_root_key[32] = {'r', 'o', 'o', 't'};
 
 static bool lmdb_put_kv(lmdb_backend* l, const uint8_t key[32],
                         const uint8_t* b, size_t n) {
-  MDB_txn* txn;
-  if (mdb_txn_begin(l->env, NULL, 0, &txn) != 0)
-    return false;
-  MDB_val k = {32, (void*)key};
-  MDB_val v = {n, (void*)b};
-  if (mdb_put(txn, l->dbi, &k, &v, 0) != 0) {
-    mdb_txn_abort(txn);
-    return false;
-  }
-  return mdb_txn_commit(txn) == 0;
+  return pl_staged_put(&l->staged, key, b, n);
 }
 
 static bool lmdb_get_kv(lmdb_backend* l, const uint8_t key[32], uint8_t** out_b,
                         size_t* out_s) {
+  if (pl_staged_get(l->staged, key, out_b, out_s))
+    return true;
   MDB_txn* txn;
   if (mdb_txn_begin(l->env, NULL, MDB_RDONLY, &txn) != 0)
     return false;
@@ -1234,7 +1298,28 @@ static bool lmdb_has(void* ctx, const uint8_t hash[32]) {
 }
 
 static bool lmdb_put_root(void* ctx, const uint8_t hash[32]) {
-  return lmdb_put_kv(ctx, pl_root_key, hash, 32);
+  lmdb_backend* l = ctx;
+  MDB_txn* txn;
+  if (mdb_txn_begin(l->env, NULL, 0, &txn) != 0)
+    return false;
+  for (ptrdiff_t i = 0; i < ax_hmlen(l->staged); i++) {
+    MDB_val k = {32, l->staged[i].key.b};
+    MDB_val v = {l->staged[i].value.len, l->staged[i].value.bytes};
+    if (mdb_put(txn, l->dbi, &k, &v, 0) != 0) {
+      mdb_txn_abort(txn);
+      return false;
+    }
+  }
+  MDB_val k = {32, (void*)pl_root_key};
+  MDB_val v = {32, (void*)hash};
+  if (mdb_put(txn, l->dbi, &k, &v, 0) != 0) {
+    mdb_txn_abort(txn);
+    return false;
+  }
+  if (mdb_txn_commit(txn) != 0)
+    return false;
+  pl_staged_clear(&l->staged);
+  return true;
 }
 
 static bool lmdb_get_root(void* ctx, uint8_t hash[32]) {
@@ -1251,6 +1336,7 @@ static bool lmdb_get_root(void* ctx, uint8_t hash[32]) {
 
 static void lmdb_close(void* ctx) {
   lmdb_backend* l = ctx;
+  pl_staged_clear(&l->staged);
   mdb_dbi_close(l->env, l->dbi);
   mdb_env_close(l->env);
   free(l);

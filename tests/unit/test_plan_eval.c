@@ -116,6 +116,22 @@ static bool test_install_self_replacement_raises(pl_thread* t,
   return true;
 }
 
+static pl_val test_ice(pl_thread* t, pl_val pin) {
+  return test_op66(t, ax_s3('I', 'c', 'e'), 1, &pin);
+}
+
+static bool test_ice_raises(pl_thread* t, pl_val value) {
+  pl_catch c;
+  pl_catch_init(t, &c);
+  if (setjmp(c.jb) == 0) {
+    (void)test_ice(t, value);
+    pl_catch_pop(t, &c);
+    return false;
+  }
+  pl_catch_unwind(t, &c);
+  return true;
+}
+
 /* ── Application shapes ────────────────────────────────────────────────── */
 
 TEST(apply, under_application_builds_app) {
@@ -684,6 +700,10 @@ TEST(ops, equal_deep_and_pin_identity) {
   ASSERT_EQ(test_op66_2(t, ax_s5('E', 'q', 'u', 'a', 'l'), t->vstack[base + 2],
                         t->vstack[base + 3]),
             1);
+  ASSERT_EQ(pl_pin_proxy_target(pl_ptr(t->vstack[base + 2])), 0);
+  ASSERT_EQ(pl_pin_proxy_target(pl_ptr(t->vstack[base + 3])), 0);
+  ASSERT_NULL(pl_pin_hash(t->vstack[base + 2]));
+  ASSERT_NULL(pl_pin_hash(t->vstack[base + 3]));
 
   /* Save keeps the two public proxies distinct but deduplicates their
    * canonical target.  Equal must chase that target before its identity
@@ -704,6 +724,147 @@ TEST(ops, equal_deep_and_pin_identity) {
   ASSERT_EQ(test_op66_2(t, ax_s5('E', 'q', 'u', 'a', 'l'), t->vstack[base + 2],
                         canonical),
             1);
+  test_rt_free(&rt);
+}
+
+TEST(ops, ice_normalizes_and_persists_without_publishing_root) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  pl_vpush(t, test_app1_thunk_to(t, 42));
+  t->vstack[base] = pl_pin(t, t->vstack[base]);
+  pl_vpush(t, test_app1(t, 0, t->vstack[base]));
+  t->vstack[base + 1] = pl_pin(t, t->vstack[base + 1]);
+  ASSERT_NULL(pl_pin_hash(t->vstack[base]));
+  uint64_t epoch = t->effect_epoch;
+  ASSERT_EQ(test_ice(t, t->vstack[base + 1]), 0);
+  ASSERT_EQ(t->effect_epoch, epoch + 1);
+  for (size_t i = 0; i < 2; i++) {
+    pl_val pin = t->vstack[base + i];
+    ASSERT_NOT_NULL(pl_pin_hash(pin));
+    ASSERT(rt.store->be.has(rt.store->be.ctx, pl_pin_hash(pin)));
+    ASSERT_EQ(pl_store_load(t, pl_pin_hash(pin)),
+              pl_pin_proxy_target(pl_ptr(pin)));
+  }
+  pl_val body = pl_pin_body(pl_ptr(t->vstack[base]));
+  ASSERT_EQ(pl_app_args(pl_ptr(body))[0], 42);
+  uint8_t root[32];
+  ASSERT_FALSE(pl_store_get_root(rt.store, root));
+
+  char err[192] = {0};
+  ASSERT(pl_store_save_root(rt.store, t->vstack[base], root, err, sizeof(err)),
+         "%s", err);
+  pl_val canonical = pl_pin_proxy_target(pl_ptr(t->vstack[base + 1]));
+  ASSERT_EQ(test_ice(t, t->vstack[base + 1]), 0);
+  ASSERT_EQ(test_ice(t, canonical), 0);
+  uint8_t after[32];
+  ASSERT(pl_store_get_root(rt.store, after));
+  ASSERT_EQ(memcmp(root, after, sizeof(root)), 0);
+  ASSERT_EQ(pl_pin_proxy_target(pl_ptr(t->vstack[base + 1])), canonical);
+  test_rt_free(&rt);
+}
+
+TEST(ops, ice_rejects_nonpins_and_propagates_normalization_errors) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  ASSERT(test_ice_raises(t, 42));
+  ASSERT_STR_EQ(t->exn_msg, "Ice: expected a pin");
+  pl_val wrong_args[2] = {0, 0};
+  test_expect_no_op66(t, ax_s3('I', 'c', 'e'), 2, wrong_args);
+
+  size_t base = t->vsp;
+  pl_vpush(t, test_throwing(t, 7));
+  t->vstack[base] = test_app1(t, 0, t->vstack[base]);
+  t->vstack[base] = pl_pin(t, t->vstack[base]);
+  for (unsigned attempt = 0; attempt < 2; attempt++) {
+    ASSERT(test_ice_raises(t, t->vstack[base]));
+    ASSERT_EQ(t->exn, 7);
+    ASSERT_NULL(pl_pin_hash(t->vstack[base]));
+    ASSERT_EQ(pl_pin_proxy_target(pl_ptr(t->vstack[base])), 0);
+  }
+  test_rt_free(&rt);
+}
+
+TEST(ops, equal_reuses_frozen_pin_in_either_order_and_survives_gc) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  pl_vpush(t, test_law(t, 1, 37, 1));
+  t->vstack[base] = pl_pin(t, t->vstack[base]);
+  ASSERT_EQ(test_ice(t, t->vstack[base]), 0);
+  pl_val canonical = pl_pin_proxy_target(pl_ptr(t->vstack[base]));
+  pl_code code = {0};
+  pl_pin_set_code(pl_ptr(canonical), &code);
+  for (unsigned variant = 0; variant < 4; variant++) {
+    pl_vpush(t, test_law(t, 1, 37, 1));
+    t->vstack[base + 1] = pl_pin(t, t->vstack[base + 1]);
+    pl_val frozen = variant < 2 ? t->vstack[base] : canonical;
+    pl_val fresh = t->vstack[base + 1];
+    uint64_t epoch = t->effect_epoch;
+    ASSERT_EQ(test_op66_2(t, ax_s5('E', 'q', 'u', 'a', 'l'),
+                          variant % 2 == 0 ? fresh : frozen,
+                          variant % 2 == 0 ? frozen : fresh),
+              1);
+    ASSERT_EQ(t->effect_epoch, epoch);
+    ASSERT_EQ(pl_pin_proxy_target(pl_ptr(t->vstack[base + 1])), canonical);
+    pl_gc_collect_now(t);
+    pl_cell* proxy = pl_ptr(t->vstack[base + 1]);
+    ASSERT_EQ(pl_pin_proxy_target(proxy), canonical);
+    ASSERT_EQ(proxy[5], 0);
+    ASSERT_EQ(pl_pin_hash(t->vstack[base + 1]), pl_pin_hash(canonical));
+    ASSERT_EQ(pl_pin_body(proxy), pl_pin_body(pl_ptr(canonical)));
+    ASSERT_EQ(pl_pin_code(proxy), &code);
+    t->vsp = base + 1;
+  }
+  pl_pin_set_code(pl_ptr(canonical), NULL);
+  test_rt_free(&rt);
+}
+
+TEST(ops, equal_publishes_nested_matches_but_not_unequal_parents) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  pl_vpush(t, pl_pin(t, 7));
+  pl_vpush(t, test_app2(t, 0, t->vstack[base], 8));
+  t->vstack[base + 1] = pl_pin(t, t->vstack[base + 1]);
+  ASSERT_EQ(test_ice(t, t->vstack[base + 1]), 0);
+  for (unsigned reverse = 0; reverse < 2; reverse++) {
+    pl_vpush(t, pl_pin(t, 7));
+    pl_vpush(t, test_app2(t, 0, t->vstack[base + 2], 9));
+    t->vstack[base + 3] = pl_pin(t, t->vstack[base + 3]);
+    pl_val frozen = t->vstack[base + 1];
+    pl_val fresh = t->vstack[base + 3];
+    ASSERT_EQ(test_op66_2(t, ax_s5('E', 'q', 'u', 'a', 'l'),
+                          reverse != 0 ? frozen : fresh,
+                          reverse != 0 ? fresh : frozen),
+              0);
+    ASSERT_EQ(pl_pin_proxy_target(pl_ptr(t->vstack[base + 2])),
+              pl_pin_proxy_target(pl_ptr(t->vstack[base])));
+    ASSERT_EQ(pl_pin_proxy_target(pl_ptr(t->vstack[base + 3])), 0);
+    ASSERT_NULL(pl_pin_hash(t->vstack[base + 3]));
+    t->vsp = base + 2;
+  }
+  test_rt_free(&rt);
+}
+
+TEST(ops, equal_completes_nested_pin_comparisons_beyond_inline_worklist) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  pl_vpush(t, 42);
+  pl_vpush(t, 42);
+  for (unsigned i = 0; i < 96; i++) {
+    t->vstack[base] = test_app1(t, 0, t->vstack[base]);
+    t->vstack[base] = pl_pin(t, t->vstack[base]);
+    t->vstack[base + 1] = test_app1(t, 0, t->vstack[base + 1]);
+    t->vstack[base + 1] = pl_pin(t, t->vstack[base + 1]);
+  }
+  ASSERT_EQ(test_ice(t, t->vstack[base]), 0);
+  ASSERT_EQ(test_op66_2(t, ax_s5('E', 'q', 'u', 'a', 'l'), t->vstack[base],
+                        t->vstack[base + 1]),
+            1);
+  ASSERT_EQ(pl_pin_proxy_target(pl_ptr(t->vstack[base + 1])),
+            pl_pin_proxy_target(pl_ptr(t->vstack[base])));
   test_rt_free(&rt);
 }
 
@@ -767,6 +928,66 @@ TEST(ops, whole_row_slice_reuses_only_exact_result) {
   ASSERT_EQ(pl_app_head(p), 0);
   ASSERT_EQ(pl_app_n(p), 3);
 
+  test_rt_free(&rt);
+}
+
+TEST(ops, weld_uses_zero_for_empty_rows) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  pl_val weld = ax_s4('W', 'e', 'l', 'd');
+  ASSERT_EQ(test_op66_2(t, weld, 0, 0), 0);
+  ASSERT_EQ(test_op66_2(t, weld, 7, 9), 0);
+
+  size_t base = t->vsp;
+  pl_vpush(t, test_app1(t, 7, 11));
+  for (unsigned order = 0; order < 2; order++) {
+    pl_val row = t->vstack[base];
+    pl_val result = test_op66_2(t, weld, order ? row : 0, order ? 0 : row);
+    pl_cell* p = pl_as(PL_TAG_APP, result);
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(pl_app_head(p), 0);
+    ASSERT_EQ(pl_app_n(p), 1);
+    ASSERT_EQ(pl_app_args(p)[0], 11);
+  }
+  pl_vpush(t, test_app2(t, 9, 22, 33));
+  pl_val result = test_op66_2(t, weld, t->vstack[base], t->vstack[base + 1]);
+  test_assert_nat_row3(result, 11, 22, 33);
+  test_rt_free(&rt);
+}
+
+TEST(ops, app_producers_collapse_head_only_results) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  pl_vpush(t, test_throwing(t, 99));
+  pl_vpush(t, test_app1(t, 7, t->vstack[base]));
+
+  /* Empty Row/Rep preserve the head without forcing unused lazy fields. */
+  pl_val rep[3] = {7, t->vstack[base], 0};
+  ASSERT_EQ(test_op66(t, ax_s3('R', 'e', 'p'), 3, rep), 7);
+  pl_val row[3] = {7, 0, t->vstack[base]};
+  ASSERT_EQ(test_op66(t, ax_s3('R', 'o', 'w'), 3, row), 7);
+  pl_val slice[3] = {0, 0, t->vstack[base + 1]};
+  ASSERT_EQ(test_op66(t, ax_s5('S', 'l', 'i', 'c', 'e'), 3, slice), 0);
+  pl_val past_end[3] = {1, 10, t->vstack[base + 1]};
+  ASSERT_EQ(test_op66(t, ax_s5('S', 'l', 'i', 'c', 'e'), 3, past_end), 0);
+  pl_val app = t->vstack[base + 1];
+  ASSERT_EQ(test_op66(t, ax_s4('I', 'n', 'i', 't'), 1, &app), 7);
+  ASSERT_EQ(test_op66_2(t, ax_s4('C', 'o', 'u', 'p'), 7, 0), 7);
+  pl_val up[3] = {0, t->vstack[base], 0};
+  ASSERT_EQ(test_op66(t, ax_s2('U', 'p'), 3, up), 0);
+  pl_val up_uniq[3] = {0, t->vstack[base], 0};
+  ASSERT_EQ(test_op66(t, ax_s6('U', 'p', 'U', 'n', 'i', 'q'), 3, up_uniq), 0);
+
+  /* Elim decomposes the shortest lawful app into head and lazy argument. */
+  pl_val elim[6] = {0, 0, 0, 0, 0, t->vstack[base + 1]};
+  pl_cell* result =
+      pl_as(PL_TAG_APP, test_op66(t, ax_s4('E', 'l', 'i', 'm'), 6, elim));
+  ASSERT_NOT_NULL(result);
+  ASSERT_EQ(pl_app_head(result), 0);
+  ASSERT_EQ(pl_app_n(result), 2);
+  ASSERT_EQ(pl_app_args(result)[0], 7);
+  ASSERT_EQ(pl_app_args(result)[1], t->vstack[base]);
   test_rt_free(&rt);
 }
 
@@ -1371,6 +1592,30 @@ TEST(exec, call_known_runs_resolved_primop_direct) {
   test_rt_free(&rt);
 }
 
+TEST(exec, call_known_ice_deep_normalizes_before_persisting) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  pl_vpush(t, pl_pin(t, 66));
+  pl_val row[7] = {
+      OP_PUSH_VAR,          1,     OP_CALL_KNOWN, 1, t->vstack[base],
+      ax_s3('I', 'c', 'e'), OP_RET};
+  pl_vpush(t, test_app(t, 0, 7, row));
+  pl_code* code = pl_bytecode_from_val(t->vstack[base + 1]);
+  ASSERT_NOT_NULL(code);
+  t->vsp = base;
+  test_code_pin(&rt, 1, code);
+  pl_vpush(t, test_app1_thunk_to(t, 42));
+  t->vstack[base + 1] = pl_pin(t, t->vstack[base + 1]);
+  ASSERT_EQ(test_run_call1(t, t->vstack[base], t->vstack[base + 1]), 0);
+  ASSERT_NOT_NULL(pl_pin_hash(t->vstack[base + 1]));
+  pl_val body = pl_pin_body(pl_ptr(t->vstack[base + 1]));
+  ASSERT_EQ(pl_app_args(pl_ptr(body))[0], 42);
+  pl_pin_set_code(pl_ptr(t->vstack[base]), NULL);
+  pl_bytecode_free(code);
+  test_rt_free(&rt);
+}
+
 /* CALL_KNOWN must retain the same argument safepoints when no forcing is
  * needed, and materialize a rooted continuation when a later argument is
  * deferred. Collect at every yield to exercise that continuation's roots. */
@@ -1465,6 +1710,23 @@ TEST(exec, call_known_try_delivers_both_arms_in_place) {
 static pl_code* test_decode_ops(pl_thread* t, size_t n, const pl_val* ops) {
   pl_val row = test_app(t, 0, (uint32_t)n, ops);
   return pl_bytecode_from_val(row);
+}
+
+TEST(exec, decode_rejects_head_only_apps) {
+  test_rt rt = test_rt_new();
+  /* There is a head on the operand stack: this is invalid arity, not
+   * stack underflow. Counts must also fit the header before narrowing. */
+  const pl_val counts[] = {0, UINT32_MAX - 1ULL, UINT32_MAX,
+                           (UINT64_C(1) << 32) + 1, PL_NAT63_MAX};
+  for (size_t i = 0; i < sizeof(counts) / sizeof(counts[0]); i++) {
+    pl_val ops[] = {OP_PUSH_LIT, 7, OP_MK_APP, counts[i], OP_RET};
+    pl_code* code = test_decode_ops(rt.t, 5, ops);
+    bool rejected = code == NULL;
+    pl_bytecode_free(code);
+    ASSERT(rejected, "invalid MK_APP count %llu",
+           (unsigned long long)counts[i]);
+  }
+  test_rt_free(&rt);
 }
 
 TEST(exec, decode_rejects_operand_stack_underflow) {
@@ -2474,6 +2736,31 @@ TEST(memo, non_nat_result_evaluates_but_never_caches) {
   uint64_t got = 0;
   ASSERT(!pl_memo_probe(pl_pin_hash(t->vstack[base]),
                         pl_pin_hash(t->vstack[base + 1]), &got));
+  test_rt_free(&rt);
+}
+
+TEST(memo, ice_persistence_is_never_cached) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  /* f x = P66 (Ice x), assembled from law-body application expressions. */
+  pl_vpush(t, test_app1(t, 0, ax_s3('I', 'c', 'e')));
+  pl_vpush(t, test_app2(t, 0, t->vstack[base], 1));
+  pl_vpush(t, test_app1(t, 0, test_p66(t)));
+  pl_vpush(t, test_app2(t, 0, t->vstack[base + 2], t->vstack[base + 1]));
+  pl_vpush(t, test_law(t, 1, ax_s6('m', 'm', '_', 'i', 'c', 'e'),
+                       t->vstack[base + 3]));
+  t->vstack[base] = test_saved_pin(&rt, t->vstack[base + 4]);
+  t->vsp = base + 1;
+  pl_vpush(t, test_saved_pin(&rt, ax_s6('m', 'm', 'x', 'i', 'c', 'e')));
+  for (unsigned attempt = 0; attempt < 2; attempt++) {
+    uint64_t epoch = t->effect_epoch;
+    ASSERT_EQ(test_memo(t, t->vstack[base], t->vstack[base + 1]), 0);
+    ASSERT_EQ(t->effect_epoch, epoch + 1);
+    uint64_t got = 0;
+    ASSERT_FALSE(pl_memo_probe(pl_pin_hash(t->vstack[base]),
+                               pl_pin_hash(t->vstack[base + 1]), &got));
+  }
   test_rt_free(&rt);
 }
 

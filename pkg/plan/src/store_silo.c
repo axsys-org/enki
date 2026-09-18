@@ -18,7 +18,15 @@
 #define SILO_INDEX_BYTES  24u
 #define PACK_BUFFER_BYTES (64u * 1024u)
 
+typedef struct silo_index_entry {
+  pl_hash key;
+  struct {
+    uint64_t off, len;
+  } value;
+} silo_index_entry;
+
 typedef struct silo_backend {
+  pl_store* store; /* save_mu protects the local staging maps */
   MDB_env* env;
   MDB_dbi objects;
   MDB_dbi meta;
@@ -27,6 +35,8 @@ typedef struct silo_backend {
   int pack_fd;
   bool has_roots; /* absent when inspecting a pre-journal store read-only */
   bool rdonly;
+  silo_index_entry* staged;
+  pl_staged_blob* staged_kv;
 } silo_backend;
 
 typedef struct pack_reader {
@@ -37,11 +47,6 @@ typedef struct pack_reader {
   size_t pos;
 } pack_reader;
 
-typedef struct batch_hash_entry {
-  pl_hash key;
-  uint8_t value;
-} batch_hash_entry;
-
 struct pl_silo_batch {
   silo_backend* backend;
   MDB_txn* txn;
@@ -51,7 +56,7 @@ struct pl_silo_batch {
   size_t buffered;
   bool changed;
   bool pack_dirty;
-  batch_hash_entry* pending;
+  silo_index_entry* pending;
   uint8_t buffer[PACK_BUFFER_BYTES];
 };
 
@@ -209,38 +214,45 @@ static bool pack_reader_rewind(void* ctx) {
   return true;
 }
 
-static bool silo_has(void* ctx, const uint8_t hash[32]) {
-  silo_backend* b = ctx;
+/* Copy the location while staging is locked; the pack bytes are immutable
+ * after a successful Ice/Save, so readers need not retain that lock. */
+static int silo_find(silo_backend* b, const uint8_t hash[32], uint64_t* off,
+                     uint64_t* len) {
+  pl_store_save_lock(b->store);
+  pl_hash h;
+  memcpy(h.b, hash, sizeof(h.b));
+  ptrdiff_t at = ax_hmgeti(b->staged, h);
+  if (at >= 0) {
+    *off = b->staged[at].value.off;
+    *len = b->staged[at].value.len;
+    pl_store_save_unlock(b->store);
+    return 0;
+  }
   MDB_txn* txn;
-  if (mdb_txn_begin(b->env, NULL, MDB_RDONLY, &txn) != 0)
-    return false;
+  int rc = mdb_txn_begin(b->env, NULL, MDB_RDONLY, &txn);
+  if (rc != 0) {
+    pl_store_save_unlock(b->store);
+    return rc;
+  }
   MDB_val key = {.mv_size = 32, .mv_data = (void*)hash};
   MDB_val value;
-  int rc = mdb_get(txn, b->objects, &key, &value);
-  uint64_t off = 0, len = 0;
-  bool valid = rc == 0 && index_decode(&value, &off, &len) && len != 0;
+  rc = mdb_get(txn, b->objects, &key, &value);
+  if (rc == 0 && (!index_decode(&value, off, len) || *len == 0))
+    rc = EINVAL;
   mdb_txn_abort(txn);
-  if (!valid)
+  pl_store_save_unlock(b->store);
+  return rc;
+}
+
+static bool silo_has(void* ctx, const uint8_t hash[32]) {
+  silo_backend* b = ctx;
+  uint64_t off = 0, len = 0;
+  if (silo_find(b, hash, &off, &len) != 0)
     return false;
   struct stat st;
   return fstat(b->pack_fd, &st) == 0 && st.st_size >= 0 &&
          off <= (uint64_t)st.st_size && len <= (uint64_t)st.st_size - off &&
          off <= (uint64_t)INT64_MAX && len <= (uint64_t)INT64_MAX - off;
-}
-
-static bool silo_meta_put(silo_backend* b, const void* key_bytes,
-                          size_t key_len, const void* value_bytes,
-                          size_t value_len) {
-  MDB_txn* txn;
-  if (mdb_txn_begin(b->env, NULL, 0, &txn) != 0)
-    return false;
-  MDB_val key = {.mv_size = key_len, .mv_data = (void*)key_bytes};
-  MDB_val value = {.mv_size = value_len, .mv_data = (void*)value_bytes};
-  if (mdb_put(txn, b->meta, &key, &value, 0) != 0) {
-    mdb_txn_abort(txn);
-    return false;
-  }
-  return mdb_txn_commit(txn) == 0;
 }
 
 static bool silo_meta_get(silo_backend* b, const void* key_bytes,
@@ -311,34 +323,9 @@ static bool silo_journal_append(silo_backend* b, MDB_txn* txn,
 
 static bool silo_put_root(void* ctx, const uint8_t hash[32]) {
   silo_backend* b = ctx;
-  if (b->rdonly)
-    return false;
-  MDB_txn* txn;
-  if (mdb_txn_begin(b->env, NULL, 0, &txn) != 0)
-    return false;
-  MDB_val key = {.mv_size = sizeof(root_key) - 1, .mv_data = (void*)root_key};
-  MDB_val old;
-  int rc = mdb_get(txn, b->meta, &key, &old);
-  if (rc != 0 && rc != MDB_NOTFOUND) {
-    mdb_txn_abort(txn);
-    return false;
-  }
-  if (rc == 0 && old.mv_size == 32 && memcmp(old.mv_data, hash, 32) == 0) {
-    mdb_txn_abort(txn);
-    return true;
-  }
-  struct stat st;
-  if (fstat(b->pack_fd, &st) != 0 || st.st_size < 0) {
-    mdb_txn_abort(txn);
-    return false;
-  }
-  MDB_val value = {.mv_size = 32, .mv_data = (void*)hash};
-  if (mdb_put(txn, b->meta, &key, &value, 0) != 0 ||
-      !silo_journal_append(b, txn, hash, (uint64_t)st.st_size)) {
-    mdb_txn_abort(txn);
-    return false;
-  }
-  return mdb_txn_commit(txn) == 0;
+  pl_silo_batch* batch = NULL;
+  return pl_store_silo_batch_begin(b->store, &batch, NULL, 0) &&
+         pl_store_silo_batch_commit(batch, hash, NULL, 0);
 }
 
 static bool silo_get_root(void* ctx, uint8_t hash[32]) {
@@ -352,6 +339,8 @@ static bool silo_get_root(void* ctx, uint8_t hash[32]) {
 static bool silo_kv_get(void* ctx, const uint8_t hash[32], uint8_t** out_b,
                         size_t* out_s) {
   silo_backend* b = ctx;
+  if (pl_staged_get(b->staged_kv, hash, out_b, out_s))
+    return true;
   MDB_txn* txn;
   if (mdb_txn_begin(b->env, NULL, MDB_RDONLY, &txn) != 0)
     return false;
@@ -374,20 +363,15 @@ static bool silo_kv_put(void* ctx, const uint8_t hash[32], const uint8_t* bytes,
   silo_backend* b = ctx;
   if (b->rdonly)
     return false;
-  MDB_txn* txn;
-  if (mdb_txn_begin(b->env, NULL, 0, &txn) != 0)
-    return false;
-  MDB_val k = {.mv_size = 32, .mv_data = (void*)hash};
-  MDB_val v = {.mv_size = len, .mv_data = (void*)bytes};
-  if (mdb_put(txn, b->codecache, &k, &v, 0) != 0) {
-    mdb_txn_abort(txn);
-    return false;
-  }
-  return mdb_txn_commit(txn) == 0;
+  return pl_staged_put(&b->staged_kv, hash, bytes, len);
 }
 
 static void silo_close(void* ctx) {
   silo_backend* b = ctx;
+  /* Unpublished pack bytes remain harmless orphan extents.  Another
+   * process may have appended after them, so never truncate on close. */
+  ax_hmfree(b->staged);
+  pl_staged_clear(&b->staged_kv);
   if (b->pack_fd >= 0)
     (void)close(b->pack_fd);
   mdb_dbi_close(b->env, b->objects);
@@ -471,24 +455,33 @@ bool pl_store_silo_batch_contains(pl_silo_batch* batch, const uint8_t hash[32],
                                   bool* out, char* err, size_t err_cap) {
   if (batch == NULL || batch->txn == NULL || hash == NULL || out == NULL)
     return pack_error(err, err_cap, "invalid Silo batch query");
-  MDB_val key = {.mv_size = 32, .mv_data = (void*)hash};
-  MDB_val value;
-  int rc = mdb_get(batch->txn, batch->backend->objects, &key, &value);
-  if (rc == MDB_NOTFOUND) {
-    *out = false;
-    return true;
-  }
-  if (rc != 0)
-    return pack_error(err, err_cap, "cannot query Silo object index");
   pl_hash hash_key;
   memcpy(hash_key.b, hash, sizeof(hash_key.b));
-  uint64_t extent = ax_hmgeti(batch->pending, hash_key) >= 0
-                        ? batch->pack_end
-                        : batch->pack_start;
+  ptrdiff_t at = ax_hmgeti(batch->pending, hash_key);
+  uint64_t extent = batch->pack_start;
   uint64_t off = 0, len = 0;
-  if (!index_decode(&value, &off, &len) || len == 0 || off > extent ||
-      len > extent - off || off > (uint64_t)INT64_MAX ||
-      len > (uint64_t)INT64_MAX - off)
+  if (at >= 0) {
+    off = batch->pending[at].value.off;
+    len = batch->pending[at].value.len;
+    extent = batch->pack_end;
+  } else if ((at = ax_hmgeti(batch->backend->staged, hash_key)) >= 0) {
+    off = batch->backend->staged[at].value.off;
+    len = batch->backend->staged[at].value.len;
+  } else {
+    MDB_val key = {.mv_size = 32, .mv_data = (void*)hash};
+    MDB_val value;
+    int rc = mdb_get(batch->txn, batch->backend->objects, &key, &value);
+    if (rc == MDB_NOTFOUND) {
+      *out = false;
+      return true;
+    }
+    if (rc != 0)
+      return pack_error(err, err_cap, "cannot query Silo object index");
+    if (!index_decode(&value, &off, &len))
+      return pack_error(err, err_cap, "existing Silo object index is invalid");
+  }
+  if (len == 0 || off > extent || len > extent - off ||
+      off > (uint64_t)INT64_MAX || len > (uint64_t)INT64_MAX - off)
     return pack_error(err, err_cap, "existing Silo object index is invalid");
   *out = true;
   return true;
@@ -509,16 +502,9 @@ bool pl_store_silo_batch_put(pl_silo_batch* batch, const uint8_t hash[32],
   uint64_t off = batch->pack_end;
   if (!batch_append(batch, bytes, len, err, err_cap))
     return false;
-  uint8_t index[SILO_INDEX_BYTES];
-  index_encode(index, off, len);
-  MDB_val key = {.mv_size = 32, .mv_data = (void*)hash};
-  MDB_val value = {.mv_size = sizeof(index), .mv_data = index};
-  if (mdb_put(batch->txn, batch->backend->objects, &key, &value,
-              MDB_NOOVERWRITE) != 0)
-    return pack_error(err, err_cap, "cannot publish Silo object index");
-  pl_hash hash_key;
-  memcpy(hash_key.b, hash, sizeof(hash_key.b));
-  ax_hmput(batch->pending, hash_key, 1);
+  silo_index_entry entry = {.value = {.off = off, .len = len}};
+  memcpy(entry.key.b, hash, sizeof(entry.key.b));
+  ax_hmput(batch->pending, entry.key, entry.value);
   batch->changed = true;
   return true;
 }
@@ -542,14 +528,53 @@ void pl_store_silo_batch_abort(pl_silo_batch* batch) {
   free(batch);
 }
 
+static bool batch_index(pl_silo_batch* batch, silo_index_entry* entries,
+                        char* err, size_t err_cap) {
+  for (ptrdiff_t i = 0; i < ax_hmlen(entries); i++) {
+    uint64_t off = entries[i].value.off, len = entries[i].value.len;
+    if (len == 0 || off > batch->pack_end || len > batch->pack_end - off)
+      return pack_error(err, err_cap, "staged object is outside pins.pack");
+    uint8_t index[SILO_INDEX_BYTES];
+    index_encode(index, off, len);
+    MDB_val key = {.mv_size = 32, .mv_data = entries[i].key.b};
+    MDB_val value = {.mv_size = sizeof(index), .mv_data = index};
+    int rc = mdb_put(batch->txn, batch->backend->objects, &key, &value,
+                     MDB_NOOVERWRITE);
+    if (rc == MDB_KEYEXIST) {
+      /* Another writer may already have saved the same object. */
+      if (!index_decode(&value, &off, &len) || len == 0 ||
+          off > batch->pack_start || len > batch->pack_start - off)
+        return pack_error(err, err_cap,
+                          "existing Silo object index is invalid");
+    } else if (rc != 0) {
+      return pack_error(err, err_cap, "cannot publish Silo object index");
+    }
+  }
+  return true;
+}
+
 bool pl_store_silo_batch_commit(pl_silo_batch* batch,
                                 const uint8_t root_hash[32], char* err,
                                 size_t err_cap) {
-  /* root_hash == NULL: commit the batch's objects without touching the
-   * store root (derived-artifact writes, e.g. the compile cache). */
+  /* Ice only stages offsets: retain the pack append, then abort the empty
+   * LMDB transaction used as a cross-process append lock.  Save atomically
+   * publishes all staged offsets/cache writes and the requested root. */
   if (batch == NULL || batch->txn == NULL) {
     pl_store_silo_batch_abort(batch);
     return pack_error(err, err_cap, "invalid Silo batch commit");
+  }
+  silo_backend* b = batch->backend;
+  if (root_hash == NULL) {
+    if (!batch_flush(batch, err, err_cap)) {
+      pl_store_silo_batch_abort(batch);
+      return false;
+    }
+    for (ptrdiff_t i = 0; i < ax_hmlen(batch->pending); i++)
+      ax_hmput(b->staged, batch->pending[i].key, batch->pending[i].value);
+    mdb_txn_abort(batch->txn);
+    batch->txn = NULL; /* keep the successfully staged pack extents */
+    pl_store_silo_batch_abort(batch);
+    return true;
   }
   bool root_changed = false;
   MDB_val root_k = {.mv_size = sizeof(root_key) - 1,
@@ -578,7 +603,9 @@ bool pl_store_silo_batch_commit(pl_silo_batch* batch,
     }
   }
 
-  if (!batch->changed && !root_changed) {
+  bool staged = ax_hmlen(b->staged) != 0;
+  bool staged_kv = ax_hmlen(b->staged_kv) != 0;
+  if (!batch->changed && !staged && !staged_kv && !root_changed) {
     pl_store_silo_batch_abort(batch);
     return true;
   }
@@ -586,10 +613,24 @@ bool pl_store_silo_batch_commit(pl_silo_batch* batch,
     pl_store_silo_batch_abort(batch);
     return false;
   }
-  if (batch->pack_dirty) {
+  if (batch->pack_dirty || staged) {
     if (pack_sync(batch->backend->pack_fd) != 0) {
       pl_store_silo_batch_abort(batch);
       return pack_error(err, err_cap, "cannot sync pins.pack");
+    }
+  }
+  if (!batch_index(batch, b->staged, err, err_cap) ||
+      !batch_index(batch, batch->pending, err, err_cap)) {
+    pl_store_silo_batch_abort(batch);
+    return false;
+  }
+  for (ptrdiff_t i = 0; i < ax_hmlen(b->staged_kv); i++) {
+    MDB_val key = {.mv_size = 32, .mv_data = b->staged_kv[i].key.b};
+    MDB_val value = {.mv_size = b->staged_kv[i].value.len,
+                     .mv_data = b->staged_kv[i].value.bytes};
+    if (mdb_put(batch->txn, b->codecache, &key, &value, 0) != 0) {
+      pl_store_silo_batch_abort(batch);
+      return pack_error(err, err_cap, "cannot publish staged cache entry");
     }
   }
   if (root_changed) {
@@ -605,6 +646,11 @@ bool pl_store_silo_batch_commit(pl_silo_batch* batch,
   MDB_txn* txn = batch->txn;
   batch->txn = NULL; /* mdb_txn_commit consumes the handle on every result. */
   int rc = mdb_txn_commit(txn);
+  if (rc == 0) {
+    ax_hmfree(b->staged);
+    b->staged = NULL;
+    pl_staged_clear(&b->staged_kv);
+  }
   ax_hmfree(batch->pending);
   free(batch);
   return rc == 0
@@ -617,18 +663,11 @@ bool pl_store_silo_open(pl_store* store, const uint8_t hash[32],
   if (store == NULL || store->format != PL_STORE_FORMAT_SILO_V1 || out == NULL)
     return pack_error(err, err_cap, "store is not a Silo backend");
   silo_backend* b = store->be.ctx;
-  MDB_txn* txn;
-  if (mdb_txn_begin(b->env, NULL, MDB_RDONLY, &txn) != 0)
-    return pack_error(err, err_cap, "cannot begin Silo index read");
-  MDB_val key = {.mv_size = 32, .mv_data = (void*)hash};
-  MDB_val value;
-  int rc = mdb_get(txn, b->objects, &key, &value);
   uint64_t off = 0, len = 0;
-  bool valid = rc == 0 && index_decode(&value, &off, &len) && len != 0;
-  mdb_txn_abort(txn);
+  int rc = silo_find(b, hash, &off, &len);
   if (rc == MDB_NOTFOUND)
     return pack_error(err, err_cap, "missing Silo pin");
-  if (!valid)
+  if (rc != 0)
     return pack_error(err, err_cap, "invalid Silo object index");
   struct stat st;
   if (fstat(b->pack_fd, &st) != 0 || st.st_size < 0 ||
@@ -740,6 +779,7 @@ pl_store* pl_store_new_silo(const char* path, size_t map_size) {
       .close = silo_close,
   });
   store->format = PL_STORE_FORMAT_SILO_V1;
+  b->store = store;
   return store;
 
 fail_pack:
@@ -806,6 +846,7 @@ pl_store* pl_store_new_silo_ro(const char* path, size_t map_size) {
       .close = silo_close,
   });
   store->format = PL_STORE_FORMAT_SILO_V1;
+  b->store = store;
   return store;
 
 fail_pack:

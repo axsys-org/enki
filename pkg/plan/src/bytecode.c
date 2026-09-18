@@ -941,10 +941,17 @@ pl_code* pl_bytecode_from_val(pl_val val) {
       i += 1;
       break;
     case OP_PUSH_LIT:
-    case OP_MK_APP:
     case OP_PUSH_SLOT:
       if (i + 1 > n)
         FAIL("truncated operand")
+      i += 1;
+      break;
+    case OP_MK_APP:
+      if (i + 1 > n)
+        FAIL("truncated operand")
+      if (!pl_is_nat63((pl_val)ops[i]) || ops[i] == 0 ||
+          ops[i] > UINT32_MAX - 2u)
+        FAIL("bad app argument count")
       i += 1;
       break;
     case OP_RET:

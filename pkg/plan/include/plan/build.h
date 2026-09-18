@@ -18,7 +18,9 @@ pl_val pl_mk_nat_u64(pl_thread* t, uint64_t n);
 pl_val pl_mk_nat_limbs(pl_thread* t, size_t limbs, uint64_t** out);
 pl_val pl_nat_trim(pl_val v);
 
-/* APP construction.  head must be WHNF (arity is consulted, never forced). */
+/* APP construction. Counts exclude the head and must be positive; callers
+ * collapse head-only results to the head. The head must be WHNF (arity is
+ * consulted, never forced). */
 pl_val pl_mk_app_snoc(pl_thread* t, pl_val f, pl_val x);
 /* Flat append of m args to f (as m chained snocs, one allocation).
  * Caller reserves PL_APP_CELLS((f is APP ? pl_app_n(f) : 0) + m). */

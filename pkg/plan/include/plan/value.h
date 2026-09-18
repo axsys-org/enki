@@ -73,12 +73,14 @@ typedef enum {
 #define PL_F_NORMAL 0x1u /* deep normal form reached (§ nf) */
 #define PL_F_HOLE   0x2u /* currently evaluating */
 #define PL_F_PIN_HASHED                                                        \
-  0x4u /* PIN hash is finalized and persistently indexed */
+  0x4u /* PIN hash is finalized and indexed (possibly staged until Save) */
 #define PL_F_PIN_PROXY                                                         \
   0x8u /* PIN cell 6 is an atomic canonical-target pl_val, not code */
 
 static inline pl_cell pl_hdr_make(pl_kind kind, uint32_t flags, uint32_t meta,
                                   uint32_t cells) {
+  ax_assume(kind != PL_K_APP || cells >= 3,
+            "APP requires a head and at least one argument");
   return (pl_cell)(kind & 0xFFu) | ((pl_cell)(flags & 0xFu) << 8) |
          ((pl_cell)(meta & PL_HDR_META_MAX) << 12) | ((pl_cell)cells << 32);
 }
@@ -200,7 +202,8 @@ static inline uint64_t* pl_nat_limb_ptr(pl_cell* p) {
   return (uint64_t*)(p + 1);
 }
 
-/* K_APP { hdr(meta=need, n=cells-2); head; arg[n] } — immutable, n-ary. */
+/* K_APP { hdr(meta=need, n=cells-2); head; arg[n] } — immutable, n >= 1.
+ * n excludes the head: every APP has at least two value fields. */
 static inline uint32_t pl_app_n(pl_cell* p) {
   return pl_hdr_cells(p[0]) - 2u;
 }
