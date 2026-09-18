@@ -122,7 +122,7 @@ AX_SB_API char* ax_sb_build_with_allocator(const ax_sb* sb,
                                            const ax_allocator* allocator,
                                            size_t* out_len);
 
-#if defined(AX_SB_IMPLEMENTATION) || defined(AX_SB_IMPLEMENTATION)
+#if defined(AX_SB_IMPLEMENTATION)
 
 #include <string.h>
 
@@ -131,7 +131,7 @@ AX_SB_API char* ax_sb_build_with_allocator(const ax_sb* sb,
 #endif
 
 static int ax_sb__allocator_ok(const ax_allocator* a) {
-  return a->alloc != 0 && a->free != 0;
+  return a != NULL && a->alloc != 0 && a->free != 0;
 }
 
 static int ax_sb__grow(ax_sb* sb, size_t wanted_capacity) {

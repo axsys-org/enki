@@ -215,3 +215,86 @@ TEST(thread, memo_barrier_survives_fuel_yields) {
   ASSERT_EQ(got, 42);
   test_rt_free(&rt);
 }
+
+TEST(thread, starting_a_run_releases_the_previous_result) {
+  for (unsigned reuse = 0; reuse < 2; reuse++) {
+    test_rt rt = test_rt_new();
+    pl_thread* t = rt.t;
+    pl_thread_start(t, test_app1(t, 0, 42));
+    ASSERT_EQ(pl_thread_run(t, 64), PL_RUN_DONE);
+    pl_gc_collect_now(t);
+    ASSERT_EQ(pl_gc_live_cells(rt.heap), PL_APP_CELLS(1));
+    pl_val input = reuse ? pl_thread_result(t) : 7;
+    pl_thread_start(t, input);
+    pl_gc_collect_now(t);
+    ASSERT_EQ(pl_gc_live_cells(rt.heap), reuse ? PL_APP_CELLS(1) : 0);
+    ASSERT_EQ(pl_thread_run(t, 64), PL_RUN_DONE);
+    if (reuse) {
+      pl_cell* app = pl_as(PL_TAG_APP, pl_thread_result(t));
+      ASSERT_NOT_NULL(app);
+      ASSERT_EQ(pl_app_args(app)[0], 42);
+    } else {
+      ASSERT_EQ(pl_thread_result(t), 7);
+    }
+    test_rt_free(&rt);
+  }
+}
+
+static bool nested_result_preserved, nested_result_released;
+static bool nested_result_hook(pl_thread* t, uint32_t op, size_t argbase,
+                               pl_val* out) {
+  (void)op;
+  (void)argbase;
+  pl_gc_collect_now(t);
+  size_t before = pl_gc_live_cells(t->heap);
+  size_t base = t->vsp;
+  pl_val value = pl_whnf(t, test_app1(t, 0, 42));
+  pl_vpush(t, value);
+  pl_gc_collect_now(t);
+  pl_cell* app = pl_as(PL_TAG_APP, t->vstack[base]);
+  nested_result_preserved = app != NULL && pl_app_args(app)[0] == 42;
+  t->vsp = base;
+  pl_gc_collect_now(t);
+  nested_result_released =
+      t->result == 0 && pl_gc_live_cells(t->heap) <= before;
+  *out = 9;
+  return true;
+}
+
+TEST(thread, nested_c_entry_does_not_retain_its_scratch_result) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  pl_vpush(t, pl_pin(t, 82));
+  pl_vpush(t, test_app1(t, ax_s3('N', 'o', 'w'), 0));
+  pl_gc_reserve(t, PL_THKE_CELLS(2));
+  pl_val call = pl_mk_thke(t, PL_BAN_SLOW, 2, &t->vstack[base]);
+  t->vsp = base;
+  nested_result_preserved = nested_result_released = false;
+  t->rplan_f = true;
+  pl_set_io_hook(nested_result_hook);
+  pl_thread_start(t, call);
+  pl_run_status status;
+  do {
+    status = pl_thread_run(t, 2);
+    if (status == PL_RUN_YIELDED)
+      pl_gc_collect_now(t);
+  } while (status == PL_RUN_YIELDED);
+  pl_set_io_hook(NULL);
+  ASSERT_EQ(status, PL_RUN_DONE);
+  ASSERT_EQ(pl_thread_result(t), 9);
+  ASSERT(nested_result_preserved);
+  ASSERT(nested_result_released);
+  test_rt_free(&rt);
+}
+
+TEST(thread, outermost_c_entry_keeps_its_return_value_rooted) {
+  test_rt rt = test_rt_new();
+  (void)pl_whnf(rt.t, test_app1(rt.t, 0, 42));
+  pl_gc_collect_now(rt.t);
+  ASSERT_EQ(pl_gc_live_cells(rt.heap), PL_APP_CELLS(1));
+  pl_cell* app = pl_as(PL_TAG_APP, rt.t->result);
+  ASSERT_NOT_NULL(app);
+  ASSERT_EQ(pl_app_args(app)[0], 42);
+  test_rt_free(&rt);
+}

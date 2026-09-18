@@ -45,6 +45,33 @@ typedef struct pl_opdesc {
 extern const pl_opdesc pl_ops[];
 extern const size_t pl_nops;
 
+/* Cheap eagerness: total O(1) nat primops whose arguments are already
+ * direct nats compute to the same value whenever they are forced, so a
+ * MK_THK KNOWN of one of these computes instead of allocating.  The
+ * decoder stores the code in the thunk instruction's spare operand. */
+typedef enum pl_spec {
+  PL_SPEC_NONE = 0,
+  PL_SPEC_ADD,
+  PL_SPEC_SUB,
+  PL_SPEC_MUL,
+  PL_SPEC_INC,
+  PL_SPEC_DEC,
+  PL_SPEC_EQ,
+  PL_SPEC_NE,
+  PL_SPEC_LT,
+  PL_SPEC_LE,
+  PL_SPEC_GT,
+  PL_SPEC_GE,
+  PL_SPEC_CMP,
+  PL_SPEC_NIL,
+  PL_SPEC_TRUTH,
+  /* Run the op's own body: for total, allocation-free O(1) field reads
+   * (row projections and value inspections) whose strict operands are
+   * already values.  The body may hand back an unevaluated element; that
+   * element then stands in for the projection thunk. */
+  PL_SPEC_BODY,
+} pl_spec;
+
 /* Returns descriptor index, or -1 if there is no matching primop. */
 int pl_op_lookup(uint64_t opset, pl_val name, uint32_t argc);
 

@@ -249,11 +249,19 @@ static pl_val op_scan8(pl_thread* t, size_t ab) {
   bool preserve_start = start >= (uint64_t)src_len;
 
   if (!preserve_start) {
+    /* Hoist the 256-bit class mask and the source limbs out of the loop:
+     * nothing below allocates, so the limb pointer stays valid.  Bytes are
+     * little-endian within limbs, so byte i lives in limb i/8. */
+    uint64_t cls[4];
+    for (size_t k = 0; k < 4; k++)
+      cls[k] = pl_nat_limb_at(ARG(2), k);
+    uint64_t src_word = ARG(0);
+    const uint64_t* limbs =
+        pl_is_nat63(ARG(0)) ? &src_word : pl_nat_limb_ptr(pl_ptr(ARG(0)));
     end = (size_t)start;
     while (end < src_len) {
-      uint8_t byte = pl_nat_byte_at(ARG(0), end);
-      bool in_class =
-          ((pl_nat_limb_at(ARG(2), byte / 64u) >> (byte % 64u)) & 1u) != 0;
+      uint8_t byte = (uint8_t)(limbs[end / 8] >> ((end % 8) * 8));
+      bool in_class = ((cls[byte / 64u] >> (byte % 64u)) & 1u) != 0;
       if (in_class != polarity)
         break;
       end++;

@@ -209,6 +209,14 @@ void er_enqueue(er_actor* a) {
   }
   if (er_trace())
     fprintf(stderr, "[trace] enqueue actor=%llu\n", (unsigned long long)a->id);
+  /* The MT root never enters the shared run queue: only its controller runs
+   * it (er_mt_executor_drive polls root->status), and queueing it made every
+   * root slice walk the queue to take it back out. */
+  er_mt_executor* ex = a->sys->mt;
+  if (ex != NULL && ex->root == a) {
+    pthread_cond_signal(&ex->controller_cv);
+    return;
+  }
   a->qnext = NULL;
   if (a->sys->qtail != NULL)
     a->sys->qtail->qnext = a;
@@ -216,9 +224,6 @@ void er_enqueue(er_actor* a) {
     a->sys->qhead = a;
   a->sys->qtail = a;
   pthread_cond_signal(&a->sys->cv);
-  er_mt_executor* ex = a->sys->mt;
-  if (ex != NULL && ex->root == a)
-    pthread_cond_signal(&ex->controller_cv);
 }
 
 static er_actor* er_dequeue(er_scheduler* sys) {
@@ -595,8 +600,9 @@ static void er_service(er_scheduler* sys, er_actor* a, bool locked) {
 
   if (er_op_is(name, "ReadFolder")) {
     ax_assume(argc == 1, "ReadFolder arity");
-    uint8_t hash[32];
-    er_vals_hash(args, argc, hash);
+    uint8_t hash[32] = {0};
+    if (sys->mode != ER_MODE_LIVE) /* only the event log reads the hash */
+      er_vals_hash(args, argc, hash);
     pl_val result;
     if (sys->mode == ER_MODE_REPLAY) {
       const er_event* e = er_replay_next(sys);
@@ -1075,7 +1081,6 @@ er_drive_status er_mt_executor_drive(er_mt_executor* ex, er_actor* root) {
   er_mt_wake_all_locked(ex);
   for (;;) {
     if (root->status == ER_ACTOR_RUNNABLE) {
-      (void)er_remove_from_queue(sys, root);
       pthread_mutex_unlock(&sys->mu);
       pl_run_status s = pl_thread_run(root->t, sys->cfg.root_quantum);
       pthread_mutex_lock(&sys->mu);

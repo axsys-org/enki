@@ -8,8 +8,10 @@ AR ?= ar
 DOCKER ?= docker
 
 NIX_DOCKER_IMAGE ?= nixos/nix@sha256:bf1d938835ab96312f098fa6c2e9cab367728e0aad0646ee3e02a787c80d8fb8
-LINUX_PLATFORM ?= linux/amd64
-LINUX_PLATFORM_ID := $(subst /,-,$(LINUX_PLATFORM))
+# TSan needs native execution: Rosetta's address space is incompatible with
+# its shadow memory. Keep these lazy so ordinary builds never query Docker.
+LINUX_PLATFORM ?= $(shell $(DOCKER) version --format '{{.Server.Os}}/{{.Server.Arch}}')
+LINUX_PLATFORM_ID = $(subst /,-,$(LINUX_PLATFORM))
 LINUX_NIX_VOLUME ?= enki-nix-2-34-7-$(LINUX_PLATFORM_ID)
 
 VALID_BUILD_TYPES := debug release asan ubsan tsan coverage profile
@@ -52,6 +54,10 @@ endif
 
 WARN_CFLAGS = $(WARN_COMMON)
 
+# Release hardening.  nix/mkenki.nix disables the stdenv's own fortify so this
+# level-3 setting is the one in force (the -U avoids a redefinition warning).
+# Measured 2026-09-15 on the plangrm bench: no cost against the same build
+# without these flags, so they stay on for the perf build types too.
 HARDEN_CFLAGS := -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3 -fstack-protector-strong
 
 # Full LTO for the perf builds (release + final pgo): the evaluator's hot
@@ -98,8 +104,10 @@ $(error BUILD_TYPE must be one of $(VALID_BUILD_TYPES))
 endif
 
 # GC stress: every reserve collects (see pkg/plan/include/plan/heap.h)
+# Every reserve collects, so the allocation-heavy eval suites run far past
+# the default 60 s per-process test alarm (tests/support/test.h): widen it.
 ifdef GC_STRESS
-BASE_CFLAGS += -DPL_GC_STRESS
+BASE_CFLAGS += -DPL_GC_STRESS -DENKI_TEST_TIMEOUT_SECONDS=900
 endif
 
 # Yield stress: every depth-0 safepoint suspends and resumes the thread
@@ -164,6 +172,13 @@ ifeq ($(BUILD_TYPE),tsan)
 ACTIVE_UNIT_BINS := $(UNIT_BINS) $(TSAN_UNIT_BINS)
 else
 ACTIVE_UNIT_BINS := $(UNIT_BINS)
+endif
+
+# Booting the assembler with a collection at every reserve takes hours, not
+# minutes: GC_STRESS runs skip the CLI suite (the plan-level suites already
+# drive the collector through every evaluator path).
+ifdef GC_STRESS
+ACTIVE_UNIT_BINS := $(filter-out $(BUILD_DIR)/tests/unit/test_wisp_cli,$(ACTIVE_UNIT_BINS))
 endif
 
 ifeq ($(BUILD_TYPE),pgo)
@@ -232,17 +247,21 @@ $(BUILD_DIR)/bin/%: $(APP_DIR)/%.c $(LIBS)
 
 lib: $(LIBS)
 
+# Recreate archives instead of updating them in place: `ar r` keeps members
+# for sources that no longer exist, and a stale member from another branch
+# then fails the link (or silently shadows a symbol).
+
 $(LIB_AXSYS): $(AXSYS_OBJS)
 	@mkdir -p $(dir $@)
-	$(AR) rcs $@ $^
+	rm -f $@ && $(AR) rcs $@ $^
 
 $(LIB_PLAN): $(PLAN_OBJS)
 	@mkdir -p $(dir $@)
-	$(AR) rcs $@ $^
+	rm -f $@ && $(AR) rcs $@ $^
 
 $(LIB_ENKI): $(ENKI_OBJS)
 	@mkdir -p $(dir $@)
-	$(AR) rcs $@ $^
+	rm -f $@ && $(AR) rcs $@ $^
 
 # Layered compile rules (R1-R3): each package sees only its own include
 # path and the layers beneath it.
@@ -293,6 +312,8 @@ install: lib bin
 	install -m 0644 pkg/axsys/include/axsys/*.h $(PREFIX)/include/axsys/
 	install -m 0644 pkg/plan/include/plan/*.h $(PREFIX)/include/plan/
 	install -m 0644 pkg/enki/include/enki/*.h $(PREFIX)/include/enki/
+	install -d $(PREFIX)/bin
+	install -m 0755 $(APP_BINS) $(PREFIX)/bin/
 
 test-binaries: $(ACTIVE_UNIT_BINS) $(PROPERTY_BINS)
 
@@ -352,9 +373,14 @@ coverage:
 	genhtml $(LCOV_FILTERED_INFO) --output-directory $(COVERAGE_HTML_DIR)
 	find $(COVERAGE_HTML_DIR) -type f -name '*.html' -exec sh -c 'root=$$1; program=$$2; shift 2; for file; do awk -v "source_root=$$root" "$$program" "$$file" > "$$file.tmp"; mv "$$file.tmp" "$$file"; done' sh "$(CURDIR)" '$(LCOV_NORMALIZE_HTML_AWK)' {} +
 
+# clang-tidy needs a compilation database: bear (in the devShell) records a
+# forced rebuild of the current BUILD_TYPE, libraries, apps and test binaries.
+compile-commands:
+	bear --output compile_commands.json -- $(MAKE) -B BUILD_TYPE=$(BUILD_TYPE) lib bin test-binaries
+
 tidy:
 	@test -f compile_commands.json || \
-		{ echo "compile_commands.json missing; run bear first"; exit 2; }
+		{ echo "compile_commands.json missing; run make compile-commands first"; exit 2; }
 	clang-tidy --quiet -p . $(TIDY_FILES_ABS) --warnings-as-errors='*'
 
 format:
@@ -373,3 +399,7 @@ distclean:
 
 -include $(LIB_OBJS:.o=.d)
 -include $(THEFT_OBJS:.o=.d)
+# The single-step compile-and-link rules emit <binary>.d beside each binary;
+# without these includes a header edit leaves stale test and app binaries.
+-include $(UNIT_BINS:=.d) $(TSAN_UNIT_BINS:=.d) $(PROPERTY_BINS:=.d)
+-include $(APP_BINS:=.d) $(PERF_BINS:=.d) $(FUZZ_BINS:=.d)

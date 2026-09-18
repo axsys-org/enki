@@ -635,9 +635,15 @@ bool pl_store_silo_open(pl_store* store, const uint8_t hash[32],
       off > (uint64_t)st.st_size || len > (uint64_t)st.st_size - off ||
       off > (uint64_t)INT64_MAX || len > (uint64_t)INT64_MAX - off)
     return pack_error(err, err_cap, "Silo object index is outside pins.pack");
-  long page_size = sysconf(_SC_PAGESIZE);
-  if (page_size <= 0)
-    return pack_error(err, err_cap, "cannot determine system page size");
+  /* The page size is a process constant: ask the kernel once, not per pin. */
+  static _Atomic long page_size_cache;
+  long page_size = atomic_load_explicit(&page_size_cache, memory_order_relaxed);
+  if (page_size <= 0) {
+    page_size = sysconf(_SC_PAGESIZE);
+    if (page_size <= 0)
+      return pack_error(err, err_cap, "cannot determine system page size");
+    atomic_store_explicit(&page_size_cache, page_size, memory_order_relaxed);
+  }
   uint64_t page = (uint64_t)page_size;
   uint64_t map_off = off - off % page;
   uint64_t delta = off - map_off;

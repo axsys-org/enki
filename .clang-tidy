@@ -48,8 +48,10 @@ Checks: >
 # e.g. WarningsAsErrors: 'clang-analyzer-*,bugprone-*'
 WarningsAsErrors: ''
 
-# Lint your own headers. Narrow to e.g. '^(src|include)/' to skip vendored code.
-HeaderFilterRegex: '^enki/'
+# Lint your own headers (the Makefile passes absolute paths, so the pattern
+# must match mid-path); the vendored stb_ds header is excluded below.
+HeaderFilterRegex: 'pkg/(axsys|plan|enki)/(include|src)/'
+ExcludeHeaderFilterRegex: 'stb_ds\.h$'
 
 # Auto-fixes are reformatted using your .clang-format.
 FormatStyle: file

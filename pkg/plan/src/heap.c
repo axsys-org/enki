@@ -560,17 +560,24 @@ static _Atomic uint64_t pl_next_profile_lane = 1;
 
 static void pl_thread_roots(pl_root_visit visit, void* gc_ctx, void* src_ctx) {
   pl_thread* t = src_ctx;
+  /* pl_forward is the identity on direct nats, and stack slots and frame
+   * roots are mostly nats (pl_fpush zeroes a/b): test the tag inline
+   * rather than paying an indirect call per slot to learn that. */
   for (size_t i = 0; i < t->vsp; i++)
-    visit(&t->vstack[i], gc_ctx);
+    if (!pl_is_nat63(t->vstack[i]))
+      visit(&t->vstack[i], gc_ctx);
   for (size_t i = 0; i < t->usp; i++)
-    visit(&t->ustack[i], gc_ctx);
+    if (!pl_is_nat63(t->ustack[i]))
+      visit(&t->ustack[i], gc_ctx);
   for (size_t i = 0; i < t->fsp; i++) {
 #ifdef PL_CACHE_STATS
     if ((unsigned)t->fstack[i].kind < PL_CACHE_FRAME_CAP)
       t->cache_stats.gc_frame_kinds[t->fstack[i].kind]++;
 #endif
-    visit(&t->fstack[i].a, gc_ctx);
-    visit(&t->fstack[i].b, gc_ctx);
+    if (!pl_is_nat63(t->fstack[i].a))
+      visit(&t->fstack[i].a, gc_ctx);
+    if (!pl_is_nat63(t->fstack[i].b))
+      visit(&t->fstack[i].b, gc_ctx);
   }
   visit(&t->exn, gc_ctx);
   visit(&t->resume_val, gc_ctx);

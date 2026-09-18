@@ -25,7 +25,6 @@ void pl_store_release(pl_store* s, size_t mark);
 
 void pl_store_lock(pl_store* s);
 void pl_store_unlock(pl_store* s);
-bool pl_store_trylock(pl_store* s);
 void pl_store_save_lock(pl_store* s);
 void pl_store_save_unlock(pl_store* s);
 
