@@ -130,11 +130,11 @@ static void ready_push(ready_state* s, bool known) {
   s->bits[k / 64] = (s->bits[k / 64] & ~bit) | (known ? bit : 0);
 }
 
-static void ready_pop(ready_state* s, pl_op_t n) {
-  if (s->depth < 0 || n > (pl_op_t)s->depth) {
-    s->depth = -2;
-    return;
-  }
+static bool ready_pop(ready_state* s, pl_op_t n) {
+  if (s->depth < 0)
+    return true; /* an unknown shape cannot prove an underflow */
+  if (n > (pl_op_t)s->depth)
+    return false;
   s->depth -= (int)n;
   /* Dead stack slots must not participate in the fixed point. */
   unsigned word = (unsigned)s->depth / 64;
@@ -143,6 +143,7 @@ static void ready_pop(ready_state* s, pl_op_t n) {
     s->bits[word++] &= (UINT64_C(1) << bit) - 1;
   while (word < READY_WORDS)
     s->bits[word++] = 0;
+  return true;
 }
 
 static bool ready_merge(ready_state* dst, ready_state src) {
@@ -186,12 +187,18 @@ static bool ready_args(const ready_state* s, pl_op_t argc, uint32_t idx) {
   return true;
 }
 
+typedef enum {
+  READY_OK,
+  READY_INCOMPLETE,
+  READY_UNDERFLOW,
+} ready_result;
+
 /* Worklist fixed point over every pc; states[pc] receives the stack shape
- * and known-WHNF slots on entry to pc.  Returns false when the analysis was
- * abandoned at a limit, in which case nothing may be rewritten from it. */
-static bool ready_analyse(pl_code* c, ready_state* states) {
+ * and known-WHNF slots on entry to pc. Limits only disable rewriting;
+ * a provable underflow rejects the decode instead of becoming unknown. */
+static ready_result ready_analyse(pl_code* c, ready_state* states) {
   size_t n = c->nops;
-  bool ok = false;
+  ready_result result = READY_INCOMPLETE;
   size_t* queue = calloc(n, sizeof(*queue));
   bool* queued = calloc(n, sizeof(*queued));
   if (!queue || !queued)
@@ -199,6 +206,13 @@ static bool ready_analyse(pl_code* c, ready_state* states) {
   for (size_t i = 0; i < n; i++)
     states[i].depth = -1;
   size_t head = 0, tail = 0, count = 0, visits = 0;
+#define POP(n)                                                                 \
+  do {                                                                         \
+    if (!ready_pop(&s, (n))) {                                                 \
+      result = READY_UNDERFLOW;                                                \
+      goto done;                                                               \
+    }                                                                          \
+  } while (0)
 #define FLOW(pc, state)                                                        \
   do {                                                                         \
     size_t target_ = (size_t)(pc);                                             \
@@ -244,7 +258,7 @@ static bool ready_analyse(pl_code* c, ready_state* states) {
       break;
     }
     case OP_FORCE:
-      ready_pop(&s, 1);
+      POP(1);
       ready_push(&s, true);
       break;
     case OP_INTERP:
@@ -252,30 +266,30 @@ static bool ready_analyse(pl_code* c, ready_state* states) {
       next++;
       break;
     case OP_MK_APP:
-      ready_pop(&s, o[0] < READY_SLOTS ? o[0] + 1 : READY_SLOTS + 1);
+      POP(o[0] < READY_SLOTS ? o[0] + 1 : READY_SLOTS + 1);
       ready_push(&s, true);
       next++;
       break;
     case OP_MK_THK:
-      ready_pop(&s, o[0]);
+      POP(o[0]);
       ready_push(&s, false);
       next += (o[1] & PL_BAN_MASK) == PL_BAN_PRIM_KNOWN ? 4 : 2;
       break;
     case OP_CALL: {
       ready_state args = {.depth = o[1] <= READY_SLOTS ? (int)o[1] : -2};
       FLOW(o[0], args);
-      ready_pop(&s, o[1]);
+      POP(o[1]);
       ready_push(&s, true);
       next += 2;
       break;
     }
     case OP_CALL_FAST:
-      ready_pop(&s, o[0] < READY_SLOTS ? o[0] + 1 : READY_SLOTS + 1);
+      POP(o[0] < READY_SLOTS ? o[0] + 1 : READY_SLOTS + 1);
       ready_push(&s, true);
       next += 2;
       break;
     case OP_CALL_SLOW:
-      ready_pop(&s, o[0] < READY_SLOTS ? o[0] + 1 : READY_SLOTS + 1);
+      POP(o[0] < READY_SLOTS ? o[0] + 1 : READY_SLOTS + 1);
       ready_push(&s, true);
       next++;
       break;
@@ -283,7 +297,7 @@ static bool ready_analyse(pl_code* c, ready_state* states) {
     case OP_ADD:
     case OP_SUB:
     case OP_CMP:
-      ready_pop(&s, o[0]);
+      POP(o[0]);
       ready_push(&s, true);
       next += 3;
       break;
@@ -296,15 +310,18 @@ static bool ready_analyse(pl_code* c, ready_state* states) {
       FLOW(o[0], s);
       continue;
     case OP_BR:
-      ready_pop(&s, 1);
+      POP(1);
       for (size_t k = 0; k < (size_t)o[0]; k++)
         FLOW(o[k + 1], s);
       continue;
     case OP_RET:
+      POP(1);
+      continue;
     case OP_TAILCALL:
     case OP_TAIL_ADD:
     case OP_TAIL_SUB:
     case OP_TAIL_CMP:
+      POP(o[0]);
       continue;
     default:
       goto done;
@@ -312,11 +329,12 @@ static bool ready_analyse(pl_code* c, ready_state* states) {
     FLOW(next, s);
   }
 #undef FLOW
-  ok = true;
+#undef POP
+  result = READY_OK;
 done:
   free(queue);
   free(queued);
-  return ok;
+  return result;
 }
 
 /* Rewrite only after every predecessor has contributed its facts. */
@@ -500,17 +518,23 @@ static bool eager_rewrite(pl_code* c, const ready_state* states,
   int32_t last_impure = -1;
 #define EPUSH(...)                                                             \
   do {                                                                         \
+    if (!live)                                                                 \
+      break;                                                                   \
     if (depth >= READY_SLOTS)                                                  \
       live = false;                                                            \
-    else                                                                       \
+    else {                                                                     \
       slots[depth] = (eager_slot){__VA_ARGS__};                                \
-    depth++;                                                                   \
+      depth++;                                                                 \
+    }                                                                          \
   } while (0)
 #define EPOP(k)                                                                \
   do {                                                                         \
+    if (!live)                                                                 \
+      break;                                                                   \
     if ((pl_op_t)(k) > (pl_op_t)depth)                                         \
       live = false;                                                            \
-    depth -= (int)(k);                                                         \
+    else                                                                       \
+      depth -= (int)(k);                                                       \
   } while (0)
   const eager_slot unknown = {.src = -1, .producer = -1, .eval_pc = -1};
   for (size_t pc = 0; pc < n;) {
@@ -548,7 +572,6 @@ static bool eager_rewrite(pl_code* c, const ready_state* states,
               .lit = slots[o[0]].lit, .has_lit = slots[o[0]].has_lit);
       } else {
         live = false;
-        depth++;
       }
       next++;
       break;
@@ -697,25 +720,30 @@ static void numeric_specialise(pl_code* c) {
 
 /* The private-stream rewrites, in dependency order: eager entries first
  * (they create new strict consumers, so iterate), numeric specialisation on
- * the resulting calls, readiness variants on the final shape. */
-static void bytecode_optimise(pl_code* c, const uint8_t* is_target) {
+ * the resulting calls, readiness variants on the final shape. Return false
+ * on a provable stack underflow so the law stays interpreted. */
+static bool bytecode_optimise(pl_code* c, const uint8_t* is_target) {
   size_t n = c->nops;
   if (n == 0 || n > 16384)
-    return;
+    return true;
   ready_state* states = calloc(n, sizeof(*states));
   if (states == NULL)
-    return;
+    return true;
+  ready_result result = READY_INCOMPLETE;
   for (unsigned round = 0; round < 64; round++) {
-    if (!ready_analyse(c, states))
+    result = ready_analyse(c, states);
+    if (result != READY_OK)
       goto done;
     if (!eager_rewrite(c, states, is_target))
       break;
   }
   numeric_specialise(c);
-  if (ready_analyse(c, states))
+  result = ready_analyse(c, states);
+  if (result == READY_OK)
     ready_rewrite(c, states);
 done:
   free(states);
+  return result != READY_UNDERFLOW;
 }
 
 /* PL_DUMP_BYTECODE=1: print every decoded program (final, post-rewrite
@@ -1080,7 +1108,9 @@ pl_code* pl_bytecode_from_val(pl_val val) {
       break;
     }
   }
-  bytecode_optimise(out, is_target);
+  if (!bytecode_optimise(out, is_target)) {
+    FAIL("operand stack underflow")
+  }
   {
     static int dump = -1;
     if (dump < 0)

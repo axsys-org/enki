@@ -1243,18 +1243,20 @@ TEST(exec, ingest_validates_targets_and_guards_fusion) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
   size_t base = t->vsp;
-  /* BR arm 1 targets the RET behind a MK_THK: decode must NOT fuse */
-  pl_val guarded[13] = {OP_PUSH_VAR, 1,           OP_FORCE,    OP_BR, 2,
-                        7,           12,          OP_PUSH_VAR, 1,     OP_MK_THK,
-                        1,           PL_BAN_SLOW, OP_RET};
+  /* BR arm 1 targets the RET behind a MK_THK: decode must NOT fuse.
+   * Keep a copy of the scrutinee so both arms have a value to return. */
+  pl_val guarded[13] = {OP_PUSH_VAR, 1, OP_FORCE, OP_PUSH_SLOT, 0, OP_BR,
+                        2,           9, 12,       OP_MK_THK,    1, PL_BAN_SLOW,
+                        OP_RET};
   pl_vpush(t, test_app(t, 0, 13, guarded));
   pl_code* c = pl_bytecode_from_val(t->vstack[base]);
   ASSERT_NOT_NULL(c);
   ASSERT_EQ(c->ops[9], OP_MK_THK);
   pl_bytecode_free(c);
   /* same program, arm 1 rejoining arm 0 instead: the MK_THK fuses */
-  pl_val fused[13] = {OP_PUSH_VAR, 1, OP_FORCE,  OP_BR, 2,           7,     7,
-                      OP_PUSH_VAR, 1, OP_MK_THK, 1,     PL_BAN_SLOW, OP_RET};
+  pl_val fused[13] = {OP_PUSH_VAR, 1, OP_FORCE, OP_PUSH_SLOT, 0, OP_BR,
+                      2,           9, 9,        OP_MK_THK,    1, PL_BAN_SLOW,
+                      OP_RET};
   pl_vpush(t, test_app(t, 0, 13, fused));
   c = pl_bytecode_from_val(t->vstack[base + 1]);
   ASSERT_NOT_NULL(c);
@@ -1463,6 +1465,62 @@ TEST(exec, call_known_try_delivers_both_arms_in_place) {
 static pl_code* test_decode_ops(pl_thread* t, size_t n, const pl_val* ops) {
   pl_val row = test_app(t, 0, (uint32_t)n, ops);
   return pl_bytecode_from_val(row);
+}
+
+TEST(exec, decode_rejects_operand_stack_underflow) {
+  test_rt rt = test_rt_new();
+  struct {
+    size_t n;
+    pl_val ops[12];
+  } cases[] = {
+      {3, {OP_MK_APP, 1, OP_RET}},
+      {5, {OP_PUSH_LIT, 0, OP_MK_APP, 1, OP_RET}},
+      {5, {OP_MK_THK, 1, PL_BAN_SLOW, OP_FORCE, OP_RET}},
+      {4, {OP_MK_THK, 1, PL_BAN_SLOW, OP_RET}},
+      {2, {OP_FORCE, OP_RET}},
+      {4, {OP_CALL_FAST, 1, 0, OP_RET}},
+      {3, {OP_CALL_SLOW, 1, OP_RET}},
+      {5, {OP_CALL_KNOWN, 1, 0, ax_s3('I', 'n', 'c'), OP_RET}},
+      {5, {OP_CALL, 4, 1, OP_RET, OP_RET}},
+      {5, {OP_CALL, 4, 0, OP_RET, OP_RET}},
+      {4, {OP_BR, 1, 3, OP_RET}},
+      {1, {OP_RET}},
+      /* A nonempty caller can still enter an underflowing local block. */
+      {9, {OP_PUSH_LIT, 0, OP_CALL, 6, 1, OP_RET, OP_MK_APP, 1, OP_RET}},
+      /* Visit the bad branch even though the other arm has a valid result. */
+      {12,
+       {OP_PUSH_LIT, 0, OP_BR, 2, 6, 9, OP_PUSH_LIT, 7, OP_RET, OP_MK_APP, 1,
+        OP_RET}},
+      /* Counts must be checked before narrowing them to the modeled depth. */
+      {3, {OP_MK_APP, PL_NAT63_MAX, OP_RET}},
+      {5, {OP_MK_THK, PL_NAT63_MAX, PL_BAN_SLOW, OP_FORCE, OP_RET}},
+      {4, {OP_CALL_FAST, PL_NAT63_MAX, 0, OP_RET}},
+      {3, {OP_CALL_SLOW, PL_NAT63_MAX, OP_RET}},
+      {5, {OP_CALL, 4, PL_NAT63_MAX, OP_RET, OP_RET}},
+  };
+  for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    /* Construct heap operands just before test_decode_ops roots them. */
+    if (cases[i].ops[0] == OP_CALL_KNOWN)
+      cases[i].ops[2] = test_p66(rt.t);
+    pl_code* c = test_decode_ops(rt.t, cases[i].n, cases[i].ops);
+    bool rejected = c == NULL;
+    pl_bytecode_free(c);
+    ASSERT(rejected, "underflow case %zu", i);
+  }
+  test_rt_free(&rt);
+}
+
+TEST(exec, eager_skips_unreachable_operand_stack_underflow) {
+  test_rt rt = test_rt_new();
+  pl_val ops[] = {OP_JMP,      5, OP_MK_APP, 1,     OP_RET,
+                  OP_PUSH_LIT, 7, OP_FORCE,  OP_RET};
+  pl_code* c = test_decode_ops(rt.t, 9, ops);
+  ASSERT_NOT_NULL(c);
+  ASSERT_EQ(c->ops[2], OP_MK_APP);
+  ASSERT_EQ(c->ops[7], OP_FORCE_READY);
+  ASSERT_EQ(c->ops[8], OP_RET_READY);
+  pl_bytecode_free(c);
+  test_rt_free(&rt);
 }
 
 /* The P5 shape of (Add 1 (Add (f (Sub n 1)) (f (Sub n 2)))): every
