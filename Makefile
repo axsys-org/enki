@@ -8,8 +8,10 @@ AR ?= ar
 DOCKER ?= docker
 
 NIX_DOCKER_IMAGE ?= nixos/nix@sha256:bf1d938835ab96312f098fa6c2e9cab367728e0aad0646ee3e02a787c80d8fb8
-LINUX_PLATFORM ?= linux/amd64
-LINUX_PLATFORM_ID := $(subst /,-,$(LINUX_PLATFORM))
+# TSan needs native execution: Rosetta's address space is incompatible with
+# its shadow memory. Keep these lazy so ordinary builds never query Docker.
+LINUX_PLATFORM ?= $(shell $(DOCKER) version --format '{{.Server.Os}}/{{.Server.Arch}}')
+LINUX_PLATFORM_ID = $(subst /,-,$(LINUX_PLATFORM))
 LINUX_NIX_VOLUME ?= enki-nix-2-34-7-$(LINUX_PLATFORM_ID)
 
 VALID_BUILD_TYPES := debug release asan ubsan tsan coverage profile

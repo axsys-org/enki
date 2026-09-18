@@ -1665,10 +1665,10 @@ void* stbds_hmdel_key(void* a, size_t elemsize, void* key, size_t keysize,
             (ptrdiff_t)stbds_arrlen(raw_a) - 1 -
             1; // minus one for the raw_a vs a, and minus one for 'last'
         STBDS_ASSERT(slot < (ptrdiff_t)table->slot_count);
+        STBDS_ASSERT(table->used_count > 0);
         --table->used_count;
         ++table->tombstone_count;
         stbds_temp(raw_a) = 1;
-        STBDS_ASSERT(table->used_count >= 0);
         // STBDS_ASSERT(table->tombstone_count < table->slot_count/4);
         b->hash[i] = STBDS_HASH_DELETED;
         b->index[i] = STBDS_INDEX_DELETED;
