@@ -717,12 +717,14 @@ static pl_val op_slice(pl_thread* t, size_t ab) {
   return r;
 }
 
-/* planWeld x y — A (N 0) (toRow x <> toRow y); may produce a 0-ary app. */
+/* planWeld x y — concatenate rows under head 0; an empty result is 0. */
 static pl_val op_weld(pl_thread* t, size_t ab) {
   pl_cell* xp = pl_as(PL_TAG_APP, ARG(0));
   pl_cell* yp = pl_as(PL_TAG_APP, ARG(1));
   uint32_t nx = xp ? pl_app_n(xp) : 0;
   uint32_t ny = yp ? pl_app_n(yp) : 0;
+  if (nx == 0 && ny == 0)
+    return 0;
   pl_gc_reserve(t, PL_APP_CELLS(nx + ny));
   PL_GC_FORBID(t);
   pl_cell* p = pl_bump(t, PL_APP_CELLS(nx + ny));

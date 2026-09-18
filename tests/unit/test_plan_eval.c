@@ -931,6 +931,66 @@ TEST(ops, whole_row_slice_reuses_only_exact_result) {
   test_rt_free(&rt);
 }
 
+TEST(ops, weld_uses_zero_for_empty_rows) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  pl_val weld = ax_s4('W', 'e', 'l', 'd');
+  ASSERT_EQ(test_op66_2(t, weld, 0, 0), 0);
+  ASSERT_EQ(test_op66_2(t, weld, 7, 9), 0);
+
+  size_t base = t->vsp;
+  pl_vpush(t, test_app1(t, 7, 11));
+  for (unsigned order = 0; order < 2; order++) {
+    pl_val row = t->vstack[base];
+    pl_val result = test_op66_2(t, weld, order ? row : 0, order ? 0 : row);
+    pl_cell* p = pl_as(PL_TAG_APP, result);
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(pl_app_head(p), 0);
+    ASSERT_EQ(pl_app_n(p), 1);
+    ASSERT_EQ(pl_app_args(p)[0], 11);
+  }
+  pl_vpush(t, test_app2(t, 9, 22, 33));
+  pl_val result = test_op66_2(t, weld, t->vstack[base], t->vstack[base + 1]);
+  test_assert_nat_row3(result, 11, 22, 33);
+  test_rt_free(&rt);
+}
+
+TEST(ops, app_producers_collapse_head_only_results) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  pl_vpush(t, test_throwing(t, 99));
+  pl_vpush(t, test_app1(t, 7, t->vstack[base]));
+
+  /* Empty Row/Rep preserve the head without forcing unused lazy fields. */
+  pl_val rep[3] = {7, t->vstack[base], 0};
+  ASSERT_EQ(test_op66(t, ax_s3('R', 'e', 'p'), 3, rep), 7);
+  pl_val row[3] = {7, 0, t->vstack[base]};
+  ASSERT_EQ(test_op66(t, ax_s3('R', 'o', 'w'), 3, row), 7);
+  pl_val slice[3] = {0, 0, t->vstack[base + 1]};
+  ASSERT_EQ(test_op66(t, ax_s5('S', 'l', 'i', 'c', 'e'), 3, slice), 0);
+  pl_val past_end[3] = {1, 10, t->vstack[base + 1]};
+  ASSERT_EQ(test_op66(t, ax_s5('S', 'l', 'i', 'c', 'e'), 3, past_end), 0);
+  pl_val app = t->vstack[base + 1];
+  ASSERT_EQ(test_op66(t, ax_s4('I', 'n', 'i', 't'), 1, &app), 7);
+  ASSERT_EQ(test_op66_2(t, ax_s4('C', 'o', 'u', 'p'), 7, 0), 7);
+  pl_val up[3] = {0, t->vstack[base], 0};
+  ASSERT_EQ(test_op66(t, ax_s2('U', 'p'), 3, up), 0);
+  pl_val up_uniq[3] = {0, t->vstack[base], 0};
+  ASSERT_EQ(test_op66(t, ax_s6('U', 'p', 'U', 'n', 'i', 'q'), 3, up_uniq), 0);
+
+  /* Elim decomposes the shortest lawful app into head and lazy argument. */
+  pl_val elim[6] = {0, 0, 0, 0, 0, t->vstack[base + 1]};
+  pl_cell* result =
+      pl_as(PL_TAG_APP, test_op66(t, ax_s4('E', 'l', 'i', 'm'), 6, elim));
+  ASSERT_NOT_NULL(result);
+  ASSERT_EQ(pl_app_head(result), 0);
+  ASSERT_EQ(pl_app_n(result), 2);
+  ASSERT_EQ(pl_app_args(result)[0], 7);
+  ASSERT_EQ(pl_app_args(result)[1], t->vstack[base]);
+  test_rt_free(&rt);
+}
+
 TEST(ops, scan8_handles_both_polarities_and_stops_at_rejected_byte) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
@@ -1650,6 +1710,23 @@ TEST(exec, call_known_try_delivers_both_arms_in_place) {
 static pl_code* test_decode_ops(pl_thread* t, size_t n, const pl_val* ops) {
   pl_val row = test_app(t, 0, (uint32_t)n, ops);
   return pl_bytecode_from_val(row);
+}
+
+TEST(exec, decode_rejects_head_only_apps) {
+  test_rt rt = test_rt_new();
+  /* There is a head on the operand stack: this is invalid arity, not
+   * stack underflow. Counts must also fit the header before narrowing. */
+  const pl_val counts[] = {0, UINT32_MAX - 1ULL, UINT32_MAX,
+                           (UINT64_C(1) << 32) + 1, PL_NAT63_MAX};
+  for (size_t i = 0; i < sizeof(counts) / sizeof(counts[0]); i++) {
+    pl_val ops[] = {OP_PUSH_LIT, 7, OP_MK_APP, counts[i], OP_RET};
+    pl_code* code = test_decode_ops(rt.t, 5, ops);
+    bool rejected = code == NULL;
+    pl_bytecode_free(code);
+    ASSERT(rejected, "invalid MK_APP count %llu",
+           (unsigned long long)counts[i]);
+  }
+  test_rt_free(&rt);
 }
 
 TEST(exec, decode_rejects_operand_stack_underflow) {
