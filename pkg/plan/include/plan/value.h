@@ -73,7 +73,7 @@ typedef enum {
 #define PL_F_NORMAL 0x1u /* deep normal form reached (§ nf) */
 #define PL_F_HOLE   0x2u /* currently evaluating */
 #define PL_F_PIN_HASHED                                                        \
-  0x4u /* PIN hash is finalized and persistently indexed */
+  0x4u /* PIN hash is finalized and indexed (possibly staged until Save) */
 #define PL_F_PIN_PROXY                                                         \
   0x8u /* PIN cell 6 is an atomic canonical-target pl_val, not code */
 
