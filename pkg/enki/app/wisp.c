@@ -32,7 +32,11 @@
  * loadAssembly / runRepl drivers.
  */
 
-#define BOOT_HEAP_CELLS                ((size_t)1 << 26) /* 512 MiB per semispace, grows */
+/* 256 MiB per semispace, grows on demand.  The moving live set of a large
+ * assembly is tens of MB (the compiled system lives in the store), so this
+ * is sized for allocation throughput, not for the live set: halving it
+ * again costs ~5% on the eden boot, and 512 MiB measured no faster. */
+#define BOOT_HEAP_CELLS                ((size_t)1 << 25)
 #define BOOT_GC_ALLOCATION_FLOOR_CELLS ((size_t)1 << 20) /* 8 MiB */
 // ./build/release/bin/wisp --file-root ../reaver/src ../reaver/src/plan
 // main  35.43s user 0.55s system 99% cpu 36.136 total

@@ -949,7 +949,9 @@ bool pl_store_put_compiler(pl_store* s, const uint8_t hash[32]) {
   memcpy(s->compiler, hash, 32);
   bool sweep = s->compiler_f;
   if (sweep) {
-    s->compiler_h = pl_heap_new(((size_t)1 << 26), s);
+    /* 32 MiB semispaces: compiles are short-lived allocations, and the
+     * heap grows on demand; 512 MiB here was over half of a boot's RSS. */
+    s->compiler_h = pl_heap_new(((size_t)1 << 22), s);
     s->compiler_t = pl_thread_new(s->compiler_h);
   }
   pl_store_unlock(s);
