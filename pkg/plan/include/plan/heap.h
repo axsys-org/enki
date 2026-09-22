@@ -27,6 +27,8 @@ typedef struct pl_store pl_store;
 typedef struct pl_heap pl_heap;
 typedef struct pl_thread pl_thread;
 
+#define PL_OP_MEMO_SLOTS 64
+
 /* ── Root sources ──────────────────────────────────────────────────────── */
 
 typedef void (*pl_root_visit)(pl_val* slot, void* gc_ctx);
@@ -229,6 +231,16 @@ struct pl_thread {
    * the pl_io_hook can attribute effects); never touched by the plan
    * layer. */
   void* host;
+
+  /* Direct-mapped memo of pl_op_lookup for interpreted primop rows: the
+   * name of a `(#pin "B") ("Name" args…)` row is the same literal on every
+   * evaluation of a call site, so identity hits skip the byte compare. */
+  struct pl_op_memo {
+    pl_val name;
+    uint64_t opset;
+    uint32_t argc;
+    int32_t idx;
+  } op_memo[PL_OP_MEMO_SLOTS];
 
 #ifdef PL_CACHE_STATS
   pl_cache_stats cache_stats;

@@ -1765,10 +1765,20 @@ ret_opent: {
   pl_val name = t->vstack[listbase];
   if (opset >= 82 && !t->rplan_f)
     pl_raise_msg(t, "Not in RPLAN Mode");
-  int idx = pl_op_lookup(opset, name, argc);
-  if (idx < 0)
-    pl_raise_msgf(t, "no primop %llu (argc %u)", (unsigned long long)opset,
-                  argc);
+  struct pl_op_memo* memo =
+      &t->op_memo[(name ^ (opset * 31) ^ argc) & (PL_OP_MEMO_SLOTS - 1)];
+  int idx;
+  if (memo->name == name && memo->opset == opset && memo->argc == argc &&
+      memo->idx >= 0) {
+    idx = memo->idx;
+  } else {
+    idx = pl_op_lookup(opset, name, argc);
+    if (idx < 0)
+      pl_raise_msgf(t, "no primop %llu (argc %u)", (unsigned long long)opset,
+                    argc);
+    *memo = (struct pl_op_memo){
+        .name = name, .opset = opset, .argc = argc, .idx = idx};
+  }
   op_idx = (uint32_t)idx;
   op_base = listbase + 1;
   op_argc = argc;
