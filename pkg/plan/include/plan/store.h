@@ -215,6 +215,18 @@ pl_val pl_store_ix1_expr(pl_store* s);
  * result on the pin itself (read back via pl_pin_code). */
 void pl_store_put_code(pl_store* s, const uint8_t hash[32]);
 
+/*
+ * Lazy attach: called by the evaluator when it enters a pinned law that has
+ * no code yet.  For a canonical hashed LAW PIN under an installed compiler
+ * this runs pl_store_put_code once (serving the code cache or compiling),
+ * marks the PIN PL_CODE_NONE when nothing could be attached so later
+ * entries do not retry until a new compiler generation resets it, and
+ * returns the attached code or NULL.  Concurrent demands on one law leave
+ * the compile to whoever won the PL_CODE_PENDING claim; the others run the
+ * law interpreted meanwhile.  Unsaved laws (heap proxies) return NULL.
+ */
+void* pl_store_code_demand(pl_store* s, pl_val pin);
+
 /* Install a compiler generation.  Returns false when the same hash is already
  * installed and no work was performed. */
 bool pl_store_put_compiler(pl_store* s, const uint8_t hash[32]);

@@ -168,7 +168,6 @@ typedef struct save_ctx {
   save_item_index* index;
   save_item* items;          /* dependency postorder */
   save_canonical* canonical; /* hash -> prepared/store representative */
-  pl_intern_entry* compile;  /* unique finalized LAW hashes */
   pl_cell** transient;       /* Save-local Legacy canonicalization cells */
   char* err;
   size_t err_cap;
@@ -611,20 +610,6 @@ static void save_publish_targets(save_ctx* c) {
   }
 }
 
-static void save_queue_compiles(save_ctx* c) {
-  if (!c->store->compiler_f)
-    return;
-  for (ptrdiff_t i = 0; i < ax_arrlen(c->items); i++) {
-    pl_val pin = c->items[i].canonical;
-    pl_cell* p = pl_ptr(pin);
-    if (pl_tag(pl_pin_body(p)) != PL_TAG_LAW || pl_pin_code(p) != NULL)
-      continue;
-    pl_hash key = c->items[i].hash;
-    if (ax_hmgeti(c->compile, key) < 0)
-      ax_hmput(c->compile, key, pin);
-  }
-}
-
 static void save_ctx_free(save_ctx* c) {
   for (ptrdiff_t i = 0; i < ax_arrlen(c->items); i++) {
     ax_arrfree(c->items[i].direct);
@@ -634,7 +619,6 @@ static void save_ctx_free(save_ctx* c) {
   ax_hmfree(c->index);
   ax_hmfree(c->visit);
   ax_hmfree(c->canonical);
-  ax_hmfree(c->compile);
   for (ptrdiff_t i = 0; i < ax_arrlen(c->transient); i++)
     free(c->transient[i]);
   ax_arrfree(c->transient);
@@ -703,27 +687,21 @@ static bool pl_store_save_pin_or_root(pl_store* s, pl_val pin,
     else
       ok = save_prepare_legacy(&c, pin);
   }
-  bool compile = false;
   if (ok) {
     /* Staging or persistence is complete. Keep the general lock around arena
      * and registry publication; Save serialization remains held until every
-     * source proxy has its canonical target. */
+     * source proxy has its canonical target.  Newly canonical laws get their
+     * code on first entry (pl_store_code_demand), not here. */
     pl_store_lock(s);
     save_build_canonical(&c);
     save_publish_targets(&c);
-    save_queue_compiles(&c);
     const uint8_t* root_hash = save_pin_hash(&c, pin);
     ax_assume(root_hash != NULL, "successful Save lost its root hash");
     if (out_hash != NULL)
       memcpy(out_hash, root_hash, 32);
-    compile = s->compiler_f;
     pl_store_unlock(s);
   }
   pl_store_save_unlock(s);
-
-  if (compile)
-    for (ptrdiff_t i = 0; i < ax_hmlen(c.compile); i++)
-      pl_store_put_code(s, c.compile[i].key.b);
   save_ctx_free(&c);
   return ok;
 }
@@ -855,8 +833,7 @@ static bool store_hash_loading(pl_store* s, const uint8_t hash[32]) {
 }
 
 static bool load_silo_pin(pl_thread* t, pl_store* s, const uint8_t hash[32],
-                          pl_val* out, pl_intern_entry** compile, char* err,
-                          size_t err_cap);
+                          pl_val* out, char* err, size_t err_cap);
 
 /* Load a Silo object stream from an external byte buffer (the global
  * compile cache): subpins resolve through the regular store paths, so
@@ -896,7 +873,6 @@ bool pl_store_load_silo_stream(pl_thread* t, pl_store* s, const uint8_t* bytes,
   pl_silo_scan scan = {0};
   pl_val* resolved = NULL;
   pl_val* subpins = NULL;
-  pl_intern_entry* compile = NULL;
   size_t mark = 0;
   bool marked = false;
   bool ok = pl_silo_scan_stream(&reader, false, &scan, err, err_cap);
@@ -911,8 +887,7 @@ bool pl_store_load_silo_stream(pl_thread* t, pl_store* s, const uint8_t* bytes,
   for (size_t i = 0; i < scan.used_count; i++) {
     uint32_t index = scan.used[i];
     pl_val sub;
-    if (!load_silo_pin(t, s, scan.pins[index].b, &sub, &compile, err,
-                       err_cap)) {
+    if (!load_silo_pin(t, s, scan.pins[index].b, &sub, err, err_cap)) {
       ok = false;
       goto done;
     }
@@ -963,16 +938,11 @@ done:
   pl_silo_scan_free(&scan);
   free(resolved);
   ax_arrfree(subpins);
-  if (ok)
-    for (ptrdiff_t i = 0; i < ax_hmlen(compile); i++)
-      pl_store_put_code(s, compile[i].key.b);
-  ax_hmfree(compile);
   return ok;
 }
 
 static bool load_silo_pin(pl_thread* t, pl_store* s, const uint8_t hash[32],
-                          pl_val* out, pl_intern_entry** compile, char* err,
-                          size_t err_cap) {
+                          pl_val* out, char* err, size_t err_cap) {
   pl_val hit = pl_store_intern_get(s, hash);
   if (hit != 0) {
     *out = hit;
@@ -1010,7 +980,7 @@ static bool load_silo_pin(pl_thread* t, pl_store* s, const uint8_t hash[32],
   for (size_t i = 0; i < scan.used_count; i++) {
     uint32_t index = scan.used[i];
     pl_val sub;
-    if (!load_silo_pin(t, s, scan.pins[index].b, &sub, compile, err, err_cap)) {
+    if (!load_silo_pin(t, s, scan.pins[index].b, &sub, err, err_cap)) {
       ok = false;
       goto done;
     }
@@ -1055,12 +1025,6 @@ static bool load_silo_pin(pl_thread* t, pl_store* s, const uint8_t hash[32],
   }
 
   *out = pl_store_mk_pin(s, hash, body, (uint32_t)scan.used_count, subpins);
-  if (pl_tag(body) == PL_TAG_LAW) {
-    pl_hash key;
-    memcpy(key.b, hash, sizeof(key.b));
-    if (ax_hmgeti(*compile, key) < 0)
-      ax_hmput(*compile, key, *out);
-  }
   marked = false; /* the successful allocations now belong to the store */
   ok = true;
 
@@ -1102,7 +1066,6 @@ static bool load_legacy_pin(pl_thread* t, pl_store* s, const uint8_t hash[32],
   uint8_t* bytes = NULL;
   size_t n = 0;
   pl_val* subs = NULL;
-  bool compile = false;
   bool ok = false;
 
   if (!pl_store_backend_get(s, hash, &bytes, &n)) {
@@ -1141,7 +1104,6 @@ static bool load_legacy_pin(pl_thread* t, pl_store* s, const uint8_t hash[32],
         "store.deserialize", sizeof("store.deserialize") - 1);
     pl_val body = deser(s, &d);
     *out = pl_store_mk_pin(s, hash, body, (uint32_t)d.nsub, subs);
-    compile = pl_tag(body) == PL_TAG_LAW;
     pl_store_profile_end(&profile);
   }
   pl_store_unlock(s);
@@ -1154,8 +1116,6 @@ done:
   ax_assume(memcmp(stbds_arrlast(s->loading).b, hash, 32) == 0,
             "Legacy loading stack order changed");
   (void)stbds_arrpop(s->loading);
-  if (ok && compile)
-    pl_store_put_code(s, hash);
   return ok;
 }
 
@@ -1169,16 +1129,9 @@ pl_val pl_store_load(pl_thread* t, const uint8_t hash[32]) {
   if (s->format == PL_STORE_FORMAT_SILO_V1) {
     /* Silo builds directly into the arena and rolls the whole build back on
      * validation failure, so retain mu across its mark/build/release region. */
-    pl_intern_entry* compile = NULL;
     pl_store_lock(s);
-    ok = load_silo_pin(t, s, hash, &pin, &compile, err, sizeof(err));
+    ok = load_silo_pin(t, s, hash, &pin, err, sizeof(err));
     pl_store_unlock(s);
-    /* Loading needs one arena rollback region, but PLAN compilation does not.
-     * Run every newly registered LAW only after releasing the general mutex;
-     * save_mu still serializes the compiler machine and this load closure. */
-    for (ptrdiff_t i = 0; i < ax_hmlen(compile); i++)
-      pl_store_put_code(s, compile[i].key.b);
-    ax_hmfree(compile);
   } else {
     ok = load_legacy_pin(t, s, hash, &pin, err, sizeof(err));
   }

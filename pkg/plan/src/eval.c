@@ -191,11 +191,20 @@ static pl_cell* pl_lawp(pl_val head) {
   return pl_ptr(pl_pin_body(pl_ptr(head)));
 }
 
-/* Compiled bytecode for a law head, cached on its pin (NULL for an
- * unpinned law or an uncompiled pin). */
-static pl_code* pl_law_code(pl_val law) {
+/* Compiled bytecode for a law head, cached on its pin: NULL for an
+ * unpinned law, an unsaved pin, or a pin whose compile is pending or has
+ * nothing to attach.  A canonical pin without code is compiled (or served
+ * from the code cache) here, on its first entry. */
+static pl_code* pl_law_code(pl_thread* t, pl_val law) {
   pl_cell* p = pl_as(PL_TAG_PIN, law);
-  return p != NULL ? (pl_code*)pl_pin_code(p) : NULL;
+  if (p == NULL)
+    return NULL;
+  void* code = pl_pin_code_raw(p);
+  if (ax_likely((uintptr_t)code > (uintptr_t)PL_CODE_PENDING))
+    return code;
+  if (code != NULL)
+    return NULL; /* pending elsewhere, or known uncompilable */
+  return pl_store_code_demand(pl_heap_store(t->heap), law);
 }
 
 /* A law compiled with a checked prologue has two entries: the prologue
@@ -1725,7 +1734,7 @@ judge: {
      * slots (max_var <= arity, no INTERP), skip the body scan and the
      * env/chain build entirely — the [head, args…] group stays on the
      * value stack and the frame runs stack-resident (PL_F_EXECV). */
-    pl_code* scode = pl_law_code(t->vstack[hbase]);
+    pl_code* scode = pl_law_code(t, t->vstack[hbase]);
     if (scode != NULL && scode->max_var <= argc) {
       fr = pl_fpush(t);
       fr->kind = PL_F_EXECV;
@@ -2040,7 +2049,7 @@ judge_scan:
       /* no chain binds: a compiled body can run with its [head, args…]
        * group left in place on the vstack — no env allocation at all
        * unless the body reifies one (pl_exec_reify_env) */
-      pl_code* scode = pl_law_code(t->vstack[jbase]);
+      pl_code* scode = pl_law_code(t, t->vstack[jbase]);
       if (scode != NULL) {
         t->vsp = cursor; /* drop the body cursor */
         fr = pl_fpush(t);
@@ -2056,7 +2065,7 @@ judge_scan:
     }
     /* Decide the entry while the arguments still sit on the value stack:
      * the check resolves indirections in place before the env copies them. */
-    pl_code* code = pl_law_code(t->vstack[jbase]);
+    pl_code* code = pl_law_code(t, t->vstack[jbase]);
     uint32_t fast_k =
         code != NULL ? pl_strict_entry(t, code, jbase + 1, jargc) : 0;
     uint32_t nslots = 1 + jargc + m;

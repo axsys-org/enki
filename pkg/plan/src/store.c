@@ -226,11 +226,20 @@ static bool plgc_get(const uint8_t key[32], uint8_t** out_b, size_t* out_n) {
   return ok;
 }
 
+/* Lazily compiled rows arrive between Saves; bound what a process that
+ * never Saves again (a server killed by a signal) can lose. */
+#define PLGC_STAGE_FLUSH 256
+
 static void plgc_put(const uint8_t key[32], const uint8_t* b, size_t n) {
   pthread_mutex_lock(&plgc_mu);
-  if (plgc_configured())
+  bool flush = false;
+  if (plgc_configured()) {
     (void)pl_staged_put(&plgc_staged, key, b, n);
+    flush = ax_hmlen(plgc_staged) >= PLGC_STAGE_FLUSH;
+  }
   pthread_mutex_unlock(&plgc_mu);
+  if (flush)
+    pl_store_cache_checkpoint();
 }
 
 /* Derived cache persistence is best-effort, but may only sync at Save. */
@@ -839,9 +848,12 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
   uint64_t compile_ns =
       (uint64_t)(compile_t1.tv_sec - compile_t0.tv_sec) * 1000000000u +
       (uint64_t)(compile_t1.tv_nsec - compile_t0.tv_nsec);
-  /* Keep the existing 10ms admission threshold: caching also serializes a
-   * row pin, retains staging memory, and adds work to the next Save. */
-  if (codecache && compile_ns < 10000000u)
+  /* Admission threshold: caching also serializes a row pin, retains
+   * staging memory, and adds work to the next Save, so rows that take
+   * less than a millisecond to recompile are not worth it.  (Was 10 ms,
+   * which left almost every boot-compiler row uncached and made every
+   * process start recompile its laws.) */
+  if (codecache && compile_ns < 1000000u)
     codecache = false;
   if (codecache) {
     /* persist the row as a pin and record the (compiler, law) -> row
@@ -884,32 +896,6 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
   pl_store_save_unlock(s);
 }
 
-/*
- * Compile every law pin already interned.  Canonical laws registered before
- * the compiler was installed (the boot prelude and loaded snapshots) would
- * otherwise never get bytecode.  Snapshot the hashes under the registry lock
- * so compilation can run afterward through the save_mu -> mu lock order.
- */
-static void pl_store_compile_existing(pl_store* s) {
-  PL_STORE_PROFILE("store.compile.existing");
-  pl_intern_entry* laws = NULL;
-  pl_store_lock(s);
-  for (ptrdiff_t i = 0; i < ax_arrlen(s->pins); i++) {
-    pl_cell* p = pl_ptr(s->pins[i]);
-    if ((pl_hdr_flags(p[0]) & PL_F_PIN_HASHED) == 0 ||
-        pl_tag(pl_pin_body(p)) != PL_TAG_LAW)
-      continue;
-    pl_hash key;
-    memcpy(key.b, pl_pin_hash_bytes(p), 32);
-    if (ax_hmgeti(laws, key) < 0)
-      ax_hmput(laws, key, s->pins[i]);
-  }
-  pl_store_unlock(s);
-  for (ptrdiff_t i = 0; i < ax_hmlen(laws); i++)
-    pl_store_put_code(s, laws[i].key.b);
-  ax_hmfree(laws);
-}
-
 static void pl_store_invalidate_code_locked(pl_store* s) {
   for (ptrdiff_t i = 0; i < ax_arrlen(s->pins); i++)
     pl_pin_set_code(pl_ptr(s->pins[i]), NULL);
@@ -947,8 +933,8 @@ bool pl_store_put_compiler(pl_store* s, const uint8_t hash[32]) {
   }
   s->compiler_f = enabled;
   memcpy(s->compiler, hash, 32);
-  bool sweep = s->compiler_f;
-  if (sweep) {
+  bool install = s->compiler_f;
+  if (install) {
     /* 32 MiB semispaces: compiles are short-lived allocations, and the
      * heap grows on demand; 512 MiB here was over half of a boot's RSS. */
     s->compiler_h = pl_heap_new(((size_t)1 << 22), s);
@@ -956,11 +942,43 @@ bool pl_store_put_compiler(pl_store* s, const uint8_t hash[32]) {
   }
   pl_store_unlock(s);
   pl_store_save_unlock(s);
-  if (sweep) {
+  /* No sweep of the interned laws: code attaches on each law's first entry
+   * (pl_store_code_demand), so an Install costs nothing for laws that never
+   * run, and a warm code cache is decoded only for the laws that do. */
+  if (install)
     fprintf(stderr, "store: installing bytecode compiler\r\n");
-    pl_store_compile_existing(s);
-  }
   return true;
+}
+
+void* pl_store_code_demand(pl_store* s, pl_val pin) {
+  if (s == NULL)
+    return NULL;
+  pl_cell* p = pl_pin_resolved(pl_ptr(pin));
+  if (pl_pin_is_proxy(p) || (pl_hdr_flags(p[0]) & PL_F_PIN_HASHED) == 0)
+    return NULL; /* unsaved: nothing to compile under */
+  if (!s->compiler_f)
+    return NULL; /* unsynchronized read: a stale answer only defers */
+  pl_cell expect = 0;
+  if (!__atomic_compare_exchange_n(&p[6], &expect,
+                                   (pl_cell)(uintptr_t)PL_CODE_PENDING, false,
+                                   __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+    /* attached, pending on another thread, or known uncompilable */
+    return (uintptr_t)expect > (uintptr_t)PL_CODE_PENDING
+               ? (void*)(uintptr_t)expect
+               : NULL;
+  }
+  pl_store_put_code(s, pl_pin_hash_bytes(p));
+  pl_cell after = __atomic_load_n(&p[6], __ATOMIC_ACQUIRE);
+  if (after == (pl_cell)(uintptr_t)PL_CODE_PENDING) {
+    /* nothing attached: the compile raised, the row did not decode, or the
+     * compiler went away.  A new generation resets the slot to NULL. */
+    (void)__atomic_compare_exchange_n(&p[6], &after,
+                                      (pl_cell)(uintptr_t)PL_CODE_NONE, false,
+                                      __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+    return NULL;
+  }
+  return (uintptr_t)after > (uintptr_t)PL_CODE_PENDING ? (void*)(uintptr_t)after
+                                                       : NULL;
 }
 
 /* ── Store-resident value construction (no GC interaction) ─────────────── */
@@ -1135,6 +1153,7 @@ void pl_store_free(pl_store* s) {
   if (s == NULL)
     return;
   PL_STORE_PROFILE("store.close");
+  pl_store_cache_checkpoint(); /* rows compiled since the last Save */
   if (s->compiler_t != NULL)
     pl_thread_free(s->compiler_t);
   if (s->compiler_h != NULL)

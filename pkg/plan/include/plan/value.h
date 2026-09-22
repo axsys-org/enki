@@ -288,11 +288,24 @@ static inline pl_val pl_pin_body(pl_cell* p) {
   p = pl_pin_resolved(p);
   return (pl_val)p[5];
 }
-static inline void* pl_pin_code(pl_cell* p) {
+/* Cell 6 of a canonical PIN holds the attached bytecode (a pl_code*), or
+ * one of these sentinels while lazy compilation decides: code is attached
+ * on a law's first entry, not when the compiler is installed. */
+#define PL_CODE_NONE                                                           \
+  ((void*)(uintptr_t)1) /* a compile was attempted; nothing to attach */
+#define PL_CODE_PENDING                                                        \
+  ((void*)(uintptr_t)2) /* a compile is in progress on some thread */
+
+static inline void* pl_pin_code_raw(pl_cell* p) {
   p = pl_pin_resolved(p);
   if (pl_pin_is_proxy(p))
     return NULL;
   return (void*)(uintptr_t)__atomic_load_n(&p[6], __ATOMIC_ACQUIRE);
+}
+/* Attached code, or NULL (including the sentinel states). */
+static inline void* pl_pin_code(pl_cell* p) {
+  void* code = pl_pin_code_raw(p);
+  return (uintptr_t)code > (uintptr_t)PL_CODE_PENDING ? code : NULL;
 }
 static inline void pl_pin_set_code(pl_cell* p, void* code) {
   p = pl_pin_resolved(p);

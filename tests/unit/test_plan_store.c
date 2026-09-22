@@ -627,6 +627,65 @@ TEST(store, compiler_install_is_generation_idempotent) {
   pl_store_free(s);
 }
 
+TEST(store, code_attaches_lazily_on_first_demand) {
+  pl_store* s = pl_store_new_mem();
+  pl_heap* h = pl_heap_new(1 << 16, s);
+  pl_thread* t = pl_thread_new(h);
+  pl_vpush(t, test_law(t, 1, 7, 1));
+  pl_val pin = pl_pin(t, t->vstack[t->vsp - 1]);
+  char save_err[192] = {0};
+  ASSERT(pl_store_save_root(s, pin, NULL, save_err, sizeof(save_err)), "%s",
+         save_err);
+  pl_val canonical = pl_pin_proxy_target(pl_ptr(pin));
+  ASSERT_NEQ(canonical, 0);
+  pl_hash law_key;
+  memcpy(law_key.b, pl_pin_hash(pin), sizeof(law_key.b));
+
+  /* no compiler: nothing is claimed */
+  ASSERT_NULL(pl_store_code_demand(s, pin));
+  ASSERT_NULL(pl_pin_code_raw(pl_ptr(pin)));
+
+  /* a compiler whose PIN cannot be loaded: the compile raises, the law is
+   * marked uncompilable once and later demands do not retry */
+  uint8_t bogus[32];
+  for (size_t i = 0; i < sizeof(bogus); i++)
+    bogus[i] = (uint8_t)(i + 1);
+  ASSERT(pl_store_put_compiler(s, bogus));
+  ASSERT_NULL(pl_pin_code_raw(pl_ptr(pin))); /* installing does not sweep */
+  ASSERT_NULL(pl_store_code_demand(s, pin));
+  ASSERT_EQ(pl_pin_code_raw(pl_ptr(pin)), PL_CODE_NONE);
+  ASSERT_NULL(pl_pin_code(pl_ptr(pin)));
+  ASSERT_NULL(pl_store_code_demand(s, pin));
+  ASSERT_EQ(pl_pin_code_raw(pl_ptr(pin)), PL_CODE_NONE);
+
+  /* a new generation resets the slot; a cached row attaches on demand */
+  uint8_t other[32]; /* non-uniform: a uniform hash means "disabled" */
+  for (size_t i = 0; i < sizeof(other); i++)
+    other[i] = (uint8_t)(3 * i + 1);
+  ASSERT(pl_store_put_compiler(s, other));
+  ASSERT_NULL(pl_pin_code_raw(pl_ptr(pin)));
+  pl_code* code = calloc(1, sizeof(*code));
+  ASSERT_NOT_NULL(code);
+  code->ops = calloc(1, sizeof(*code->ops));
+  ASSERT_NOT_NULL(code->ops);
+  ax_arrpush(s->codes, code);
+  ax_hmput(s->code_cache, law_key, code);
+  ASSERT_EQ(pl_store_code_demand(s, pin), code);
+  ASSERT_EQ(pl_pin_code(pl_ptr(pin)), code);
+  ASSERT_EQ(pl_pin_code(pl_ptr(canonical)), code);
+  ASSERT_EQ(pl_store_code_demand(s, pin), code);
+
+  /* an unsaved law has no hash to compile under */
+  pl_vpush(t, test_law(t, 1, 9, 1));
+  pl_val fresh = pl_pin(t, t->vstack[t->vsp - 1]);
+  ASSERT_NULL(pl_store_code_demand(s, fresh));
+  ASSERT_NULL(pl_pin_code_raw(pl_ptr(fresh)));
+
+  pl_thread_free(t);
+  pl_heap_free(h);
+  pl_store_free(s);
+}
+
 enum { TEST_SIGABRT_EXIT = 128 + SIGABRT };
 
 static void test_sigabrt_exit(int signal_number) {
