@@ -226,9 +226,11 @@ static bool plgc_get(const uint8_t key[32], uint8_t** out_b, size_t* out_n) {
   return ok;
 }
 
-/* Lazily compiled rows arrive between Saves; bound what a process that
- * never Saves again (a server killed by a signal) can lose. */
-#define PLGC_STAGE_FLUSH 256
+/* Lazily compiled rows arrive between Saves (a server's request paths
+ * compile on first use); bound what a process that never Saves again and
+ * is killed by a signal can lose.  P5/P6 rows cost tens of milliseconds
+ * each to make, so a write transaction per few dozen is cheap by comparison. */
+#define PLGC_STAGE_FLUSH 32
 
 static void plgc_put(const uint8_t key[32], const uint8_t* b, size_t n) {
   pthread_mutex_lock(&plgc_mu);
@@ -240,6 +242,20 @@ static void plgc_put(const uint8_t key[32], const uint8_t* b, size_t n) {
   pthread_mutex_unlock(&plgc_mu);
   if (flush)
     pl_store_cache_checkpoint();
+}
+
+/* Rows whose compile took less than this are recompiled rather than cached
+ * (PL_CODECACHE_MIN_MS, default 1 ms). */
+static uint64_t plgc_min_ns(void) {
+  static _Atomic uint64_t cached = UINT64_MAX;
+  uint64_t v = atomic_load_explicit(&cached, memory_order_relaxed);
+  if (v == UINT64_MAX) {
+    const char* e = getenv("PL_CODECACHE_MIN_MS");
+    double ms = e != NULL && e[0] != '\0' ? strtod(e, NULL) : 1.0;
+    v = ms > 0 ? (uint64_t)(ms * 1000000.0) : 0;
+    atomic_store_explicit(&cached, v, memory_order_relaxed);
+  }
+  return v;
 }
 
 /* Derived cache persistence is best-effort, but may only sync at Save. */
@@ -700,7 +716,7 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
           pl_catch_pop(t, &cc);
           pl_cell* rp = pl_as(PL_TAG_PIN, rowpin);
           if (rp != NULL) {
-            pl_code* code = pl_bytecode_from_val(pl_pin_body(rp));
+            pl_code* code = pl_bytecode_from_val_in(s, pl_pin_body(rp));
             if (code != NULL) {
               pl_store_lock(s);
               ptrdiff_t hit_at = ax_hmgeti(s->code_cache, key);
@@ -770,7 +786,7 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
         pl_catch_pop(t, &cc);
         pl_cell* rp = loaded ? pl_as(PL_TAG_PIN, rowpin) : NULL;
         if (rp != NULL) {
-          pl_code* code = pl_bytecode_from_val(pl_pin_body(rp));
+          pl_code* code = pl_bytecode_from_val_in(s, pl_pin_body(rp));
           if (code != NULL) {
             pl_store_lock(s);
             ptrdiff_t hit_at = ax_hmgeti(s->code_cache, key);
@@ -824,7 +840,7 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
   pl_val stable = pl_store_snapshot_normal(t, t->vstack[result_at]);
   t->vsp = result_at;
   pl_catch_pop(t, &c);
-  pl_code* code = pl_bytecode_from_val(stable);
+  pl_code* code = pl_bytecode_from_val_in(s, stable);
   if (code != NULL) {
     /* Attach the cached code to every canonical LAW registered for this hash.
      */
@@ -849,11 +865,10 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
       (uint64_t)(compile_t1.tv_sec - compile_t0.tv_sec) * 1000000000u +
       (uint64_t)(compile_t1.tv_nsec - compile_t0.tv_nsec);
   /* Admission threshold: caching also serializes a row pin, retains
-   * staging memory, and adds work to the next Save, so rows that take
-   * less than a millisecond to recompile are not worth it.  (Was 10 ms,
-   * which left almost every boot-compiler row uncached and made every
-   * process start recompile its laws.) */
-  if (codecache && compile_ns < 1000000u)
+   * staging memory, and adds work to the next Save, so rows that
+   * recompile faster than PL_CODECACHE_MIN_MS (default 1 ms) are not
+   * worth it. */
+  if (codecache && compile_ns < plgc_min_ns())
     codecache = false;
   if (codecache) {
     /* persist the row as a pin and record the (compiler, law) -> row

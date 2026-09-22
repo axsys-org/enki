@@ -68,6 +68,11 @@ typedef enum pl_op {
 } pl_op;
 
 pl_code* pl_bytecode_from_val(pl_val val);
+/* As above, with a store in scope: a saturated call of a literal pinned law
+ * that has no code yet is compiled first (bounded depth), so the caller's
+ * ingest still sees the callee's strict-entry mask under lazy attachment. */
+struct pl_store;
+pl_code* pl_bytecode_from_val_in(struct pl_store* s, pl_val val);
 void pl_bytecode_free(pl_code* code);
 
 #endif

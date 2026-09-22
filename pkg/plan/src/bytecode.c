@@ -1,4 +1,5 @@
 #include "plan/bytecode.h"
+#include "plan/store.h"
 #include "stdio.h"
 #include "inttypes.h"
 #include "stdlib.h"
@@ -410,6 +411,15 @@ static bool eager_consume(pl_code* c, eager_slot* slots, size_t base,
  * is a strictness fact about the law, valid whichever tier's code ends up
  * running; a callee whose code lands later is simply not seen.  Published
  * code objects live as long as the store, so the peek cannot dangle. */
+/* Store in scope for the ingest on this thread (pl_bytecode_from_val_in),
+ * and how many ingests are nested: demanding a callee's code from inside
+ * the caller's ingest compiles depth-first, so cap the recursion; a callee
+ * beyond the cap (or one whose compile is already pending: a cycle) is
+ * simply not seen, as before. */
+static _Thread_local pl_store* pl_ingest_store;
+static _Thread_local int pl_ingest_depth;
+#define PL_INGEST_DEMAND_DEPTH 8
+
 static uint64_t eager_callee_mask(const pl_code* c, const eager_slot* head,
                                   size_t nargs) {
   if (head->var1 == 1)
@@ -424,6 +434,9 @@ static uint64_t eager_callee_mask(const pl_code* c, const eager_slot* head,
       pl_law_arity(pl_ptr(body)) != nargs)
     return 0;
   const pl_code* callee = pl_pin_code(p);
+  if (callee == NULL && pl_ingest_store != NULL &&
+      pl_ingest_depth <= PL_INGEST_DEMAND_DEPTH)
+    callee = pl_store_code_demand(pl_ingest_store, head->lit);
   return callee != NULL ? callee->strict_mask : 0;
 }
 
@@ -878,6 +891,16 @@ static void bytecode_dump(const pl_code* c) {
 }
 
 /** mallocs (and leaks) */
+pl_code* pl_bytecode_from_val_in(pl_store* s, pl_val val) {
+  pl_store* outer = pl_ingest_store;
+  pl_ingest_store = s;
+  pl_ingest_depth++;
+  pl_code* out = pl_bytecode_from_val(val);
+  pl_ingest_depth--;
+  pl_ingest_store = outer;
+  return out;
+}
+
 pl_code* pl_bytecode_from_val(pl_val val) {
   /* PL_NO_BYTECODE=1: refuse every decode, so the whole system runs
    * interpreted — the differential-testing ground truth */
