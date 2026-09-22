@@ -486,6 +486,13 @@ static void pl_gc_grow(pl_thread* t, pl_heap* h, size_t need_cells) {
   free(old_to);
 }
 
+void pl_invariant_failed(const char* file, int line, const char* func,
+                         const char* what) {
+  fprintf(stderr, "%s:%d: %s: Assertion failed: %s\n", file, line, func, what);
+  fflush(stderr);
+  abort();
+}
+
 void pl_gc_reserve_slow(pl_thread* t, size_t cells) {
   pl_heap* h = t->heap;
 #ifdef PL_GC_STRESS

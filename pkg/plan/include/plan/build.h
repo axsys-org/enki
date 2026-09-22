@@ -57,7 +57,8 @@ static inline void pl_thunk_update(pl_thread* t, pl_val thunk_or_bh,
 
 /* Argument vectors are short: copy the common sizes inline instead of
  * paying a libc memmove call per thunk. */
-static inline void pl_copy_vals(pl_cell* dst, const pl_val* src, uint32_t n) {
+static inline ax_always_inline void
+pl_copy_vals(pl_cell* dst, const pl_val* src, uint32_t n) {
   switch (n) {
   case 4:
     dst[3] = src[3];
@@ -79,7 +80,7 @@ static inline void pl_copy_vals(pl_cell* dst, const pl_val* src, uint32_t n) {
   }
 }
 
-static inline uint64_t pl_arity(pl_val v) {
+static inline ax_always_inline uint64_t pl_arity(pl_val v) {
   if (pl_is_nat63(v))
     return 0;
   switch (pl_tag(v)) {
@@ -96,23 +97,25 @@ static inline uint64_t pl_arity(pl_val v) {
   case PL_TAG_APP:
     return pl_app_need(pl_ptr(v));
   default:
-    ax_abort("pl_arity on a non-WHNF value (tag 0x%llx)",
-             (unsigned long long)pl_tag(v));
+    pl_invariant_failed(__FILE__, __LINE__, __func__,
+                        "pl_arity on a non-WHNF value");
   }
 }
 
-static inline uint32_t pl_need_after(pl_val head, uint64_t n_args) {
+static inline ax_always_inline uint32_t pl_need_after(pl_val head,
+                                                      uint64_t n_args) {
   uint64_t a = pl_arity(head);
   if (a == 0 || a <= n_args)
     return 0;
   uint64_t need = a - n_args;
-  ax_assume(need < (1u << 20), "app need exceeds meta width");
+  pl_check(need < (1u << 20), "app need exceeds meta width");
   return (uint32_t)need;
 }
 
-static inline pl_val pl_mk_app_from(pl_thread* t, pl_val head, uint32_t n,
-                                    const pl_val* args) {
-  ax_assume(n >= 1, "empty app");
+static inline ax_always_inline pl_val pl_mk_app_from(pl_thread* t, pl_val head,
+                                                     uint32_t n,
+                                                     const pl_val* args) {
+  pl_check(n >= 1, "empty app");
   pl_cell* p = pl_bump(t, PL_APP_CELLS(n));
   pl_cache_stat_alloc(t, PL_K_APP, PL_APP_CELLS(n));
   p[0] = pl_hdr_make(PL_K_APP, 0, pl_need_after(head, n), PL_APP_CELLS(n));
@@ -121,7 +124,8 @@ static inline pl_val pl_mk_app_from(pl_thread* t, pl_val head, uint32_t n,
   return pl_make(PL_TAG_APP, p);
 }
 
-static inline pl_val pl_mk_app_snoc(pl_thread* t, pl_val f, pl_val x) {
+static inline ax_always_inline pl_val pl_mk_app_snoc(pl_thread* t, pl_val f,
+                                                     pl_val x) {
   pl_cell* fp = pl_as(PL_TAG_APP, f);
   if (fp != NULL) {
     uint32_t n = pl_app_n(fp);
@@ -143,7 +147,8 @@ static inline pl_val pl_mk_app_snoc(pl_thread* t, pl_val f, pl_val x) {
   return pl_make(PL_TAG_APP, p);
 }
 
-static inline pl_val pl_mk_thunk(pl_thread* t, pl_val env, pl_val expr) {
+static inline ax_always_inline pl_val pl_mk_thunk(pl_thread* t, pl_val env,
+                                                  pl_val expr) {
   pl_cell* p = pl_bump(t, PL_THUNK_CELLS);
   pl_cache_stat_alloc(t, PL_K_THUNK, PL_THUNK_CELLS);
   p[0] = pl_hdr_make(PL_K_THUNK, 0, 0, PL_THUNK_CELLS);
@@ -152,8 +157,8 @@ static inline pl_val pl_mk_thunk(pl_thread* t, pl_val env, pl_val expr) {
   return pl_make(PL_TAG_DEFER, p);
 }
 
-static inline pl_val pl_mk_thke(pl_thread* t, uint64_t bane, uint32_t nargs,
-                                pl_val* args) {
+static inline ax_always_inline pl_val pl_mk_thke(pl_thread* t, uint64_t bane,
+                                                 uint32_t nargs, pl_val* args) {
   uint32_t size = PL_THKE_CELLS(nargs);
   pl_cell* p = pl_bump(t, size);
   pl_cache_stat_alloc(t, PL_K_THKE, size);
@@ -163,8 +168,10 @@ static inline pl_val pl_mk_thke(pl_thread* t, uint64_t bane, uint32_t nargs,
   return pl_make(PL_TAG_DEFER, p);
 }
 
-static inline pl_val pl_mk_thke_known(pl_thread* t, uint32_t idx,
-                                      uint32_t nargs, pl_val* args) {
+static inline ax_always_inline pl_val pl_mk_thke_known(pl_thread* t,
+                                                       uint32_t idx,
+                                                       uint32_t nargs,
+                                                       pl_val* args) {
   uint32_t size = PL_THKE_CELLS(nargs + 1);
   pl_cell* p = pl_bump(t, size);
   pl_cache_stat_alloc(t, PL_K_THKE, size);
@@ -175,22 +182,23 @@ static inline pl_val pl_mk_thke_known(pl_thread* t, uint32_t idx,
   return pl_make(PL_TAG_DEFER, p);
 }
 
-static inline void pl_thunk_update(pl_thread* t, pl_val thunk_or_bh,
-                                   pl_val result) {
+static inline ax_always_inline void
+pl_thunk_update(pl_thread* t, pl_val thunk_or_bh, pl_val result) {
   (void)t;
   pl_cell* p = pl_ptr(thunk_or_bh);
   pl_kind k = pl_hdr_kind(p[0]);
-  ax_assume(k == PL_K_THUNK || k == PL_K_BH, "thunk_update on kind %d", (int)k);
+  pl_check(k == PL_K_THUNK || k == PL_K_BH, "thunk_update on a non-thunk");
   /* keep the original cell count so the collector copies correctly */
   p[0] = pl_hdr_make(PL_K_IND, 0, 0, pl_hdr_cells(p[0]));
   p[1] = result;
 }
 
-static inline void pl_thke_update(pl_thread* t, pl_val thke, pl_val result) {
+static inline ax_always_inline void pl_thke_update(pl_thread* t, pl_val thke,
+                                                   pl_val result) {
   (void)t;
   pl_cell* p = pl_ptr(thke);
   pl_kind k = pl_hdr_kind(p[0]);
-  ax_assume(k == PL_K_THKE, "thunk_update on kind %d", (int)k);
+  pl_check(k == PL_K_THKE, "thke_update on a non-thke");
   /* keep the original cell count so the collector copies correctly */
   p[0] = pl_hdr_make(PL_K_IND, 0, 0, pl_hdr_cells(p[0]));
   p[1] = result;
