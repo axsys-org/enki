@@ -717,12 +717,14 @@ static pl_val op_slice(pl_thread* t, size_t ab) {
   return r;
 }
 
-/* planWeld x y — A (N 0) (toRow x <> toRow y); may produce a 0-ary app. */
+/* planWeld x y — concatenate rows under head 0; an empty result is 0. */
 static pl_val op_weld(pl_thread* t, size_t ab) {
   pl_cell* xp = pl_as(PL_TAG_APP, ARG(0));
   pl_cell* yp = pl_as(PL_TAG_APP, ARG(1));
   uint32_t nx = xp ? pl_app_n(xp) : 0;
   uint32_t ny = yp ? pl_app_n(yp) : 0;
+  if (nx == 0 && ny == 0)
+    return 0;
   pl_gc_reserve(t, PL_APP_CELLS(nx + ny));
   PL_GC_FORBID(t);
   pl_cell* p = pl_bump(t, PL_APP_CELLS(nx + ny));
@@ -917,11 +919,12 @@ static pl_val op_trace(pl_thread* t, size_t ab) {
  * arbitrarily deep data (the compiler compares whole IR trees for its
  * fixed point), so graph depth must never translate into C stack
  * depth.  The worklist holds bare pl_vals with no GC protection —
- * legal only because nothing here allocates; both roots stay live on
- * the caller's vstack.
+ * legal only because nothing here allocates on the PLAN heap; both roots
+ * stay live on the caller's vstack.
  */
 typedef struct {
   pl_val a, b;
+  bool publish; /* after a successful body comparison: proxy a -> canonical b */
 } pl_eq_pair;
 
 typedef struct {
@@ -944,10 +947,23 @@ static void pl_eq_push(pl_eq_stack* s, pl_val a, pl_val b) {
     }
     s->cap = cap2;
   }
-  s->items[s->n++] = (pl_eq_pair){a, b};
+  s->items[s->n++] = (pl_eq_pair){.a = a, .b = b};
 }
 
-static bool pl_eq_deep(pl_val a0, pl_val b0) {
+static void pl_eq_publish(pl_store* store, pl_val proxy, pl_val target) {
+  target = pl_eq_resolve_pin(target);
+  if (store == NULL || !pl_store_owns(store, target))
+    return;
+  /* Serialize with Save/Ice and other Equal publications.  Another thread
+   * may already have resolved a shared store proxy while we compared it. */
+  pl_store_save_lock(store);
+  pl_cell* p = pl_ptr(proxy);
+  if (pl_pin_is_proxy(p) && pl_pin_proxy_target(p) == 0)
+    pl_pin_set_target(p, target);
+  pl_store_save_unlock(store);
+}
+
+static bool pl_eq_deep(pl_store* store, pl_val a0, pl_val b0) {
   pl_eq_stack s;
   s.items = s.inline_buf;
   s.n = 0;
@@ -956,6 +972,10 @@ static bool pl_eq_deep(pl_val a0, pl_val b0) {
   bool eq = true;
   while (eq && s.n > 0) {
     pl_eq_pair p = s.items[--s.n];
+    if (p.publish) {
+      pl_eq_publish(store, p.a, p.b);
+      continue;
+    }
     pl_val a = pl_resolve(p.a);
     pl_val b = pl_resolve(p.b);
     if (a == b)
@@ -978,8 +998,15 @@ static bool pl_eq_deep(pl_val a0, pl_val b0) {
       const uint8_t* bh = pl_pin_hash(b);
       if (ah != NULL && bh != NULL)
         eq = memcmp(ah, bh, 32) == 0;
-      else
+      else {
+        if ((ah != NULL) != (bh != NULL)) {
+          /* LIFO completion marker: publish only after the entire body has
+           * compared equal, including any nested PINs. */
+          pl_eq_push(&s, ah == NULL ? a : b, ah != NULL ? a : b);
+          s.items[s.n - 1].publish = true;
+        }
         pl_eq_push(&s, pl_pin_body(pl_ptr(a)), pl_pin_body(pl_ptr(b)));
+      }
       break;
     }
     case PL_TAG_LAW: {
@@ -1016,7 +1043,7 @@ static bool pl_eq_deep(pl_val a0, pl_val b0) {
 
 static pl_val op_equal(pl_thread* t, size_t ab) {
   /* both args deep via mask */
-  return pl_eq_deep(ARG(0), ARG(1)) ? 1 : 0;
+  return pl_eq_deep(pl_heap_store(t->heap), ARG(0), ARG(1)) ? 1 : 0;
 }
 
 static pl_val op_install(pl_thread* t, size_t ab) {
@@ -1084,6 +1111,17 @@ static void save_pin_only(pl_thread* t, pl_val pin) {
   ax_free(ax_allocator_system(), text);
   if (fclose(f) != 0 || wrote != n)
     pl_raise_msg(t, "Save: short write");
+}
+
+static pl_val op_ice(pl_thread* t, size_t ab) {
+  t->effect_epoch++; /* persistence effect: never cached across (F_MEMO) */
+  if (pl_as(PL_TAG_PIN, ARG(0)) == NULL)
+    pl_raise_msg(t, "Ice: expected a pin");
+  char err[192] = {0};
+  if (!pl_store_save_pin(pl_heap_store(t->heap), ARG(0), NULL, err,
+                         sizeof(err)))
+    pl_raise_msgf(t, "Ice: %s", err[0] != '\0' ? err : "store failure");
+  return 0;
 }
 
 static pl_val op_save(pl_thread* t, size_t ab) {
@@ -1311,6 +1349,8 @@ const pl_opdesc pl_ops[] = {
     OP83_LOCAL("Ed25519Verify", 3, 0b111, pl_op83_ed25519_verify),
     OP83_LOCAL("Blake3Keyed", 2, 0b11, pl_op83_blake3_keyed),
     OP83_LOCAL("HmacSha256", 2, 0b11, pl_op83_hmac_sha256),
+
+    OP66(ax_s3('I', 'c', 'e'), 1, 0b1, 0b1, op_ice),
 };
 
 const size_t pl_nops = sizeof(pl_ops) / sizeof(pl_ops[0]);
@@ -1327,9 +1367,9 @@ static const uint16_t pl_op0_argc3[] = {1};
 static const uint16_t pl_op0_argc6[] = {2};
 
 static const uint16_t pl_op66_argc1[] = {
-    3,  6,  7,  38, 39, 40, 41, 42, 44,  45,  46,  52,  53, 54,
-    55, 56, 57, 58, 59, 60, 65, 71, 72,  74,  75,  76,  77, 78,
-    79, 80, 81, 82, 83, 85, 86, 99, 100, 101, 103, 104, 130};
+    3,  6,  7,  38, 39, 40, 41, 42, 44,  45,  46,  52,  53,  54,
+    55, 56, 57, 58, 59, 60, 65, 71, 72,  74,  75,  76,  77,  78,
+    79, 80, 81, 82, 83, 85, 86, 99, 100, 101, 103, 104, 130, 141};
 static const uint16_t pl_op66_argc2[] = {
     8,  9,  10, 11, 12, 13, 14, 31, 32, 33, 36, 37, 43, 47, 50,  64, 66,
     69, 70, 73, 84, 87, 88, 89, 92, 93, 94, 95, 96, 97, 98, 102, 133};

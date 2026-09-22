@@ -38,6 +38,22 @@ bool pl_store_backend_get(pl_store* s, const uint8_t hash[32], uint8_t** out_b,
 
 typedef struct pl_silo_batch pl_silo_batch;
 
+/* Store-local (or separately locked global-cache) writes awaiting Save. */
+typedef struct pl_staged_blob {
+  pl_hash key;
+  struct {
+    uint8_t* bytes;
+    size_t len;
+  } value;
+} pl_staged_blob;
+
+bool pl_staged_put(pl_staged_blob** staged, const uint8_t hash[32],
+                   const uint8_t* bytes, size_t len);
+bool pl_staged_get(pl_staged_blob* staged, const uint8_t hash[32],
+                   uint8_t** out, size_t* len);
+void pl_staged_clear(pl_staged_blob** staged);
+void pl_store_cache_checkpoint(void);
+
 bool pl_store_silo_batch_begin(pl_store* s, pl_silo_batch** out, char* err,
                                size_t err_cap);
 bool pl_store_silo_batch_contains(pl_silo_batch* batch, const uint8_t hash[32],
@@ -45,7 +61,9 @@ bool pl_store_silo_batch_contains(pl_silo_batch* batch, const uint8_t hash[32],
 bool pl_store_silo_batch_put(pl_silo_batch* batch, const uint8_t hash[32],
                              const uint8_t* bytes, size_t len, char* err,
                              size_t err_cap);
-/* Commit consumes batch on both success and failure. */
+/* With no root, stage the batch locally without committing LMDB or syncing.
+ * With a root, commit all staged objects/cache entries and the root together.
+ * Consumes batch on both success and failure. */
 bool pl_store_silo_batch_commit(pl_silo_batch* batch,
                                 const uint8_t root_hash[32], char* err,
                                 size_t err_cap);

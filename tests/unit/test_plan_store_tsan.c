@@ -7,6 +7,7 @@
 #include "plan/store.h"
 #include "test.h"
 #include "test_plan.h"
+#include "../../pkg/plan/src/store_internal.h"
 
 typedef struct store_pin_worker {
   pl_store* store;
@@ -22,6 +23,44 @@ typedef struct pin_code_race {
   bool start;
   bool ok;
 } pin_code_race;
+
+typedef struct pin_equal_race {
+  pl_store* store;
+  pl_val* proxies;
+  size_t count;
+  pl_val canonical;
+  bool* start;
+  unsigned operation;
+  bool ok;
+} pin_equal_race;
+
+static void* pin_equal_thread(void* arg) {
+  pin_equal_race* race = arg;
+  pl_heap* heap = pl_heap_new(1 << 14, race->store);
+  pl_thread* t = pl_thread_new(heap);
+  while (!__atomic_load_n(race->start, __ATOMIC_ACQUIRE)) {
+  }
+  for (size_t i = 0; i < race->count; i++) {
+    pl_val pin = race->proxies[i];
+    if (race->operation < 2) {
+      pl_val a = race->operation == 0 ? pin : race->canonical;
+      pl_val b = race->operation == 0 ? race->canonical : pin;
+      race->ok = test_op66_2(t, ax_s5('E', 'q', 'u', 'a', 'l'), a, b) == 1;
+    } else if (race->operation == 2) {
+      race->ok = test_op66(t, ax_s3('I', 'c', 'e'), 1, &pin) == 0;
+    } else {
+      char err[192] = {0};
+      race->ok = pl_store_save_root(race->store, pin, NULL, err, sizeof(err));
+    }
+    if (!race->ok || pl_pin_proxy_target(pl_ptr(pin)) != race->canonical) {
+      race->ok = false;
+      break;
+    }
+  }
+  pl_thread_free(t);
+  pl_heap_free(heap);
+  return NULL;
+}
 
 static void* store_pin_thread(void* arg) {
   store_pin_worker* w = arg;
@@ -184,4 +223,135 @@ TEST(store_tsan, concurrent_saves_publish_equal_and_distinct_values) {
 
 TEST(store_tsan, pin_code_publication_is_atomic) {
   ASSERT_EQ(test_pin_code_publication_is_atomic(), 0);
+}
+
+TEST(store_tsan, equal_ice_and_save_publish_shared_proxies) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  enum { COUNT = 128, WORKERS = 4 };
+  pl_val proxies[COUNT];
+  size_t base = t->vsp;
+  pl_vpush(t, pl_pin(t, 42));
+  pl_val pin = t->vstack[base];
+  ASSERT_EQ(test_op66(t, ax_s3('I', 'c', 'e'), 1, &pin), 0);
+  pl_val canonical = pl_pin_proxy_target(pl_ptr(t->vstack[base]));
+  for (size_t i = 0; i < COUNT; i++) {
+    pl_vpush(t, pl_pin(t, 42));
+    t->vstack[base + 1] = pl_nf(t, t->vstack[base + 1]);
+    proxies[i] = pl_store_snapshot_normal(t, t->vstack[base + 1]);
+    ASSERT_EQ(pl_pin_proxy_target(pl_ptr(proxies[i])), 0);
+    t->vsp = base + 1;
+  }
+  bool start = false;
+  pin_equal_race races[WORKERS];
+  pthread_t threads[WORKERS];
+  unsigned started = 0;
+  int create_error = 0;
+  for (unsigned i = 0; i < WORKERS; i++) {
+    races[i] = (pin_equal_race){.store = rt.store,
+                                .proxies = proxies,
+                                .count = COUNT,
+                                .canonical = canonical,
+                                .start = &start,
+                                .operation = i,
+                                .ok = true};
+    create_error =
+        pthread_create(&threads[i], NULL, pin_equal_thread, &races[i]);
+    if (create_error != 0)
+      break;
+    started++;
+  }
+  __atomic_store_n(&start, true, __ATOMIC_RELEASE);
+  bool ok = true;
+  for (unsigned i = 0; i < started; i++) {
+    if (pthread_join(threads[i], NULL) != 0 || !races[i].ok)
+      ok = false;
+  }
+  ASSERT_EQ(create_error, 0);
+  ASSERT(ok);
+  for (size_t i = 0; i < COUNT; i++)
+    ASSERT_EQ(pl_pin_proxy_target(pl_ptr(proxies[i])), canonical);
+  test_rt_free(&rt);
+}
+
+static void* staging_thread(void* arg) {
+  store_pin_worker* w = arg;
+  pl_heap* h = pl_heap_new(1 << 14, w->store);
+  pl_thread* t = pl_thread_new(h);
+  for (unsigned i = 0; i < 32 && w->ok; i++) {
+    t->vsp = 0;
+    pl_vpush(t, pl_pin(t, i + 32 * w->group));
+    pl_val pin = t->vstack[0];
+    w->ok = test_op66(t, ax_s3('I', 'c', 'e'), 1, &pin) == 0;
+    const uint8_t* hash = pl_pin_hash(t->vstack[0]);
+    pl_silo_reader reader;
+    char err[192];
+    if (!w->ok || hash == NULL ||
+        !pl_store_silo_open(w->store, hash, &reader, err, sizeof(err))) {
+      w->ok = false;
+      break;
+    }
+    uint8_t byte;
+    w->ok = reader.read(reader.ctx, &byte, 1);
+    pl_store_silo_close_reader(&reader);
+    uint8_t key[32] = {0xCC, (uint8_t)w->group};
+    w->ok = w->ok && pl_store_backend_put(w->store, key, &byte, 1);
+    uint8_t* got = NULL;
+    size_t n = 0;
+    w->ok = w->ok && pl_store_backend_get(w->store, key, &got, &n);
+    w->ok = w->ok && n == 1 && *got == byte;
+    free(got);
+    if (w->ok && i % 4 == 0)
+      w->ok =
+          pl_store_save_root(w->store, t->vstack[0], NULL, err, sizeof(err));
+  }
+  pl_thread_free(t);
+  pl_heap_free(h);
+  return NULL;
+}
+
+static void staging_object(void* ctx, const uint8_t hash[32], uint64_t off,
+                           uint64_t len) {
+  (void)ctx;
+  (void)hash;
+  (void)off;
+  (void)len;
+}
+
+TEST(store_tsan, silo_staging_reads_and_checkpoints_are_serialized) {
+  char dir[] = "/tmp/enki-tsan-staging-XXXXXX";
+  ASSERT_NOT_NULL(mkdtemp(dir));
+  pl_store* s = pl_store_new_silo(dir, 1 << 20);
+  ASSERT_NOT_NULL(s);
+  enum { N = 4 };
+  store_pin_worker workers[N];
+  pthread_t threads[N];
+  unsigned started = 0;
+  int create_error = 0;
+  for (unsigned i = 0; i < N; i++) {
+    workers[i] = (store_pin_worker){.store = s, .group = i, .ok = true};
+    create_error =
+        pthread_create(&threads[i], NULL, staging_thread, &workers[i]);
+    if (create_error != 0)
+      break;
+    started++;
+  }
+  bool ok = true;
+  for (unsigned i = 0; i < started; i++)
+    if (pthread_join(threads[i], NULL) != 0 || !workers[i].ok)
+      ok = false;
+  ASSERT_EQ(create_error, 0);
+  ASSERT(ok);
+  uint8_t root[32];
+  ASSERT(pl_store_get_root(s, root));
+  ASSERT(pl_store_put_root(s, root));
+  ASSERT_EQ(pl_store_silo_objects(s, staging_object, NULL), 128);
+  pl_store_free(s);
+  const char* files[] = {"pins.pack", "data.mdb", "lock.mdb"};
+  for (unsigned i = 0; i < 3; i++) {
+    char path[256];
+    snprintf(path, sizeof(path), "%s/%s", dir, files[i]);
+    (void)unlink(path);
+  }
+  (void)rmdir(dir);
 }

@@ -16,10 +16,10 @@
 
 /*
  * Pinning is deliberately cheap: pl_pin only forces the value to WHNF and
- * wraps it in a moving-heap proxy.  Save discovers the reachable proxy closure,
- * persists it in dependency order, builds or reuses a canonical store DAG,
- * then publishes each proxy's canonical target.  Publication happens only
- * after the persistence commit succeeds, so a failed Save remains retryable.
+ * wraps it in a moving-heap proxy. Save/Ice discover the reachable proxy
+ * closure, encode it in dependency order, and build or reuse a canonical DAG.
+ * Ice publishes targets after successful store-local staging; Save publishes
+ * after the durable commit. Failed operations remain retryable.
  *
  * The persistence backend keeps a binary rendering (below), because
  * rehydration must not depend on the enki-layer assembler; it is keyed
@@ -172,7 +172,7 @@ typedef struct save_ctx {
   pl_cell** transient;       /* Save-local Legacy canonicalization cells */
   char* err;
   size_t err_cap;
-  bool no_root; /* persist objects only; leave the store root untouched */
+  bool no_root; /* stage objects only; leave the store root untouched */
 } save_ctx;
 
 static bool save_error(save_ctx* c, const char* fmt, ...) {
@@ -237,10 +237,9 @@ static bool save_discover_pin(save_ctx* c, pl_val input, uint32_t depth) {
   if (!pl_pin_is_proxy(p)) {
     if (!pl_store_owns(c->store, pin) || pl_pin_hash(pin) == NULL)
       return save_error(c, "Save encountered a noncanonical PIN");
-    /* Canonical store PINs are durable closure boundaries: they were either
-     * loaded from this backend or published only after an earlier successful
-     * Save.  Their hash is sufficient for a provisional parent's direct table;
-     * rediscovering their bodies would rewalk the complete persisted graph. */
+    /* Canonical PINs are complete closure boundaries, either persisted or
+     * staged in this store. Save checkpoints all staging, so their hashes
+     * suffice without rediscovering the already encoded graph. */
     return true;
   }
 
@@ -319,7 +318,7 @@ static pl_val save_canonical_pin(save_ctx* c, pl_val input) {
   if (at >= 0)
     return c->canonical[at].value;
 
-  /* Discovery deliberately omits already-durable leaves.  On a map miss they
+  /* Discovery deliberately omits canonical leaves. On a map miss they
    * are their own canonical representative.  Keep the hash-map lookup first:
    * Legacy preparation may already have installed a Save-local representative
    * for an equal provisional PIN, and both references must resolve to it. */
@@ -641,10 +640,9 @@ static void save_ctx_free(save_ctx* c) {
   ax_arrfree(c->transient);
 }
 
-/* A canonical store PIN was either loaded from this backend or constructed
- * after an earlier successful Save.  Its persisted closure is therefore
- * already complete: a repeated Save only needs to publish that hash as the
- * root.  Keep Silo's root update in its validated LMDB batch transaction;
+/* A canonical store PIN has an encoded closure, staged or already durable.
+ * Save must still checkpoint staged objects even when its root is unchanged.
+ * Keep Silo's root update in its validated LMDB batch transaction;
  * Legacy backends use their existing root operation after verifying that the
  * root object is still present. */
 static bool save_canonical_root(save_ctx* c, pl_val input, bool* handled) {
@@ -662,7 +660,7 @@ static bool save_canonical_root(save_ctx* c, pl_val input, bool* handled) {
     /* already canonical: presence is all that matters, and the root
      * stays whatever it was */
     if (c->store->be.has != NULL && !c->store->be.has(c->store->be.ctx, hash))
-      return save_error(c, "canonical object is not persisted");
+      return save_error(c, "canonical object is not available");
     return true;
   }
 
@@ -674,7 +672,7 @@ static bool save_canonical_root(save_ctx* c, pl_val input, bool* handled) {
   }
 
   if (c->store->be.has == NULL || !c->store->be.has(c->store->be.ctx, hash))
-    return save_error(c, "canonical root object is not persisted");
+    return save_error(c, "canonical root object is not available");
   if (!c->store->be.put_root(c->store->be.ctx, hash))
     return save_error(c, "Legacy root publication failed");
   return true;
@@ -707,8 +705,8 @@ static bool pl_store_save_pin_or_root(pl_store* s, pl_val pin,
   }
   bool compile = false;
   if (ok) {
-    /* Persistence is complete.  Keep the general lock only around arena and
-     * registry publication; Save serialization remains held until every
+    /* Staging or persistence is complete. Keep the general lock around arena
+     * and registry publication; Save serialization remains held until every
      * source proxy has its canonical target. */
     pl_store_lock(s);
     save_build_canonical(&c);
@@ -732,12 +730,14 @@ static bool pl_store_save_pin_or_root(pl_store* s, pl_val pin,
 
 bool pl_store_save_root(pl_store* s, pl_val pin, uint8_t out_hash[32],
                         char* err, size_t err_cap) {
-  return pl_store_save_pin_or_root(s, pin, out_hash, err, err_cap, false);
+  bool ok = pl_store_save_pin_or_root(s, pin, out_hash, err, err_cap, false);
+  if (ok)
+    pl_store_cache_checkpoint();
+  return ok;
 }
 
-/* Persist a pin's closed graph without publishing it as the store
- * root — the bytecode compile cache stores derived artifacts this
- * way. */
+/* Stage a pin's closed graph without publishing a root. The bytecode
+ * compile cache stages derived artifacts through the same path. */
 bool pl_store_save_pin(pl_store* s, pl_val pin, uint8_t out_hash[32], char* err,
                        size_t err_cap) {
   return pl_store_save_pin_or_root(s, pin, out_hash, err, err_cap, true);

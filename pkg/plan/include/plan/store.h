@@ -51,7 +51,7 @@ typedef struct pl_intern_entry {
   pl_val value;
 } pl_intern_entry;
 
-/* Canonical store LAW PINs grouped by persistent hash.  This lets a decoded
+/* Canonical store LAW PINs grouped by finalized hash.  This lets a decoded
  * compiler result be attached to every registered target for that hash. */
 typedef struct pl_code_targets_entry {
   pl_hash key;
@@ -95,7 +95,8 @@ pl_store* pl_store_new(pl_store_backend backend);
 pl_store* pl_store_new_mem(void);
 /* NULL on failure (path must be an existing directory). */
 pl_store* pl_store_new_lmdb(const char* path, size_t map_size);
-/* Canonical Silo streams in pins.pack, indexed by LMDB. */
+/* Canonical Silo streams in pins.pack. Ice stages index entries locally;
+ * Save publishes them in LMDB. Unsaved entries are lost on store close. */
 pl_store* pl_store_new_silo(const char* path, size_t map_size);
 /* Inspector open: MDB_RDONLY environment, pins.pack O_RDONLY.  Coexists
  * with a live writer; every mutating store operation fails cleanly. */
@@ -113,8 +114,8 @@ static inline bool pl_store_owns(const pl_store* s, pl_val v) {
 /*
  * Force a value to WHNF and wrap it in a fixed-size moving-heap PIN proxy.
  * Nested fields remain lazy.  This is deliberately cheap and non-persistent:
- * the PLAN Save operation later deep-normalizes and promotes the reachable PIN
- * closure into canonical store objects, then resolves each proxy in place.
+ * the PLAN Save/Ice operations deep-normalize and promote the reachable PIN
+ * closure into canonical store objects, then resolve each proxy in place.
  */
 pl_val pl_pin(pl_thread* t, pl_val v);
 
@@ -128,21 +129,27 @@ pl_val pl_pin(pl_thread* t, pl_val v);
  */
 pl_val pl_store_snapshot_normal(pl_thread* t, pl_val v);
 
-/* True when a PIN has a persistent content hash. */
+/* True when a PIN has a finalized content hash (possibly still staged). */
 bool pl_pin_is_hashed(pl_val pin);
 
 /* Hash bytes of a PIN value (32 bytes, borrowed), or NULL while unresolved. */
 const uint8_t* pl_pin_hash(pl_val pin);
 
-/* Finalize and persist a PIN closure, resolve its proxies, and publish root.
- * Unresolved PIN bodies must already be deeply normal; the PLAN Save primop
- * establishes this before calling the store layer.
+/* Finalize a PIN closure and resolve its proxies. The built-in disk backends
+ * stage objects locally without an LMDB commit or sync, leaving the store
+ * root/journal unchanged. Staged pins are loadable in this store, but become
+ * durable and visible to other store instances only after a successful Save.
+ * Unresolved PIN bodies must already be deeply normal; the PLAN Save/Ice
+ * primops establish this before calling the store layer.
  * An unresolved moving proxy must belong to a heap whose store is `s`; this
  * keeps its eventual canonical target within the collector's store-lifetime
  * domain.  Store-owned and already-canonical PINs must likewise belong to
  * `s`. */
 bool pl_store_save_pin(pl_store* s, pl_val pin, uint8_t out_hash[32], char* err,
                        size_t err_cap);
+/* Finalize the PIN, durably checkpoint all staged writes, and publish the
+ * store root. An unchanged root still checkpoints intervening staged writes.
+ * Closing a store discards uncheckpointed staging; it does not save. */
 bool pl_store_save_root(pl_store* s, pl_val pin, uint8_t out_hash[32],
                         char* err, size_t err_cap);
 
@@ -151,14 +158,15 @@ pl_val pl_store_load(pl_thread* t, const uint8_t hash[32]);
 
 /* op-66 Memo nat cache (doc/sigoflaw-memo-spec.md): machine-global
  * memoisation of (f x) keyed by the two pin hashes.  Values are nat63
- * only; the persistent layer shares the code cache's LMDB and knobs. */
+ * only; the persistent layer shares the code cache's LMDB and knobs.
+ * Cache writes stay in memory until a successful Save checkpoints them. */
 bool pl_memo_probe(const uint8_t f_hash[32], const uint8_t x_hash[32],
                    uint64_t* out);
 void pl_memo_record(const uint8_t f_hash[32], const uint8_t x_hash[32],
                     uint64_t value);
 void pl_memo_stats(uint64_t* probes, uint64_t* hits, uint64_t* records);
 
-/* Persist / fetch the root hash (event-log replay seam). */
+/* Checkpoint staging and publish / fetch the root (event-log replay seam). */
 bool pl_store_put_root(pl_store* s, const uint8_t hash[32]);
 bool pl_store_get_root(pl_store* s, uint8_t hash[32]);
 
@@ -182,16 +190,17 @@ uint64_t pl_store_root_log_head(pl_store* s);
 size_t pl_store_root_log(pl_store* s, uint64_t from, pl_store_root_entry* out,
                          size_t cap);
 
-/* Inspector access to the persisted object graph (Silo only): these read
- * the LMDB index and stream headers, never the evaluator heap. */
+/* Inspector access to the stored object graph (Silo only): these read
+ * index entries and stream headers, never the evaluator heap. */
 
-/* Visit every indexed object (hash order) with its pack placement. */
+/* Visit every committed object (hash order) with its pack placement.
+ * Store-local staged objects are excluded. */
 typedef void (*pl_store_silo_object_fn)(void* ctx, const uint8_t hash[32],
                                         uint64_t off, uint64_t len);
 size_t pl_store_silo_objects(pl_store* s, pl_store_silo_object_fn fn,
                              void* ctx);
 
-/* Stream length and direct subpin hashes of one stored object.  On
+/* Stream length and direct subpin hashes of one stored or staged object. On
  * success *out_subpins is malloc'd (NULL when *out_nsub == 0); the
  * caller frees it. */
 bool pl_store_silo_object_info(pl_store* s, const uint8_t hash[32],
@@ -210,6 +219,6 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]);
  * installed and no work was performed. */
 bool pl_store_put_compiler(pl_store* s, const uint8_t hash[32]);
 
-/* Register a LAW PIN after its persistent hash becomes visible. */
+/* Register a LAW PIN after its finalized hash becomes visible. */
 void pl_store_index_hashed_law(pl_store* s, pl_val pin);
 #endif

@@ -50,6 +50,7 @@ typedef struct save_probe_backend {
   bool put_entered;
   bool release_put;
   bool fail_root;
+  bool fail_put;
   unsigned active_puts;
   unsigned max_active_puts;
 } save_probe_backend;
@@ -154,8 +155,8 @@ static bool save_probe_put(void* ctx, const uint8_t hash[32], const uint8_t* b,
   while (backend->block_put && !backend->release_put)
     (void)pthread_cond_wait(&backend->cv, &backend->mu);
 
-  bool ok = true;
-  if (ax_hmgeti(backend->objects, key) < 0) {
+  bool ok = !backend->fail_put;
+  if (ok && ax_hmgeti(backend->objects, key) < 0) {
     uint8_t* copy = malloc(len != 0 ? len : 1);
     if (copy == NULL) {
       ok = false;
@@ -235,6 +236,75 @@ static void* save_root_thread(void* arg) {
   worker->ok = pl_store_save_root(worker->store, worker->root, worker->hash,
                                   worker->err, sizeof(worker->err));
   return NULL;
+}
+
+static bool store_test_ice(pl_thread* t, pl_val pin) {
+  pl_catch c;
+  pl_catch_init(t, &c);
+  if (setjmp(c.jb) == 0) {
+    pl_val result = test_op66(t, ax_s3('I', 'c', 'e'), 1, &pin);
+    pl_catch_pop(t, &c);
+    ASSERT_EQ(result, 0);
+    return true;
+  }
+  pl_catch_unwind(t, &c);
+  return false;
+}
+
+TEST(store, ice_failure_is_retryable_without_root_or_snapshot_publication) {
+  save_probe_backend* backend = NULL;
+  pl_store* s = save_probe_store(&backend);
+  pl_heap* h = pl_heap_new(1 << 16, s);
+  pl_thread* t = pl_thread_new(h);
+  size_t base = t->vsp;
+  pl_vpush(t, pl_pin(t, 1));
+  uint8_t root[32];
+  char err[192] = {0};
+  ASSERT(pl_store_save_root(s, t->vstack[base], root, err, sizeof(err)), "%s",
+         err);
+  pl_vpush(t, test_lazy_app1(t, 42));
+  t->vstack[base + 1] = pl_pin(t, t->vstack[base + 1]);
+  pl_vpush(t, test_app1(t, 0, t->vstack[base + 1]));
+  t->vstack[base + 2] = pl_pin(t, t->vstack[base + 2]);
+  size_t mark = pl_store_mark(s);
+  ptrdiff_t intern_count = ax_hmlen(s->intern);
+  backend->fail_put = true;
+  ASSERT_FALSE(store_test_ice(t, t->vstack[base + 2]));
+  ASSERT_STR_EQ(t->exn_msg, "Ice: Legacy store backend put failed");
+  ASSERT_EQ(pl_store_mark(s), mark);
+  ASSERT_EQ(ax_hmlen(s->intern), intern_count);
+  for (size_t i = 1; i <= 2; i++) {
+    ASSERT_EQ(pl_pin_proxy_target(pl_ptr(t->vstack[base + i])), 0);
+    ASSERT_NULL(pl_pin_hash(t->vstack[base + i]));
+  }
+  ASSERT_EQ(memcmp(backend->root, root, sizeof(root)), 0);
+
+  backend->fail_put = false;
+  backend->fail_root = true; /* Ice must not try to publish a root. */
+  char dir[] = "/tmp/enki-test-ice-XXXXXX";
+  ASSERT_NOT_NULL(mkdtemp(dir));
+  char* cwd = getcwd(NULL, 0);
+  ASSERT_NOT_NULL(cwd);
+  ASSERT_EQ(chdir(dir), 0);
+  bool ok = store_test_ice(t, t->vstack[base + 2]);
+  ASSERT_EQ(chdir(cwd), 0);
+  free(cwd);
+  ASSERT(ok, "%s", t->exn_msg != NULL ? t->exn_msg : "Ice failed");
+  char snap_path[128];
+  snprintf(snap_path, sizeof(snap_path), "%s/snap", dir);
+  struct stat st;
+  ASSERT_EQ(stat(snap_path, &st), -1);
+  ASSERT_EQ(errno, ENOENT);
+  ASSERT_EQ(rmdir(dir), 0);
+  for (size_t i = 1; i <= 2; i++) {
+    ASSERT_NOT_NULL(pl_pin_hash(t->vstack[base + i]));
+    ASSERT(save_probe_has(backend, pl_pin_hash(t->vstack[base + i])));
+  }
+  ASSERT_EQ(memcmp(backend->root, root, sizeof(root)), 0);
+  ASSERT(store_test_ice(t, t->vstack[base + 2]));
+  pl_thread_free(t);
+  pl_heap_free(h);
+  pl_store_free(s);
 }
 
 TEST(store, save_persistence_does_not_hold_general_store_lock) {
@@ -818,6 +888,63 @@ static void cleanup_store_dir(const char* dir, bool pack) {
   snprintf(path, sizeof(path), "%s/lock.mdb", dir);
   (void)unlink(path);
   (void)rmdir(dir);
+}
+
+TEST(store, ice_silo_becomes_durable_only_on_save) {
+  char dir[] = "/tmp/enki-test-ice-silo-XXXXXX";
+  ASSERT_NOT_NULL(mkdtemp(dir));
+  uint8_t first[32], second[32], root[32];
+  for (unsigned session = 0; session < 3; session++) {
+    pl_store* s = mk_silo(dir);
+    ASSERT_NOT_NULL(s);
+    pl_heap* h = pl_heap_new(1 << 16, s);
+    pl_thread* t = pl_thread_new(h);
+    size_t base = t->vsp;
+    if (session == 0) {
+      pl_vpush(t, pl_pin(t, 42));
+      ASSERT(store_test_ice(t, t->vstack[base]));
+      memcpy(first, pl_pin_hash(t->vstack[base]), sizeof(first));
+      ASSERT_FALSE(pl_store_get_root(s, root));
+      ASSERT_EQ(pl_store_root_log_head(s), 0);
+    } else if (session == 1) {
+      ASSERT_FALSE(pl_store_get_root(s, root));
+      ASSERT_EQ(pl_store_root_log_head(s), 0);
+      ASSERT(test_store_load_raises(t, first));
+      pl_vpush(t, pl_pin(t, 42));
+      ASSERT(store_test_ice(t, t->vstack[base]));
+      ASSERT_EQ(pl_pin_body(pl_ptr(t->vstack[base])), 42);
+      char err[192] = {0};
+      ASSERT(pl_store_save_root(s, t->vstack[base], NULL, err, sizeof(err)),
+             "%s", err);
+      pl_vpush(t, pl_pin(t, 43));
+      pl_vpush(t, test_app2(t, 0, t->vstack[base], t->vstack[base + 1]));
+      t->vstack[base + 2] = pl_pin(t, t->vstack[base + 2]);
+      ASSERT(store_test_ice(t, t->vstack[base + 2]));
+      memcpy(second, pl_pin_hash(t->vstack[base + 2]), sizeof(second));
+      ASSERT(store_test_ice(t, t->vstack[base + 2]));
+      ASSERT(pl_store_get_root(s, root));
+      ASSERT_EQ(memcmp(first, root, sizeof(root)), 0);
+      ASSERT_EQ(pl_store_root_log_head(s), 1);
+      /* Even an unchanged root checkpoints all intervening Ice writes. */
+      ASSERT(pl_store_save_root(s, t->vstack[base], NULL, err, sizeof(err)),
+             "%s", err);
+      ASSERT_EQ(pl_store_root_log_head(s), 1);
+    } else {
+      ASSERT(pl_store_get_root(s, root));
+      ASSERT_EQ(memcmp(first, root, sizeof(root)), 0);
+      ASSERT_EQ(pl_store_root_log_head(s), 1);
+      pl_val loaded = pl_store_load(t, second);
+      pl_cell* body = pl_as(PL_TAG_APP, pl_pin_body(pl_ptr(loaded)));
+      ASSERT_NOT_NULL(body);
+      ASSERT_EQ(pl_app_n(body), 2);
+      ASSERT_EQ(pl_pin_body(pl_ptr(pl_app_args(body)[0])), 42);
+      ASSERT_EQ(pl_pin_body(pl_ptr(pl_app_args(body)[1])), 43);
+    }
+    pl_thread_free(t);
+    pl_heap_free(h);
+    pl_store_free(s);
+  }
+  cleanup_store_dir(dir, true);
 }
 
 static void silo_pin_nat(const char* dir, uint64_t natural, uint8_t hash[32]) {
