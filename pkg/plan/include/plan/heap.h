@@ -18,6 +18,7 @@
 #include <stddef.h>
 #include <assert.h>
 
+#include "axsys/perf.h"
 #include "axsys/profile.h"
 #include "plan/value.h"
 #include "plan/bytecode.h"
@@ -341,11 +342,50 @@ void pl_thread_free(pl_thread* t);
 
 /* ── The three allocation entry points ─────────────────────────────────── */
 
-/* The ONLY collecting path; postcondition: headroom >= cells. */
-void pl_gc_reserve(pl_thread* t, size_t cells);
+typedef struct pl_root_entry {
+  pl_root_source fn;
+  void* ctx;
+} pl_root_entry;
+
+/* Exposed so the reserve fast path and bump allocation inline into the
+ * evaluator; only heap.c mutates anything but `free`. */
+struct pl_heap {
+  pl_cell* from; /* active semispace; bump frontier lives here */
+  pl_cell* to;
+  pl_cell* free;
+  pl_cell* limit;
+  size_t cells; /* per-space size */
+  size_t live_cells;
+  pl_store* store;
+  pl_root_entry* roots;
+  size_t nroots, rootcap;
+#ifndef NDEBUG
+  int forbid_depth;
+#endif
+};
+
+/* The ONLY collecting path (out of line); postcondition: headroom >= cells. */
+void pl_gc_reserve_slow(pl_thread* t, size_t cells);
+
+/* Reserve headroom: the common no-collect case is a compare against the
+ * frontier; collection and growth stay out of line. */
+static inline void pl_gc_reserve(pl_thread* t, size_t cells) {
+#ifndef PL_GC_STRESS
+  pl_heap* h = t->heap;
+  if (ax_likely(h->free + cells <= h->limit))
+    return;
+#endif
+  pl_gc_reserve_slow(t, cells);
+}
 
 /* Bump allocation; never collects; hard-asserts headroom (I2). */
-pl_cell* pl_bump(pl_thread* t, size_t cells);
+static inline pl_cell* pl_bump(pl_thread* t, size_t cells) {
+  pl_heap* h = t->heap;
+  ax_assume(h->free + cells <= h->limit, "bump without reserved headroom (I2)");
+  pl_cell* p = h->free;
+  h->free += cells;
+  return p;
+}
 
 /* Remaining headroom in cells (for tests/diagnostics). */
 size_t pl_gc_headroom(pl_thread* t);

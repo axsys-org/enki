@@ -17,9 +17,11 @@
  *
  */
 
+#include <assert.h>
 #include <stdint.h>
 
 #include "axsys/assume.h"
+#include "axsys/perf.h"
 
 typedef uint64_t pl_val;
 typedef uint64_t pl_cell;
@@ -251,14 +253,15 @@ static inline pl_val pl_pin_proxy_target(pl_cell* p) {
 
 static inline pl_cell* pl_pin_resolved(pl_cell* p) {
   pl_val target = pl_pin_proxy_target(p);
-  if (target == 0)
+  if (ax_likely(target == 0))
     return p;
-  ax_assume(pl_tag(target) == PL_TAG_PIN, "PIN proxy target is not a PIN");
+  /* Debug-only: the target was published by Save as a canonical hashed
+   * PIN; re-checking that on every access is a measurable hot-path cost. */
+  assert(pl_tag(target) == PL_TAG_PIN && "PIN proxy target is not a PIN");
   pl_cell* canonical = pl_ptr(target);
-  ax_assume(pl_hdr_kind(canonical[0]) == PL_K_PIN &&
-                !pl_pin_is_proxy(canonical) &&
-                (pl_hdr_flags(canonical[0]) & PL_F_PIN_HASHED) != 0,
-            "PIN proxy target is not canonical");
+  assert(pl_hdr_kind(canonical[0]) == PL_K_PIN && !pl_pin_is_proxy(canonical) &&
+         (pl_hdr_flags(canonical[0]) & PL_F_PIN_HASHED) != 0 &&
+         "PIN proxy target is not canonical");
   return canonical;
 }
 

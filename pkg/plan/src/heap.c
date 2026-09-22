@@ -188,26 +188,6 @@ static void pl_cache_stats_merge(const pl_cache_stats* s) {
 }
 #endif
 
-typedef struct pl_root_entry {
-  pl_root_source fn;
-  void* ctx;
-} pl_root_entry;
-
-struct pl_heap {
-  pl_cell* from; /* active semispace; bump frontier lives here */
-  pl_cell* to;
-  pl_cell* free;
-  pl_cell* limit;
-  size_t cells; /* per-space size */
-  size_t live_cells;
-  pl_store* store;
-  pl_root_entry* roots;
-  size_t nroots, rootcap;
-#ifndef NDEBUG
-  int forbid_depth;
-#endif
-};
-
 /* ── Heap lifecycle ────────────────────────────────────────────────────── */
 
 static pl_cell* pl_space_alloc(size_t cells) {
@@ -506,7 +486,7 @@ static void pl_gc_grow(pl_thread* t, pl_heap* h, size_t need_cells) {
   free(old_to);
 }
 
-void pl_gc_reserve(pl_thread* t, size_t cells) {
+void pl_gc_reserve_slow(pl_thread* t, size_t cells) {
   pl_heap* h = t->heap;
 #ifdef PL_GC_STRESS
   pl_gc_collect(t, h);
@@ -517,14 +497,6 @@ void pl_gc_reserve(pl_thread* t, size_t cells) {
   if (h->free + cells > h->limit)
     pl_gc_grow(t, h, cells);
   ax_assume(h->free + cells <= h->limit, "heap exhausted after grow");
-}
-
-pl_cell* pl_bump(pl_thread* t, size_t cells) {
-  pl_heap* h = t->heap;
-  ax_assume(h->free + cells <= h->limit, "bump without reserved headroom (I2)");
-  pl_cell* p = h->free;
-  h->free += cells;
-  return p;
 }
 
 size_t pl_gc_headroom(pl_thread* t) {

@@ -169,7 +169,7 @@ pl_val en_run_whnf(en_wisp* w, pl_val v) {
     return en_run_drive(w, v, false);
   pl_catch c;
   pl_catch_init(w->t, &c);
-  if (setjmp(c.jb) == 0) {
+  if (pl_setjmp(c.jb) == 0) {
     pl_val r = pl_whnf(w->t, v);
     pl_catch_pop(w->t, &c);
     return r;
@@ -183,7 +183,7 @@ pl_val en_run_nf(en_wisp* w, pl_val v) {
     return en_run_drive(w, v, true);
   pl_catch c;
   pl_catch_init(w->t, &c);
-  if (setjmp(c.jb) == 0) {
+  if (pl_setjmp(c.jb) == 0) {
     pl_val r = pl_nf(w->t, v);
     pl_catch_pop(w->t, &c);
     return r;
@@ -303,7 +303,7 @@ static pl_val en_run_apply_mode(en_wisp* w, size_t mark, size_t n, bool nf) {
   volatile bool nf_v = nf;
   pl_catch c;
   pl_catch_init(w->t, &c);
-  if (setjmp(c.jb) == 0) {
+  if (pl_setjmp(c.jb) == 0) {
     pl_val r = en_run_apply_body(w_v, mark_v, n_v, nf_v);
     pl_catch_pop(w_v->t, &c);
     return r;
@@ -859,7 +859,7 @@ static pl_val en_pin(en_wisp* w, pl_val val) {
   en_root_push(w, en_wisp_eval(w, val));
   pl_catch c;
   pl_catch_init(w->t, &c);
-  if (setjmp(c.jb) != 0) {
+  if (pl_setjmp(c.jb) != 0) {
     pl_catch_unwind(w->t, &c);
     en_fail_exn(w);
   }

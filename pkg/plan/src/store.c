@@ -683,7 +683,7 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
       if (gn == 32 && (s->be.has == NULL || s->be.has(s->be.ctx, got))) {
         pl_catch cc;
         pl_catch_init(t, &cc);
-        if (setjmp(cc.jb) != 0) {
+        if (pl_setjmp(cc.jb) != 0) {
           /* stale or unreadable cache row: recompile below */
           pl_catch_unwind(t, &cc);
         } else {
@@ -751,7 +751,7 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
       volatile bool served = false;
       pl_catch cc;
       pl_catch_init(t, &cc);
-      if (setjmp(cc.jb) != 0) {
+      if (pl_setjmp(cc.jb) != 0) {
         pl_catch_unwind(t, &cc);
       } else {
         char lerr[192] = {0};
@@ -794,7 +794,7 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
    * take the runtime down — the law just stays interpreted */
   pl_catch c;
   pl_catch_init(t, &c);
-  if (setjmp(c.jb) != 0) {
+  if (pl_setjmp(c.jb) != 0) {
     pl_catch_unwind(t, &c);
     fprintf(stderr, "bytecode compile raised: %s\n",
             t->exn_msg != NULL ? t->exn_msg : "PLAN exn");
@@ -854,7 +854,7 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
     pl_vpush(t, stable);
     pl_catch cc;
     pl_catch_init(t, &cc);
-    if (setjmp(cc.jb) != 0) {
+    if (pl_setjmp(cc.jb) != 0) {
       pl_catch_unwind(t, &cc); /* cache write is best-effort */
     } else {
       t->vstack[rb] = pl_pin(t, t->vstack[rb]);

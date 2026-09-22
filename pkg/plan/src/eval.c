@@ -40,7 +40,7 @@ static _Thread_local char pl_msgbuf[256];
   t->exn_msg = NULL;
   if (t->handler == NULL)
     ax_abort("uncaught PLAN_EXN");
-  longjmp(*t->handler, 1);
+  pl_longjmp(*t->handler, 1);
 }
 
 [[noreturn]] void pl_raise_msg(pl_thread* t, const char* msg) {
@@ -48,7 +48,7 @@ static _Thread_local char pl_msgbuf[256];
   t->exn_msg = msg;
   if (t->handler == NULL)
     ax_abort("uncaught PLAN error: %s", msg);
-  longjmp(*t->handler, 1);
+  pl_longjmp(*t->handler, 1);
 }
 
 [[noreturn]] void pl_raise_msgf(pl_thread* t, const char* fmt, ...) {
@@ -2184,7 +2184,7 @@ static pl_run_status pl_run_caught(pl_thread* t, pl_val v0, size_t base,
   for (;;) {
     pl_catch c;
     pl_catch_init(t, &c);
-    if (setjmp(c.jb) == 0) {
+    if (pl_setjmp(c.jb) == 0) {
       pl_run_status s = pl_run(t, v, base, entry);
       pl_catch_pop(t, &c);
       return s;
@@ -2314,7 +2314,7 @@ pl_run_status pl_thread_run(pl_thread* t, uint64_t fuel) {
 
   pl_catch c;
   pl_catch_init(t, &c);
-  if (setjmp(c.jb) != 0) {
+  if (pl_setjmp(c.jb) != 0) {
     /* uncaught at thread top level: unwind to the entry watermarks;
      * t->exn / t->exn_msg carry the payload */
     t->handler = c.prev;
