@@ -654,6 +654,12 @@ static pl_run_status pl_run(pl_thread* t, pl_val v, size_t base,
   uint32_t jargc = 0;
   uint32_t op_idx, op_argc;
   size_t op_base;
+  /* Bytecode cursor of the current F_EXEC frame while control is inside the
+   * exec region: the ops pointer and pc live in locals (registers) and are
+   * written back to fr->k (XSYNC) at every exit that leaves the frame live,
+   * so the frame stays a complete continuation for yields and returns. */
+  const pl_op_t* xops = NULL;
+  uint32_t xpc = 0;
 
   /*
    * Computed-goto dispatch tables (labels-as-values; the Makefile
@@ -869,7 +875,8 @@ exec: {
    * for every opcode below PL_OP_COUNT, so no handler-NULL check is
    * needed here (pass 1 of the decoder rejects anything else).
    */
-#define NEXT() (assert(fr->k < fr->code->nops), fr->code->ops[fr->k++])
+#define NEXT()  (assert(xpc < fr->code->nops), xops[xpc++])
+#define XSYNC() (fr->k = xpc)
 #define DISPATCH()                                                             \
   do {                                                                         \
     pl_op_t op_ = NEXT();                                                      \
@@ -877,6 +884,8 @@ exec: {
     goto* op_tbl[op_];                                                         \
   } while (0)
   fr = &t->fstack[t->fsp - 1];
+  xops = fr->code->ops;
+  xpc = fr->k;
   DISPATCH();
 
 x_push_var: {
@@ -1048,6 +1057,7 @@ x_interp:
   pl_exec_reify_env(t, fr);
   env = fr->a;
   expr = NEXT();
+  XSYNC();
   goto eval_expr;
 
 x_ret:
@@ -1086,7 +1096,7 @@ x_tail: {
    * runs in constant frame depth.  The group of n values relocates to
    * tbase, exactly where x_ret's vsp reset would have left the stack.
    */
-  bool args_ready = fr->code->ops[fr->k - 1] == OP_TAIL_READY;
+  bool args_ready = xops[xpc - 1] == OP_TAIL_READY;
   argc = (uint32_t)NEXT();
   pl_op_t rawbane = NEXT();
   pl_bane bane = (pl_bane)(rawbane & PL_BAN_MASK);
@@ -1246,6 +1256,7 @@ x_force:
     DISPATCH();
   }
   v = pl_vpop(t);
+  XSYNC();
   goto eval;
 
 x_push_slot: {
@@ -1261,7 +1272,7 @@ x_br: {
    * stack; arm targets were boundary-checked at ingest.  A backward
    * arm is a loop edge: take a fuel step there, and on exhaustion
    * yield with the jump already taken (PL_RES_RUN resumes exec). */
-  size_t br_pc = fr->k - 1;
+  size_t br_pc = xpc - 1;
   pl_op_t m = NEXT();
   if (t->vsp == fr->argbase)
     pl_raise_msg(t, "bytecode stack underflow");
@@ -1270,9 +1281,10 @@ x_br: {
     pl_raise_msg(t, "exec: branch on non-nat");
   if (scrut >= m)
     pl_raise_msg(t, "exec: branch out of range");
-  pl_op_t target = fr->code->ops[fr->k + scrut];
-  fr->k = (uint32_t)target;
+  pl_op_t target = xops[xpc + scrut];
+  xpc = (uint32_t)target;
   if (target <= br_pc && ax_unlikely(--t->fuel == 0) && pl_yield_now(t)) {
+    XSYNC();
     t->resume_kind = PL_RES_RUN;
     pl_profile_pause_all(t);
     return PL_RUN_YIELDED;
@@ -1281,10 +1293,11 @@ x_br: {
 }
 
 x_jmp: {
-  size_t jmp_pc = fr->k - 1;
+  size_t jmp_pc = xpc - 1;
   pl_op_t target = NEXT();
-  fr->k = (uint32_t)target;
+  xpc = (uint32_t)target;
   if (target <= jmp_pc && ax_unlikely(--t->fuel == 0) && pl_yield_now(t)) {
+    XSYNC();
     t->resume_kind = PL_RES_RUN;
     pl_profile_pause_all(t);
     return PL_RUN_YIELDED;
@@ -1299,9 +1312,10 @@ x_call: {
    * (self-recursive local calls would otherwise grow the frame stack
    * unpreemptably); on exhaustion, yield rewound to re-execute the
    * call with fresh fuel. */
-  size_t call_pc = fr->k - 1;
+  size_t call_pc = xpc - 1;
   pl_op_t target = NEXT();
   pl_op_t nargs = NEXT();
+  XSYNC();
   if (nargs > t->vsp - fr->argbase)
     pl_raise_msg(t, "bytecode stack underflow");
   if (ax_unlikely(--t->fuel == 0) && pl_yield_now(t)) {
@@ -1321,6 +1335,7 @@ x_call: {
   fr->argc = cargc;
   fr->code = ccode;
   fr->k = (uint32_t)target;
+  xpc = (uint32_t)target; /* same code object: xops is unchanged */
   fr->argbase = (uint32_t)(t->vsp - nargs);
   DISPATCH();
 }
@@ -1342,7 +1357,7 @@ x_call: {
     t->fuel -= 3;                                                              \
     t->vstack[t->vsp - 2] = (result);                                          \
     t->vsp--;                                                                  \
-    fr->k += 3;                                                                \
+    xpc += 3;                                                                  \
     DISPATCH();                                                                \
   } while (0)
 x_add: {
@@ -1398,10 +1413,11 @@ x_call_known: {
    * ret_exec delivers the result exactly where MK_THK's cell sat.
    * (Skipping the slot for bodies that never read it measured within
    * noise on the plangrm bench, 2026-09-15: not worth the extra path.) */
-  bool args_ready = fr->code->ops[fr->k - 1] == OP_CALL_READY;
+  bool args_ready = xops[xpc - 1] == OP_CALL_READY;
   uint32_t nargs = (uint32_t)NEXT();
   uint32_t idx = (uint32_t)NEXT();
   (void)NEXT();
+  XSYNC();
   assert(idx < pl_nops);
   if (nargs == 0 || nargs > t->vsp - fr->argbase)
     pl_raise_msg(t, "bytecode stack underflow");
@@ -1435,9 +1451,10 @@ x_call_fast: {
    * (non-tail self-recursion is otherwise unpreemptable); a yield
    * rewinds to re-execute the call with fresh fuel.  Anything the
    * verification rejects takes the generic slow-apply path. */
-  size_t callf_pc = fr->k - 1;
+  size_t callf_pc = xpc - 1;
   uint32_t nargs = (uint32_t)NEXT();
   (void)NEXT(); /* the caller's strictness hint: judge checks the args itself */
+  XSYNC();
   if (nargs + 1 > t->vsp - fr->argbase)
     pl_raise_msg(t, "bytecode stack underflow");
   size_t hb = t->vsp - nargs - 1;
@@ -1474,6 +1491,7 @@ x_call_slow: {
    * one F_APPLYN frame and force the head — thke_slow without the
    * cell.  The eval safepoint owns any yield from here. */
   uint32_t nargs = (uint32_t)NEXT();
+  XSYNC();
   if (nargs + 1 > t->vsp - fr->argbase)
     pl_raise_msg(t, "bytecode stack underflow");
   size_t hb = t->vsp - nargs - 1;
@@ -1489,6 +1507,7 @@ x_call_slow: {
 }
 #undef DISPATCH
 #undef NEXT
+#undef XSYNC
 
   /*
    * Decompose a law-body expression under env.  Mirrors KAL, except a
