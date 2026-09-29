@@ -651,6 +651,19 @@ pl_val pl_store_snapshot_normal(pl_thread* t, pl_val v) {
   return out;
 }
 
+/* Record the arity of the law behind key on code about to be published.
+ * Every target registered under one law hash is the same law, so the first
+ * one answers for all. */
+static void pl_store_code_set_arity_locked(pl_store* s, pl_hash key,
+                                           pl_code* code) {
+  ptrdiff_t at = ax_hmgeti(s->code_targets, key);
+  if (at < 0 || ax_arrlen(s->code_targets[at].value) == 0)
+    return;
+  pl_cell* pin = pl_ptr(s->code_targets[at].value[0]);
+  uint64_t arity = pl_law_arity(pl_ptr((pl_val)pin[5]));
+  code->arity = arity <= UINT32_MAX ? (uint32_t)arity : 0; /* 0: unknown */
+}
+
 void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
   pl_store_save_lock(s);
   pl_store_lock(s);
@@ -724,6 +737,7 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
                 pl_bytecode_free(code);
                 code = s->code_cache[hit_at].value;
               } else {
+                pl_store_code_set_arity_locked(s, key, code);
                 ax_arrpush(s->codes, code);
                 ax_hmput(s->code_cache, key, code);
               }
@@ -794,6 +808,7 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
               pl_bytecode_free(code);
               code = s->code_cache[hit_at].value;
             } else {
+              pl_store_code_set_arity_locked(s, key, code);
               ax_arrpush(s->codes, code);
               ax_hmput(s->code_cache, key, code);
             }
@@ -850,6 +865,7 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
       pl_bytecode_free(code); /* a re-entrant compile won the generation */
       code = s->code_cache[cached_at].value;
     } else {
+      pl_store_code_set_arity_locked(s, key, code);
       ax_arrpush(s->codes, code);
       ax_hmput(s->code_cache, key, code);
     }

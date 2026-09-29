@@ -211,6 +211,25 @@ static pl_code* pl_law_code(pl_thread* t, pl_val law) {
   return pl_store_code_demand(pl_heap_store(t->heap), law);
 }
 
+/* Is head a law (or pinned law) of exactly this arity?  A pin with published
+ * code answers from the code header, whose line the entry touches next
+ * anyway, so a compiled call never loads the law object itself.  *codep
+ * receives the pin's code (NULL if none) for judge to enter without a
+ * second lookup. */
+static inline bool pl_exact_law(pl_val head, uint64_t arity, pl_code** codep) {
+  *codep = NULL;
+  if (pl_tag(head) == PL_TAG_PIN) {
+    pl_cell* p = pl_pin_resolved(pl_ptr(head));
+    pl_code* code = pl_pin_code(p);
+    *codep = code;
+    if (code != NULL && code->arity != 0)
+      return code->arity == arity;
+    pl_val body = pl_pin_body(p);
+    return pl_tag(body) == PL_TAG_LAW && pl_law_arity(pl_ptr(body)) == arity;
+  }
+  return pl_tag(head) == PL_TAG_LAW && pl_law_arity(pl_ptr(head)) == arity;
+}
+
 /* A law compiled with a checked prologue has two entries: the prologue
  * forces the strict arguments in order and stacks the values; the fast
  * entry (past OP_ENTRY) stacks the arguments as they are.  Enter fast
@@ -664,6 +683,9 @@ static pl_run_status pl_run(pl_thread* t, pl_val v, size_t base,
    * so the frame stays a complete continuation for yields and returns. */
   const pl_op_t* xops = NULL;
   uint32_t xpc = 0;
+  /* The head's code when the path into judge already looked it up (NULL:
+   * judge looks it up itself). */
+  pl_code* jcode = NULL;
 
   /*
    * Computed-goto dispatch tables (labels-as-values; the Makefile
@@ -802,14 +824,7 @@ eval_thke_v: {
      * including a non-WHNF head — takes the slow path, which is
      * semantically identical.
      */
-    pl_val head = args[0];
-    pl_cell* lp = NULL;
-    if (pl_tag(head) == PL_TAG_LAW)
-      lp = pl_ptr(head);
-    else if (pl_tag(head) == PL_TAG_PIN &&
-             pl_tag(pl_pin_body(pl_ptr(head))) == PL_TAG_LAW)
-      lp = pl_ptr(pl_pin_body(pl_ptr(head)));
-    if (lp == NULL || pl_law_arity(lp) != argc - 1)
+    if (!pl_exact_law(args[0], argc - 1, &jcode))
       goto thke_slow;
     hbase = t->vsp;
     for (uint32_t i = 0; i < argc; i++)
@@ -1127,14 +1142,7 @@ x_tail: {
     goto tail_fallback;
   }
   if (bane == PL_BAN_FAST) {
-    pl_val head = t->vstack[g];
-    pl_cell* lp = NULL;
-    if (pl_tag(head) == PL_TAG_LAW)
-      lp = pl_ptr(head);
-    else if (pl_tag(head) == PL_TAG_PIN &&
-             pl_tag(pl_pin_body(pl_ptr(head))) == PL_TAG_LAW)
-      lp = pl_ptr(pl_pin_body(pl_ptr(head)));
-    if (lp == NULL || pl_law_arity(lp) != argc - 1)
+    if (!pl_exact_law(t->vstack[g], argc - 1, &jcode))
       goto tail_fallback; /* mis-hinted: the generic path via the thunk */
     pl_cache_stat_vstack_move(t, PL_CACHE_MOVE_TAIL_FAST,
                               (size_t)argc * sizeof(pl_val),
@@ -1463,13 +1471,7 @@ x_call_fast: {
     pl_raise_msg(t, "bytecode stack underflow");
   size_t hb = t->vsp - nargs - 1;
   pl_val head = t->vstack[hb];
-  pl_cell* lp = NULL;
-  if (pl_tag(head) == PL_TAG_LAW)
-    lp = pl_ptr(head);
-  else if (pl_tag(head) == PL_TAG_PIN &&
-           pl_tag(pl_pin_body(pl_ptr(head))) == PL_TAG_LAW)
-    lp = pl_ptr(pl_pin_body(pl_ptr(head)));
-  if (lp != NULL && pl_law_arity(lp) == nargs) {
+  if (pl_exact_law(head, nargs, &jcode)) {
     if (ax_unlikely(--t->fuel == 0) && pl_yield_now(t)) {
       fr->k = (uint32_t)callf_pc;
       t->resume_kind = PL_RES_RUN;
@@ -1697,6 +1699,7 @@ ret_apply: {
 
 fast_apply:
   argc = (uint32_t)(t->vsp - hbase - 1);
+  jcode = NULL;
 
   /* dispatch on the ultimate head: a LAW or a pinned law falls
    * through to judge, a pinned nat enters the op table */
@@ -1725,8 +1728,6 @@ fast_apply:
   }
 
 judge: {
-  pl_cell* lp = pl_lawp(t->vstack[hbase]);
-  ax_assume(pl_law_arity(lp) == argc, "JUDGE: arity mismatch");
   bool profile_frame = pl_profile_law_push(t, t->vstack[hbase]);
   if (pl_hook != NULL) {
     pl_val out;
@@ -1744,8 +1745,9 @@ judge: {
     }
     /* An enter hook is a C-entry region and may allocate or collect.  The
      * head itself is rooted at hbase, but an unresolved PIN's LAW body moves
-     * with its heap, so never retain the raw body pointer across the hook. */
-    lp = pl_lawp(t->vstack[hbase]);
+     * with its heap, so no raw body pointer is taken before this point, and
+     * a code pointer looked up before the hook is not trusted after it. */
+    jcode = NULL;
   }
   /*
    * JUDGE: the recursive-let prelude.  Scan the body for the (1 v k)
@@ -1757,8 +1759,10 @@ judge: {
      * slots (max_var <= arity, no INTERP), skip the body scan and the
      * env/chain build entirely — the [head, args…] group stays on the
      * value stack and the frame runs stack-resident (PL_F_EXECV). */
-    pl_code* scode = pl_law_code(t, t->vstack[hbase]);
+    pl_code* scode = jcode != NULL ? jcode : pl_law_code(t, t->vstack[hbase]);
     if (scode != NULL && scode->max_var <= argc) {
+      ax_assume(scode->arity == 0 || scode->arity == argc,
+                "JUDGE: arity mismatch");
       fr = pl_fpush(t);
       fr->kind = PL_F_EXECV;
       fr->a = 0;
@@ -1770,6 +1774,8 @@ judge: {
       goto exec;
     }
   }
+  pl_cell* lp = pl_lawp(t->vstack[hbase]);
+  ax_assume(pl_law_arity(lp) == argc, "JUDGE: arity mismatch");
   pl_vpush(t, pl_law_body(lp)); /* the chain cursor slot */
   jbase = hbase;
   jargc = argc;

@@ -18,6 +18,11 @@ typedef struct pl_code {
                             means the code never reads chain-bind slots, so
                             judge can skip the chain scan and enter with the
                             [head, args…] group left on the value stack. */
+  uint32_t arity;        /* arity of the law this code runs, recorded when
+                            the store publishes it; 0 when unknown (any
+                            zero-initialized code), which sends callers to
+                            the law object.  Lets an exact-arity entry be
+                            verified from the code header alone. */
 } pl_code;
 
 typedef enum pl_op {
