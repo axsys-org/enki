@@ -729,6 +729,7 @@ pl_store* pl_store_new_silo(const char* path, size_t map_size) {
       mdb_env_set_mapsize(b->env, map_size) != 0 ||
       mdb_env_open(b->env, path, 0, 0664) != 0)
     goto fail_env;
+  pl_lmdb_reap(b->env);
 
   char pack_path[4096];
   int path_len = snprintf(pack_path, sizeof(pack_path), "%s/pins.pack", path);
@@ -802,6 +803,7 @@ pl_store* pl_store_new_silo_ro(const char* path, size_t map_size) {
       mdb_env_set_mapsize(b->env, map_size) != 0 ||
       mdb_env_open(b->env, path, MDB_RDONLY, 0664) != 0)
     goto fail_env;
+  pl_lmdb_reap(b->env);
 
   char pack_path[4096];
   int path_len = snprintf(pack_path, sizeof(pack_path), "%s/pins.pack", path);

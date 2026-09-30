@@ -132,6 +132,22 @@ void pl_staged_clear(pl_staged_blob** staged) {
   *staged = NULL;
 }
 
+/* ── LMDB reader slots ─────────────────────────────────────────────────── */
+
+void pl_lmdb_reap(MDB_env* env) {
+  int dead = 0;
+  (void)mdb_reader_check(env, &dead);
+}
+
+int pl_lmdb_read_begin(MDB_env* env, MDB_txn** txn) {
+  int rc = mdb_txn_begin(env, NULL, MDB_RDONLY, txn);
+  if (rc == MDB_READERS_FULL) {
+    pl_lmdb_reap(env);
+    rc = mdb_txn_begin(env, NULL, MDB_RDONLY, txn);
+  }
+  return rc;
+}
+
 /* ── Global compile cache ──────────────────────────────────────────────
  *
  * A machine-wide LMDB at PL_CODECACHE_DIR mapping the same
@@ -179,14 +195,19 @@ static bool plgc_open(bool writable) {
   MDB_env* env = NULL;
   if (mdb_env_create(&env) != 0)
     return false;
+  /* MDB_NOTLS: a read transaction owns its reader slot only while it
+   * runs, rather than pinning one per thread for the environment's life. */
   if (mdb_env_set_maxdbs(env, 1) != 0 ||
       mdb_env_set_mapsize(env, (size_t)1 << 33) != 0 ||
-      mdb_env_open(env, dir, writable ? 0 : MDB_RDONLY, 0664) != 0) {
+      mdb_env_open(env, dir, (writable ? 0 : MDB_RDONLY) | MDB_NOTLS, 0664) !=
+          0) {
     mdb_env_close(env);
     return false;
   }
+  pl_lmdb_reap(env);
   MDB_txn* txn = NULL;
-  if (mdb_txn_begin(env, NULL, writable ? 0 : MDB_RDONLY, &txn) != 0 ||
+  if ((writable ? mdb_txn_begin(env, NULL, 0, &txn)
+                : pl_lmdb_read_begin(env, &txn)) != 0 ||
       mdb_dbi_open(txn, "cache", writable ? MDB_CREATE : 0, &plgc_dbi) != 0) {
     if (txn != NULL)
       mdb_txn_abort(txn);
@@ -208,7 +229,7 @@ static bool plgc_get(const uint8_t key[32], uint8_t** out_b, size_t* out_n) {
   bool ok = pl_staged_get(plgc_staged, key, out_b, out_n);
   if (!ok && plgc_open(false)) {
     MDB_txn* txn;
-    if (mdb_txn_begin(plgc_env, NULL, MDB_RDONLY, &txn) == 0) {
+    if (pl_lmdb_read_begin(plgc_env, &txn) == 0) {
       MDB_val k = {32, (void*)key};
       MDB_val v;
       if (mdb_get(txn, plgc_dbi, &k, &v) == 0) {
@@ -1409,6 +1430,7 @@ pl_store* pl_store_new_lmdb(const char* path, size_t map_size) {
     free(l);
     return NULL;
   }
+  pl_lmdb_reap(l->env);
   MDB_txn* txn;
   if (mdb_txn_begin(l->env, NULL, 0, &txn) != 0 ||
       mdb_dbi_open(txn, NULL, MDB_CREATE, &l->dbi) != 0 ||

@@ -572,6 +572,52 @@ TEST(store, save_treats_canonical_descendants_as_opaque_leaves) {
   pl_store_free(store);
 }
 
+/* A process that dies holding an LMDB reader slot leaks it until someone runs
+ * mdb_reader_check.  An opener that finds nobody else attached resets the
+ * table, so the leak needs a long-lived holder, as with a shared cache kept
+ * open by servers: then the table fills and reads fail.  (The machine-wide
+ * code cache filled its 126 slots with dead wisps this way and silently
+ * stopped serving hits.) */
+static MDB_env* test_lmdb_env(const char* dir) {
+  MDB_env* env = NULL;
+  if (mdb_env_create(&env) != 0 || mdb_env_set_maxreaders(env, 1) != 0 ||
+      mdb_env_open(env, dir, 0, 0664) != 0)
+    return NULL;
+  return env;
+}
+
+TEST(store, lmdb_reaps_reader_slots_of_dead_processes) {
+  char dir[] = "/tmp/pl-lmdb-readers-XXXXXX";
+  ASSERT_NOT_NULL(mkdtemp(dir));
+  MDB_env* env = test_lmdb_env(dir); /* the long-lived holder */
+  ASSERT_NOT_NULL(env);
+  pid_t child = fork();
+  ASSERT(child >= 0, "fork");
+  if (child == 0) {
+    /* its own environment: take the only reader slot and die holding it */
+    MDB_env* mine = test_lmdb_env(dir);
+    MDB_txn* txn = NULL;
+    _exit(mine != NULL && mdb_txn_begin(mine, NULL, MDB_RDONLY, &txn) == 0 ? 0
+                                                                           : 1);
+  }
+  int status = 0;
+  ASSERT_EQ(waitpid(child, &status, 0), child);
+  ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 0, "child reader");
+
+  MDB_txn* txn = NULL;
+  ASSERT_EQ(mdb_txn_begin(env, NULL, MDB_RDONLY, &txn), MDB_READERS_FULL);
+  ASSERT_EQ(pl_lmdb_read_begin(env, &txn), 0);
+  mdb_txn_abort(txn);
+  mdb_env_close(env);
+
+  char path[64];
+  snprintf(path, sizeof(path), "%s/data.mdb", dir);
+  unlink(path);
+  snprintf(path, sizeof(path), "%s/lock.mdb", dir);
+  unlink(path);
+  rmdir(dir);
+}
+
 TEST(store, compiler_install_is_generation_idempotent) {
   pl_store* s = pl_store_new_mem();
   pl_heap* h = pl_heap_new(1 << 16, s);

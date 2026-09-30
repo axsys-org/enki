@@ -3,6 +3,8 @@
 
 /* Shared between store.c (region, backends) and pin.c (canonize, copy). */
 
+#include <lmdb.h>
+
 #include "plan/store.h"
 #include "plan/value.h"
 #include "silo_internal.h"
@@ -18,6 +20,18 @@ typedef struct pl_store_profile_scope {
 /* Chrome Trace span shared by store.c and the serializer in pin.c. */
 pl_store_profile_scope pl_store_profile_begin(const char* name, size_t name_n);
 void pl_store_profile_end(pl_store_profile_scope* scope);
+
+/* LMDB reader-slot hygiene.  A process that exits or is killed without
+ * closing its environment leaves its reader slot taken until some process
+ * runs mdb_reader_check; once the table is full (126 slots by default) every
+ * read transaction on that environment fails with MDB_READERS_FULL.  A
+ * long-lived shared environment such as the machine-wide code cache fills
+ * up with dead servers and test runs this way.  pl_lmdb_reap clears the
+ * slots of dead processes (call it after every mdb_env_open);
+ * pl_lmdb_read_begin begins a read-only transaction, reaping and retrying
+ * once when the table is full. */
+void pl_lmdb_reap(MDB_env* env);
+int pl_lmdb_read_begin(MDB_env* env, MDB_txn** txn);
 
 pl_cell* pl_store_alloc(pl_store* s, size_t cells);
 size_t pl_store_mark(pl_store* s);
