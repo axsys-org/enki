@@ -4,6 +4,19 @@
 
 typedef uint64_t pl_op_t; /* one slot per opcode and per operand */
 
+/* A local block that implements an unpinned law.  The compiler lists the
+ * nested laws it compiled as blocks in a directory behind the code
+ * (OP_LAWBLK rows); the decoder resolves each entry to every literal in
+ * the code that is that law, since those literals are the objects the
+ * program's closures are built from.  Entering such a law anywhere — a
+ * forced thunk, another law's generic apply — runs the block. */
+typedef struct pl_lawblk {
+  pl_val law;                 /* the unpinned LAW object */
+  const struct pl_code* code; /* the code holding the block */
+  uint32_t target;            /* block entry: its args are the operand base */
+  uint32_t arity;
+} pl_lawblk;
+
 typedef struct pl_code {
   pl_op_t* ops;
   size_t nops;
@@ -23,6 +36,8 @@ typedef struct pl_code {
                             zero-initialized code), which sends callers to
                             the law object.  Lets an exact-arity entry be
                             verified from the code header alone. */
+  pl_lawblk* lawblks;    /* unpinned laws implemented by blocks of this code */
+  uint32_t nlawblks;
 } pl_code;
 
 typedef enum pl_op {
@@ -75,7 +90,11 @@ typedef enum pl_op {
    * The compiler emits it for tail calls of local functions (OP_CALL
    * for the others) and follows it with an unreachable OP_RET. */
   OP_TAILBLK = 27,
-  PL_OP_COUNT = 28 /* sentinel: sizes pl_run's exec dispatch table */
+  PL_OP_COUNT = 28, /* sentinel: sizes pl_run's exec dispatch table */
+  /* Row-only, never dispatched: +law +target, a directory entry behind
+   * the final RET saying the block at target implements that unpinned
+   * law.  The decoder strips the directory into pl_code.lawblks. */
+  OP_LAWBLK = 28
 } pl_op;
 
 pl_code* pl_bytecode_from_val(pl_val val);

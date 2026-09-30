@@ -747,6 +747,82 @@ pl_val pl_store_snapshot_normal(pl_thread* t, pl_val v) {
   return out;
 }
 
+/* ── unpinned law -> block table ─────────────────────────────────────── */
+
+typedef struct pl_lawblk_table {
+  size_t cap, count;
+  pl_lawblk slots[];
+} pl_lawblk_table;
+
+static size_t pl_lawblk_slot(pl_val law, size_t cap) {
+  return (size_t)(((uint64_t)law >> 3) * 0x9E3779B97F4A7C15ull >> 17) &
+         (cap - 1);
+}
+
+/* The law is written last (release), so a reader that sees it sees the
+ * entry; an existing entry is never rewritten (first code wins). */
+static void pl_lawblk_put(pl_lawblk_table* tb, const pl_lawblk* e) {
+  for (size_t h = pl_lawblk_slot(e->law, tb->cap);;
+       h = (h + 1) & (tb->cap - 1)) {
+    pl_lawblk* slot = &tb->slots[h];
+    if (slot->law == e->law)
+      return;
+    if (slot->law == 0) {
+      slot->code = e->code;
+      slot->target = e->target;
+      slot->arity = e->arity;
+      __atomic_store_n(&slot->law, e->law, __ATOMIC_RELEASE);
+      tb->count++;
+      return;
+    }
+  }
+}
+
+const pl_lawblk* pl_store_lawblk(pl_store* s, pl_val law) {
+  pl_lawblk_table* tb = __atomic_load_n(&s->lawblk, __ATOMIC_ACQUIRE);
+  if (tb == NULL)
+    return NULL;
+  for (size_t h = pl_lawblk_slot(law, tb->cap);; h = (h + 1) & (tb->cap - 1)) {
+    pl_val k = __atomic_load_n(&tb->slots[h].law, __ATOMIC_ACQUIRE);
+    if (k == law)
+      return &tb->slots[h];
+    if (k == 0)
+      return NULL;
+  }
+}
+
+static void pl_store_lawblk_register_locked(pl_store* s, const pl_code* code) {
+  for (uint32_t k = 0; k < code->nlawblks; k++) {
+    const pl_lawblk* e = &code->lawblks[k];
+    if (!pl_store_owns(s, e->law))
+      continue; /* only store objects have stable addresses */
+    pl_lawblk_table* tb = s->lawblk;
+    if (tb == NULL || (tb->count + 1) * 2 > tb->cap) {
+      size_t cap = tb == NULL ? 1024 : tb->cap * 2;
+      pl_lawblk_table* nt =
+          calloc(1, sizeof(pl_lawblk_table) + cap * sizeof(pl_lawblk));
+      if (nt == NULL)
+        return; /* the laws stay interpreted */
+      nt->cap = cap;
+      if (tb != NULL) {
+        for (size_t i = 0; i < tb->cap; i++)
+          if (tb->slots[i].law != 0)
+            pl_lawblk_put(nt, &tb->slots[i]);
+        ax_arrpush(s->lawblk_retired, tb);
+      }
+      __atomic_store_n(&s->lawblk, nt, __ATOMIC_RELEASE);
+      tb = nt;
+    }
+    pl_lawblk_put(tb, e);
+  }
+}
+
+void pl_store_register_lawblks(pl_store* s, const pl_code* code) {
+  pl_store_lock(s);
+  pl_store_lawblk_register_locked(s, code);
+  pl_store_unlock(s);
+}
+
 /* Record the arity of the law behind key on code about to be published.
  * Every target registered under one law hash is the same law, so the first
  * one answers for all. */
@@ -836,6 +912,7 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
                 pl_store_code_set_arity_locked(s, key, code);
                 ax_arrpush(s->codes, code);
                 ax_hmput(s->code_cache, key, code);
+                pl_store_lawblk_register_locked(s, code);
               }
               targets_at = ax_hmgeti(s->code_targets, key);
               if (targets_at >= 0)
@@ -907,6 +984,7 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
               pl_store_code_set_arity_locked(s, key, code);
               ax_arrpush(s->codes, code);
               ax_hmput(s->code_cache, key, code);
+              pl_store_lawblk_register_locked(s, code);
             }
             targets_at = ax_hmgeti(s->code_targets, key);
             if (targets_at >= 0)
@@ -964,6 +1042,7 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
       pl_store_code_set_arity_locked(s, key, code);
       ax_arrpush(s->codes, code);
       ax_hmput(s->code_cache, key, code);
+      pl_store_lawblk_register_locked(s, code);
     }
     targets_at = ax_hmgeti(s->code_targets, key);
     ax_assume(targets_at >= 0, "compiled law left the hash index");
@@ -1026,6 +1105,10 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
 static void pl_store_invalidate_code_locked(pl_store* s) {
   for (ptrdiff_t i = 0; i < ax_arrlen(s->pins); i++)
     pl_pin_set_code(pl_ptr(s->pins[i]), NULL);
+  if (s->lawblk != NULL) {
+    ax_arrpush(s->lawblk_retired, s->lawblk);
+    __atomic_store_n(&s->lawblk, NULL, __ATOMIC_RELEASE);
+  }
   ax_hmfree(s->code_cache);
   s->code_cache = NULL;
 }
@@ -1287,6 +1370,9 @@ void pl_store_free(pl_store* s) {
     pl_heap_free(s->compiler_h);
   pl_store_invalidate_code_locked(s);
   pl_store_free_code(s);
+  for (ptrdiff_t i = 0; i < ax_arrlen(s->lawblk_retired); i++)
+    free(s->lawblk_retired[i]);
+  ax_arrfree(s->lawblk_retired);
   for (ptrdiff_t i = 0; i < ax_hmlen(s->code_targets); i++)
     ax_arrfree(s->code_targets[i].value);
   ax_hmfree(s->code_targets);

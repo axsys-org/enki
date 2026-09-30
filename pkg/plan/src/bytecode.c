@@ -233,6 +233,13 @@ static ready_result ready_analyse(pl_code* c, ready_state* states) {
     ready_state fast = {.depth = 0, .vars = c->strict_mask << 1};
     FLOW(c->strict_entry, fast);
   }
+  for (uint32_t k = 0; k < c->nlawblks; k++) {
+    /* a law's block is also entered from outside, like OP_CALL's target:
+     * its arguments are unknown operand slots */
+    uint32_t a = c->lawblks[k].arity;
+    ready_state args = {.depth = a <= READY_SLOTS ? (int)a : -2};
+    FLOW(c->lawblks[k].target, args);
+  }
   while (count) {
     if (++visits > n * 512)
       goto done; /* never publish a partial fixed point */
@@ -830,6 +837,9 @@ static void bytecode_dump(const pl_code* c) {
   fprintf(f, "--- bytecode %zu ops, strict_mask 0x%llx entry %u max_var %u\n",
           c->nops, (unsigned long long)c->strict_mask, c->strict_entry,
           c->max_var);
+  for (uint32_t k = 0; k < c->nlawblks; k++)
+    fprintf(f, "    law block: arity %u at %u (law %p)\n", c->lawblks[k].arity,
+            c->lawblks[k].target, (void*)c->lawblks[k].law);
   size_t i = 0;
   while (i < c->nops) {
     pl_op_t op = c->ops[i];
@@ -904,6 +914,102 @@ static void bytecode_dump(const pl_code* c) {
   }
 }
 
+/* Structural equality of two normal literals, within a node budget (false
+ * when exhausted: an unmatched literal only stays interpreted). */
+static bool lit_eq(pl_val a, pl_val b, int* budget) {
+  if (a == b)
+    return true;
+  if (--*budget < 0)
+    return false;
+  if (pl_is_nat(a) || pl_is_nat(b))
+    return pl_is_nat(a) && pl_is_nat(b) && pl_nat_eq(a, b);
+  if (pl_tag(a) != pl_tag(b))
+    return false;
+  switch (pl_tag(a)) {
+  case PL_TAG_LAW: {
+    pl_cell* x = pl_ptr(a);
+    pl_cell* y = pl_ptr(b);
+    return pl_law_arity(x) == pl_law_arity(y) &&
+           lit_eq(pl_law_name(x), pl_law_name(y), budget) &&
+           lit_eq(pl_law_body(x), pl_law_body(y), budget);
+  }
+  case PL_TAG_PIN: {
+    const uint8_t* ha = pl_pin_hash(a);
+    const uint8_t* hb = pl_pin_hash(b);
+    return ha != NULL && hb != NULL && memcmp(ha, hb, 32) == 0;
+  }
+  case PL_TAG_APP: {
+    pl_cell* x = pl_ptr(a);
+    pl_cell* y = pl_ptr(b);
+    uint32_t n = pl_app_n(x);
+    if (n != pl_app_n(y) || !lit_eq(pl_app_head(x), pl_app_head(y), budget))
+      return false;
+    for (uint32_t k = 0; k < n; k++)
+      if (!lit_eq(pl_app_args(x)[k], pl_app_args(y)[k], budget))
+        return false;
+    return true;
+  }
+  default:
+    return false;
+  }
+}
+
+typedef struct {
+  pl_lawblk* v;
+  size_t n, cap;
+} lawblk_vec;
+
+/* Add law -> dir's block unless law is already listed. */
+static bool lawblk_add(lawblk_vec* got, pl_val law, const pl_lawblk* dir,
+                       const pl_code* out) {
+  for (size_t q = 0; q < got->n; q++)
+    if (got->v[q].law == law)
+      return true;
+  if (got->n == got->cap) {
+    size_t cap = got->cap ? got->cap * 2 : 8;
+    pl_lawblk* v = realloc(got->v, cap * sizeof(*v));
+    if (v == NULL)
+      return false;
+    got->v = v;
+    got->cap = cap;
+  }
+  got->v[got->n++] = (pl_lawblk){law, out, dir->target, dir->arity};
+  return true;
+}
+
+/* Resolve the law directory: each entry's own law object plus every
+ * literal law in the code equal to it (closures are built from those),
+ * looking through the heads of literal partial applications. */
+static bool resolve_lawblks(pl_code* out, const pl_lawblk* dir, size_t ndir,
+                            const size_t* lits, size_t nlits) {
+  lawblk_vec got = {0};
+  bool ok = true;
+  for (size_t k = 0; k < ndir && ok; k++)
+    ok = lawblk_add(&got, dir[k].law, &dir[k], out);
+  for (size_t j = 0; j < nlits && ok; j++) {
+    pl_val v = (pl_val)out->ops[lits[j]];
+    while (!pl_is_nat63(v) && pl_tag(v) == PL_TAG_APP)
+      v = pl_app_head(pl_ptr(v));
+    if (pl_is_nat63(v) || pl_tag(v) != PL_TAG_LAW)
+      continue;
+    for (size_t k = 0; k < ndir; k++) {
+      int budget = 4096;
+      if (v == dir[k].law || (pl_law_arity(pl_ptr(v)) == dir[k].arity &&
+                              lit_eq(v, dir[k].law, &budget))) {
+        ok = lawblk_add(&got, v, &dir[k], out);
+        break;
+      }
+    }
+  }
+  if (!ok) {
+    free(got.v);
+    return false;
+  }
+  out->lawblks = got.v;
+  out->nlawblks = (uint32_t)got.n;
+  return true;
+}
+
 /** mallocs (and leaks) */
 pl_code* pl_bytecode_from_val_in(pl_store* s, pl_val val) {
   pl_store* outer = pl_ingest_store;
@@ -926,6 +1032,13 @@ pl_code* pl_bytecode_from_val(pl_val val) {
 
   char* msg = NULL;
   uint8_t* starts = NULL; /* pass-1 scratch, freed on every exit */
+  /* the law directory behind the code, and the PUSH_LIT operand slots
+   * that could name its laws */
+  size_t dir_at = SIZE_MAX;
+  pl_lawblk* dir = NULL;
+  size_t ndir = 0;
+  size_t* lits = NULL;
+  size_t nlits = 0;
   pl_code* out = calloc(1, sizeof(pl_code));
   pl_cell* a = pl_as(PL_TAG_APP, val);
 #define FAIL(m)                                                                \
@@ -961,8 +1074,30 @@ pl_code* pl_bytecode_from_val(pl_val val) {
   while (i < n) {
     starts[i] = 1;
     pl_op_t op = ops[i++];
-    last_op = op;
+    if (dir_at != SIZE_MAX && op != OP_LAWBLK)
+      FAIL("code after the law directory")
+    if (op != OP_LAWBLK)
+      last_op = op;
     switch (op) {
+    case OP_LAWBLK: {
+      if (i + 2 > n)
+        FAIL("truncated operand")
+      pl_val law = (pl_val)ops[i];
+      if (pl_is_nat63(law) || pl_tag(law) != PL_TAG_LAW ||
+          pl_law_arity(pl_ptr(law)) > UINT32_MAX)
+        FAIL("bad law directory entry")
+      MARK_TARGET(ops[i + 1])
+      if (dir_at == SIZE_MAX)
+        dir_at = i - 1;
+      pl_lawblk* d = realloc(dir, (ndir + 1) * sizeof(*dir));
+      if (d == NULL)
+        FAIL("oom")
+      dir = d;
+      dir[ndir++] = (pl_lawblk){law, NULL, (uint32_t)ops[i + 1],
+                                (uint32_t)pl_law_arity(pl_ptr(law))};
+      i += 2;
+      break;
+    }
     case OP_PUSH_VAR:
       if (i + 1 > n)
         FAIL("truncated operand")
@@ -981,6 +1116,15 @@ pl_code* pl_bytecode_from_val(pl_val val) {
     case OP_PUSH_SLOT:
       if (i + 1 > n)
         FAIL("truncated operand")
+      if (op == OP_PUSH_LIT && !pl_is_nat63((pl_val)ops[i]) &&
+          (pl_tag((pl_val)ops[i]) == PL_TAG_LAW ||
+           pl_tag((pl_val)ops[i]) == PL_TAG_APP)) {
+        size_t* l = realloc(lits, (nlits + 1) * sizeof(*lits));
+        if (l == NULL)
+          FAIL("oom")
+        lits = l;
+        lits[nlits++] = i;
+      }
       i += 1;
       break;
     case OP_MK_APP:
@@ -1105,6 +1249,20 @@ pl_code* pl_bytecode_from_val(pl_val val) {
     }
   }
 #undef MARK_TARGET
+  if (dir_at != SIZE_MAX) {
+    /* the code proper ends where the directory starts */
+    n = dir_at;
+    out->nops = dir_at;
+    for (size_t k = 0; k < ndir; k++)
+      if (dir[k].target >= n)
+        FAIL("law directory target out of range")
+    if (!resolve_lawblks(out, dir, ndir, lits, nlits))
+      FAIL("oom")
+  }
+  free(dir);
+  dir = NULL;
+  free(lits);
+  lits = NULL;
   /* exec must never run off the end: the last instruction is a RET
    * (possibly the unreachable one behind a fused TAILCALL) */
   if (last_op != OP_RET)
@@ -1169,6 +1327,9 @@ pl_code* pl_bytecode_from_val(pl_val val) {
 
 failed:
   free(starts);
+  free(dir);
+  free(lits);
+  free(out->lawblks);
   if (out->ops != NULL)
     free(out->ops);
   free(out);
@@ -1180,6 +1341,7 @@ failed:
 void pl_bytecode_free(pl_code* code) {
   if (code == NULL)
     return;
+  free(code->lawblks);
   free(code->ops);
   free(code);
 }

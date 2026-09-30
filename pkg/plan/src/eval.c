@@ -1799,6 +1799,26 @@ judge: {
       fr->argbase = (uint32_t)t->vsp;
       goto exec;
     }
+    /* An unpinned law some compiled code implements as a local block:
+     * run the block with the arguments as its operand base.  Blocks read
+     * only operand slots, so the [head, args…] group needs no env, and
+     * the frame's RET drops the whole group as for any EXECV entry. */
+    pl_store* lbs;
+    const pl_lawblk* lb;
+    if (scode == NULL && pl_tag(t->vstack[hbase]) == PL_TAG_LAW &&
+        (lbs = pl_heap_store(t->heap)) != NULL &&
+        (lb = pl_store_lawblk(lbs, t->vstack[hbase])) != NULL &&
+        lb->arity == argc) {
+      fr = pl_fpush(t);
+      fr->kind = PL_F_EXECV;
+      fr->a = 0;
+      fr->b = (pl_val)hbase;
+      fr->argc = (uint32_t)(1 + argc);
+      fr->code = (pl_code*)lb->code;
+      fr->k = lb->target;
+      fr->argbase = (uint32_t)(hbase + 1);
+      goto exec;
+    }
   }
   pl_cell* lp = pl_lawp(t->vstack[hbase]);
   ax_assume(pl_law_arity(lp) == argc, "JUDGE: arity mismatch");

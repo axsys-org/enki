@@ -81,6 +81,12 @@ typedef struct pl_store {
    * retained until store teardown because suspended evaluator frames can
    * still hold raw pointers into an old generation. */
   pl_code** codes;
+  /* Unpinned law -> the block implementing it (pl_code.lawblks of the
+   * active generation).  Insert-only under `mu`, read lock-free: a full
+   * table is replaced, never modified in place, and replaced tables are
+   * retired until teardown like old code. */
+  struct pl_lawblk_table* lawblk;
+  struct pl_lawblk_table** lawblk_retired;
   pl_hash* loading; /* active Silo loads; cycle detection */
   pl_store_backend be;
   pl_store_format format;
@@ -92,6 +98,11 @@ typedef struct pl_store {
 } pl_store;
 
 pl_store* pl_store_new(pl_store_backend backend);
+/* The block implementing an unpinned store LAW, or NULL (lock-free). */
+const pl_lawblk* pl_store_lawblk(pl_store* s, pl_val law);
+/* Register the unpinned laws `code` implements as blocks.  The store does
+ * this whenever it publishes code; exposed for code attached by hand. */
+void pl_store_register_lawblks(pl_store* s, const pl_code* code);
 pl_store* pl_store_new_mem(void);
 /* NULL on failure (path must be an existing directory). */
 pl_store* pl_store_new_lmdb(const char* path, size_t map_size);
