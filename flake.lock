@@ -37,16 +37,16 @@
     "reaver": {
       "flake": false,
       "locked": {
-        "lastModified": 1784049907,
-        "narHash": "sha256-o2S8YMTH6hlTsV0yQZ1fl0qavLsodm4HNFuQdIkDRyM=",
+        "lastModified": 1790812371,
+        "narHash": "sha256-uqpVFuVWuF+6W1NIuDSIUzUkPCTJ+GJeKyNkpEiNIOM=",
         "owner": "axsys-org",
         "repo": "shrine-plan",
-        "rev": "ba8744ce27409d198646727c2388ad3d366d1d23",
+        "rev": "4b0d5ef9e44147235bde42d6baa4e2844200194b",
         "type": "github"
       },
       "original": {
         "owner": "axsys-org",
-        "ref": "lf/fix-silo",
+        "ref": "main",
         "repo": "shrine-plan",
         "type": "github"
       }

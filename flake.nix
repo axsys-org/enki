@@ -9,7 +9,7 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     reaver = {
-      url = "github:axsys-org/shrine-plan/lf/fix-silo";
+      url = "github:axsys-org/shrine-plan/main";
       flake = false;
     };
   };
