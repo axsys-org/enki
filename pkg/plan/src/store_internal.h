@@ -33,6 +33,14 @@ void pl_store_profile_end(pl_store_profile_scope* scope);
 void pl_lmdb_reap(MDB_env* env);
 int pl_lmdb_read_begin(MDB_env* env, MDB_txn** txn);
 
+/* The machine-wide code cache's key/value layer (PL_CODECACHE_DIR), exposed
+ * for tests: a lookup (staged rows first), a staged write (flushed with
+ * pl_store_cache_checkpoint), and a reset that forgets this process's open
+ * environment, lock and staged rows. */
+bool pl_codecache_get(const uint8_t key[32], uint8_t** out_b, size_t* out_n);
+void pl_codecache_put(const uint8_t key[32], const uint8_t* b, size_t n);
+void pl_codecache_reset(void);
+
 pl_cell* pl_store_alloc(pl_store* s, size_t cells);
 size_t pl_store_mark(pl_store* s);
 void pl_store_release(pl_store* s, size_t mark);

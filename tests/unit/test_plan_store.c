@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -616,6 +617,173 @@ TEST(store, lmdb_reaps_reader_slots_of_dead_processes) {
   snprintf(path, sizeof(path), "%s/lock.mdb", dir);
   unlink(path);
   rmdir(dir);
+}
+
+/* The machine-wide code cache locks with flock (released by the kernel when
+ * a process dies) instead of LMDB's semaphores.  Scenarios run in child
+ * processes, each under an alarm: a hang fails the test instead of the
+ * suite.  cc_child exits 0 on success. */
+static char cc_dir[] = "/tmp/pl-codecache-XXXXXX";
+
+static void cc_key(uint8_t key[32], uint8_t tag) {
+  memset(key, 0, 32);
+  key[0] = tag;
+}
+
+static bool cc_has(uint8_t tag, const char* want) {
+  uint8_t key[32];
+  cc_key(key, tag);
+  uint8_t* b = NULL;
+  size_t n = 0;
+  if (!pl_codecache_get(key, &b, &n))
+    return false;
+  bool same = want != NULL && n == strlen(want) && memcmp(b, want, n) == 0;
+  free(b);
+  return same;
+}
+
+static void cc_put(uint8_t tag, const char* v) {
+  uint8_t key[32];
+  cc_key(key, tag);
+  pl_codecache_put(key, (const uint8_t*)v, strlen(v));
+}
+
+static void cc_enter(void) {
+  alarm(10);
+  setenv("PL_CODECACHE_DIR", cc_dir, 1);
+  unsetenv("PL_CODECACHE");
+  pl_codecache_reset();
+}
+
+static int cc_wait(pid_t pid) {
+  int status = 0;
+  if (waitpid(pid, &status, 0) != pid)
+    return -1;
+  return WIFEXITED(status) ? WEXITSTATUS(status) : 100 + WTERMSIG(status);
+}
+
+static char cc_path[256];
+static const char* cc_file(const char* name) {
+  snprintf(cc_path, sizeof(cc_path), "%s/%s", cc_dir, name);
+  return cc_path;
+}
+
+static void cc_cleanup(void) {
+  unlink(cc_file("plgc.mdb"));
+  unlink(cc_file("plgc.lock"));
+  rmdir(cc_dir);
+}
+
+TEST(store, codecache_survives_writer_killed_mid_transaction) {
+  strcpy(cc_dir, "/tmp/pl-codecache-XXXXXX");
+  ASSERT_NOT_NULL(mkdtemp(cc_dir));
+
+  pid_t a = fork();
+  if (a == 0) {
+    cc_enter();
+    cc_put(1, "one");
+    pl_store_cache_checkpoint();
+    pl_codecache_reset(); /* read it back from the file, not the stage */
+    _exit(cc_has(1, "one") ? 0 : 1);
+  }
+  ASSERT_EQ(cc_wait(a), 0);
+  /* the new protocol never touches LMDB's lock file */
+  ASSERT_NEQ(access(cc_file("lock.mdb"), F_OK), 0);
+
+  pid_t b = fork();
+  if (b == 0) {
+    /* die inside a write transaction, holding the writer lock */
+    alarm(10);
+    int fd = open(cc_file("plgc.lock"), O_RDWR);
+    MDB_env* env = NULL;
+    MDB_txn* txn = NULL;
+    MDB_dbi dbi;
+    if (fd < 0 || flock(fd, LOCK_EX) != 0 || mdb_env_create(&env) != 0 ||
+        mdb_env_set_maxdbs(env, 1) != 0 ||
+        mdb_env_set_mapsize(env, (size_t)1 << 33) != 0 ||
+        mdb_env_open(env, cc_file("plgc.mdb"), MDB_NOSUBDIR | MDB_NOLOCK,
+                     0664) != 0 ||
+        mdb_txn_begin(env, NULL, 0, &txn) != 0 ||
+        mdb_dbi_open(txn, "cache", 0, &dbi) != 0)
+      _exit(1);
+    uint8_t key[32];
+    cc_key(key, 9);
+    MDB_val k = {32, key}, v = {4, "junk"};
+    _exit(mdb_put(txn, dbi, &k, &v, 0) == 0 ? 0 : 1);
+  }
+  ASSERT_EQ(cc_wait(b), 0);
+
+  pid_t c = fork();
+  if (c == 0) {
+    cc_enter();
+    if (!cc_has(1, "one"))
+      _exit(1);
+    cc_put(2, "two");
+    pl_store_cache_checkpoint();
+    pl_codecache_reset();
+    _exit(cc_has(2, "two") && !cc_has(9, NULL) && cc_has(1, "one") ? 0 : 2);
+  }
+  ASSERT_EQ(cc_wait(c), 0);
+  cc_cleanup();
+}
+
+TEST(store, codecache_busy_lock_defers_instead_of_hanging) {
+  strcpy(cc_dir, "/tmp/pl-codecache-XXXXXX");
+  ASSERT_NOT_NULL(mkdtemp(cc_dir));
+  pid_t seed = fork();
+  if (seed == 0) {
+    cc_enter();
+    cc_put(1, "one");
+    pl_store_cache_checkpoint();
+    _exit(0);
+  }
+  ASSERT_EQ(cc_wait(seed), 0);
+
+  int locked[2], go[2], done[2];
+  ASSERT_EQ(pipe(locked), 0);
+  ASSERT_EQ(pipe(go), 0);
+  ASSERT_EQ(pipe(done), 0);
+  pid_t holder = fork();
+  if (holder == 0) {
+    /* a live process that holds the writer lock and never lets go */
+    int fd = open(cc_file("plgc.lock"), O_RDWR);
+    if (fd < 0 || flock(fd, LOCK_EX) != 0)
+      _exit(1);
+    (void)write(locked[1], "L", 1);
+    for (;;)
+      pause();
+  }
+  char ch;
+  ASSERT_EQ(read(locked[0], &ch, 1), 1);
+
+  pid_t user = fork();
+  if (user == 0) {
+    cc_enter();
+    /* busy: the lookup misses and the flush is deferred, both promptly */
+    if (cc_has(1, "one"))
+      _exit(1);
+    cc_put(2, "two");
+    pl_store_cache_checkpoint();
+    (void)write(done[1], "D", 1);
+    if (read(go[0], &ch, 1) != 1)
+      _exit(2);
+    /* the lock is free again: the staged row flushes */
+    pl_store_cache_checkpoint();
+    pl_codecache_reset();
+    _exit(cc_has(2, "two") && cc_has(1, "one") ? 0 : 3);
+  }
+  ASSERT_EQ(read(done[0], &ch, 1), 1);
+  kill(holder, SIGKILL);
+  ASSERT_EQ(cc_wait(holder), 100 + SIGKILL);
+  ASSERT_EQ(write(go[1], "G", 1), 1);
+  ASSERT_EQ(cc_wait(user), 0);
+  close(locked[0]);
+  close(locked[1]);
+  close(go[0]);
+  close(go[1]);
+  close(done[0]);
+  close(done[1]);
+  cc_cleanup();
 }
 
 TEST(store, compiler_install_is_generation_idempotent) {

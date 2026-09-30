@@ -18,7 +18,8 @@ static test_rt staging_open(const char* dir, bool silo) {
 }
 
 static void staging_cleanup(const char* dir) {
-  const char* files[] = {"pins.pack", "data.mdb", "lock.mdb"};
+  const char* files[] = {"pins.pack", "data.mdb", "lock.mdb", "plgc.mdb",
+                         "plgc.lock"};
   for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
     char path[256];
     snprintf(path, sizeof(path), "%s/%s", dir, files[i]);
@@ -312,7 +313,7 @@ TEST(staging, global_cache_only_commits_on_save) {
   char dir[] = "/tmp/enki-stage-cache-XXXXXX";
   ASSERT_NOT_NULL(mkdtemp(dir));
   char path[256];
-  snprintf(path, sizeof(path), "%s/data.mdb", dir);
+  snprintf(path, sizeof(path), "%s/plgc.mdb", dir);
   for (unsigned phase = 0; phase < 4; phase++) {
     pid_t pid = fork();
     ASSERT_GTE(pid, 0);

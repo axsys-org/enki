@@ -10,7 +10,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <stdio.h>
+#include <sys/file.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "axsys/arena.h"
 #include "axsys/assume.h"
@@ -157,12 +162,26 @@ int pl_lmdb_read_begin(MDB_env* env, MDB_txn** txn) {
  * rows compiled by any earlier snap — `rm -rf snap` no longer means a
  * cold compiler. Writes remain in memory until Save. An unset dir
  * (library users, tests) disables it; an unopenable path is a cache miss.
- * PL_CODECACHE=0 forces it off. */
+ * PL_CODECACHE=0 forces it off.
+ *
+ * Locking.  LMDB's own locks are POSIX semaphores on macOS, which are not
+ * robust: a process that dies inside a write transaction holds the write
+ * lock forever, so every later writer (every wisp's next Save) blocks for
+ * good, and one that dies attached keeps a reader slot until something
+ * reaps it.  Every wisp on the machine shares this cache and killed servers
+ * are routine, so it runs with MDB_NOLOCK and serializes through flock on a
+ * side file instead: readers share the lock, a writer holds it exclusively
+ * (the discipline MDB_NOLOCK requires: no reader active while a writer
+ * runs), and the kernel drops a dead process's lock.  Waits are bounded: a
+ * busy lock is a miss for a reader and a deferred flush for a writer, never
+ * a hang.  The data lives in plgc.mdb beside the LMDB-locked data.mdb that
+ * older binaries use, so the two protocols never share a file. */
 static pthread_mutex_t plgc_mu = PTHREAD_MUTEX_INITIALIZER;
 static MDB_env* plgc_env;
 static MDB_dbi plgc_dbi;
 static int plgc_state; /* 0 unopened, 1 open, -1 disabled */
 static bool plgc_writable;
+static int plgc_lock_fd = -1; /* PL_CODECACHE_DIR/plgc.lock */
 static pl_staged_blob* plgc_staged;
 
 static bool plgc_configured(void) {
@@ -171,6 +190,35 @@ static bool plgc_configured(void) {
     return false;
   const char* dir = getenv("PL_CODECACHE_DIR");
   return dir != NULL && dir[0] != '\0';
+}
+
+/* Take the cache lock (LOCK_SH or LOCK_EX), waiting at most ~250 ms. */
+#define PLGC_LOCK_TRIES 250
+static bool plgc_lock(int op) {
+  for (int i = 0; i < PLGC_LOCK_TRIES; i++) {
+    if (flock(plgc_lock_fd, op | LOCK_NB) == 0)
+      return true;
+    if (errno != EWOULDBLOCK && errno != EINTR)
+      return false;
+    struct timespec ms = {0, 1000000};
+    (void)nanosleep(&ms, NULL);
+  }
+  return false;
+}
+
+static void plgc_unlock(void) {
+  (void)flock(plgc_lock_fd, LOCK_UN);
+}
+
+static void plgc_close(void) {
+  if (plgc_env != NULL)
+    mdb_env_close(plgc_env);
+  plgc_env = NULL;
+  if (plgc_lock_fd >= 0)
+    close(plgc_lock_fd);
+  plgc_lock_fd = -1;
+  plgc_state = 0;
+  plgc_writable = false;
 }
 
 static bool plgc_open(bool writable) {
@@ -184,38 +232,47 @@ static bool plgc_open(bool writable) {
   }
   /* Reads (including compiler lookups during Ice) must not create the
    * cache or perform a write transaction.  Upgrade only at a Save. */
-  if (plgc_env != NULL) {
-    mdb_env_close(plgc_env);
-    plgc_env = NULL;
-    plgc_state = 0;
-  }
+  plgc_close();
   const char* dir = getenv("PL_CODECACHE_DIR");
+  char path[PATH_MAX], lock_path[PATH_MAX];
+  if ((size_t)snprintf(path, sizeof(path), "%s/plgc.mdb", dir) >=
+          sizeof(path) ||
+      (size_t)snprintf(lock_path, sizeof(lock_path), "%s/plgc.lock", dir) >=
+          sizeof(lock_path))
+    return false;
   if (writable)
     (void)mkdir(dir, 0755);
+  /* O_CLOEXEC: a child that inherited the descriptor would share, and keep
+   * alive, whatever lock this process holds on it. */
+  plgc_lock_fd = open(
+      lock_path, (writable ? O_RDWR | O_CREAT : O_RDONLY) | O_CLOEXEC, 0664);
+  if (plgc_lock_fd < 0)
+    return false;
+  if (!plgc_lock(writable ? LOCK_EX : LOCK_SH)) {
+    plgc_close();
+    return false;
+  }
   MDB_env* env = NULL;
-  if (mdb_env_create(&env) != 0)
-    return false;
-  /* MDB_NOTLS: a read transaction owns its reader slot only while it
-   * runs, rather than pinning one per thread for the environment's life. */
-  if (mdb_env_set_maxdbs(env, 1) != 0 ||
-      mdb_env_set_mapsize(env, (size_t)1 << 33) != 0 ||
-      mdb_env_open(env, dir, (writable ? 0 : MDB_RDONLY) | MDB_NOTLS, 0664) !=
-          0) {
-    mdb_env_close(env);
-    return false;
-  }
-  pl_lmdb_reap(env);
   MDB_txn* txn = NULL;
-  if ((writable ? mdb_txn_begin(env, NULL, 0, &txn)
-                : pl_lmdb_read_begin(env, &txn)) != 0 ||
-      mdb_dbi_open(txn, "cache", writable ? MDB_CREATE : 0, &plgc_dbi) != 0) {
-    if (txn != NULL)
-      mdb_txn_abort(txn);
-    mdb_env_close(env);
-    return false;
+  bool ok =
+      mdb_env_create(&env) == 0 && mdb_env_set_maxdbs(env, 1) == 0 &&
+      mdb_env_set_mapsize(env, (size_t)1 << 33) == 0 &&
+      mdb_env_open(env, path,
+                   MDB_NOSUBDIR | MDB_NOLOCK | (writable ? 0 : MDB_RDONLY),
+                   0664) == 0 &&
+      mdb_txn_begin(env, NULL, writable ? 0 : MDB_RDONLY, &txn) == 0 &&
+      mdb_dbi_open(txn, "cache", writable ? MDB_CREATE : 0, &plgc_dbi) == 0;
+  if (ok) {
+    ok = mdb_txn_commit(txn) == 0;
+    txn = NULL;
   }
-  if (mdb_txn_commit(txn) != 0) {
-    mdb_env_close(env);
+  if (txn != NULL)
+    mdb_txn_abort(txn);
+  plgc_unlock();
+  if (!ok) {
+    if (env != NULL)
+      mdb_env_close(env);
+    plgc_close();
     return false;
   }
   plgc_env = env;
@@ -227,9 +284,9 @@ static bool plgc_open(bool writable) {
 static bool plgc_get(const uint8_t key[32], uint8_t** out_b, size_t* out_n) {
   pthread_mutex_lock(&plgc_mu);
   bool ok = pl_staged_get(plgc_staged, key, out_b, out_n);
-  if (!ok && plgc_open(false)) {
+  if (!ok && plgc_open(false) && plgc_lock(LOCK_SH)) {
     MDB_txn* txn;
-    if (pl_lmdb_read_begin(plgc_env, &txn) == 0) {
+    if (mdb_txn_begin(plgc_env, NULL, MDB_RDONLY, &txn) == 0) {
       MDB_val k = {32, (void*)key};
       MDB_val v;
       if (mdb_get(txn, plgc_dbi, &k, &v) == 0) {
@@ -242,6 +299,7 @@ static bool plgc_get(const uint8_t key[32], uint8_t** out_b, size_t* out_n) {
       }
       mdb_txn_abort(txn);
     }
+    plgc_unlock();
   }
   pthread_mutex_unlock(&plgc_mu);
   return ok;
@@ -282,7 +340,8 @@ static uint64_t plgc_min_ns(void) {
 /* Derived cache persistence is best-effort, but may only sync at Save. */
 void pl_store_cache_checkpoint(void) {
   pthread_mutex_lock(&plgc_mu);
-  if (ax_hmlen(plgc_staged) != 0 && plgc_open(true)) {
+  /* A lock that stays busy defers the flush; the rows stay staged. */
+  if (ax_hmlen(plgc_staged) != 0 && plgc_open(true) && plgc_lock(LOCK_EX)) {
     MDB_txn* txn;
     if (mdb_txn_begin(plgc_env, NULL, 0, &txn) == 0) {
       bool ok = true;
@@ -299,7 +358,23 @@ void pl_store_cache_checkpoint(void) {
       else if (mdb_txn_commit(txn) == 0)
         pl_staged_clear(&plgc_staged);
     }
+    plgc_unlock();
   }
+  pthread_mutex_unlock(&plgc_mu);
+}
+
+bool pl_codecache_get(const uint8_t key[32], uint8_t** out_b, size_t* out_n) {
+  return plgc_get(key, out_b, out_n);
+}
+
+void pl_codecache_put(const uint8_t key[32], const uint8_t* b, size_t n) {
+  plgc_put(key, b, n);
+}
+
+void pl_codecache_reset(void) {
+  pthread_mutex_lock(&plgc_mu);
+  plgc_close();
+  pl_staged_clear(&plgc_staged);
   pthread_mutex_unlock(&plgc_mu);
 }
 
