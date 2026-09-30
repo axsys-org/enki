@@ -69,7 +69,13 @@ typedef enum pl_op {
   /* Ingest-only filler: a MK_THK KNOWN (4 operands) rewritten into a
    * CALL_KNOWN (3 operands) leaves one slot behind. */
   OP_NOP = 26,
-  PL_OP_COUNT = 27 /* sentinel: sizes pl_run's exec dispatch table */
+  /* +target +argc: tail call of a local block in the same code — the
+   * argc topmost operands replace this frame's operand base (the block's
+   * arguments) and control jumps to target, in constant frame space.
+   * The compiler emits it for tail calls of local functions (OP_CALL
+   * for the others) and follows it with an unreachable OP_RET. */
+  OP_TAILBLK = 27,
+  PL_OP_COUNT = 28 /* sentinel: sizes pl_run's exec dispatch table */
 } pl_op;
 
 pl_code* pl_bytecode_from_val(pl_val val);

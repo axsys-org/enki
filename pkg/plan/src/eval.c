@@ -731,6 +731,7 @@ static pl_run_status pl_run(pl_thread* t, pl_val v, size_t base,
       [OP_CALL_FAST] = &&x_call_fast,
       [OP_CALL_SLOW] = &&x_call_slow,
       [OP_NOP] = &&x_nop,
+      [OP_TAILBLK] = &&x_tailblk,
   };
   static void* const ret_tbl[PL_F_KIND_COUNT] = {
       [PL_F_UPDATE] = &&ret_update, [PL_F_APPLY] = &&ret_apply,
@@ -1309,6 +1310,31 @@ x_jmp: {
   pl_op_t target = NEXT();
   xpc = (uint32_t)target;
   if (target <= jmp_pc && ax_unlikely(--t->fuel == 0) && pl_yield_now(t)) {
+    XSYNC();
+    t->resume_kind = PL_RES_RUN;
+    pl_profile_pause_all(t);
+    return PL_RUN_YIELDED;
+  }
+  DISPATCH();
+}
+
+x_tailblk: {
+  /* [target, argc]: tail call of a local block in the same code.  The
+   * argc topmost operands become this frame's operand base — the
+   * block's arguments, exactly where OP_CALL would have put them — and
+   * control jumps to the block, so tail recursion runs in constant
+   * space.  Every cycle of blocks has a backward jump: take the fuel
+   * step there, and on exhaustion yield with the jump already taken. */
+  size_t tb_pc = xpc - 1;
+  pl_op_t target = NEXT();
+  pl_op_t nargs = NEXT();
+  if (nargs > t->vsp - fr->argbase)
+    pl_raise_msg(t, "bytecode stack underflow");
+  memmove(&t->vstack[fr->argbase], &t->vstack[t->vsp - nargs],
+          (size_t)nargs * sizeof(pl_val));
+  t->vsp = fr->argbase + (size_t)nargs;
+  xpc = (uint32_t)target;
+  if (target <= tb_pc && ax_unlikely(--t->fuel == 0) && pl_yield_now(t)) {
     XSYNC();
     t->resume_kind = PL_RES_RUN;
     pl_profile_pause_all(t);

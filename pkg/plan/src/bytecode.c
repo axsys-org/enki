@@ -310,6 +310,13 @@ static ready_result ready_analyse(pl_code* c, ready_state* states) {
     case OP_JMP:
       FLOW(o[0], s);
       continue;
+    case OP_TAILBLK: {
+      /* a block entry, exactly as OP_CALL's: argc unknown slots */
+      POP(o[1]);
+      ready_state args = {.depth = o[1] <= READY_SLOTS ? (int)o[1] : -2};
+      FLOW(o[0], args);
+      continue;
+    }
     case OP_BR:
       POP(1);
       for (size_t k = 0; k < (size_t)o[0]; k++)
@@ -671,6 +678,10 @@ static bool eager_rewrite(pl_code* c, const ready_state* states,
       next++;
       block_start = true;
       break;
+    case OP_TAILBLK:
+      next += 2;
+      block_start = true;
+      break;
     case OP_RET:
       block_start = true;
       break;
@@ -712,6 +723,7 @@ static void numeric_specialise(pl_code* c) {
       break;
     case OP_CALL:
     case OP_CALL_FAST:
+    case OP_TAILBLK:
       i += 3;
       break;
     case OP_PUSH_VAR:
@@ -812,6 +824,7 @@ static void bytecode_dump(const pl_code* c) {
       [OP_CALL_READY] = "CALL_READY",
       [OP_TAIL_READY] = "TAIL_READY",
       [OP_NOP] = "NOP",
+      [OP_TAILBLK] = "TAILBLK",
   };
   FILE* f = stderr;
   fprintf(f, "--- bytecode %zu ops, strict_mask 0x%llx entry %u max_var %u\n",
@@ -840,6 +853,7 @@ static void bytecode_dump(const pl_code* c) {
       w = 1;
       break;
     case OP_CALL:
+    case OP_TAILBLK:
     case OP_CALL_FAST:
       fprintf(f, " %llu %llu", (unsigned long long)o[0],
               (unsigned long long)o[1]);
@@ -996,6 +1010,7 @@ pl_code* pl_bytecode_from_val(pl_val val) {
       i += 1;
       break;
     case OP_CALL:
+    case OP_TAILBLK:
       if (i + 2 > n)
         FAIL("truncated operand")
       MARK_TARGET(ops[i])
@@ -1118,6 +1133,7 @@ pl_code* pl_bytecode_from_val(pl_val val) {
       break;
     case OP_CALL:
     case OP_CALL_FAST:
+    case OP_TAILBLK:
       i += 2;
       break;
     case OP_CALL_SLOW:

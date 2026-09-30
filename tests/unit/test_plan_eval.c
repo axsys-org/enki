@@ -1592,6 +1592,77 @@ TEST(exec, call_known_runs_resolved_primop_direct) {
   test_rt_free(&rt);
 }
 
+/* A local block loop: the law calls block `sum` with (n, 0); the block
+ * returns acc when n is 0 and otherwise tail-calls itself with
+ * (Dec n, Add acc n) through OP_TAILBLK.  The loop must run in constant
+ * frame space, and yield/resume at its backward jump (collecting at every
+ * yield) without disturbing the arguments it just moved. */
+static pl_code* test_block_loop_code(pl_thread* t, size_t pin_slot) {
+  pl_val op66 = t->vstack[pin_slot];
+  pl_val row[39] = {OP_PUSH_VAR, 1, OP_PUSH_LIT, 0, OP_CALL, 8, 2, OP_RET,
+                    /* 8: sum(n, acc) */
+                    OP_PUSH_SLOT, 0, OP_CALL_KNOWN, 1, op66,
+                    ax_s3('N', 'i', 'l'), OP_BR, 2, 21, 18,
+                    /* 18: n == 0 */
+                    OP_PUSH_SLOT, 1, OP_RET,
+                    /* 21: loop */
+                    OP_PUSH_SLOT, 0, OP_CALL_KNOWN, 1, op66,
+                    ax_s3('D', 'e', 'c'), OP_PUSH_SLOT, 1, OP_PUSH_SLOT, 0,
+                    OP_CALL_KNOWN, 2, op66, ax_s3('A', 'd', 'd'), OP_TAILBLK, 8,
+                    2, OP_RET};
+  pl_vpush(t, test_app(t, 0, 39, row));
+  pl_code* code = pl_bytecode_from_val(t->vstack[t->vsp - 1]);
+  t->vsp--;
+  return code;
+}
+
+TEST(exec, tailblk_loops_in_constant_frame_space) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  pl_vpush(t, pl_pin(t, 66));
+  pl_code* code = test_block_loop_code(t, base);
+  ASSERT_NOT_NULL(code);
+  test_code_pin(&rt, 1, code); /* at base + 1 */
+  size_t fcap0 = t->fcap;
+  ASSERT_EQ(test_run_call1(t, t->vstack[base + 1], 100000), 5000050000);
+  ASSERT_EQ(t->fcap, fcap0);
+  ASSERT_EQ(test_run_call1(t, t->vstack[base + 1], 0), 0);
+  pl_pin_set_code(pl_as(PL_TAG_PIN, t->vstack[base + 1]), NULL);
+  pl_bytecode_free(code);
+  test_rt_free(&rt);
+}
+
+TEST(exec, tailblk_yields_at_its_backward_jump) {
+  for (unsigned fuel = 2; fuel <= 5; fuel++) {
+    test_rt rt = test_rt_new();
+    pl_thread* t = rt.t;
+    size_t base = t->vsp;
+    pl_vpush(t, pl_pin(t, 66));
+    pl_code* code = test_block_loop_code(t, base);
+    ASSERT_NOT_NULL(code);
+    test_code_pin(&rt, 1, code);
+    pl_vpush(t, t->vstack[base + 1]);
+    pl_vpush(t, 50);
+    pl_gc_reserve(t, PL_THKE_CELLS(2));
+    pl_val call = pl_mk_thke(t, PL_BAN_FAST, 2, &t->vstack[base + 2]);
+    t->vsp = base + 2;
+    pl_thread_start(t, call);
+    unsigned yields = 0;
+    pl_run_status st;
+    while ((st = pl_thread_run(t, fuel)) == PL_RUN_YIELDED) {
+      ASSERT_LT(++yields, 100000);
+      pl_gc_collect_now(t);
+    }
+    ASSERT_EQ(st, PL_RUN_DONE);
+    ASSERT_EQ(pl_thread_result(t), 1275);
+    ASSERT_GT(yields, 10);
+    pl_pin_set_code(pl_as(PL_TAG_PIN, t->vstack[base + 1]), NULL);
+    pl_bytecode_free(code);
+    test_rt_free(&rt);
+  }
+}
+
 TEST(exec, call_known_ice_deep_normalizes_before_persisting) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
