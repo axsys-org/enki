@@ -749,7 +749,8 @@ TEST(store, codecache_busy_lock_defers_instead_of_hanging) {
     int fd = open(cc_file("plgc.lock"), O_RDWR);
     if (fd < 0 || flock(fd, LOCK_EX) != 0)
       _exit(1);
-    (void)write(locked[1], "L", 1);
+    if (write(locked[1], "L", 1) != 1)
+      _exit(1);
     for (;;)
       pause();
   }
@@ -764,7 +765,8 @@ TEST(store, codecache_busy_lock_defers_instead_of_hanging) {
       _exit(1);
     cc_put(2, "two");
     pl_store_cache_checkpoint();
-    (void)write(done[1], "D", 1);
+    if (write(done[1], "D", 1) != 1)
+      _exit(4);
     if (read(go[0], &ch, 1) != 1)
       _exit(2);
     /* the lock is free again: the staged row flushes */
