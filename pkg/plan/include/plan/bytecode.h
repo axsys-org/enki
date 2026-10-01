@@ -4,6 +4,19 @@
 
 typedef uint64_t pl_op_t; /* one slot per opcode and per operand */
 
+/* A local block that implements an unpinned law.  The compiler lists the
+ * nested laws it compiled as blocks in a directory behind the code
+ * (OP_LAWBLK rows); the decoder resolves each entry to every literal in
+ * the code that is that law, since those literals are the objects the
+ * program's closures are built from.  Entering such a law anywhere — a
+ * forced thunk, another law's generic apply — runs the block. */
+typedef struct pl_lawblk {
+  pl_val law;                 /* the unpinned LAW object */
+  const struct pl_code* code; /* the code holding the block */
+  uint32_t target;            /* block entry: its args are the operand base */
+  uint32_t arity;
+} pl_lawblk;
+
 typedef struct pl_code {
   pl_op_t* ops;
   size_t nops;
@@ -18,6 +31,13 @@ typedef struct pl_code {
                             means the code never reads chain-bind slots, so
                             judge can skip the chain scan and enter with the
                             [head, args…] group left on the value stack. */
+  uint32_t arity;        /* arity of the law this code runs, recorded when
+                            the store publishes it; 0 when unknown (any
+                            zero-initialized code), which sends callers to
+                            the law object.  Lets an exact-arity entry be
+                            verified from the code header alone. */
+  pl_lawblk* lawblks;    /* unpinned laws implemented by blocks of this code */
+  uint32_t nlawblks;
 } pl_code;
 
 typedef enum pl_op {
@@ -64,10 +84,25 @@ typedef enum pl_op {
   /* Ingest-only filler: a MK_THK KNOWN (4 operands) rewritten into a
    * CALL_KNOWN (3 operands) leaves one slot behind. */
   OP_NOP = 26,
-  PL_OP_COUNT = 27 /* sentinel: sizes pl_run's exec dispatch table */
+  /* +target +argc: tail call of a local block in the same code — the
+   * argc topmost operands replace this frame's operand base (the block's
+   * arguments) and control jumps to target, in constant frame space.
+   * The compiler emits it for tail calls of local functions (OP_CALL
+   * for the others) and follows it with an unreachable OP_RET. */
+  OP_TAILBLK = 27,
+  PL_OP_COUNT = 28, /* sentinel: sizes pl_run's exec dispatch table */
+  /* Row-only, never dispatched: +law +target, a directory entry behind
+   * the final RET saying the block at target implements that unpinned
+   * law.  The decoder strips the directory into pl_code.lawblks. */
+  OP_LAWBLK = 28
 } pl_op;
 
 pl_code* pl_bytecode_from_val(pl_val val);
+/* As above, with a store in scope: a saturated call of a literal pinned law
+ * that has no code yet is compiled first (bounded depth), so the caller's
+ * ingest still sees the callee's strict-entry mask under lazy attachment. */
+struct pl_store;
+pl_code* pl_bytecode_from_val_in(struct pl_store* s, pl_val val);
 void pl_bytecode_free(pl_code* code);
 
 #endif

@@ -128,6 +128,17 @@ uint32_t pl_io_argc(uint32_t op);
  *     ... t->exn / t->exn_msg ...
  *   }
  */
+/* PLAN exceptions are delivered with longjmp; the signal mask is never
+ * touched on the raise path, so skip the sigprocmask syscall that Darwin's
+ * setjmp/longjmp pair performs (glibc's plain setjmp already omits it). */
+#if defined(__APPLE__)
+#define pl_setjmp(jb)     _setjmp(jb)
+#define pl_longjmp(jb, v) _longjmp(jb, v)
+#else
+#define pl_setjmp(jb)     setjmp(jb)
+#define pl_longjmp(jb, v) longjmp(jb, v)
+#endif
+
 typedef struct pl_catch {
   jmp_buf jb;
   jmp_buf* prev;

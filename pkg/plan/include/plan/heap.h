@@ -18,6 +18,7 @@
 #include <stddef.h>
 #include <assert.h>
 
+#include "axsys/perf.h"
 #include "axsys/profile.h"
 #include "plan/value.h"
 #include "plan/bytecode.h"
@@ -25,6 +26,8 @@
 typedef struct pl_store pl_store;
 typedef struct pl_heap pl_heap;
 typedef struct pl_thread pl_thread;
+
+#define PL_OP_MEMO_SLOTS 64
 
 /* ── Root sources ──────────────────────────────────────────────────────── */
 
@@ -229,6 +232,16 @@ struct pl_thread {
    * layer. */
   void* host;
 
+  /* Direct-mapped memo of pl_op_lookup for interpreted primop rows: the
+   * name of a `(#pin "B") ("Name" args…)` row is the same literal on every
+   * evaluation of a call site, so identity hits skip the byte compare. */
+  struct pl_op_memo {
+    pl_val name;
+    uint64_t opset;
+    uint32_t argc;
+    int32_t idx;
+  } op_memo[PL_OP_MEMO_SLOTS];
+
 #ifdef PL_CACHE_STATS
   pl_cache_stats cache_stats;
 #endif
@@ -341,11 +354,62 @@ void pl_thread_free(pl_thread* t);
 
 /* ── The three allocation entry points ─────────────────────────────────── */
 
-/* The ONLY collecting path; postcondition: headroom >= cells. */
-void pl_gc_reserve(pl_thread* t, size_t cells);
+typedef struct pl_root_entry {
+  pl_root_source fn;
+  void* ctx;
+} pl_root_entry;
+
+/* Exposed so the reserve fast path and bump allocation inline into the
+ * evaluator; only heap.c mutates anything but `free`. */
+struct pl_heap {
+  pl_cell* from; /* active semispace; bump frontier lives here */
+  pl_cell* to;
+  pl_cell* free;
+  pl_cell* limit;
+  size_t cells; /* per-space size */
+  size_t live_cells;
+  pl_store* store;
+  pl_root_entry* roots;
+  size_t nroots, rootcap;
+#ifndef NDEBUG
+  int forbid_depth;
+#endif
+};
+
+/* The ONLY collecting path (out of line); postcondition: headroom >= cells. */
+void pl_gc_reserve_slow(pl_thread* t, size_t cells);
+
+/* Always-on invariant checks inside inline helpers report through this cold
+ * function: an inline fprintf-and-abort sequence per check is what stops the
+ * builders from being inlined into the evaluator. */
+[[noreturn]] ax_cold void pl_invariant_failed(const char* file, int line,
+                                              const char* func,
+                                              const char* what);
+#define pl_check(cond, what)                                                   \
+  do {                                                                         \
+    if (ax_unlikely(!(cond)))                                                  \
+      pl_invariant_failed(__FILE__, __LINE__, __func__, what);                 \
+  } while (0)
+
+/* Reserve headroom: the common no-collect case is a compare against the
+ * frontier; collection and growth stay out of line. */
+static inline ax_always_inline void pl_gc_reserve(pl_thread* t, size_t cells) {
+#ifndef PL_GC_STRESS
+  pl_heap* h = t->heap;
+  if (ax_likely(h->free + cells <= h->limit))
+    return;
+#endif
+  pl_gc_reserve_slow(t, cells);
+}
 
 /* Bump allocation; never collects; hard-asserts headroom (I2). */
-pl_cell* pl_bump(pl_thread* t, size_t cells);
+static inline ax_always_inline pl_cell* pl_bump(pl_thread* t, size_t cells) {
+  pl_heap* h = t->heap;
+  pl_check(h->free + cells <= h->limit, "bump without reserved headroom (I2)");
+  pl_cell* p = h->free;
+  h->free += cells;
+  return p;
+}
 
 /* Remaining headroom in cells (for tests/diagnostics). */
 size_t pl_gc_headroom(pl_thread* t);

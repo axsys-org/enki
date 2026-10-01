@@ -40,7 +40,7 @@ static _Thread_local char pl_msgbuf[256];
   t->exn_msg = NULL;
   if (t->handler == NULL)
     ax_abort("uncaught PLAN_EXN");
-  longjmp(*t->handler, 1);
+  pl_longjmp(*t->handler, 1);
 }
 
 [[noreturn]] void pl_raise_msg(pl_thread* t, const char* msg) {
@@ -48,7 +48,7 @@ static _Thread_local char pl_msgbuf[256];
   t->exn_msg = msg;
   if (t->handler == NULL)
     ax_abort("uncaught PLAN error: %s", msg);
-  longjmp(*t->handler, 1);
+  pl_longjmp(*t->handler, 1);
 }
 
 [[noreturn]] void pl_raise_msgf(pl_thread* t, const char* fmt, ...) {
@@ -191,11 +191,43 @@ static pl_cell* pl_lawp(pl_val head) {
   return pl_ptr(pl_pin_body(pl_ptr(head)));
 }
 
-/* Compiled bytecode for a law head, cached on its pin (NULL for an
- * unpinned law or an uncompiled pin). */
-static pl_code* pl_law_code(pl_val law) {
+/* Compiled bytecode for a law head, cached on its pin: NULL for an
+ * unpinned law, an unsaved pin, or a pin whose compile is pending or has
+ * nothing to attach.  A canonical pin without code is compiled (or served
+ * from the code cache) here, on its first entry. */
+static pl_code* pl_law_code(pl_thread* t, pl_val law) {
   pl_cell* p = pl_as(PL_TAG_PIN, law);
-  return p != NULL ? (pl_code*)pl_pin_code(p) : NULL;
+  if (p == NULL)
+    return NULL;
+  p = pl_pin_resolved(p);
+  if (pl_pin_is_proxy(p))
+    return NULL; /* unsaved: no hash to compile under (checked inline —
+                    fresh laws are entered constantly during a build) */
+  void* code = (void*)(uintptr_t)__atomic_load_n(&p[6], __ATOMIC_ACQUIRE);
+  if (ax_likely((uintptr_t)code > (uintptr_t)PL_CODE_PENDING))
+    return code;
+  if (code != NULL)
+    return NULL; /* pending elsewhere, or known uncompilable */
+  return pl_store_code_demand(pl_heap_store(t->heap), law);
+}
+
+/* Is head a law (or pinned law) of exactly this arity?  A pin with published
+ * code answers from the code header, whose line the entry touches next
+ * anyway, so a compiled call never loads the law object itself.  *codep
+ * receives the pin's code (NULL if none) for judge to enter without a
+ * second lookup. */
+static inline bool pl_exact_law(pl_val head, uint64_t arity, pl_code** codep) {
+  *codep = NULL;
+  if (pl_tag(head) == PL_TAG_PIN) {
+    pl_cell* p = pl_pin_resolved(pl_ptr(head));
+    pl_code* code = pl_pin_code(p);
+    *codep = code;
+    if (code != NULL && code->arity != 0)
+      return code->arity == arity;
+    pl_val body = pl_pin_body(p);
+    return pl_tag(body) == PL_TAG_LAW && pl_law_arity(pl_ptr(body)) == arity;
+  }
+  return pl_tag(head) == PL_TAG_LAW && pl_law_arity(pl_ptr(head)) == arity;
 }
 
 /* A law compiled with a checked prologue has two entries: the prologue
@@ -645,6 +677,15 @@ static pl_run_status pl_run(pl_thread* t, pl_val v, size_t base,
   uint32_t jargc = 0;
   uint32_t op_idx, op_argc;
   size_t op_base;
+  /* Bytecode cursor of the current F_EXEC frame while control is inside the
+   * exec region: the ops pointer and pc live in locals (registers) and are
+   * written back to fr->k (XSYNC) at every exit that leaves the frame live,
+   * so the frame stays a complete continuation for yields and returns. */
+  const pl_op_t* xops = NULL;
+  uint32_t xpc = 0;
+  /* The head's code when the path into judge already looked it up (NULL:
+   * judge looks it up itself). */
+  pl_code* jcode = NULL;
 
   /*
    * Computed-goto dispatch tables (labels-as-values; the Makefile
@@ -690,6 +731,7 @@ static pl_run_status pl_run(pl_thread* t, pl_val v, size_t base,
       [OP_CALL_FAST] = &&x_call_fast,
       [OP_CALL_SLOW] = &&x_call_slow,
       [OP_NOP] = &&x_nop,
+      [OP_TAILBLK] = &&x_tailblk,
   };
   static void* const ret_tbl[PL_F_KIND_COUNT] = {
       [PL_F_UPDATE] = &&ret_update, [PL_F_APPLY] = &&ret_apply,
@@ -783,14 +825,7 @@ eval_thke_v: {
      * including a non-WHNF head — takes the slow path, which is
      * semantically identical.
      */
-    pl_val head = args[0];
-    pl_cell* lp = NULL;
-    if (pl_tag(head) == PL_TAG_LAW)
-      lp = pl_ptr(head);
-    else if (pl_tag(head) == PL_TAG_PIN &&
-             pl_tag(pl_pin_body(pl_ptr(head))) == PL_TAG_LAW)
-      lp = pl_ptr(pl_pin_body(pl_ptr(head)));
-    if (lp == NULL || pl_law_arity(lp) != argc - 1)
+    if (!pl_exact_law(args[0], argc - 1, &jcode))
       goto thke_slow;
     hbase = t->vsp;
     for (uint32_t i = 0; i < argc; i++)
@@ -860,7 +895,8 @@ exec: {
    * for every opcode below PL_OP_COUNT, so no handler-NULL check is
    * needed here (pass 1 of the decoder rejects anything else).
    */
-#define NEXT() (assert(fr->k < fr->code->nops), fr->code->ops[fr->k++])
+#define NEXT()  (assert(xpc < fr->code->nops), xops[xpc++])
+#define XSYNC() (fr->k = xpc)
 #define DISPATCH()                                                             \
   do {                                                                         \
     pl_op_t op_ = NEXT();                                                      \
@@ -868,6 +904,8 @@ exec: {
     goto* op_tbl[op_];                                                         \
   } while (0)
   fr = &t->fstack[t->fsp - 1];
+  xops = fr->code->ops;
+  xpc = fr->k;
   DISPATCH();
 
 x_push_var: {
@@ -1039,6 +1077,7 @@ x_interp:
   pl_exec_reify_env(t, fr);
   env = fr->a;
   expr = NEXT();
+  XSYNC();
   goto eval_expr;
 
 x_ret:
@@ -1077,7 +1116,7 @@ x_tail: {
    * runs in constant frame depth.  The group of n values relocates to
    * tbase, exactly where x_ret's vsp reset would have left the stack.
    */
-  bool args_ready = fr->code->ops[fr->k - 1] == OP_TAIL_READY;
+  bool args_ready = xops[xpc - 1] == OP_TAIL_READY;
   argc = (uint32_t)NEXT();
   pl_op_t rawbane = NEXT();
   pl_bane bane = (pl_bane)(rawbane & PL_BAN_MASK);
@@ -1104,14 +1143,7 @@ x_tail: {
     goto tail_fallback;
   }
   if (bane == PL_BAN_FAST) {
-    pl_val head = t->vstack[g];
-    pl_cell* lp = NULL;
-    if (pl_tag(head) == PL_TAG_LAW)
-      lp = pl_ptr(head);
-    else if (pl_tag(head) == PL_TAG_PIN &&
-             pl_tag(pl_pin_body(pl_ptr(head))) == PL_TAG_LAW)
-      lp = pl_ptr(pl_pin_body(pl_ptr(head)));
-    if (lp == NULL || pl_law_arity(lp) != argc - 1)
+    if (!pl_exact_law(t->vstack[g], argc - 1, &jcode))
       goto tail_fallback; /* mis-hinted: the generic path via the thunk */
     pl_cache_stat_vstack_move(t, PL_CACHE_MOVE_TAIL_FAST,
                               (size_t)argc * sizeof(pl_val),
@@ -1237,6 +1269,7 @@ x_force:
     DISPATCH();
   }
   v = pl_vpop(t);
+  XSYNC();
   goto eval;
 
 x_push_slot: {
@@ -1252,7 +1285,7 @@ x_br: {
    * stack; arm targets were boundary-checked at ingest.  A backward
    * arm is a loop edge: take a fuel step there, and on exhaustion
    * yield with the jump already taken (PL_RES_RUN resumes exec). */
-  size_t br_pc = fr->k - 1;
+  size_t br_pc = xpc - 1;
   pl_op_t m = NEXT();
   if (t->vsp == fr->argbase)
     pl_raise_msg(t, "bytecode stack underflow");
@@ -1261,9 +1294,10 @@ x_br: {
     pl_raise_msg(t, "exec: branch on non-nat");
   if (scrut >= m)
     pl_raise_msg(t, "exec: branch out of range");
-  pl_op_t target = fr->code->ops[fr->k + scrut];
-  fr->k = (uint32_t)target;
+  pl_op_t target = xops[xpc + scrut];
+  xpc = (uint32_t)target;
   if (target <= br_pc && ax_unlikely(--t->fuel == 0) && pl_yield_now(t)) {
+    XSYNC();
     t->resume_kind = PL_RES_RUN;
     pl_profile_pause_all(t);
     return PL_RUN_YIELDED;
@@ -1272,10 +1306,36 @@ x_br: {
 }
 
 x_jmp: {
-  size_t jmp_pc = fr->k - 1;
+  size_t jmp_pc = xpc - 1;
   pl_op_t target = NEXT();
-  fr->k = (uint32_t)target;
+  xpc = (uint32_t)target;
   if (target <= jmp_pc && ax_unlikely(--t->fuel == 0) && pl_yield_now(t)) {
+    XSYNC();
+    t->resume_kind = PL_RES_RUN;
+    pl_profile_pause_all(t);
+    return PL_RUN_YIELDED;
+  }
+  DISPATCH();
+}
+
+x_tailblk: {
+  /* [target, argc]: tail call of a local block in the same code.  The
+   * argc topmost operands become this frame's operand base — the
+   * block's arguments, exactly where OP_CALL would have put them — and
+   * control jumps to the block, so tail recursion runs in constant
+   * space.  Every cycle of blocks has a backward jump: take the fuel
+   * step there, and on exhaustion yield with the jump already taken. */
+  size_t tb_pc = xpc - 1;
+  pl_op_t target = NEXT();
+  pl_op_t nargs = NEXT();
+  if (nargs > t->vsp - fr->argbase)
+    pl_raise_msg(t, "bytecode stack underflow");
+  memmove(&t->vstack[fr->argbase], &t->vstack[t->vsp - nargs],
+          (size_t)nargs * sizeof(pl_val));
+  t->vsp = fr->argbase + (size_t)nargs;
+  xpc = (uint32_t)target;
+  if (target <= tb_pc && ax_unlikely(--t->fuel == 0) && pl_yield_now(t)) {
+    XSYNC();
     t->resume_kind = PL_RES_RUN;
     pl_profile_pause_all(t);
     return PL_RUN_YIELDED;
@@ -1290,9 +1350,10 @@ x_call: {
    * (self-recursive local calls would otherwise grow the frame stack
    * unpreemptably); on exhaustion, yield rewound to re-execute the
    * call with fresh fuel. */
-  size_t call_pc = fr->k - 1;
+  size_t call_pc = xpc - 1;
   pl_op_t target = NEXT();
   pl_op_t nargs = NEXT();
+  XSYNC();
   if (nargs > t->vsp - fr->argbase)
     pl_raise_msg(t, "bytecode stack underflow");
   if (ax_unlikely(--t->fuel == 0) && pl_yield_now(t)) {
@@ -1312,6 +1373,7 @@ x_call: {
   fr->argc = cargc;
   fr->code = ccode;
   fr->k = (uint32_t)target;
+  xpc = (uint32_t)target; /* same code object: xops is unchanged */
   fr->argbase = (uint32_t)(t->vsp - nargs);
   DISPATCH();
 }
@@ -1333,7 +1395,7 @@ x_call: {
     t->fuel -= 3;                                                              \
     t->vstack[t->vsp - 2] = (result);                                          \
     t->vsp--;                                                                  \
-    fr->k += 3;                                                                \
+    xpc += 3;                                                                  \
     DISPATCH();                                                                \
   } while (0)
 x_add: {
@@ -1389,10 +1451,11 @@ x_call_known: {
    * ret_exec delivers the result exactly where MK_THK's cell sat.
    * (Skipping the slot for bodies that never read it measured within
    * noise on the plangrm bench, 2026-09-15: not worth the extra path.) */
-  bool args_ready = fr->code->ops[fr->k - 1] == OP_CALL_READY;
+  bool args_ready = xops[xpc - 1] == OP_CALL_READY;
   uint32_t nargs = (uint32_t)NEXT();
   uint32_t idx = (uint32_t)NEXT();
   (void)NEXT();
+  XSYNC();
   assert(idx < pl_nops);
   if (nargs == 0 || nargs > t->vsp - fr->argbase)
     pl_raise_msg(t, "bytecode stack underflow");
@@ -1426,20 +1489,15 @@ x_call_fast: {
    * (non-tail self-recursion is otherwise unpreemptable); a yield
    * rewinds to re-execute the call with fresh fuel.  Anything the
    * verification rejects takes the generic slow-apply path. */
-  size_t callf_pc = fr->k - 1;
+  size_t callf_pc = xpc - 1;
   uint32_t nargs = (uint32_t)NEXT();
   (void)NEXT(); /* the caller's strictness hint: judge checks the args itself */
+  XSYNC();
   if (nargs + 1 > t->vsp - fr->argbase)
     pl_raise_msg(t, "bytecode stack underflow");
   size_t hb = t->vsp - nargs - 1;
   pl_val head = t->vstack[hb];
-  pl_cell* lp = NULL;
-  if (pl_tag(head) == PL_TAG_LAW)
-    lp = pl_ptr(head);
-  else if (pl_tag(head) == PL_TAG_PIN &&
-           pl_tag(pl_pin_body(pl_ptr(head))) == PL_TAG_LAW)
-    lp = pl_ptr(pl_pin_body(pl_ptr(head)));
-  if (lp != NULL && pl_law_arity(lp) == nargs) {
+  if (pl_exact_law(head, nargs, &jcode)) {
     if (ax_unlikely(--t->fuel == 0) && pl_yield_now(t)) {
       fr->k = (uint32_t)callf_pc;
       t->resume_kind = PL_RES_RUN;
@@ -1465,6 +1523,7 @@ x_call_slow: {
    * one F_APPLYN frame and force the head — thke_slow without the
    * cell.  The eval safepoint owns any yield from here. */
   uint32_t nargs = (uint32_t)NEXT();
+  XSYNC();
   if (nargs + 1 > t->vsp - fr->argbase)
     pl_raise_msg(t, "bytecode stack underflow");
   size_t hb = t->vsp - nargs - 1;
@@ -1480,6 +1539,7 @@ x_call_slow: {
 }
 #undef DISPATCH
 #undef NEXT
+#undef XSYNC
 
   /*
    * Decompose a law-body expression under env.  Mirrors KAL, except a
@@ -1665,6 +1725,7 @@ ret_apply: {
 
 fast_apply:
   argc = (uint32_t)(t->vsp - hbase - 1);
+  jcode = NULL;
 
   /* dispatch on the ultimate head: a LAW or a pinned law falls
    * through to judge, a pinned nat enters the op table */
@@ -1693,8 +1754,6 @@ fast_apply:
   }
 
 judge: {
-  pl_cell* lp = pl_lawp(t->vstack[hbase]);
-  ax_assume(pl_law_arity(lp) == argc, "JUDGE: arity mismatch");
   bool profile_frame = pl_profile_law_push(t, t->vstack[hbase]);
   if (pl_hook != NULL) {
     pl_val out;
@@ -1712,8 +1771,9 @@ judge: {
     }
     /* An enter hook is a C-entry region and may allocate or collect.  The
      * head itself is rooted at hbase, but an unresolved PIN's LAW body moves
-     * with its heap, so never retain the raw body pointer across the hook. */
-    lp = pl_lawp(t->vstack[hbase]);
+     * with its heap, so no raw body pointer is taken before this point, and
+     * a code pointer looked up before the hook is not trusted after it. */
+    jcode = NULL;
   }
   /*
    * JUDGE: the recursive-let prelude.  Scan the body for the (1 v k)
@@ -1725,8 +1785,10 @@ judge: {
      * slots (max_var <= arity, no INTERP), skip the body scan and the
      * env/chain build entirely — the [head, args…] group stays on the
      * value stack and the frame runs stack-resident (PL_F_EXECV). */
-    pl_code* scode = pl_law_code(t->vstack[hbase]);
+    pl_code* scode = jcode != NULL ? jcode : pl_law_code(t, t->vstack[hbase]);
     if (scode != NULL && scode->max_var <= argc) {
+      ax_assume(scode->arity == 0 || scode->arity == argc,
+                "JUDGE: arity mismatch");
       fr = pl_fpush(t);
       fr->kind = PL_F_EXECV;
       fr->a = 0;
@@ -1737,7 +1799,29 @@ judge: {
       fr->argbase = (uint32_t)t->vsp;
       goto exec;
     }
+    /* An unpinned law some compiled code implements as a local block:
+     * run the block with the arguments as its operand base.  Blocks read
+     * only operand slots, so the [head, args…] group needs no env, and
+     * the frame's RET drops the whole group as for any EXECV entry. */
+    pl_store* lbs;
+    const pl_lawblk* lb;
+    if (scode == NULL && pl_tag(t->vstack[hbase]) == PL_TAG_LAW &&
+        (lbs = pl_heap_store(t->heap)) != NULL &&
+        (lb = pl_store_lawblk(lbs, t->vstack[hbase])) != NULL &&
+        lb->arity == argc) {
+      fr = pl_fpush(t);
+      fr->kind = PL_F_EXECV;
+      fr->a = 0;
+      fr->b = (pl_val)hbase;
+      fr->argc = (uint32_t)(1 + argc);
+      fr->code = (pl_code*)lb->code;
+      fr->k = lb->target;
+      fr->argbase = (uint32_t)(hbase + 1);
+      goto exec;
+    }
   }
+  pl_cell* lp = pl_lawp(t->vstack[hbase]);
+  ax_assume(pl_law_arity(lp) == argc, "JUDGE: arity mismatch");
   pl_vpush(t, pl_law_body(lp)); /* the chain cursor slot */
   jbase = hbase;
   jargc = argc;
@@ -1765,10 +1849,20 @@ ret_opent: {
   pl_val name = t->vstack[listbase];
   if (opset >= 82 && !t->rplan_f)
     pl_raise_msg(t, "Not in RPLAN Mode");
-  int idx = pl_op_lookup(opset, name, argc);
-  if (idx < 0)
-    pl_raise_msgf(t, "no primop %llu (argc %u)", (unsigned long long)opset,
-                  argc);
+  struct pl_op_memo* memo =
+      &t->op_memo[(name ^ (opset * 31) ^ argc) & (PL_OP_MEMO_SLOTS - 1)];
+  int idx;
+  if (memo->name == name && memo->opset == opset && memo->argc == argc &&
+      memo->idx >= 0) {
+    idx = memo->idx;
+  } else {
+    idx = pl_op_lookup(opset, name, argc);
+    if (idx < 0)
+      pl_raise_msgf(t, "no primop %llu (argc %u)", (unsigned long long)opset,
+                    argc);
+    *memo = (struct pl_op_memo){
+        .name = name, .opset = opset, .argc = argc, .idx = idx};
+  }
   op_idx = (uint32_t)idx;
   op_base = listbase + 1;
   op_argc = argc;
@@ -2030,7 +2124,7 @@ judge_scan:
       /* no chain binds: a compiled body can run with its [head, args…]
        * group left in place on the vstack — no env allocation at all
        * unless the body reifies one (pl_exec_reify_env) */
-      pl_code* scode = pl_law_code(t->vstack[jbase]);
+      pl_code* scode = pl_law_code(t, t->vstack[jbase]);
       if (scode != NULL) {
         t->vsp = cursor; /* drop the body cursor */
         fr = pl_fpush(t);
@@ -2046,7 +2140,7 @@ judge_scan:
     }
     /* Decide the entry while the arguments still sit on the value stack:
      * the check resolves indirections in place before the env copies them. */
-    pl_code* code = pl_law_code(t->vstack[jbase]);
+    pl_code* code = pl_law_code(t, t->vstack[jbase]);
     uint32_t fast_k =
         code != NULL ? pl_strict_entry(t, code, jbase + 1, jargc) : 0;
     uint32_t nslots = 1 + jargc + m;
@@ -2184,7 +2278,7 @@ static pl_run_status pl_run_caught(pl_thread* t, pl_val v0, size_t base,
   for (;;) {
     pl_catch c;
     pl_catch_init(t, &c);
-    if (setjmp(c.jb) == 0) {
+    if (pl_setjmp(c.jb) == 0) {
       pl_run_status s = pl_run(t, v, base, entry);
       pl_catch_pop(t, &c);
       return s;
@@ -2314,7 +2408,7 @@ pl_run_status pl_thread_run(pl_thread* t, uint64_t fuel) {
 
   pl_catch c;
   pl_catch_init(t, &c);
-  if (setjmp(c.jb) != 0) {
+  if (pl_setjmp(c.jb) != 0) {
     /* uncaught at thread top level: unwind to the entry watermarks;
      * t->exn / t->exn_msg carry the payload */
     t->handler = c.prev;

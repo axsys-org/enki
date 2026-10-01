@@ -434,7 +434,7 @@ static int64_t er_load_caps(er_actor* a, size_t capslot, er_actor*** out) {
   *out = NULL;
   pl_catch c;
   pl_catch_init(t, &c);
-  if (setjmp(c.jb) != 0) {
+  if (pl_setjmp(c.jb) != 0) {
     pl_catch_unwind(t, &c);
     return -1;
   }

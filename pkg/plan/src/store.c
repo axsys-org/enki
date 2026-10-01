@@ -10,7 +10,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <stdio.h>
+#include <sys/file.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "axsys/arena.h"
 #include "axsys/assume.h"
@@ -132,6 +137,22 @@ void pl_staged_clear(pl_staged_blob** staged) {
   *staged = NULL;
 }
 
+/* ── LMDB reader slots ─────────────────────────────────────────────────── */
+
+void pl_lmdb_reap(MDB_env* env) {
+  int dead = 0;
+  (void)mdb_reader_check(env, &dead);
+}
+
+int pl_lmdb_read_begin(MDB_env* env, MDB_txn** txn) {
+  int rc = mdb_txn_begin(env, NULL, MDB_RDONLY, txn);
+  if (rc == MDB_READERS_FULL) {
+    pl_lmdb_reap(env);
+    rc = mdb_txn_begin(env, NULL, MDB_RDONLY, txn);
+  }
+  return rc;
+}
+
 /* ── Global compile cache ──────────────────────────────────────────────
  *
  * A machine-wide LMDB at PL_CODECACHE_DIR mapping the same
@@ -141,12 +162,26 @@ void pl_staged_clear(pl_staged_blob** staged) {
  * rows compiled by any earlier snap — `rm -rf snap` no longer means a
  * cold compiler. Writes remain in memory until Save. An unset dir
  * (library users, tests) disables it; an unopenable path is a cache miss.
- * PL_CODECACHE=0 forces it off. */
+ * PL_CODECACHE=0 forces it off.
+ *
+ * Locking.  LMDB's own locks are POSIX semaphores on macOS, which are not
+ * robust: a process that dies inside a write transaction holds the write
+ * lock forever, so every later writer (every wisp's next Save) blocks for
+ * good, and one that dies attached keeps a reader slot until something
+ * reaps it.  Every wisp on the machine shares this cache and killed servers
+ * are routine, so it runs with MDB_NOLOCK and serializes through flock on a
+ * side file instead: readers share the lock, a writer holds it exclusively
+ * (the discipline MDB_NOLOCK requires: no reader active while a writer
+ * runs), and the kernel drops a dead process's lock.  Waits are bounded: a
+ * busy lock is a miss for a reader and a deferred flush for a writer, never
+ * a hang.  The data lives in plgc.mdb beside the LMDB-locked data.mdb that
+ * older binaries use, so the two protocols never share a file. */
 static pthread_mutex_t plgc_mu = PTHREAD_MUTEX_INITIALIZER;
 static MDB_env* plgc_env;
 static MDB_dbi plgc_dbi;
 static int plgc_state; /* 0 unopened, 1 open, -1 disabled */
 static bool plgc_writable;
+static int plgc_lock_fd = -1; /* PL_CODECACHE_DIR/plgc.lock */
 static pl_staged_blob* plgc_staged;
 
 static bool plgc_configured(void) {
@@ -155,6 +190,35 @@ static bool plgc_configured(void) {
     return false;
   const char* dir = getenv("PL_CODECACHE_DIR");
   return dir != NULL && dir[0] != '\0';
+}
+
+/* Take the cache lock (LOCK_SH or LOCK_EX), waiting at most ~250 ms. */
+#define PLGC_LOCK_TRIES 250
+static bool plgc_lock(int op) {
+  for (int i = 0; i < PLGC_LOCK_TRIES; i++) {
+    if (flock(plgc_lock_fd, op | LOCK_NB) == 0)
+      return true;
+    if (errno != EWOULDBLOCK && errno != EINTR)
+      return false;
+    struct timespec ms = {0, 1000000};
+    (void)nanosleep(&ms, NULL);
+  }
+  return false;
+}
+
+static void plgc_unlock(void) {
+  (void)flock(plgc_lock_fd, LOCK_UN);
+}
+
+static void plgc_close(void) {
+  if (plgc_env != NULL)
+    mdb_env_close(plgc_env);
+  plgc_env = NULL;
+  if (plgc_lock_fd >= 0)
+    close(plgc_lock_fd);
+  plgc_lock_fd = -1;
+  plgc_state = 0;
+  plgc_writable = false;
 }
 
 static bool plgc_open(bool writable) {
@@ -168,33 +232,47 @@ static bool plgc_open(bool writable) {
   }
   /* Reads (including compiler lookups during Ice) must not create the
    * cache or perform a write transaction.  Upgrade only at a Save. */
-  if (plgc_env != NULL) {
-    mdb_env_close(plgc_env);
-    plgc_env = NULL;
-    plgc_state = 0;
-  }
+  plgc_close();
   const char* dir = getenv("PL_CODECACHE_DIR");
+  char path[PATH_MAX], lock_path[PATH_MAX];
+  if ((size_t)snprintf(path, sizeof(path), "%s/plgc.mdb", dir) >=
+          sizeof(path) ||
+      (size_t)snprintf(lock_path, sizeof(lock_path), "%s/plgc.lock", dir) >=
+          sizeof(lock_path))
+    return false;
   if (writable)
     (void)mkdir(dir, 0755);
+  /* O_CLOEXEC: a child that inherited the descriptor would share, and keep
+   * alive, whatever lock this process holds on it. */
+  plgc_lock_fd = open(
+      lock_path, (writable ? O_RDWR | O_CREAT : O_RDONLY) | O_CLOEXEC, 0664);
+  if (plgc_lock_fd < 0)
+    return false;
+  if (!plgc_lock(writable ? LOCK_EX : LOCK_SH)) {
+    plgc_close();
+    return false;
+  }
   MDB_env* env = NULL;
-  if (mdb_env_create(&env) != 0)
-    return false;
-  if (mdb_env_set_maxdbs(env, 1) != 0 ||
-      mdb_env_set_mapsize(env, (size_t)1 << 33) != 0 ||
-      mdb_env_open(env, dir, writable ? 0 : MDB_RDONLY, 0664) != 0) {
-    mdb_env_close(env);
-    return false;
-  }
   MDB_txn* txn = NULL;
-  if (mdb_txn_begin(env, NULL, writable ? 0 : MDB_RDONLY, &txn) != 0 ||
-      mdb_dbi_open(txn, "cache", writable ? MDB_CREATE : 0, &plgc_dbi) != 0) {
-    if (txn != NULL)
-      mdb_txn_abort(txn);
-    mdb_env_close(env);
-    return false;
+  bool ok =
+      mdb_env_create(&env) == 0 && mdb_env_set_maxdbs(env, 1) == 0 &&
+      mdb_env_set_mapsize(env, (size_t)1 << 33) == 0 &&
+      mdb_env_open(env, path,
+                   MDB_NOSUBDIR | MDB_NOLOCK | (writable ? 0 : MDB_RDONLY),
+                   0664) == 0 &&
+      mdb_txn_begin(env, NULL, writable ? 0 : MDB_RDONLY, &txn) == 0 &&
+      mdb_dbi_open(txn, "cache", writable ? MDB_CREATE : 0, &plgc_dbi) == 0;
+  if (ok) {
+    ok = mdb_txn_commit(txn) == 0;
+    txn = NULL;
   }
-  if (mdb_txn_commit(txn) != 0) {
-    mdb_env_close(env);
+  if (txn != NULL)
+    mdb_txn_abort(txn);
+  plgc_unlock();
+  if (!ok) {
+    if (env != NULL)
+      mdb_env_close(env);
+    plgc_close();
     return false;
   }
   plgc_env = env;
@@ -206,7 +284,7 @@ static bool plgc_open(bool writable) {
 static bool plgc_get(const uint8_t key[32], uint8_t** out_b, size_t* out_n) {
   pthread_mutex_lock(&plgc_mu);
   bool ok = pl_staged_get(plgc_staged, key, out_b, out_n);
-  if (!ok && plgc_open(false)) {
+  if (!ok && plgc_open(false) && plgc_lock(LOCK_SH)) {
     MDB_txn* txn;
     if (mdb_txn_begin(plgc_env, NULL, MDB_RDONLY, &txn) == 0) {
       MDB_val k = {32, (void*)key};
@@ -221,22 +299,49 @@ static bool plgc_get(const uint8_t key[32], uint8_t** out_b, size_t* out_n) {
       }
       mdb_txn_abort(txn);
     }
+    plgc_unlock();
   }
   pthread_mutex_unlock(&plgc_mu);
   return ok;
 }
 
+/* Lazily compiled rows arrive between Saves (a server's request paths
+ * compile on first use); bound what a process that never Saves again and
+ * is killed by a signal can lose.  P5/P6 rows cost tens of milliseconds
+ * each to make, so a write transaction per few dozen is cheap by comparison. */
+#define PLGC_STAGE_FLUSH 32
+
 static void plgc_put(const uint8_t key[32], const uint8_t* b, size_t n) {
   pthread_mutex_lock(&plgc_mu);
-  if (plgc_configured())
+  bool flush = false;
+  if (plgc_configured()) {
     (void)pl_staged_put(&plgc_staged, key, b, n);
+    flush = ax_hmlen(plgc_staged) >= PLGC_STAGE_FLUSH;
+  }
   pthread_mutex_unlock(&plgc_mu);
+  if (flush)
+    pl_store_cache_checkpoint();
+}
+
+/* Rows whose compile took less than this are recompiled rather than cached
+ * (PL_CODECACHE_MIN_MS, default 1 ms). */
+static uint64_t plgc_min_ns(void) {
+  static _Atomic uint64_t cached = UINT64_MAX;
+  uint64_t v = atomic_load_explicit(&cached, memory_order_relaxed);
+  if (v == UINT64_MAX) {
+    const char* e = getenv("PL_CODECACHE_MIN_MS");
+    double ms = e != NULL && e[0] != '\0' ? strtod(e, NULL) : 1.0;
+    v = ms > 0 ? (uint64_t)(ms * 1000000.0) : 0;
+    atomic_store_explicit(&cached, v, memory_order_relaxed);
+  }
+  return v;
 }
 
 /* Derived cache persistence is best-effort, but may only sync at Save. */
 void pl_store_cache_checkpoint(void) {
   pthread_mutex_lock(&plgc_mu);
-  if (ax_hmlen(plgc_staged) != 0 && plgc_open(true)) {
+  /* A lock that stays busy defers the flush; the rows stay staged. */
+  if (ax_hmlen(plgc_staged) != 0 && plgc_open(true) && plgc_lock(LOCK_EX)) {
     MDB_txn* txn;
     if (mdb_txn_begin(plgc_env, NULL, 0, &txn) == 0) {
       bool ok = true;
@@ -253,7 +358,23 @@ void pl_store_cache_checkpoint(void) {
       else if (mdb_txn_commit(txn) == 0)
         pl_staged_clear(&plgc_staged);
     }
+    plgc_unlock();
   }
+  pthread_mutex_unlock(&plgc_mu);
+}
+
+bool pl_codecache_get(const uint8_t key[32], uint8_t** out_b, size_t* out_n) {
+  return plgc_get(key, out_b, out_n);
+}
+
+void pl_codecache_put(const uint8_t key[32], const uint8_t* b, size_t n) {
+  plgc_put(key, b, n);
+}
+
+void pl_codecache_reset(void) {
+  pthread_mutex_lock(&plgc_mu);
+  plgc_close();
+  pl_staged_clear(&plgc_staged);
   pthread_mutex_unlock(&plgc_mu);
 }
 
@@ -626,6 +747,95 @@ pl_val pl_store_snapshot_normal(pl_thread* t, pl_val v) {
   return out;
 }
 
+/* ── unpinned law -> block table ─────────────────────────────────────── */
+
+typedef struct pl_lawblk_table {
+  size_t cap, count;
+  pl_lawblk slots[];
+} pl_lawblk_table;
+
+static size_t pl_lawblk_slot(pl_val law, size_t cap) {
+  return (size_t)(((uint64_t)law >> 3) * 0x9E3779B97F4A7C15ull >> 17) &
+         (cap - 1);
+}
+
+/* The law is written last (release), so a reader that sees it sees the
+ * entry; an existing entry is never rewritten (first code wins). */
+static void pl_lawblk_put(pl_lawblk_table* tb, const pl_lawblk* e) {
+  for (size_t h = pl_lawblk_slot(e->law, tb->cap);;
+       h = (h + 1) & (tb->cap - 1)) {
+    pl_lawblk* slot = &tb->slots[h];
+    if (slot->law == e->law)
+      return;
+    if (slot->law == 0) {
+      slot->code = e->code;
+      slot->target = e->target;
+      slot->arity = e->arity;
+      __atomic_store_n(&slot->law, e->law, __ATOMIC_RELEASE);
+      tb->count++;
+      return;
+    }
+  }
+}
+
+const pl_lawblk* pl_store_lawblk(pl_store* s, pl_val law) {
+  pl_lawblk_table* tb = __atomic_load_n(&s->lawblk, __ATOMIC_ACQUIRE);
+  if (tb == NULL)
+    return NULL;
+  for (size_t h = pl_lawblk_slot(law, tb->cap);; h = (h + 1) & (tb->cap - 1)) {
+    pl_val k = __atomic_load_n(&tb->slots[h].law, __ATOMIC_ACQUIRE);
+    if (k == law)
+      return &tb->slots[h];
+    if (k == 0)
+      return NULL;
+  }
+}
+
+static void pl_store_lawblk_register_locked(pl_store* s, const pl_code* code) {
+  for (uint32_t k = 0; k < code->nlawblks; k++) {
+    const pl_lawblk* e = &code->lawblks[k];
+    if (!pl_store_owns(s, e->law))
+      continue; /* only store objects have stable addresses */
+    pl_lawblk_table* tb = s->lawblk;
+    if (tb == NULL || (tb->count + 1) * 2 > tb->cap) {
+      size_t cap = tb == NULL ? 1024 : tb->cap * 2;
+      pl_lawblk_table* nt =
+          calloc(1, sizeof(pl_lawblk_table) + cap * sizeof(pl_lawblk));
+      if (nt == NULL)
+        return; /* the laws stay interpreted */
+      nt->cap = cap;
+      if (tb != NULL) {
+        for (size_t i = 0; i < tb->cap; i++)
+          if (tb->slots[i].law != 0)
+            pl_lawblk_put(nt, &tb->slots[i]);
+        ax_arrpush(s->lawblk_retired, tb);
+      }
+      __atomic_store_n(&s->lawblk, nt, __ATOMIC_RELEASE);
+      tb = nt;
+    }
+    pl_lawblk_put(tb, e);
+  }
+}
+
+void pl_store_register_lawblks(pl_store* s, const pl_code* code) {
+  pl_store_lock(s);
+  pl_store_lawblk_register_locked(s, code);
+  pl_store_unlock(s);
+}
+
+/* Record the arity of the law behind key on code about to be published.
+ * Every target registered under one law hash is the same law, so the first
+ * one answers for all. */
+static void pl_store_code_set_arity_locked(pl_store* s, pl_hash key,
+                                           pl_code* code) {
+  ptrdiff_t at = ax_hmgeti(s->code_targets, key);
+  if (at < 0 || ax_arrlen(s->code_targets[at].value) == 0)
+    return;
+  pl_cell* pin = pl_ptr(s->code_targets[at].value[0]);
+  uint64_t arity = pl_law_arity(pl_ptr((pl_val)pin[5]));
+  code->arity = arity <= UINT32_MAX ? (uint32_t)arity : 0; /* 0: unknown */
+}
+
 void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
   pl_store_save_lock(s);
   pl_store_lock(s);
@@ -683,7 +893,7 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
       if (gn == 32 && (s->be.has == NULL || s->be.has(s->be.ctx, got))) {
         pl_catch cc;
         pl_catch_init(t, &cc);
-        if (setjmp(cc.jb) != 0) {
+        if (pl_setjmp(cc.jb) != 0) {
           /* stale or unreadable cache row: recompile below */
           pl_catch_unwind(t, &cc);
         } else {
@@ -691,7 +901,7 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
           pl_catch_pop(t, &cc);
           pl_cell* rp = pl_as(PL_TAG_PIN, rowpin);
           if (rp != NULL) {
-            pl_code* code = pl_bytecode_from_val(pl_pin_body(rp));
+            pl_code* code = pl_bytecode_from_val_in(s, pl_pin_body(rp));
             if (code != NULL) {
               pl_store_lock(s);
               ptrdiff_t hit_at = ax_hmgeti(s->code_cache, key);
@@ -699,8 +909,10 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
                 pl_bytecode_free(code);
                 code = s->code_cache[hit_at].value;
               } else {
+                pl_store_code_set_arity_locked(s, key, code);
                 ax_arrpush(s->codes, code);
                 ax_hmput(s->code_cache, key, code);
+                pl_store_lawblk_register_locked(s, code);
               }
               targets_at = ax_hmgeti(s->code_targets, key);
               if (targets_at >= 0)
@@ -751,7 +963,7 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
       volatile bool served = false;
       pl_catch cc;
       pl_catch_init(t, &cc);
-      if (setjmp(cc.jb) != 0) {
+      if (pl_setjmp(cc.jb) != 0) {
         pl_catch_unwind(t, &cc);
       } else {
         char lerr[192] = {0};
@@ -761,7 +973,7 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
         pl_catch_pop(t, &cc);
         pl_cell* rp = loaded ? pl_as(PL_TAG_PIN, rowpin) : NULL;
         if (rp != NULL) {
-          pl_code* code = pl_bytecode_from_val(pl_pin_body(rp));
+          pl_code* code = pl_bytecode_from_val_in(s, pl_pin_body(rp));
           if (code != NULL) {
             pl_store_lock(s);
             ptrdiff_t hit_at = ax_hmgeti(s->code_cache, key);
@@ -769,8 +981,10 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
               pl_bytecode_free(code);
               code = s->code_cache[hit_at].value;
             } else {
+              pl_store_code_set_arity_locked(s, key, code);
               ax_arrpush(s->codes, code);
               ax_hmput(s->code_cache, key, code);
+              pl_store_lawblk_register_locked(s, code);
             }
             targets_at = ax_hmgeti(s->code_targets, key);
             if (targets_at >= 0)
@@ -794,7 +1008,7 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
    * take the runtime down — the law just stays interpreted */
   pl_catch c;
   pl_catch_init(t, &c);
-  if (setjmp(c.jb) != 0) {
+  if (pl_setjmp(c.jb) != 0) {
     pl_catch_unwind(t, &c);
     fprintf(stderr, "bytecode compile raised: %s\n",
             t->exn_msg != NULL ? t->exn_msg : "PLAN exn");
@@ -815,7 +1029,7 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
   pl_val stable = pl_store_snapshot_normal(t, t->vstack[result_at]);
   t->vsp = result_at;
   pl_catch_pop(t, &c);
-  pl_code* code = pl_bytecode_from_val(stable);
+  pl_code* code = pl_bytecode_from_val_in(s, stable);
   if (code != NULL) {
     /* Attach the cached code to every canonical LAW registered for this hash.
      */
@@ -825,8 +1039,10 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
       pl_bytecode_free(code); /* a re-entrant compile won the generation */
       code = s->code_cache[cached_at].value;
     } else {
+      pl_store_code_set_arity_locked(s, key, code);
       ax_arrpush(s->codes, code);
       ax_hmput(s->code_cache, key, code);
+      pl_store_lawblk_register_locked(s, code);
     }
     targets_at = ax_hmgeti(s->code_targets, key);
     ax_assume(targets_at >= 0, "compiled law left the hash index");
@@ -839,9 +1055,11 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
   uint64_t compile_ns =
       (uint64_t)(compile_t1.tv_sec - compile_t0.tv_sec) * 1000000000u +
       (uint64_t)(compile_t1.tv_nsec - compile_t0.tv_nsec);
-  /* Keep the existing 10ms admission threshold: caching also serializes a
-   * row pin, retains staging memory, and adds work to the next Save. */
-  if (codecache && compile_ns < 10000000u)
+  /* Admission threshold: caching also serializes a row pin, retains
+   * staging memory, and adds work to the next Save, so rows that
+   * recompile faster than PL_CODECACHE_MIN_MS (default 1 ms) are not
+   * worth it. */
+  if (codecache && compile_ns < plgc_min_ns())
     codecache = false;
   if (codecache) {
     /* persist the row as a pin and record the (compiler, law) -> row
@@ -854,7 +1072,7 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
     pl_vpush(t, stable);
     pl_catch cc;
     pl_catch_init(t, &cc);
-    if (setjmp(cc.jb) != 0) {
+    if (pl_setjmp(cc.jb) != 0) {
       pl_catch_unwind(t, &cc); /* cache write is best-effort */
     } else {
       t->vstack[rb] = pl_pin(t, t->vstack[rb]);
@@ -884,35 +1102,13 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
   pl_store_save_unlock(s);
 }
 
-/*
- * Compile every law pin already interned.  Canonical laws registered before
- * the compiler was installed (the boot prelude and loaded snapshots) would
- * otherwise never get bytecode.  Snapshot the hashes under the registry lock
- * so compilation can run afterward through the save_mu -> mu lock order.
- */
-static void pl_store_compile_existing(pl_store* s) {
-  PL_STORE_PROFILE("store.compile.existing");
-  pl_intern_entry* laws = NULL;
-  pl_store_lock(s);
-  for (ptrdiff_t i = 0; i < ax_arrlen(s->pins); i++) {
-    pl_cell* p = pl_ptr(s->pins[i]);
-    if ((pl_hdr_flags(p[0]) & PL_F_PIN_HASHED) == 0 ||
-        pl_tag(pl_pin_body(p)) != PL_TAG_LAW)
-      continue;
-    pl_hash key;
-    memcpy(key.b, pl_pin_hash_bytes(p), 32);
-    if (ax_hmgeti(laws, key) < 0)
-      ax_hmput(laws, key, s->pins[i]);
-  }
-  pl_store_unlock(s);
-  for (ptrdiff_t i = 0; i < ax_hmlen(laws); i++)
-    pl_store_put_code(s, laws[i].key.b);
-  ax_hmfree(laws);
-}
-
 static void pl_store_invalidate_code_locked(pl_store* s) {
   for (ptrdiff_t i = 0; i < ax_arrlen(s->pins); i++)
     pl_pin_set_code(pl_ptr(s->pins[i]), NULL);
+  if (s->lawblk != NULL) {
+    ax_arrpush(s->lawblk_retired, s->lawblk);
+    __atomic_store_n(&s->lawblk, NULL, __ATOMIC_RELEASE);
+  }
   ax_hmfree(s->code_cache);
   s->code_cache = NULL;
 }
@@ -947,18 +1143,52 @@ bool pl_store_put_compiler(pl_store* s, const uint8_t hash[32]) {
   }
   s->compiler_f = enabled;
   memcpy(s->compiler, hash, 32);
-  bool sweep = s->compiler_f;
-  if (sweep) {
-    s->compiler_h = pl_heap_new(((size_t)1 << 26), s);
+  bool install = s->compiler_f;
+  if (install) {
+    /* 32 MiB semispaces: compiles are short-lived allocations, and the
+     * heap grows on demand; 512 MiB here was over half of a boot's RSS. */
+    s->compiler_h = pl_heap_new(((size_t)1 << 22), s);
     s->compiler_t = pl_thread_new(s->compiler_h);
   }
   pl_store_unlock(s);
   pl_store_save_unlock(s);
-  if (sweep) {
+  /* No sweep of the interned laws: code attaches on each law's first entry
+   * (pl_store_code_demand), so an Install costs nothing for laws that never
+   * run, and a warm code cache is decoded only for the laws that do. */
+  if (install)
     fprintf(stderr, "store: installing bytecode compiler\r\n");
-    pl_store_compile_existing(s);
-  }
   return true;
+}
+
+void* pl_store_code_demand(pl_store* s, pl_val pin) {
+  if (s == NULL)
+    return NULL;
+  pl_cell* p = pl_pin_resolved(pl_ptr(pin));
+  if (pl_pin_is_proxy(p) || (pl_hdr_flags(p[0]) & PL_F_PIN_HASHED) == 0)
+    return NULL; /* unsaved: nothing to compile under */
+  if (!s->compiler_f)
+    return NULL; /* unsynchronized read: a stale answer only defers */
+  pl_cell expect = 0;
+  if (!__atomic_compare_exchange_n(&p[6], &expect,
+                                   (pl_cell)(uintptr_t)PL_CODE_PENDING, false,
+                                   __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+    /* attached, pending on another thread, or known uncompilable */
+    return (uintptr_t)expect > (uintptr_t)PL_CODE_PENDING
+               ? (void*)(uintptr_t)expect
+               : NULL;
+  }
+  pl_store_put_code(s, pl_pin_hash_bytes(p));
+  pl_cell after = __atomic_load_n(&p[6], __ATOMIC_ACQUIRE);
+  if (after == (pl_cell)(uintptr_t)PL_CODE_PENDING) {
+    /* nothing attached: the compile raised, the row did not decode, or the
+     * compiler went away.  A new generation resets the slot to NULL. */
+    (void)__atomic_compare_exchange_n(&p[6], &after,
+                                      (pl_cell)(uintptr_t)PL_CODE_NONE, false,
+                                      __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+    return NULL;
+  }
+  return (uintptr_t)after > (uintptr_t)PL_CODE_PENDING ? (void*)(uintptr_t)after
+                                                       : NULL;
 }
 
 /* ── Store-resident value construction (no GC interaction) ─────────────── */
@@ -1133,12 +1363,16 @@ void pl_store_free(pl_store* s) {
   if (s == NULL)
     return;
   PL_STORE_PROFILE("store.close");
+  pl_store_cache_checkpoint(); /* rows compiled since the last Save */
   if (s->compiler_t != NULL)
     pl_thread_free(s->compiler_t);
   if (s->compiler_h != NULL)
     pl_heap_free(s->compiler_h);
   pl_store_invalidate_code_locked(s);
   pl_store_free_code(s);
+  for (ptrdiff_t i = 0; i < ax_arrlen(s->lawblk_retired); i++)
+    free(s->lawblk_retired[i]);
+  ax_arrfree(s->lawblk_retired);
   for (ptrdiff_t i = 0; i < ax_hmlen(s->code_targets); i++)
     ax_arrfree(s->code_targets[i].value);
   ax_hmfree(s->code_targets);
@@ -1357,6 +1591,7 @@ pl_store* pl_store_new_lmdb(const char* path, size_t map_size) {
     free(l);
     return NULL;
   }
+  pl_lmdb_reap(l->env);
   MDB_txn* txn;
   if (mdb_txn_begin(l->env, NULL, 0, &txn) != 0 ||
       mdb_dbi_open(txn, NULL, MDB_CREATE, &l->dbi) != 0 ||
