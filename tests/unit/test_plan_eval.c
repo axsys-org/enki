@@ -1726,11 +1726,13 @@ TEST(exec, lawblk_directory_must_trail_the_code) {
   pl_thread* t = rt.t;
   size_t base = t->vsp;
   pl_vpush(t, test_law(t, 2, ax_s3('l', 'a', 'm'), 1));
-  pl_val lam = t->vstack[base];
-  pl_val bad[7] = {OP_LAWBLK, lam, 3, OP_PUSH_SLOT, 1, OP_RET, OP_RET};
+  /* lam lives in a moving heap: read its rooted slot for every row */
+  pl_val bad[7] = {OP_LAWBLK, t->vstack[base], 3,     OP_PUSH_SLOT,
+                   1,         OP_RET,          OP_RET};
   pl_vpush(t, test_app(t, 0, 7, bad));
   ASSERT_NULL(pl_bytecode_from_val(t->vstack[base + 1]));
-  pl_val out_of_range[6] = {OP_PUSH_SLOT, 0, OP_RET, OP_LAWBLK, lam, 4};
+  pl_val out_of_range[6] = {OP_PUSH_SLOT,    0, OP_RET, OP_LAWBLK,
+                            t->vstack[base], 4};
   t->vstack[base + 1] = test_app(t, 0, 6, out_of_range);
   ASSERT_NULL(pl_bytecode_from_val(t->vstack[base + 1]));
   pl_val not_law[6] = {OP_PUSH_SLOT, 0, OP_RET, OP_LAWBLK, 5, 0};
