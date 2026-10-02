@@ -826,3 +826,29 @@ TEST(actor, cross_actor_payload_is_store_resident) {
   er_scheduler_free(sys);
   test_rt_free(&rt);
 }
+
+TEST(actor, halted_actor_releases_unreachable_scratch) {
+  test_rt rt = test_rt_new();
+  er_scheduler* sys = er_scheduler_new(rt.store, (er_config){.heap_cells = 262144});
+  for (size_t i = 0; i < 16; i++) {
+    er_actor* a = er_scheduler_actor(sys);
+    pl_thread* t = er_actor_thread(a);
+    size_t capacity = pl_gc_headroom(t);
+    size_t base = t->vsp;
+    pl_vpush(t, 0);
+    for (size_t j = 0; j < 4096; j++)
+      t->vstack[base] = test_app2(t, 0, j, t->vstack[base]);
+    ASSERT(pl_gc_headroom(t) < capacity - 4096, "fixture allocates scratch");
+    t->vsp = base;
+    er_actor_start(a, actor_fn(t, 42));
+    ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
+    ASSERT_EQ(er_actor_state(a), ER_ACTOR_HALTED);
+    ASSERT_EQ(er_actor_result(a), 42);
+    ASSERT(pl_gc_live_cells(t->heap) < 64,
+           "terminated actor retains only its live result, not scratch");
+    ASSERT(pl_gc_headroom(t) + pl_gc_live_cells(t->heap) <= 8192,
+           "terminated actor releases its oversized physical semispaces");
+  }
+  er_scheduler_free(sys);
+  test_rt_free(&rt);
+}

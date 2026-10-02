@@ -684,9 +684,11 @@ static void er_step(er_scheduler* sys, er_actor* a, pl_run_status s,
     break;
   case PL_RUN_DONE:
     a->status = ER_ACTOR_HALTED; /* result discarded (kept for tests) */
+    pl_gc_trim(a->t);
     break;
   case PL_RUN_EXN:
     er_crash(a);
+    pl_gc_trim(a->t);
     break;
   case PL_RUN_BLOCKED:
     er_service(sys, a, locked);
