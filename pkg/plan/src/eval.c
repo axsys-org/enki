@@ -88,6 +88,8 @@ static void pl_unwind_frames(pl_thread* t, size_t base) {
     }
     if (fr->kind != PL_F_UPD)
       continue;
+    if (fr->argc == 0)
+      continue;
     if (fr->argc == 1) {
       pl_restore_thke(fr->a);
       continue;
@@ -634,7 +636,10 @@ static void pl_push_thke_update(pl_thread* t, size_t base, pl_val thke) {
     pl_frame* fr = &t->fstack[t->fsp - 1];
     if (fr->kind == PL_F_UPD) {
       ax_assume(fr->argc < UINT32_MAX, "update chain is too large");
-      if (fr->argc == 1) {
+      if (fr->argc == 0) {
+        fr->a = thke;
+        fr->argc = 1;
+      } else if (fr->argc == 1) {
         size_t start = t->usp;
         pl_upush(t, thke);
         fr->argbase = (uint32_t)start;
@@ -1633,7 +1638,7 @@ ret_update:
 ret_upd:
   if (fr->argc == 1) {
     pl_thke_update(t, fr->a, v);
-  } else {
+  } else if (fr->argc > 1) {
     ax_assume(fr->argc >= 2 && (size_t)fr->argbase + fr->argc - 1 == t->usp,
               "coalesced update stack is not a frame suffix");
     for (size_t i = fr->argc - 1; i > 0; i--)

@@ -1370,6 +1370,51 @@ TEST(exec, update_chain_coalesces_and_survives_gc) {
   test_rt_free(&rt);
 }
 
+static void test_update_chain_reachability(bool shared) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  enum { DEPTH = 6000 };
+  pl_vpush(t, 7);
+  pl_vpush(t, 0);
+  for (unsigned i = 0; i < DEPTH; i++) {
+    pl_gc_reserve(t, PL_THKE_CELLS(1));
+    t->vstack[base] = pl_mk_thke(t, PL_BAN_SLOW, 1, &t->vstack[base]);
+    if (shared && i == 5000)
+      t->vstack[base + 1] = t->vstack[base];
+  }
+  pl_val chain = t->vstack[base];
+  t->vstack[base] = 0;
+  pl_thread_start(t, chain);
+  ASSERT_EQ(pl_thread_run(t, DEPTH / 2), PL_RUN_YIELDED);
+  size_t before = t->usp;
+  ASSERT(before > 1000);
+  pl_gc_collect_now(t);
+  if (shared) {
+    ASSERT(t->usp > 1000);
+    ASSERT(t->usp < before);
+  } else {
+    ASSERT_EQ(t->usp, 0);
+  }
+  pl_run_status status;
+  while ((status = pl_thread_run(t, 100000)) == PL_RUN_YIELDED)
+    ;
+  ASSERT_EQ(status, PL_RUN_DONE);
+  ASSERT_EQ(pl_thread_result(t), 7);
+  ASSERT_EQ(t->usp, 0);
+  if (shared)
+    ASSERT_EQ(pl_whnf(t, t->vstack[base + 1]), 7);
+  test_rt_free(&rt);
+}
+
+TEST(exec, unreachable_update_targets_do_not_retain_tail_history) {
+  test_update_chain_reachability(false);
+}
+
+TEST(exec, shared_update_targets_keep_call_by_need_results) {
+  test_update_chain_reachability(true);
+}
+
 TEST(exec, runtime_error_restores_unwound_thke) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
