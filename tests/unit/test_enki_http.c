@@ -1,3 +1,4 @@
+#include "plan/bat.h"
 #include "test.h"
 
 #include <stdio.h>
@@ -979,4 +980,123 @@ TEST(http, mt_adopted_root_can_fetch) {
   er_scheduler_free(sys);
   test_rt_free(&rt);
   test_http_server_stop(&srv);
+}
+
+/* BAT request uses a virtual repeat followed by a pinned binary chunk.
+ * The server verifies every byte and the 307 path requires upload rewind. */
+static pl_val mk_bat_post(pl_thread* t, const void* env) {
+  size_t base = t->vsp;
+  pl_vpush(t, mk_request(t, "POST", env, 0, NULL, NULL));
+  pl_val run[] = {ax_s6('r', 'e', 'p', 'e', 'a', 't'), 'x', 9u << 20};
+  pl_vpush(t, test_app(t, 0, 3, run));
+  static const uint8_t tail[] = {'a', 0, 'b', 0, 'c', 0,
+                                 'd', 0, 'e', 0, 'f', 0};
+  pl_vpush(t, pl_bat_chunk(t, tail, sizeof(tail)));
+  pl_val shared[] = {ax_s3('c', 'a', 't'), t->vstack[base + 2],
+                     t->vstack[base + 2]};
+  t->vstack[base + 2] = test_app(t, 0, 3, shared);
+  pl_val cat[] = {ax_s3('c', 'a', 't'), t->vstack[base + 1],
+                  t->vstack[base + 2]};
+  pl_vpush(t, test_app(t, 0, 3, cat));
+  pl_vpush(t, test_app1(t, 0, t->vstack[base + 3]));
+  /* Fresh, unpublished request row. */
+  pl_app_args(pl_ptr(t->vstack[base]))[3] = t->vstack[base + 4];
+  pl_val out = t->vstack[base];
+  t->vsp = base;
+  return out;
+}
+
+TEST(http, bat_upload_above_nat_limit_redirect_and_replay) {
+  test_http_server srv;
+  ASSERT(test_http_server_start(&srv));
+  char url[256];
+  url_of(&srv, "/rehop", url, sizeof(url));
+  test_rt rt = test_rt_new();
+  er_log* log = er_log_new();
+  for (int replay = 0; replay < 2; replay++) {
+    er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
+    if (replay)
+      er_scheduler_replay(sys, log);
+    else
+      er_scheduler_record(sys, log);
+    er_actor* a = start_fetch_actor(sys, mk_bat_post, url, 30000, 2, 1024);
+    ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
+    ASSERT_EQ(er_actor_state(a), ER_ACTOR_HALTED);
+    assert_bar_eq(pl_app_args(result_ok(er_actor_result(a)))[3], "hello, enki");
+    er_scheduler_free(sys);
+    if (!replay)
+      test_http_server_stop(&srv);
+  }
+  uint64_t expected = 0;
+  for (size_t i = 0; i < (9u << 20); i++)
+    expected = expected * 31 + 'x';
+  static const uint8_t tail[] = {'a', 0, 'b', 0, 'c', 0,
+                                 'd', 0, 'e', 0, 'f', 0};
+  for (size_t i = 0; i < 2 * sizeof(tail); i++)
+    expected = expected * 31 + tail[i % sizeof(tail)];
+  ASSERT_EQ(srv.nreqs, 2);
+  for (size_t i = 0; i < 2; i++) {
+    ASSERT_EQ(srv.reqs[i].body_n, (9u << 20) + 2 * sizeof(tail));
+    ASSERT_EQ(srv.reqs[i].body_hash, expected);
+  }
+  er_log_free(log);
+  test_rt_free(&rt);
+}
+
+TEST(http, bat_response_above_nat_limit_and_replay) {
+  test_http_server srv;
+  ASSERT(test_http_server_start(&srv));
+  char url[256];
+  url_of(&srv, "/batbig", url, sizeof(url));
+  test_rt rt = test_rt_new();
+  er_log* log = er_log_new();
+  for (int replay = 0; replay < 2; replay++) {
+    er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
+    if (replay)
+      er_scheduler_replay(sys, log);
+    else
+      er_scheduler_record(sys, log);
+    er_actor* a = er_scheduler_actor(sys);
+    pl_thread* t = er_actor_thread(a);
+    pl_vpush(t, mk_get(t, url));
+    pl_vpush(t, mk_config(t, 30000, 0, 10u << 20));
+    pl_val mode[] = {ax_s3('b', 'a', 't'), 10u << 20};
+    pl_vpush(t, test_app(t, 0, 2, mode));
+    pl_app_args(pl_ptr(t->vstack[1]))[3] = t->vstack[2];
+    pl_val code = code_fetch(t, t->vstack[0], t->vstack[1]);
+    t->vsp = 0;
+    er_actor_start(a, actor_fn(t, code));
+    ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
+    ASSERT_EQ(er_actor_state(a), ER_ACTOR_HALTED);
+    pl_bat_cursor c;
+    ASSERT(pl_bat_open(&c, pl_app_args(result_ok(er_actor_result(a)))[3]));
+    ASSERT_EQ(c.length, 9u << 20);
+    uint8_t buf[4096];
+    size_t n;
+    while ((n = pl_bat_read(&c, buf, sizeof(buf))) != 0)
+      for (size_t i = 0; i < n; i++)
+        ASSERT_EQ(buf[i], 'x');
+    pl_bat_close(&c);
+    er_scheduler_free(sys);
+    if (!replay)
+      test_http_server_stop(&srv);
+  }
+  er_log_free(log);
+  test_rt_free(&rt);
+}
+
+TEST(http, legacy_bar_response_reports_representation_limit) {
+  test_http_server srv;
+  ASSERT(test_http_server_start(&srv));
+  char url[256];
+  url_of(&srv, "/batbig", url, sizeof(url));
+  test_rt rt = test_rt_new();
+  er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
+  er_actor* a = start_fetch_actor(sys, mk_get, url, 30000, 0, 10u << 20);
+  ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
+  ASSERT_EQ(er_actor_state(a), ER_ACTOR_HALTED);
+  ASSERT_EQ(result_err(er_actor_result(a)), HTTP_TOO_LARGE);
+  er_scheduler_free(sys);
+  test_http_server_stop(&srv);
+  test_rt_free(&rt);
 }

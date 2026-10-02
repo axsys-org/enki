@@ -1,3 +1,6 @@
+#include <openssl/evp.h>
+#include "plan/bat.h"
+#include "plan/store.h"
 /*
  * The HTTP driver: op 83 Fetch, backed by libcurl.
  *
@@ -10,11 +13,14 @@
  * aborts whatever is still in flight.
  *
  * Result   = (0 response) | (1 errCode)
- * Response = [status urlBar headersRow bodyBar]   (final response only)
+ * Response = [status urlBar headersRow body]   (final response only)
  * Request  = [methodBar urlBar headersRow bodyMaybe]
  * Config   = [connectMsMaybe deadlineMs redirects bodyMode]
  *   where Maybe x = 0 | [x], headersRow = 0 | [[nameBar valBar]…],
- *   bodyMode = [maxBytes] (Buffered) | 1 (Spooled — reserved, rejected)
+ *   bodyMode = [maxBytes] (bar) | ["bat" maxBytes] (BAT response)
+ *            | 1 (Spooled — reserved, rejected)
+ *   Request bodyMaybe accepts either a byte bar or a CordTree/BAT.
+ *   BAT responses are chunked PLAN values; transport/log buffers remain flat.
  *
  * Record/replay.  The completion order of concurrent transfers is the
  * only nondeterminism; the log captures it and replay reproduces it
@@ -89,7 +95,10 @@ struct er_http_xfer {
   char* url_c;
   uint8_t* body; /* CURLOPT_POSTFIELDS storage */
   size_t body_n;
+  bool body_bat;
+  pl_bat_cursor bat;
   uint64_t max_body;
+  int body_mode;
   bool body_overflow; /* Buffered cap tripped in the write callback */
   CURLcode result;
   long resp_status;
@@ -101,6 +110,13 @@ struct er_http_xfer {
   struct er_http_xfer* next_inflight;
   struct er_http_xfer* next_done;
 };
+
+/* Keep stable leaves visible to tracing as well as to curl. */
+static void er_http_bat_roots(pl_root_visit visit, void* gc, void* ctx) {
+  er_http_xfer* x = ctx;
+  for (size_t i = 0; i < x->bat.count; i++)
+    visit(&x->bat.spans[i].source, gc);
+}
 
 /* ── curl bootstrap ────────────────────────────────────────────────────── */
 
@@ -138,6 +154,8 @@ typedef struct er_http_parsed {
   bool has_body;
   uint8_t* body;
   size_t body_n;
+  bool body_bat;
+  pl_bat_cursor bat;
   bool has_connect_ms;
   uint64_t connect_ms;
   uint64_t deadline_ms;
@@ -155,6 +173,7 @@ static void er_http_parsed_free(er_http_parsed* p) {
   }
   ax_arrfree(p->hdrs);
   free(p->body);
+  pl_bat_close(&p->bat);
   memset(p, 0, sizeof(*p));
 }
 
@@ -219,8 +238,16 @@ static bool er_http_parse(pl_val reqv, pl_val cfgv, er_http_parsed* p) {
     pl_cell* some = er_row(rf[3]);
     if (some == NULL || pl_app_n(some) != 1)
       return false;
-    if (!er_bar(pl_app_args(some)[0], &p->body, &p->body_n))
-      return false;
+    pl_val body = pl_app_args(some)[0];
+    if (pl_is_nat(body)) {
+      if (!er_bar(body, &p->body, &p->body_n))
+        return false;
+    } else {
+      if (!pl_bat_open(&p->bat, body) || p->bat.length > INT64_MAX)
+        return false;
+      p->body_bat = true;
+      p->body_n = (size_t)p->bat.length;
+    }
     p->has_body = true;
   }
 
@@ -245,11 +272,18 @@ static bool er_http_parse(pl_val reqv, pl_val cfgv, er_http_parsed* p) {
     p->body_mode = 1;
   } else {
     pl_cell* buffered = er_row(cf[3]);
-    if (buffered == NULL || pl_app_n(buffered) != 1 ||
-        !pl_is_nat(pl_app_args(buffered)[0]))
+    if (buffered == NULL)
       return false;
-    p->body_mode = 0;
-    p->max_body = pl_nat_u64_clamp(pl_app_args(buffered)[0]);
+    pl_val* bf = pl_app_args(buffered);
+    if (pl_app_n(buffered) == 1 && pl_is_nat(bf[0])) {
+      p->body_mode = 0;
+      p->max_body = pl_nat_u64_clamp(bf[0]);
+    } else if (pl_app_n(buffered) == 2 && bf[0] == ax_s3('b', 'a', 't') &&
+               pl_is_nat(bf[1])) {
+      p->body_mode = 2;
+      p->max_body = pl_nat_u64_clamp(bf[1]);
+    } else
+      return false;
   }
   return true;
 }
@@ -268,26 +302,51 @@ static void er_hash_bytes(uint8_t** buf, const uint8_t* b, size_t n) {
     memcpy(ax_arraddn(*buf, (ptrdiff_t)n), b, n);
 }
 
-static void er_http_args_hash(const er_http_parsed* p, uint8_t out[32]) {
-  uint8_t* buf = NULL;
-  er_hash_bytes(&buf, p->method, p->method_n);
-  er_hash_bytes(&buf, p->url, p->url_n);
-  er_hash_u64(&buf, (uint64_t)ax_arrlen(p->hdrs));
+/* Preserve the existing request-hash byte encoding, but feed it
+ * incrementally; BAT shape and chunk boundaries do not affect identity. */
+static void er_digest_u64(EVP_MD_CTX* ctx, uint64_t n) {
+  uint8_t b[8];
+  for (unsigned i = 0; i < 8; i++)
+    b[i] = (uint8_t)(n >> (8 * i));
+  ax_assume(EVP_DigestUpdate(ctx, b, 8) == 1, "SHA256 update");
+}
+static void er_digest_bytes(EVP_MD_CTX* ctx, const uint8_t* b, size_t n) {
+  er_digest_u64(ctx, n);
+  if (n)
+    ax_assume(EVP_DigestUpdate(ctx, b, n) == 1, "SHA256 update");
+}
+static void er_http_args_hash(er_http_parsed* p, uint8_t out[32]) {
+  EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+  ax_assume(ctx && EVP_DigestInit_ex(ctx, EVP_sha256(), NULL) == 1,
+            "SHA256 init");
+  er_digest_bytes(ctx, p->method, p->method_n);
+  er_digest_bytes(ctx, p->url, p->url_n);
+  er_digest_u64(ctx, (uint64_t)ax_arrlen(p->hdrs));
   for (ptrdiff_t i = 0; i < ax_arrlen(p->hdrs); i++) {
-    er_hash_bytes(&buf, p->hdrs[i].name, p->hdrs[i].name_n);
-    er_hash_bytes(&buf, p->hdrs[i].value, p->hdrs[i].value_n);
+    er_digest_bytes(ctx, p->hdrs[i].name, p->hdrs[i].name_n);
+    er_digest_bytes(ctx, p->hdrs[i].value, p->hdrs[i].value_n);
   }
-  er_hash_u64(&buf, p->has_body ? 1 : 0);
-  if (p->has_body)
-    er_hash_bytes(&buf, p->body, p->body_n);
-  er_hash_u64(&buf, p->has_connect_ms ? 1 : 0);
-  er_hash_u64(&buf, p->connect_ms);
-  er_hash_u64(&buf, p->deadline_ms);
-  er_hash_u64(&buf, p->redirects);
-  er_hash_u64(&buf, (uint64_t)p->body_mode);
-  er_hash_u64(&buf, p->max_body);
-  ax_sha256(buf, (size_t)ax_arrlen(buf), out);
-  ax_arrfree(buf);
+  er_digest_u64(ctx, p->has_body ? 1 : 0);
+  if (p->has_body) {
+    if (p->body_bat) {
+      er_digest_u64(ctx, p->body_n);
+      uint8_t buf[65536];
+      size_t n;
+      pl_bat_seek(&p->bat, 0);
+      while ((n = pl_bat_read(&p->bat, buf, sizeof(buf))) != 0)
+        ax_assume(EVP_DigestUpdate(ctx, buf, n) == 1, "SHA256 update");
+      pl_bat_seek(&p->bat, 0);
+    } else
+      er_digest_bytes(ctx, p->body, p->body_n);
+  }
+  er_digest_u64(ctx, p->has_connect_ms ? 1 : 0);
+  er_digest_u64(ctx, p->connect_ms);
+  er_digest_u64(ctx, p->deadline_ms);
+  er_digest_u64(ctx, p->redirects);
+  er_digest_u64(ctx, (uint64_t)p->body_mode);
+  er_digest_u64(ctx, p->max_body);
+  ax_assume(EVP_DigestFinal_ex(ctx, out, NULL) == 1, "SHA256 final");
+  EVP_MD_CTX_free(ctx);
 }
 
 /* ── Validation (live/record only; replay reads the log instead) ───────── */
@@ -384,7 +443,7 @@ static int er_http_validate(const er_scheduler* sys, const er_http_parsed* p) {
 static size_t er_http_write_cb(char* ptr, size_t size, size_t nmemb, void* ud) {
   er_http_xfer* x = ud;
   size_t n = size * nmemb;
-  if ((uint64_t)ax_arrlen(x->resp_body) + n > x->max_body) {
+  if (n > x->max_body - (uint64_t)ax_arrlen(x->resp_body)) {
     x->body_overflow = true;
     return 0; /* short count aborts the transfer (CURLE_WRITE_ERROR) */
   }
@@ -519,7 +578,7 @@ static uint8_t* er_http_result_encode(const er_http_xfer* x, uint64_t* out_n) {
     ax_arrpush(buf, 1);
     ax_arrpush(buf, er_http_map_err(x));
   } else {
-    ax_arrpush(buf, 0);
+    ax_arrpush(buf, x->body_mode == 2 ? 2 : 0);
     er_enc_u64(&buf, (uint64_t)x->resp_status);
     const char* eu = x->effective_url != NULL ? x->effective_url : "";
     er_enc_bytes(&buf, (const uint8_t*)eu, strlen(eu));
@@ -618,7 +677,10 @@ static pl_val er_http_result_build(pl_thread* t, const uint8_t* d, uint64_t n) {
     uint64_t body_n;
     const uint8_t* body = er_dec_bytes(&c, &body_n);
     ax_assume(c.at == c.n, "er_http: trailing bytes in result encoding");
-    er_push_bar(t, body, body_n);
+    if (d[0] == 2)
+      pl_vpush(t, pl_bat_from_bytes(t, body, (size_t)body_n));
+    else
+      er_push_bar(t, body, body_n);
     er_push_app(t, 0, 4); /* [status url headers body] */
     er_push_app(t, 0, 1); /* (0 response) */
   }
@@ -639,6 +701,9 @@ static void er_http_xfer_free(er_scheduler* sys, er_http_xfer* x) {
   free(x->method_c);
   free(x->url_c);
   free(x->body);
+  if (x->body_bat)
+    pl_gc_del_root_source(x->actor->t->heap, er_http_bat_roots, x);
+  pl_bat_close(&x->bat);
   free(x->effective_url);
   ax_arrfree(x->resp_body);
   er_http_headers_reset(x);
@@ -710,6 +775,20 @@ static void er_http_curlm_settle(er_scheduler* sys) {
   }
 }
 
+static size_t er_http_upload(char* out, size_t size, size_t nmemb, void* ud) {
+  er_http_xfer* x = ud;
+  if (size && nmemb > SIZE_MAX / size)
+    return CURL_READFUNC_ABORT;
+  return pl_bat_read(&x->bat, (uint8_t*)out, size * nmemb);
+}
+static int er_http_seek(void* ud, curl_off_t offset, int origin) {
+  er_http_xfer* x = ud;
+  return origin == SEEK_SET && offset >= 0 &&
+                 pl_bat_seek(&x->bat, (uint64_t)offset)
+             ? CURL_SEEKFUNC_OK
+             : CURL_SEEKFUNC_CANTSEEK;
+}
+
 static void er_http_dispatch(er_scheduler* sys, er_actor* a, er_http_parsed* p,
                              const uint8_t hash[32]) {
   CURLM* m = er_curlm(sys);
@@ -719,9 +798,39 @@ static void er_http_dispatch(er_scheduler* sys, er_actor* a, er_http_parsed* p,
   x->actor = a;
   memcpy(x->args_hash, hash, 32);
   x->max_body = p->max_body;
+  x->body_mode = p->body_mode;
+  if (x->body_mode == 0 && x->max_body > (uint64_t)PL_HDR_META_MAX * 8 - 1)
+    x->max_body = (uint64_t)PL_HDR_META_MAX * 8 - 1;
   x->method_c = er_cstr(p->method, p->method_n);
   x->url_c = er_cstr(p->url, p->url_n);
   if (p->has_body) { /* steal the parsed body as POSTFIELDS storage */
+    x->body_bat = p->body_bat;
+    x->bat = p->bat;
+    memset(&p->bat, 0, sizeof(p->bat));
+    if (x->body_bat)
+      pl_gc_add_root_source(a->t->heap, er_http_bat_roots, x);
+    /* Snapshot only distinct leaf nats. Whole-rope copying is recursive;
+     * copying per span duplicates backing chunks shared by many slices.
+     * Snapshot allocation never collects: map keys remain stable here. */
+    struct {
+      pl_val key, value;
+    }* copies = NULL;
+    PL_GC_FORBID(a->t);
+    for (size_t i = 0; i < x->bat.count; i++) {
+      pl_val source = x->bat.spans[i].source;
+      if (pl_is_nat63(source) || pl_store_owns(sys->store, source))
+        continue;
+      ptrdiff_t at = ax_hmgeti(copies, source);
+      if (at >= 0) {
+        x->bat.spans[i].source = copies[at].value;
+      } else {
+        pl_val stable = pl_store_snapshot_normal(a->t, source);
+        ax_hmput(copies, source, stable);
+        x->bat.spans[i].source = stable;
+      }
+    }
+    PL_GC_ALLOW(a->t);
+    ax_hmfree(copies);
     x->body = p->body;
     x->body_n = p->body_n;
     p->body = NULL;
@@ -757,7 +866,15 @@ static void er_http_dispatch(er_scheduler* sys, er_actor* a, er_http_parsed* p,
   ER_CURL_EASY(curl_easy_setopt(e, CURLOPT_CUSTOMREQUEST, x->method_c));
   if (strcmp(x->method_c, "HEAD") == 0)
     ER_CURL_EASY(curl_easy_setopt(e, CURLOPT_NOBODY, 1L));
-  if (x->body != NULL) {
+  if (x->body_bat) {
+    ER_CURL_EASY(curl_easy_setopt(e, CURLOPT_POST, 1L));
+    ER_CURL_EASY(curl_easy_setopt(e, CURLOPT_READFUNCTION, er_http_upload));
+    ER_CURL_EASY(curl_easy_setopt(e, CURLOPT_READDATA, x));
+    ER_CURL_EASY(curl_easy_setopt(e, CURLOPT_SEEKFUNCTION, er_http_seek));
+    ER_CURL_EASY(curl_easy_setopt(e, CURLOPT_SEEKDATA, x));
+    ER_CURL_EASY(curl_easy_setopt(e, CURLOPT_POSTFIELDSIZE_LARGE,
+                                  (curl_off_t)x->body_n));
+  } else if (x->body != NULL) {
     ER_CURL_EASY(curl_easy_setopt(e, CURLOPT_POSTFIELDS, x->body));
     ER_CURL_EASY(curl_easy_setopt(e, CURLOPT_POSTFIELDSIZE_LARGE,
                                   (curl_off_t)x->body_n));

@@ -1,3 +1,4 @@
+#include "plan/bat.h"
 #include "test.h"
 
 #include <stdio.h>
@@ -476,4 +477,59 @@ TEST(replay, live_systems_are_unaffected_by_the_hook) {
     er_scheduler_free(sys);
   }
   test_rt_free(&rt);
+}
+
+TEST(replay, readbat_roundtrip_without_file) {
+  char dir[] = "/tmp/enki-replay-bat-XXXXXX";
+  ASSERT_NOT_NULL(mkdtemp(dir));
+  char path[256], logpath[256];
+  snprintf(path, sizeof(path), "%s/data", dir);
+  snprintf(logpath, sizeof(logpath), "%s/log", dir);
+  FILE* f = fopen(path, "wb");
+  ASSERT_NOT_NULL(f);
+  uint8_t bytes[65536];
+  memset(bytes, 0xab, sizeof(bytes));
+  for (size_t i = 0; i < 144; i++)
+    ASSERT_EQ(fwrite(bytes, 1, sizeof(bytes), f), sizeof(bytes));
+  ASSERT_EQ(fputc(0, f), 0);
+  fclose(f);
+  test_rt rt = test_rt_new();
+  er_log* log = er_log_new();
+  for (int replay = 0; replay < 2; replay++) {
+    er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
+    if (replay)
+      er_scheduler_replay(sys, log);
+    else
+      er_scheduler_record(sys, log);
+    er_actor* a = er_scheduler_actor(sys);
+    pl_thread* t = er_actor_thread(a);
+    pl_vpush(t, pl_nat_from_bytes(t, (const uint8_t*)path, strlen(path)));
+    pl_val args[] = {t->vstack[0]};
+    pl_val code =
+        code_effect83(t, ax_s7('R', 'e', 'a', 'd', 'B', 'a', 't'), 1, args);
+    t->vsp = 0;
+    er_actor_start(a, actor_fn(t, code));
+    ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
+    ASSERT_EQ(er_actor_state(a), ER_ACTOR_HALTED);
+    pl_bat_cursor c;
+    ASSERT(pl_bat_open(&c, er_actor_result(a)));
+    ASSERT_EQ(c.length, (9u << 20) + 1);
+    ASSERT(pl_bat_seek(&c, c.length - 2));
+    ASSERT_EQ(pl_bat_read(&c, bytes, 2), 2);
+    ASSERT_EQ(bytes[0], 0xab);
+    ASSERT_EQ(bytes[1], 0);
+    pl_bat_close(&c);
+    er_scheduler_free(sys);
+    if (!replay) {
+      ASSERT(er_log_write_file(log, logpath));
+      er_log_free(log);
+      log = er_log_read_file(logpath);
+      ASSERT_NOT_NULL(log);
+      ASSERT_EQ(unlink(path), 0);
+    }
+  }
+  er_log_free(log);
+  test_rt_free(&rt);
+  unlink(logpath);
+  rmdir(dir);
 }
