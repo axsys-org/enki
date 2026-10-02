@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 
 #include "axsys/assume.h"
 #include "axsys/perf.h"
@@ -191,12 +192,31 @@ static void pl_cache_stats_merge(const pl_cache_stats* s) {
 /* ── Heap lifecycle ────────────────────────────────────────────────────── */
 
 static pl_cell* pl_space_alloc(size_t cells) {
-  pl_cell* p = malloc(cells * sizeof(pl_cell));
-  ax_assume(p != NULL, "heap semispace allocation failed (%zu cells)", cells);
+  pl_cell* p = mmap(NULL, cells * sizeof(pl_cell), PROT_READ | PROT_WRITE,
+                    MAP_PRIVATE | MAP_ANON, -1, 0);
+  ax_assume(p != MAP_FAILED, "heap semispace allocation failed (%zu cells)", cells);
   ax_assume(((uintptr_t)p & 7u) == 0, "semispace not 8-aligned");
   ax_assume(((uintptr_t)(p + cells) & ~PL_ADDR_MASK) == 0,
             "heap address exceeds 56 bits");
   return p;
+}
+
+static void pl_space_free(pl_cell* space, size_t cells) {
+  (void)munmap(space, cells * sizeof(pl_cell));
+}
+static void pl_space_discard(pl_cell* space, size_t cells) {
+#if defined(__APPLE__)
+  (void)madvise(space, cells * sizeof(pl_cell), MADV_FREE_REUSABLE);
+#else
+  (void)madvise(space, cells * sizeof(pl_cell), MADV_DONTNEED);
+#endif
+}
+static void pl_space_reuse(pl_cell* space, size_t cells) {
+#if defined(__APPLE__)
+  (void)madvise(space, cells * sizeof(pl_cell), MADV_FREE_REUSE);
+#else
+  (void)space; (void)cells;
+#endif
 }
 
 pl_heap* pl_heap_new(size_t cells, pl_store* store) {
@@ -216,8 +236,8 @@ pl_heap* pl_heap_new(size_t cells, pl_store* store) {
 void pl_heap_free(pl_heap* h) {
   if (h == NULL)
     return;
-  free(h->from);
-  free(h->to);
+  pl_space_free(h->from, h->cells);
+  pl_space_free(h->to, h->cells);
   free(h->roots);
   free(h);
 }
@@ -461,14 +481,18 @@ static void pl_collect_into(pl_thread* t, pl_heap* h, pl_cell* target) {
 }
 
 static void pl_gc_collect(pl_thread* t, pl_heap* h) {
+  pl_space_reuse(h->to, h->cells);
   pl_collect_into(t, h, h->to);
   pl_cell* old_from = h->from;
   h->from = h->to;
   h->to = old_from;
   h->limit = h->from + h->cells;
+
+  pl_space_discard(h->to, h->cells);
 }
 
 static void pl_gc_grow(pl_thread* t, pl_heap* h, size_t need_cells) {
+  size_t old_cells = h->cells;
   size_t want = h->cells;
   while (want < h->live_cells + need_cells + (h->live_cells / 2) + 4096)
     want *= 2;
@@ -482,8 +506,8 @@ static void pl_gc_grow(pl_thread* t, pl_heap* h, size_t need_cells) {
   h->to = nto;
   h->cells = want;
   h->limit = h->from + want;
-  free(old_from);
-  free(old_to);
+  pl_space_free(old_from, old_cells);
+  pl_space_free(old_to, old_cells);
 }
 
 void pl_invariant_failed(const char* file, int line, const char* func,
@@ -531,6 +555,27 @@ bool pl_gc_collect_if_pressure(pl_thread* t, size_t allocation_floor_cells) {
 
 void pl_gc_collect_now(pl_thread* t) {
   pl_gc_collect(t, t->heap);
+}
+
+void pl_gc_trim(pl_thread* t) {
+  pl_heap* h = t->heap;
+  pl_gc_collect(t, h);
+  size_t want = 4096;
+  while (want < h->live_cells + 4096)
+    want *= 2;
+  if (want >= h->cells)
+    return;
+  size_t old_cells = h->cells;
+  pl_cell* old_from = h->from;
+  pl_cell* old_to = h->to;
+  pl_cell* next = pl_space_alloc(want);
+  pl_collect_into(t, h, next);
+  h->from = next;
+  h->to = pl_space_alloc(want);
+  h->cells = want;
+  h->limit = next + want;
+  pl_space_free(old_from, old_cells);
+  pl_space_free(old_to, old_cells);
 }
 
 /* ── Thread ────────────────────────────────────────────────────────────── */
