@@ -872,6 +872,29 @@ static pl_val op_try(pl_thread* t, size_t ab) {
   return ARG(0);
 }
 
+static pl_val op_pure(pl_thread* t, size_t ab) {
+  uint64_t limit = pl_nat_u64_clamp(pl_nat_coerce(ARG(0)));
+  if (limit > UINT64_C(250000000)) limit = UINT64_C(250000000);
+  pl_frame* fr = pl_fpush(t);
+  fr->kind = PL_F_PURE;
+  fr->argbase = (uint32_t)(ab - 1);
+  fr->profile_mark = t->profile_next_generation;
+  fr->k = t->pure_depth;
+
+  fr->argc = t->pure_depth != 0 && t->pure_remaining > limit
+      ? (uint32_t)(t->pure_remaining - limit) : 0;
+  if (t->pure_depth == 0 || limit < t->pure_remaining)
+    t->pure_remaining = limit;
+  t->pure_depth++;
+  if (getenv("PLAN_PURE_STATS") != NULL)
+    fprintf(stderr, "[pure] enter depth=%u allowance=%llu requested=%llu\n",
+            t->pure_depth, (unsigned long long)t->pure_remaining,
+            (unsigned long long)limit);
+  pl_push_nf(t);
+  pl_push_apply(t, ARG(2));
+  return ARG(1);
+}
+
 /*
  * (Memo f x) ≡ (f x), unconditionally — the identity on application
  * (spec: doc/sigoflaw-memo-spec.md).  When both args are canonical
@@ -1351,6 +1374,7 @@ const pl_opdesc pl_ops[] = {
     OP83_LOCAL("HmacSha256", 2, 0b11, pl_op83_hmac_sha256),
 
     OP66(ax_s3('I', 'c', 'e'), 1, 0b1, 0b1, op_ice),
+    OP66(ax_s4('P', 'u', 'r', 'e'), 3, 0b001, 0, op_pure),
 };
 
 const size_t pl_nops = sizeof(pl_ops) / sizeof(pl_ops[0]);
@@ -1374,7 +1398,7 @@ static const uint16_t pl_op66_argc2[] = {
     8,  9,  10, 11, 12, 13, 14, 31, 32, 33, 36, 37, 43, 47, 50,  64, 66,
     69, 70, 73, 84, 87, 88, 89, 92, 93, 94, 95, 96, 97, 98, 102, 133};
 static const uint16_t pl_op66_argc3[] = {4,  15, 30, 34, 35, 48, 51,
-                                         61, 62, 63, 67, 68, 90, 91};
+                                         61, 62, 63, 67, 68, 90, 91, 142};
 static const uint16_t pl_op66_argc4[] = {16, 49, 129};
 static const uint16_t pl_op66_argc5[] = {17};
 static const uint16_t pl_op66_argc6[] = {5, 18};

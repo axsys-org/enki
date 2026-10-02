@@ -644,6 +644,76 @@ TEST(ops, try_catches_plan_exn_only) {
   test_rt_free(&rt);
 }
 
+TEST(ops, pure_bounds_and_recovers) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  pl_vpush(t, test_law(t, 1, 0, 1));
+  size_t identity = t->vsp - 1;
+  const uint64_t budgets[] = {0, 1, 1000000000};
+  for (size_t i = 0; i < 3; i++) {
+    pl_val args[3] = {budgets[i], t->vstack[identity], 9};
+    pl_val r = test_op66(t, ax_s4('P', 'u', 'r', 'e'), 3, args);
+    pl_cell* p = pl_as(PL_TAG_APP, r);
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(pl_app_head(p), i == 0 ? 1 : 0);
+    if (i != 0) ASSERT_EQ(pl_app_args(p)[0], 9);
+    ASSERT_EQ(t->pure_depth, 0);
+  }
+  test_rt_free(&rt);
+}
+
+TEST(ops, pure_trace_preserves_underlying_exception) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  pl_vpush(t, test_throwing(t, 19));
+  pl_val fields[2] = {42, t->vstack[base]};
+  base = t->vsp;
+  pl_vpush(t, test_app(t, ax_s5('T', 'r', 'a', 'c', 'e'), 2, fields));
+  pl_vpush(t, test_app1(t, 0, t->vstack[base]));
+  pl_vpush(t, test_app1(t, 0, test_p66(t)));
+  pl_vpush(t, test_app2(t, 0, t->vstack[base + 2], t->vstack[base + 1]));
+  pl_vpush(t, test_law(t, 1, 0, t->vstack[base + 3]));
+  pl_val denied[3] = {10000, t->vstack[base + 4], 0};
+  pl_cell* p = pl_as(PL_TAG_APP,
+      test_op66(t, ax_s4('P', 'u', 'r', 'e'), 3, denied));
+  ASSERT_NOT_NULL(p);
+  ASSERT_EQ(pl_app_head(p), 1);
+  ASSERT_EQ(pl_app_args(p)[0], 19);
+  ASSERT_EQ(t->pure_depth, 0);
+  test_rt_free(&rt);
+}
+
+TEST(ops, pure_silences_trace_and_normalizes_lazy_results) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  pl_val fields[2] = {42, 7};
+  pl_vpush(t, test_app(t, ax_s5('T', 'r', 'a', 'c', 'e'), 2, fields));
+  pl_vpush(t, test_app1(t, 0, t->vstack[base]));
+  pl_vpush(t, test_app1(t, 0, test_p66(t)));
+  pl_vpush(t, test_app2(t, 0, t->vstack[base + 2], t->vstack[base + 1]));
+  pl_vpush(t, test_law(t, 1, 0, t->vstack[base + 3]));
+  pl_val denied[3] = {10000, t->vstack[base + 4], 0};
+  pl_cell* p = pl_as(PL_TAG_APP,
+      test_op66(t, ax_s4('P', 'u', 'r', 'e'), 3, denied));
+  ASSERT_NOT_NULL(p);
+  ASSERT_EQ(pl_app_head(p), 0);
+  ASSERT_EQ(pl_app_args(p)[0], 7);
+  ASSERT_EQ(t->pure_depth, 0);
+  pl_vpush(t, test_law(t, 1, 0, 1));
+  pl_vpush(t, test_app1_thunk_to(t, 17));
+  pl_val allowed[3] = {10000, t->vstack[t->vsp - 2], t->vstack[t->vsp - 1]};
+  p = pl_as(PL_TAG_APP, test_op66(t, ax_s4('P', 'u', 'r', 'e'), 3, allowed));
+  ASSERT_NOT_NULL(p);
+  ASSERT_EQ(pl_app_head(p), 0);
+  pl_cell* result = pl_as(PL_TAG_APP, pl_app_args(p)[0]);
+  ASSERT_NOT_NULL(result);
+  ASSERT_EQ(pl_resolve(pl_app_args(result)[0]), 17);
+  ASSERT_EQ(t->pure_depth, 0);
+  test_rt_free(&rt);
+}
+
 TEST(ops, try_restores_unwound_thunk_chain) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;

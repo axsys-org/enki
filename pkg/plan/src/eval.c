@@ -77,6 +77,14 @@ static void pl_unwind_frames(pl_thread* t, size_t base) {
   ax_assume(base <= t->fsp, "frame unwind below live stack");
   for (size_t i = t->fsp; i > base; i--) {
     pl_frame* fr = &t->fstack[i - 1];
+    if (fr->kind == PL_F_PURE) {
+      if (getenv("PLAN_PURE_STATS") != NULL)
+        fprintf(stderr, "[pure] unwind depth=%u remaining=%llu\n",
+                t->pure_depth, (unsigned long long)t->pure_remaining);
+      t->pure_remaining += fr->argc;
+      t->pure_depth = fr->k;
+      continue;
+    }
     if (fr->kind == PL_F_UPDATE) {
       pl_cell* p = pl_ptr(fr->a);
       ax_assume(pl_hdr_kind(p[0]) == PL_K_BH,
@@ -701,7 +709,7 @@ static pl_run_status pl_run(pl_thread* t, pl_val v, size_t base,
       [PL_F_UPD] = &&ret_upd,       [PL_F_TRY] = &&ret_try,
       [PL_F_JUDGE] = &&ret_judge,   [PL_F_NIL] = &&ret_nil,
       [PL_F_PROF] = &&ret_prof,     [PL_F_APPLYN] = &&ret_applyn,
-      [PL_F_MEMO] = &&ret_memo,
+      [PL_F_MEMO] = &&ret_memo,     [PL_F_PURE] = &&ret_pure,
   };
 
   if (entry == PL_RES_RETURN)
@@ -710,6 +718,10 @@ static pl_run_status pl_run(pl_thread* t, pl_val v, size_t base,
     goto exec;
 
 eval:
+  if (ax_unlikely(t->pure_depth != 0)) {
+    if (t->pure_remaining == 0) pl_raise_msg(t, "Pure: evaluation budget exhausted");
+    t->pure_remaining--;
+  }
   /*
    * The per-step safepoint: one decrement and one branch.  Fuel is the
    * only yield trigger.  At this position the complete machine
@@ -863,6 +875,11 @@ exec: {
 #define NEXT() (assert(fr->k < fr->code->nops), fr->code->ops[fr->k++])
 #define DISPATCH()                                                             \
   do {                                                                         \
+    if (ax_unlikely(t->pure_depth != 0)) {                                     \
+      if (t->pure_remaining == 0)                                              \
+        pl_raise_msg(t, "Pure: evaluation budget exhausted");                  \
+      t->pure_remaining--;                                                     \
+    }                                                                          \
     pl_op_t op_ = NEXT();                                                      \
     assert(op_ < PL_OP_COUNT);                                                 \
     goto* op_tbl[op_];                                                         \
@@ -1821,6 +1838,14 @@ ret_exec:
   pl_vpush(t, v); /* deliver to operand stack */
   goto exec;
 
+ret_pure:
+  if (getenv("PLAN_PURE_STATS") != NULL)
+    fprintf(stderr, "[pure] return depth=%u remaining=%llu\n",
+            t->pure_depth, (unsigned long long)t->pure_remaining);
+  t->pure_remaining += fr->argc;
+  t->pure_depth = fr->k;
+  goto ret_try;
+
 ret_try: {
   /* force (f x) succeeded under the barrier: the reference planTry's
    * Right, wrapped as (0 v).  The Left path lives in pl_run_caught. */
@@ -2112,6 +2137,30 @@ op_body:
   t->fsp--; /* pop before the body so its frames take this slot */
 op_body_ready: {
   const pl_opdesc* d = &pl_ops[op_idx];
+
+  if (ax_unlikely(t->pure_depth != 0) && d->name_c != NULL &&
+      (strcmp(d->name_c, "ZoneStart") == 0 || strcmp(d->name_c, "ZoneEnd") == 0)) {
+    t->vsp = op_base - 1;
+    v = 0;
+    goto ret;
+  }
+
+  if (ax_unlikely(t->pure_depth != 0) && d->opset == 66 &&
+      d->name == ax_s5('T', 'r', 'a', 'c', 'e')) {
+    v = t->vstack[op_base + 1];
+    t->vsp = op_base - 1;
+    goto eval;
+  }
+  if (ax_unlikely(t->pure_depth != 0) &&
+      (d->opset == 82 || d->coord || d->host_effect ||
+       (d->opset == 66 && (d->name == ax_s4('S','a','v','e') ||
+         d->name == ax_s7('I','n','s','t','a','l','l') ||
+         d->name == ax_s7('U','p','g','r','a','d','e') || d->name == ax_s5('T','r','a','c','e'))) ||
+       (d->name_c != NULL && (strcmp(d->name_c, "ZoneStart") == 0 ||
+                              strcmp(d->name_c, "ZoneEnd") == 0))))
+    pl_raise_msgf(t, "Pure: external effect denied (%u/%llu)",
+      (unsigned)d->opset, (unsigned long long)d->name);
+
   uint32_t opi = op_idx;
   size_t argbase = op_base;
   t->centry_depth++; /* op bodies are C-entry regions */
@@ -2191,11 +2240,19 @@ static pl_run_status pl_run_caught(pl_thread* t, pl_val v0, size_t base,
     }
     t->handler = c.prev;
     t->centry_depth = c.centry;
-    if (t->exn_msg == NULL) { /* runtime errors are not catchable */
+    if (t->exn_msg == NULL || t->pure_depth != 0) {
       size_t i = t->fsp;
-      while (i > base && t->fstack[i - 1].kind != PL_F_TRY)
+      while (i > base) {
+        uint8_t kind = t->fstack[i - 1].kind;
+        if (kind == PL_F_PURE || (t->exn_msg == NULL && kind == PL_F_TRY)) break;
         i--;
+      }
       if (i > base) {
+        if (t->exn_msg != NULL) {
+          const char* message = t->exn_msg;
+          t->exn = pl_nat_from_bytes(t, (const uint8_t*)message, strlen(message));
+          t->exn_msg = NULL;
+        }
         /* unwind to the barrier and deliver (1 exn) */
         uint64_t profile_mark = t->fstack[i - 1].profile_mark;
         uint32_t argbase = t->fstack[i - 1].argbase;

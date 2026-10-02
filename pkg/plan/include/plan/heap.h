@@ -64,6 +64,7 @@ typedef enum {
                    /* vstack at argbase; the head slot is argbase-1     */
   PL_F_MEMO,       /* memo barrier (op 66 Memo); a: f pin, b: x pin,    */
                    /* epoch: effect-epoch watermark at entry            */
+  PL_F_PURE,
   PL_F_KIND_COUNT, /* sentinel: sizes pl_run's RETURN dispatch table    */
 } pl_frame_kind;
 
@@ -214,6 +215,8 @@ struct pl_thread {
   /* The reference vMode: op 82 (rplan I/O) is callable only in RPLAN
    * mode (REPL / snapshot execution), never while assembling modules. */
   bool rplan_f;
+  uint32_t pure_depth;
+  uint64_t pure_remaining;
 
   /* When non-NULL, ReadFile and ReadFolder resolve their arguments relative
    * to this root and refuse paths whose canonical target escapes it. */
