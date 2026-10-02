@@ -1,3 +1,5 @@
+#include <sodium.h>
+#include "plan/bat.h"
 #include <setjmp.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -286,168 +288,64 @@ static pl_val op_scan8(pl_thread* t, size_t ab) {
   return out;
 }
 
-typedef struct strtree_stack {
-  pl_val* items;
-  size_t len;
-  size_t cap;
-} strtree_stack;
-
-typedef struct strtree_bytes {
-  uint8_t* items;
-  size_t len;
-  size_t cap;
-} strtree_bytes;
-
-#define STRTREE_MAX_BYTES ((((size_t)1 << 20) - 1) * sizeof(uint64_t))
-
-static void* strtree_grow(void* mem, size_t* cap, size_t need,
-                          size_t item_size) {
-  if (need <= *cap)
-    return mem;
-  size_t next = *cap == 0 ? 16 : *cap;
-  while (next < need) {
-    if (next > SIZE_MAX / 2) {
-      next = need;
-      break;
-    }
-    next *= 2;
-  }
-  if (next > SIZE_MAX / item_size)
-    return NULL;
-  void* grown = realloc(mem, next * item_size);
-  if (grown == NULL)
-    return NULL;
-  *cap = next;
-  return grown;
-}
-
-static bool strtree_push(strtree_stack* stack, pl_val value) {
-  void* grown = strtree_grow(stack->items, &stack->cap, stack->len + 1,
-                             sizeof(*stack->items));
-  if (grown == NULL)
-    return false;
-  stack->items = grown;
-  stack->items[stack->len++] = value;
-  return true;
-}
-
-static bool strtree_nat_size(pl_val value, size_t* out) {
-  if (pl_nat_limb_len(value) > 1)
-    return false;
-  uint64_t n = pl_nat_limb_at(value, 0);
-  if (n > SIZE_MAX)
-    return false;
-  *out = (size_t)n;
-  return true;
-}
-
-static bool strtree_reserve_bytes(strtree_bytes* bytes, size_t add) {
-  if (add == 0)
-    return true;
-  if (add > STRTREE_MAX_BYTES - bytes->len)
-    return false;
-  void* grown = strtree_grow(bytes->items, &bytes->cap, bytes->len + add,
-                             sizeof(*bytes->items));
-  if (grown == NULL)
-    return false;
-  bytes->items = grown;
-  return true;
-}
-
-/*
- * StrTree traverses an already-deep-normal CordTree.  The host stack and
- * byte accumulator cannot be invalidated by GC; the only PLAN allocation
- * happens after traversal, when no CordTree pointers remain in the host stack.
- */
+/* CordTree/BAT flattening is deliberately bounded by the nat representation.
+ * Streaming consumers use the same validated cursor without this bound. */
 static pl_val op_strtree(pl_thread* t, size_t ab) {
-  const pl_val text_tag = ax_s4('t', 'e', 'x', 't');
-  const pl_val slice_tag = ax_s5('s', 'l', 'i', 'c', 'e');
-  const pl_val repeat_tag = ax_s6('r', 'e', 'p', 'e', 'a', 't');
-  const pl_val cat_tag = ax_s3('c', 'a', 't');
-  strtree_stack stack = {0};
-  strtree_bytes bytes = {0};
-
-  if (!strtree_push(&stack, ARG(0)))
-    goto allocation_failed;
-
-  while (stack.len != 0) {
-    pl_val node = stack.items[--stack.len];
-    pl_cell* app = pl_as(PL_TAG_APP, node);
-    if (app == NULL)
-      goto malformed;
-    uint32_t row_n = pl_app_n(app);
-    if (pl_app_head(app) != 0 || row_n == 0)
-      goto malformed;
-    pl_val* fields = pl_app_args(app);
-    pl_val tag = fields[0];
-    fields++;
-    uint32_t n = row_n - 1;
-    if (n == 1 && tag == text_tag) {
-      if (!pl_is_nat(fields[0]))
-        goto malformed;
-      size_t text_len = pl_nat_byte_len(fields[0]);
-      if (!strtree_reserve_bytes(&bytes, text_len))
-        goto output_too_large_or_allocation_failed;
-      for (size_t i = 0; i < text_len; i++)
-        bytes.items[bytes.len + i] = pl_nat_byte_at(fields[0], i);
-      bytes.len += text_len;
-    } else if (n == 3 && tag == slice_tag) {
-      if (!pl_is_nat(fields[0]) || !pl_is_nat(fields[1]) ||
-          !pl_is_nat(fields[2]))
-        goto malformed;
-      size_t slice_len;
-      if (!strtree_nat_size(fields[2], &slice_len) ||
-          !strtree_reserve_bytes(&bytes, slice_len))
-        goto output_too_large_or_allocation_failed;
-      size_t offset;
-      size_t source_len = pl_nat_byte_len(fields[0]);
-      size_t available = 0;
-      if (strtree_nat_size(fields[1], &offset) && offset < source_len)
-        available = source_len - offset;
-      if (available > slice_len)
-        available = slice_len;
-      for (size_t i = 0; i < available; i++)
-        bytes.items[bytes.len + i] = pl_nat_byte_at(fields[0], offset + i);
-      if (slice_len != available)
-        memset(bytes.items + bytes.len + available, 0, slice_len - available);
-      bytes.len += slice_len;
-    } else if (n == 2 && tag == repeat_tag) {
-      if (!pl_is_nat(fields[0]) || !pl_is_nat(fields[1]))
-        goto malformed;
-      size_t count;
-      if (!strtree_nat_size(fields[1], &count) ||
-          !strtree_reserve_bytes(&bytes, count))
-        goto output_too_large_or_allocation_failed;
-      if (count != 0)
-        memset(bytes.items + bytes.len, pl_nat_byte_at(fields[0], 0), count);
-      bytes.len += count;
-    } else if (n == 2 && tag == cat_tag) {
-      if (!strtree_push(&stack, fields[1]) || !strtree_push(&stack, fields[0]))
-        goto allocation_failed;
-    } else {
-      goto malformed;
-    }
+  pl_bat_cursor c;
+  if (!pl_bat_open(&c, ARG(0)))
+    return 0;
+  if (c.length > (uint64_t)PL_HDR_META_MAX * 8) {
+    pl_bat_close(&c);
+    pl_raise_msg(t, "StrTree: output too large");
   }
-
-  free(stack.items);
-  pl_val out = pl_nat_from_bytes(t, bytes.items, bytes.len);
-  free(bytes.items);
+  size_t n = (size_t)c.length;
+  uint8_t* bytes = malloc(n ? n : 1);
+  if (!bytes) {
+    pl_bat_close(&c);
+    pl_raise_msg(t, "StrTree: temporary allocation failed");
+  }
+  pl_bat_read(&c, bytes, n);
+  pl_bat_close(&c);
+  pl_val out = pl_nat_from_bytes(t, bytes, n);
+  free(bytes);
   return out;
+}
 
-malformed:
-  free(stack.items);
-  free(bytes.items);
-  return 0;
+static pl_val op_bateq(pl_thread* t, size_t ab) {
+  pl_bat_cursor a, b;
+  if (!pl_bat_open(&a, ARG(0)))
+    return 0;
+  if (!pl_bat_open(&b, ARG(1))) {
+    pl_bat_close(&a);
+    return 0;
+  }
+  bool equal = a.length == b.length;
+  uint8_t x[16384], y[16384];
+  while (equal) {
+    size_t n = pl_bat_read(&a, x, sizeof(x));
+    if (!n)
+      break;
+    equal = pl_bat_read(&b, y, n) == n && memcmp(x, y, n) == 0;
+  }
+  pl_bat_close(&a);
+  pl_bat_close(&b);
+  return equal;
+}
 
-allocation_failed:
-  free(stack.items);
-  free(bytes.items);
-  pl_raise_msg(t, "StrTree: temporary allocation failed");
-
-output_too_large_or_allocation_failed:
-  free(stack.items);
-  free(bytes.items);
-  pl_raise_msg(t, "StrTree: output too large or temporary allocation failed");
+static pl_val op_bathash(pl_thread* t, size_t ab) {
+  pl_bat_cursor c;
+  if (!pl_bat_open(&c, ARG(0)))
+    pl_raise_msg(t, "BatHash: malformed BAT");
+  crypto_hash_sha256_state state;
+  crypto_hash_sha256_init(&state);
+  uint8_t buf[16384], digest[33];
+  size_t n;
+  while ((n = pl_bat_read(&c, buf, sizeof(buf))) != 0)
+    crypto_hash_sha256_update(&state, buf, n);
+  pl_bat_close(&c);
+  crypto_hash_sha256_final(&state, digest);
+  digest[32] = 1; /* same byte-bar convention as Sha256 */
+  return pl_nat_from_bytes(t, digest, sizeof(digest));
 }
 
 /* ── Comparisons ───────────────────────────────────────────────────────── */
@@ -1351,6 +1249,9 @@ const pl_opdesc pl_ops[] = {
     OP83_LOCAL("HmacSha256", 2, 0b11, pl_op83_hmac_sha256),
 
     OP66(ax_s3('I', 'c', 'e'), 1, 0b1, 0b1, op_ice),
+    OP83C("ReadBat", 1, 0b1, 0, pl_op83_read_bat),
+    OP83_LOCAL_DEEP("BatEq", 2, 0b11, 0b11, op_bateq),
+    OP83_LOCAL_DEEP("BatHash", 1, 0b1, 0b1, op_bathash),
 };
 
 const size_t pl_nops = sizeof(pl_ops) / sizeof(pl_ops[0]);
@@ -1395,9 +1296,9 @@ static const uint16_t pl_op82_argc1[] = {105, 106, 107, 108, 110, 111, 112,
 static const uint16_t pl_op82_argc2[] = {109, 116, 117, 119};
 static const uint16_t pl_op82_argc3[] = {120, 123};
 
-static const uint16_t pl_op83_argc1[] = {124, 126, 127, 128,
-                                         132, 134, 135, 136};
-static const uint16_t pl_op83_argc2[] = {125, 137, 139, 140};
+static const uint16_t pl_op83_argc1[] = {124, 126, 127, 128, 132,
+                                         134, 135, 136, 142, 144};
+static const uint16_t pl_op83_argc2[] = {125, 137, 139, 140, 143};
 static const uint16_t pl_op83_argc3[] = {138};
 static const uint16_t pl_op83_argc4[] = {131};
 

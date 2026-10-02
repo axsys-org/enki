@@ -79,6 +79,7 @@ int pl_op_lookup(uint64_t opset, pl_val name, uint32_t argc);
 pl_val pl_op82_input(pl_thread* t, size_t ab);
 pl_val pl_op82_output(pl_thread* t, size_t ab);
 pl_val pl_op82_warn(pl_thread* t, size_t ab);
+pl_val pl_op83_read_bat(pl_thread* t, size_t ab);
 pl_val pl_op82_read_file(pl_thread* t, size_t ab);
 pl_val pl_op82_write_file(pl_thread* t, size_t ab);
 pl_val pl_op82_print(pl_thread* t, size_t ab);

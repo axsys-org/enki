@@ -1,3 +1,4 @@
+#include "plan/bat.h"
 #include "enki/actor.h"
 
 #include <pthread.h>
@@ -595,6 +596,50 @@ static void er_service(er_scheduler* sys, er_actor* a, bool locked) {
 
   if (er_op_is(name, "Fetch")) {
     er_http_service(sys, a, argc, args);
+    return;
+  }
+
+  if (er_op_is(name, "ReadBat")) {
+    ax_assume(argc == 1, "ReadBat arity");
+    uint8_t hash[32] = {0};
+    if (sys->mode != ER_MODE_LIVE)
+      er_vals_hash(args, argc, hash);
+    pl_val result;
+    if (sys->mode == ER_MODE_REPLAY) {
+      const er_event* e = er_replay_next(sys);
+      ax_assume(e->kind == ER_EV_BAT && e->actor == a->id &&
+                    memcmp(e->args_hash, hash, 32) == 0 && e->data_n >= 1,
+                "er_log: replay divergence at ReadBat");
+      ax_assume(e->data[0] <= 1 && (e->data[0] || e->data_n == 1),
+                "er_log: malformed ReadBat result");
+      result = e->data[0]
+                   ? pl_bat_from_bytes(t, e->data + 1, (size_t)e->data_n - 1)
+                   : 0;
+    } else {
+      size_t base = t->vsp;
+      pl_vpush(t, args[0]);
+      er_service_unlock(sys, locked);
+      result = pl_rplan_read_bat(t, t->vstack[base]);
+      er_service_relock(sys, locked);
+      t->vsp = base;
+      if (sys->mode == ER_MODE_RECORD) {
+        er_event e = {.kind = ER_EV_BAT, .actor = a->id};
+        memcpy(e.args_hash, hash, 32);
+        pl_bat_cursor c = {0};
+        ax_assume(result == 0 || pl_bat_open(&c, result), "ReadBat result");
+        ax_assume(c.length < SIZE_MAX, "ReadBat log size");
+        e.data_n = c.length + 1;
+        e.data = malloc((size_t)e.data_n);
+        ax_assume(e.data != NULL, "oom");
+        e.data[0] = result != 0;
+        pl_bat_read(&c, e.data + 1, (size_t)c.length);
+        pl_bat_close(&c);
+        ax_arrpush(sys->rec->ev, e);
+      }
+    }
+    pl_thread_deposit(t, result);
+    a->status = ER_ACTOR_RUNNABLE;
+    er_enqueue(a);
     return;
   }
 

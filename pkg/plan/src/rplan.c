@@ -1,3 +1,4 @@
+#include "plan/bat.h"
 #include <blake3.h>
 #include <sodium.h>
 #include <pthread.h>
@@ -357,6 +358,63 @@ pl_val pl_op82_read_file(pl_thread* t, size_t ab) {
   close(fd);
   pl_val out = rp_bar(t, buf, size);
   free(buf);
+  return out;
+}
+
+/* Read bounded chunks, preserving binary lengths and the ReadFile jail.
+ * Pairwise joins keep the produced BAT balanced. No full-file C buffer. */
+pl_val pl_rplan_read_bat(pl_thread* t, pl_val path_v) {
+  char* arg = rp_nat_path(rp_want_nat(t, path_v));
+  char* path = NULL;
+  bool resolved = rp_resolve_read_path(t, arg, &path);
+  free(arg);
+  if (!resolved)
+    return 0;
+  int fd = open(path, O_RDONLY);
+  free(path);
+  if (fd < 0)
+    return 0;
+  uint8_t* buf = malloc(PL_BAT_CHUNK_BYTES);
+  ax_assume(buf != NULL, "oom");
+  size_t base = t->vsp;
+  bool failed = false, eof = false;
+  while (!eof && !failed) {
+    size_t n = 0;
+    while (n < PL_BAT_CHUNK_BYTES) {
+      ssize_t r = read(fd, buf + n, PL_BAT_CHUNK_BYTES - n);
+      if (r < 0) {
+        if (errno == EINTR)
+          continue;
+        failed = true;
+        break;
+      }
+      if (r == 0) {
+        eof = true;
+        break;
+      }
+      n += (size_t)r;
+    }
+    if (!failed && (n || t->vsp == base))
+      pl_vpush(t, pl_bat_chunk(t, buf, n));
+  }
+  close(fd);
+  free(buf);
+  if (failed) {
+    t->vsp = base;
+    return 0;
+  }
+  while (t->vsp - base > 1) {
+    size_t end = t->vsp, dst = base;
+    for (size_t i = base; i < end; i += 2) {
+      pl_val v = t->vstack[i];
+      if (i + 1 < end)
+        v = pl_bat_join(t, v, t->vstack[i + 1]);
+      t->vstack[dst++] = v;
+    }
+    t->vsp = dst;
+  }
+  pl_val out = t->vstack[base];
+  t->vsp = base;
   return out;
 }
 
@@ -758,6 +816,11 @@ pl_val pl_op82_close_handle(pl_thread* t, size_t ab) {
 }
 
 /* ── op 83: structured drivers ─────────────────────────────────────────── */
+
+pl_val pl_op83_read_bat(pl_thread* t, size_t ab) {
+  rp_want_nat(t, ARG(0));
+  return rp_request(t, ab, 1);
+}
 
 pl_val pl_op83_read_folder(pl_thread* t, size_t ab) {
   rp_want_nat(t, ARG(0));

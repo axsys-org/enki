@@ -40,6 +40,8 @@
 #define TEST_HTTP_BIG_BYTES (4u << 20)
 
 typedef struct test_http_req {
+  size_t body_n;
+  uint64_t body_hash;
   char method[16];
   char path[128];
   bool had_auth;
@@ -143,12 +145,17 @@ static void* test_http_handle(void* arg) {
       content_length = strtoul(strchr(cl, ':') + 1, NULL, 10);
   }
   size_t body_got = got - (size_t)(body_start - head);
+  uint64_t body_hash = 0;
+  for (size_t i = 0; i < body_got; i++)
+    body_hash = body_hash * 31 + (uint8_t)body_start[i];
   while (body_got < content_length) {
     char sink[4096];
     size_t want = content_length - body_got;
     ssize_t r = read(fd, sink, want < sizeof(sink) ? want : sizeof(sink));
     if (r <= 0)
       break;
+    for (ssize_t i = 0; i < r; i++)
+      body_hash = body_hash * 31 + (uint8_t)sink[i];
     body_got += (size_t)r;
   }
 
@@ -156,6 +163,8 @@ static void* test_http_handle(void* arg) {
   test_http_req* cap = NULL;
   if (srv->nreqs < TEST_HTTP_MAX_REQS) {
     cap = &srv->reqs[srv->nreqs++];
+    cap->body_n = body_got;
+    cap->body_hash = body_hash;
     snprintf(cap->method, sizeof(cap->method), "%s", method);
     snprintf(cap->path, sizeof(cap->path), "%s", path);
     cap->had_auth = strstr(hdrs, "Authorization:") != NULL ||
@@ -206,6 +215,19 @@ static void* test_http_handle(void* arg) {
                      "Location: http://127.0.0.1:%u/final\r\n"
                      "Content-Length: %zu\r\nConnection: close\r\n\r\n%s",
                      (unsigned)self, strlen(body), body);
+  } else if (strcmp(path, "/rehop") == 0) {
+    test_http_printf(fd, &failed,
+                     "HTTP/1.1 307 Temporary Redirect\r\nLocation: "
+                     "/ok\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+  } else if (strcmp(path, "/batbig") == 0) {
+    test_http_printf(fd, &failed,
+                     "HTTP/1.1 200 OK\r\nContent-Length: "
+                     "9437184\r\nConnection: close\r\n\r\n");
+    char chunk[65536];
+    memset(chunk, 'x', sizeof(chunk));
+    for (size_t i = 0; i < 144 && !failed; i++)
+      if (test_http_write_all(fd, chunk, sizeof(chunk)) < 0)
+        failed = true;
   } else if (strcmp(path, "/big") == 0) {
     test_http_printf(fd, &failed,
                      "HTTP/1.1 200 OK\r\nContent-Length: %u\r\n"
