@@ -284,11 +284,15 @@ static bool nreserve(native_store* n, char* err, size_t cap) {
   }
 #endif
   n->reserved = true;
+  /* Reserve address space for all possible PINs, but back only slots actually
+   * touched. Linux must not charge the entire array against its commit limit.
+   */
   n->slots = mmap(NULL, N_SLOT_BYTES, PROT_READ | PROT_WRITE,
-                  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                  MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
   if (n->slots == MAP_FAILED) {
     n->slots = NULL;
-    return nerror(err, cap, "cannot reserve native code slots");
+    return nerror(err, cap, "cannot reserve native code slots: %s",
+                  strerror(errno));
   }
   return true;
 }

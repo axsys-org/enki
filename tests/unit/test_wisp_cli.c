@@ -259,11 +259,11 @@ TEST(wisp_cli, profile_json_open_failure_exits_early) {
 
   char trace_path[512];
   (void)snprintf(trace_path, sizeof(trace_path), "%s/trace.json", dir);
-  char cmd[2048];
-  (void)snprintf(cmd, sizeof(cmd),
-                 "%s --profile-json %s %s reaver >/dev/null 2>&1", wisp_bin(),
-                 trace_path, reaver_plan_dir());
+  char* cmd = NULL;
+  ASSERT(asprintf(&cmd, "%s --profile-json %s %s reaver >/dev/null 2>&1",
+                  wisp_bin(), trace_path, reaver_plan_dir()) >= 0);
   int st = system(cmd);
+  free(cmd);
   ASSERT(WIFEXITED(st) && WEXITSTATUS(st) != 0,
          "unopenable profile destination should fail");
   ASSERT_NEQ(access(trace_path, F_OK), 0);
