@@ -302,10 +302,12 @@ TEST(wisp_cli, profile_json_finalizes_after_runtime_error) {
 
 static int run_scenario(const char* bin, const char* fn, char* out,
                         size_t cap) {
-  char cmd[4096];
-  (void)snprintf(cmd, sizeof(cmd), "%s %s/tests/plan actors %s 2>/dev/null",
-                 bin, original_cwd, fn);
-  return run_cmd(cmd, out, cap);
+  char* cmd = NULL;
+  ASSERT(asprintf(&cmd, "%s %s/tests/plan actors %s 2>/dev/null", bin,
+                  original_cwd, fn) >= 0);
+  int status = run_cmd(cmd, out, cap);
+  free(cmd);
+  return status;
 }
 
 TEST(wisp_cli, actor_ping_echo) {
