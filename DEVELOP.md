@@ -263,10 +263,12 @@ survives until store teardown so suspended frames remain valid. Actor payloads
 and other transient shared values continue to use the anonymous store region.
 
 Object and per-store compiler-cache indexes are append-only Patricia trees.
-Ice stages new extents and COW index paths, seals their granules read-only, and
-only then resolves source proxies. Save stages a journal record for a changed
-root, seals pages, synchronizes appended data, writes the inactive superblock,
-and synchronizes again (`F_FULLFSYNC` on macOS, `fsync` on Linux). Initial file
+Ice stages new object extents, updates a private mutable index overlay, seals
+object granules read-only, and only then resolves source proxies. Save writes
+each final changed index node once, reuses immutable committed subtrees, stages
+a journal record for a changed root, seals pages, synchronizes appended data,
+writes the inactive superblock, and synchronizes again (`F_FULLFSYNC` on macOS,
+`fsync` on Linux). Initial file
 creation also synchronizes the containing directory. Saving the same root
 checkpoints staged objects/cache mappings without duplicating history. There
 is no GC, compaction, relocation, migration, or multi-store address allocation.
@@ -282,8 +284,11 @@ verification, so opening or loading a large extent only faults in its header.
 Startup does not recursively deserialize Silo or
 scan/register all PINs. A writer truncates abandoned staging before appending.
 No valid checkpoint in an existing file is an error. Failures before
-superblock publication can be retried; ambiguous publication failures disable
-writes until reopen. Store teardown requires all its evaluator threads to have
+superblock publication can be retried: completed index records are memoized
+and reused, and subsequent inserts invalidate only changed overlay paths.
+Ambiguous publication failures disable writes until reopen. The overlay is
+released after a successful checkpoint or on close. Store teardown requires
+all its evaluator threads to have
 stopped and all store pointers to have been discarded.
 
 The optional machine-wide LMDB compiler/Memo cache remains independent.
@@ -339,8 +344,8 @@ median 1.87 ms to first evaluation versus Silo's 43.53 ms. Anonymous
 resident memory was 3.52 MB versus 33.85 MB; anonymous store-object
 allocations were 96 bytes versus 27.4 MB. The single Save batch took
 117 ms versus 17 ms for Silo. Evaluator throughput was similar
-(54.5 versus 54.1 million identity applications/second). The first version
-trades additional COW index writes and checksumming for fast direct restart.
+(54.5 versus 54.1 million identity applications/second). That initial version
+traded additional COW index writes and checksumming for fast direct restart.
 Repeat measurements on the deployment filesystem before drawing throughput
 conclusions.
 
@@ -351,6 +356,146 @@ arm64 and Linux arm64 with fixed mapping enabled. Linux x86-64 TSan compiled,
 but exited before `main` in the emulated container with an incompatible memory
 layout / denied ASLR change. That profile still needs a native x86-64 TSan
 runner. Linux skipped the optional Haskell-oracle comparison because its
-binary was unavailable. The native suite contains 20 tests, including actual
+binary was unavailable. The initial native suite contained 20 tests, including actual
 concurrent code-slot claims and cache attachment. Linux leak detection also
 exposed an existing empty staged-cache lookup allocation leak, now fixed.
+
+### Baseline Save profiling (2026-10-19)
+
+The arena implementation is committed as `f88adb1`. Profiling used macOS
+arm64 release builds and the existing `bench_native` workload: distinct small
+PINs plus one enclosing root. Each measurement created a fresh directory and
+process; five interleaved repetitions were run per backend and size. These
+numbers characterize a batch of many small objects, not every application
+snapshot or cold-disk behavior.
+
+| Child PINs | Native Save | Silo default | Silo `PL_SILO_FSYNC=full` |
+| --- | ---: | ---: | ---: |
+| 1,000 | 16.2 ms | 6.9 ms | 9.7 ms |
+| 10,000 | 119.5 ms | 17.0 ms | 20.4 ms |
+| 50,000 | 662.6 ms | 73.0 ms | 75.4 ms |
+
+These are uninstrumented medians. Silo defaults to `F_BARRIERFSYNC` for its
+pack on macOS, followed by LMDB's commit; native uses two `F_FULLFSYNC` calls.
+Forcing full pack sync in Silo adds only about 3 ms at 10,000 PINs, so this
+policy difference accounts for little of the observed slowdown.
+
+An isolated copy of the committed sources was instrumented with nested
+monotonic timers and call counters. At 10,000 child PINs (10,001 objects), the
+instrumented Save median was 137.3 ms; instrumentation increased runtime, so
+the following timings are attribution evidence rather than baseline latency.
+Exclusive categories do not include their child scopes:
+
+| Work | Calls | Median exclusive time |
+| --- | ---: | ---: |
+| Verify native record checksums | 372,176 | 62.4 ms |
+| Generate native record/superblock checksums | 141,732 | 24.3 ms |
+| Two durable file synchronizations | 2 | 10.3 ms |
+| Canonical Silo streaming hash | 10,001 | 3.7 ms |
+| Extend file | 243 | 2.6 ms |
+| Synchronize mapped pages | 1 | 2.0 ms |
+| Map extensions | 243 | 0.8 ms |
+
+The two checksum categories consume about 63% of the instrumented Save.
+`pl_native_stage` first traverses the index to look for an existing hash;
+`ninsert` descends again to find the split, then again to record its path.
+Every visit calls `nnode`, which verifies the record's SHA-256, including
+nodes this same writer just created. Insertion then copies and hashes every
+ancestor on the path. An independent 1 ms macOS `sample` capture, with timers
+disabled, corroborated the checksum hotspot and showed OpenSSL's one-shot
+`SHA256` path spending substantial time in provider lookup, context allocation,
+initialization, and cleanup around the small hashes.
+
+This batch writes **131,729 index nodes**, although its final tree contains
+only **20,001**. The 111,728 superseded nodes occupy 12,513,536 bytes. The full
+image is 16,187,392 bytes: 1,200,152 object bytes, 14,753,648 total index bytes,
+120 journal bytes, and 233,472 bytes of headers/padding. Thus about 77% of this
+first checkpoint is already obsolete index metadata. This is repeated
+copy-on-write work within one unpublished transaction, not useful history.
+
+Diagnostic variants were built only in a temporary source copy. Five runs
+per variant, with timing instrumentation disabled, gave these medians:
+
+| Diagnostic variant | 10,000 PINs | 50,000 PINs |
+| --- | ---: | ---: |
+| Same-build control | 123.3 ms | 722.8 ms |
+| Trust checksums of newly written staging index nodes | 61.5 ms | 334.2 ms |
+| Reuse the native SHA-256 context | 54.6 ms | 301.6 ms |
+| Both | 40.7 ms | 224.8 ms |
+
+The control is from the same diagnostic executable, not the baseline run
+above. Trusting staging retained header/bounds checks and continued checking
+committed index nodes. Context reuse retained SHA-256 and all on-disk
+checksums. Neither variant changed synchronization. One output per variant
+and size (eight images) passed the unchanged production full-image verifier.
+These are diagnostic prototypes, not production patches: in particular, the
+prototype digest context is single-threaded and needs proper ownership before
+use in a runtime with concurrent inspectors.
+
+The profiling suggested this optimization order (the first two are implemented
+below):
+
+1. Reuse digest state with explicit thread/store ownership, and avoid repeated
+   verification of nodes created by the current writer. Keep committed-image
+   validation and explicit full verification intact.
+1. Maintain the working Patricia index in process-local memory and serialize
+   each final changed node once at checkpoint. Reuse immutable committed
+   subtrees, preserve append-only publication, and keep object pages read-only.
+   This addresses the within-transaction write amplification that remains
+   after the diagnostic improvements.
+1. Re-measure before changing growth granularity: `ftruncate` and `mmap`
+   together cost only about 3.4 ms in this case. Keep the required durable
+   flushes; they are not the primary bottleneck for this workload.
+
+The local raw measurements, sample stack report, record counts, and temporary
+instrumentation scripts are retained under `build/save-profile/` (ignored
+build artifacts). Those diagnostic experiments left the runtime unchanged; the implementation
+below applies their findings.
+
+### Implemented Save optimizations
+
+The native writer now reuses a store-owned OpenSSL digest context under the
+existing `save_mu` lock. Read-only inspectors have their own context, and all
+contexts are released on store close. SHA-256 identities, record checksums,
+full-image verification, and durability barriers are unchanged.
+
+New index nodes stay in a private mutable Patricia overlay. They need no
+checksum verification on traversal because they have not been serialized;
+committed nodes still take the validating disk path. Insertion records its
+path in one descent, modifies existing overlay ancestors, and copies committed
+ancestors only when necessary. Save serializes the final overlay in child-first
+order and hashes each emitted record once. On retry, unchanged emitted records
+are reused, while mutations invalidate the affected paths. No committed page
+is rewritten. The v1 format is unchanged, and old and new binaries were tested
+reading each other's images.
+
+Five interleaved release runs using the original committed benchmark executable
+and the optimized one produced these macOS arm64 medians:
+
+| Child PINs | Original native Save | Optimized native Save | Silo Save | Original image | Optimized image |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1,000 | 20.5 ms | 9.5 ms | 8.5 ms | 1.38 MB | 0.52 MB |
+| 10,000 | 151.4 ms | 27.7 ms | 21.8 ms | 16.19 MB | 3.60 MB |
+| 50,000 | 859.9 ms | 139.0 ms | 99.2 ms | 93.13 MB | 17.43 MB |
+
+These runs have different absolute timings from the earlier profiling session;
+compare the interleaved controls within this table. The 10,000-PIN batch now
+emits exactly 20,001 index nodes instead of 131,729. The additional transient
+cost is a 120-byte overlay entry per working node, plus allocator spare
+capacity; the overlay is discarded after successful Save. This memory is not
+needed on reopen. Raw measurements are in `build/save-profile/optimized.json`.
+
+The native regression suite now has 25 tests. Added coverage counts actual
+index records (including obsolete ones), requires zero index records after
+Ice, verifies partial-emission reuse, exercises new inserts and cache
+replacement after a synchronized but unpublished checkpoint, checks committed
+checksum validation while an overlay exists, and runs concurrent writer/store
+and read-only inspector queries through the shared digest context. Crash
+injection now includes index serialization.
+
+Validation for this optimization passed the full debug, release, ASan, UBSan,
+TSan, and GC-stress suites on macOS arm64; full debug, ASan, UBSan, and TSan
+suites on Linux arm64; and full debug, ASan, and UBSan suites on emulated
+Linux x86-64. Linux also passed the native suite with GCC UBSan. The optional
+Haskell-oracle CLI comparison was skipped on Linux. Native x86-64 TSan still
+requires the non-emulated runner noted above.

@@ -204,6 +204,7 @@ TEST(native, publication_failures_are_retryable_or_poisoned) {
 TEST(native, crash_boundaries) {
   const char* points[] = {"grow",
                           "object",
+                          "index",
                           "before_data_sync",
                           "after_data_sync",
                           "before_superblock",
@@ -219,9 +220,9 @@ TEST(native, crash_boundaries) {
     pl_val pin = pl_store_load(rt.t, hash);
     pl_val value = pl_pin_body(pl_ptr(pin));
     ASSERT(value == 42 || value == 43);
-    if (i < 5)
+    if (i < 6)
       ASSERT_EQ(value, 42);
-    if (i == 6)
+    if (i == 7)
       ASSERT_EQ(value, 43);
     char err[256];
     ASSERT(pl_store_verify(rt.store, err, sizeof(err)), "%s", err);
@@ -730,6 +731,279 @@ TEST(native, verifier_checks_layout_and_edges_even_with_valid_checksum) {
   free(bytes);
   reopen_rt();
   ASSERT_FALSE(pl_store_verify(rt.store, err, sizeof(err)));
+}
+
+/* Count the actual v1 records, including obsolete records and abandoned
+ * staging. This catches write amplification that live-index accounting hides.
+ */
+static uint64_t index_records(void) {
+  char path[256];
+  snprintf(path, sizeof(path), "%s/arena.dat", native_dir);
+  int fd = open(path, O_RDONLY);
+  ASSERT_GTE(fd, 0);
+  struct stat st;
+  ASSERT_EQ(fstat(fd, &st), 0);
+  uint64_t count = 0, at = 2 * PL_NATIVE_GRANULE;
+  while (at < (uint64_t)st.st_size) {
+    uint64_t boundary = (at / PL_NATIVE_GRANULE + 1) * PL_NATIVE_GRANULE;
+    if (boundary - at < 48) {
+      at = boundary;
+      continue;
+    }
+    uint64_t header[6];
+    ASSERT_EQ(pread(fd, header, sizeof(header), (off_t)at), sizeof(header));
+    uint64_t len = header[4], type = header[5];
+    if (len == 0) {
+      at = boundary;
+      continue;
+    }
+    ASSERT_GTE(len, 48);
+    ASSERT_LTE(at + len, (uint64_t)st.st_size);
+    if (type == 2) {
+      ASSERT_EQ(len, 112);
+      uint64_t fields[8];
+      ASSERT_EQ(pread(fd, fields, sizeof(fields), (off_t)(at + 48)),
+                sizeof(fields));
+      if (fields[0] < 256) {
+        /* Overlay handles are odd; only aligned disk offsets may escape. */
+        ASSERT_EQ(fields[5] & 7, 0);
+        ASSERT_EQ(fields[6] & 7, 0);
+        ASSERT_GT(fields[5], 0);
+        ASSERT_GT(fields[6], 0);
+      }
+      count++;
+    }
+    at += len;
+  }
+  close(fd);
+  return count;
+}
+static pl_val stage_batch(size_t count, uint8_t hash[32]) {
+  size_t slot = rt.t->vsp;
+  for (size_t i = 0; i < count; i++)
+    pl_vpush(rt.t, pl_pin(rt.t, (pl_val)(1000 + i)));
+  pl_gc_reserve(rt.t, PL_APP_CELLS(count));
+  pl_vpush(rt.t, pl_mk_app_from(rt.t, 0, (uint32_t)count, &rt.t->vstack[slot]));
+  rt.t->vstack[slot + count] = pl_nf(rt.t, rt.t->vstack[slot + count]);
+  pl_vpush(rt.t, pl_pin(rt.t, rt.t->vstack[slot + count]));
+  char err[256];
+  ASSERT(pl_store_save_pin(rt.store, rt.t->vstack[slot + count + 1], hash, err,
+                           sizeof(err)),
+         "%s", err);
+  pl_val out = pl_make(PL_TAG_PIN,
+                       pl_pin_resolved(pl_ptr(rt.t->vstack[slot + count + 1])));
+  rt.t->vsp = slot;
+  return out;
+}
+TEST(native, checkpoint_serializes_only_final_indexes_and_reuses_subtrees) {
+  uint8_t hash[32];
+  pl_val root = stage_batch(256, hash);
+  ASSERT_EQ(index_records(), 0); /* Ice publishes objects, not index records. */
+  uint8_t key[32] = {0};
+  for (unsigned i = 0; i < 32; i++) {
+    key[0] = (uint8_t)i;
+    ASSERT(pl_store_backend_put(rt.store, key, hash, 32));
+  }
+  ASSERT_EQ(index_records(), 0);
+  char err[256];
+  ASSERT(pl_store_save_root(rt.store, root, NULL, err, sizeof(err)), "%s", err);
+  uint64_t first = 2 * 257 - 1 + 2 * 32 - 1;
+  ASSERT_EQ(index_records(), first);
+  pl_store_usage usage;
+  ASSERT(pl_store_get_usage(rt.store, &usage, err, sizeof(err)), "%s", err);
+  ASSERT_EQ(usage.index_bytes, first * 112);
+  ASSERT(pl_store_verify(rt.store, err, sizeof(err)), "%s", err);
+  /* A changed leaf copies only its path; the rest of the committed tree and
+   * cache are retained. Reopen also proves no overlay handles reached disk. */
+  uint8_t next[32];
+  (void)save_nat(9000, next, true);
+  ASSERT_GT(index_records(), first);
+  ASSERT_LTE(index_records() - first, 258);
+  ASSERT_EQ(pl_store_root_log_head(rt.store), 2);
+  close_rt();
+  reopen_rt();
+  ASSERT_EQ(pl_store_load(rt.t, hash), root);
+  pl_cell* app = pl_ptr(pl_pin_body(pl_ptr(root)));
+  for (unsigned i = 0; i < 256; i++)
+    ASSERT_EQ(pl_pin_body(pl_ptr(pl_app_args(app)[i])), 1000 + i);
+  for (unsigned i = 0; i < 32; i++) {
+    key[0] = (uint8_t)i;
+    uint8_t* bytes;
+    size_t len;
+    ASSERT(pl_store_backend_get(rt.store, key, &bytes, &len));
+    ASSERT_EQ(len, 32);
+    ASSERT_MEM_EQ(bytes, hash, 32);
+    free(bytes);
+  }
+  ASSERT(pl_store_verify(rt.store, err, sizeof(err)), "%s", err);
+}
+typedef struct index_fault {
+  unsigned remaining;
+} index_fault;
+static bool fail_index(void* ctx, const char* point) {
+  index_fault* fault = ctx;
+  return strcmp(point, "index") != 0 || --fault->remaining != 0;
+}
+TEST(native, partial_index_emission_is_reused_on_retry) {
+  uint8_t hash[32];
+  pl_val root = stage_batch(64, hash);
+  char err[256];
+  index_fault fault = {.remaining = 7};
+  pl_native_set_fault(rt.store, fail_index, &fault);
+  ASSERT_FALSE(pl_store_save_root(rt.store, root, NULL, err, sizeof(err)));
+  ASSERT_EQ(index_records(), 7);
+  ASSERT_FALSE(pl_store_get_root(rt.store, hash));
+  ASSERT_EQ(child("empty", NULL, NULL), 0);
+  pl_native_set_fault(rt.store, NULL, NULL);
+  ASSERT(pl_store_save_root(rt.store, root, hash, err, sizeof(err)), "%s", err);
+  ASSERT_EQ(index_records(), 2 * 65 - 1);
+  ASSERT(pl_store_verify(rt.store, err, sizeof(err)), "%s", err);
+  close_rt();
+  reopen_rt();
+  ASSERT_EQ(pl_store_load(rt.t, hash), root);
+}
+TEST(native, failed_checkpoint_allows_index_and_cache_changes_before_retry) {
+  uint8_t old[32], row[32], added[32];
+  (void)save_nat(42, old, true);
+  pl_val root = stage_batch(64, row);
+  uint8_t key[32] = {7};
+  ASSERT(pl_store_backend_put(rt.store, key, old, 32));
+  char err[256];
+  pl_native_set_fault(rt.store, fault_return, "after_data_sync");
+  ASSERT_FALSE(pl_store_save_root(rt.store, root, NULL, err, sizeof(err)));
+  uint64_t emitted = index_records();
+  pl_native_set_fault(rt.store, NULL, NULL);
+  (void)save_nat(9000, added, false);
+  /* Replace a memoized cache leaf twice, and add another branch. Old sealed
+   * records must stay valid while all changed ancestor offsets are forgotten.
+   */
+  ASSERT(pl_store_backend_put(rt.store, key, row, 32));
+  ASSERT(pl_store_backend_put(rt.store, key, added, 32));
+  uint8_t other[32] = {8};
+  ASSERT(pl_store_backend_put(rt.store, other, old, 32));
+  ASSERT(pl_store_save_root(rt.store, root, NULL, err, sizeof(err)), "%s", err);
+  ASSERT_GT(index_records(), emitted);
+  ASSERT_LT(index_records() - emitted, 32);
+  ASSERT_EQ(pl_store_root_log_head(rt.store), 2);
+  ASSERT(pl_store_verify(rt.store, err, sizeof(err)), "%s", err);
+  close_rt();
+  reopen_rt();
+  uint8_t actual[32], *bytes;
+  size_t len;
+  ASSERT(pl_store_get_root(rt.store, actual));
+  ASSERT_MEM_EQ(actual, row, 32);
+  ASSERT(pl_store_backend_get(rt.store, key, &bytes, &len));
+  ASSERT_EQ(len, 32);
+  ASSERT_MEM_EQ(bytes, added, 32);
+  free(bytes);
+  ASSERT(pl_store_backend_get(rt.store, other, &bytes, &len));
+  ASSERT_MEM_EQ(bytes, old, 32);
+  free(bytes);
+  ASSERT_EQ(pl_pin_body(pl_ptr(pl_store_load(rt.t, added))), 9000);
+  ASSERT(pl_store_verify(rt.store, err, sizeof(err)), "%s", err);
+}
+
+TEST(native, committed_index_checksums_are_not_trusted_by_working_overlay) {
+  uint8_t hash[32], added[32];
+  pl_val root = stage_batch(64, hash);
+  char err[256];
+  ASSERT(pl_store_save_root(rt.store, root, NULL, err, sizeof(err)), "%s", err);
+  (void)save_nat(9000, added, false);
+  char path[256];
+  snprintf(path, sizeof(path), "%s/arena.dat", native_dir);
+  int fd = open(path, O_RDWR);
+  ASSERT_GTE(fd, 0);
+  uint64_t off;
+  ASSERT_EQ(pread(fd, &off, 8, (off_t)(PL_NATIVE_GRANULE + 104)), 8);
+  /* Locate the immutable leaf for the old root; insertion reuses this leaf
+   * even when its ancestors have been copied into the working overlay. */
+  uint64_t node[14];
+  for (unsigned depth = 0;; depth++) {
+    ASSERT_LTE(depth, 256);
+    ASSERT_EQ(pread(fd, node, sizeof(node), (off_t)off), sizeof(node));
+    uint64_t bit = node[6];
+    if (bit == 256)
+      break;
+    ASSERT_LT(bit, 256);
+    unsigned direction = (hash[bit / 8] >> (7 - bit % 8)) & 1u;
+    off = node[11 + direction];
+  }
+  ASSERT_MEM_EQ((uint8_t*)node + 56, hash, 32);
+  uint8_t bad = (uint8_t)(node[0] ^ 1);
+  ASSERT_EQ(pwrite(fd, &bad, 1, (off_t)off), 1);
+  close(fd);
+  pl_val pin;
+  ASSERT_FALSE(pl_native_load(rt.store, hash, &pin, err, sizeof(err)));
+  ASSERT_NOT_NULL(strstr(err, "index"));
+  ASSERT_FALSE(pl_store_verify(rt.store, err, sizeof(err)));
+}
+
+typedef struct native_reader {
+  pl_store* store;
+  uint8_t key[32], hash[32];
+  bool ok;
+} native_reader;
+static void* native_read_worker(void* ctx) {
+  native_reader* reader = ctx;
+  reader->ok = true;
+  for (unsigned i = 0; i < 100; i++) {
+    uint8_t* bytes = NULL;
+    size_t len = 0;
+    if (!pl_store_backend_get(reader->store, reader->key, &bytes, &len) ||
+        len != 32 || memcmp(bytes, reader->hash, 32) != 0) {
+      free(bytes);
+      reader->ok = false;
+      break;
+    }
+    free(bytes);
+    uint64_t object_len;
+    pl_hash* subs = NULL;
+    size_t count;
+    if (!pl_store_object_info(reader->store, reader->hash, &object_len, &subs,
+                              &count, NULL, 0) ||
+        count != 0)
+      reader->ok = false;
+    free(subs);
+  }
+  return NULL;
+}
+TEST(native, digest_context_is_serialized_for_writer_and_inspector_threads) {
+  uint8_t hash[32], key[32] = {4};
+  pl_val root = save_nat(42, hash, true);
+  ASSERT(pl_store_backend_put(rt.store, key, hash, 32));
+  char err[256];
+  ASSERT(pl_store_save_root(rt.store, root, NULL, err, sizeof(err)), "%s", err);
+  for (unsigned readonly = 0; readonly < 2; readonly++) {
+    native_reader readers[8];
+    pthread_t threads[8];
+    for (unsigned i = 0; i < 8; i++) {
+      readers[i] = (native_reader){.store = rt.store};
+      memcpy(readers[i].key, key, 32);
+      memcpy(readers[i].hash, hash, 32);
+      ASSERT_EQ(
+          pthread_create(&threads[i], NULL, native_read_worker, &readers[i]),
+          0);
+    }
+    if (!readonly) {
+      uint8_t staged[32];
+      for (unsigned i = 0; i < 16; i++)
+        (void)save_nat(100 + i, staged, false);
+      ASSERT(pl_store_save_root(rt.store, root, NULL, err, sizeof(err)), "%s",
+             err);
+    }
+    for (unsigned i = 0; i < 8; i++) {
+      ASSERT_EQ(pthread_join(threads[i], NULL), 0);
+      ASSERT(readers[i].ok);
+    }
+    ASSERT(pl_store_verify(rt.store, err, sizeof(err)), "%s", err);
+    if (!readonly) {
+      close_rt();
+      rt.store = pl_store_new_native_ro(native_dir, err, sizeof(err));
+      ASSERT_NOT_NULL(rt.store, "%s", err);
+      rt.heap = pl_heap_new(1 << 16, rt.store);
+      rt.t = pl_thread_new(rt.heap);
+    }
+  }
 }
 
 static int child_main(int argc, char** argv) {

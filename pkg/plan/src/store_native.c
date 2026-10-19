@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <openssl/evp.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,7 +22,6 @@
 #include <mach/mach_vm.h>
 #endif
 #include "axsys/ds.h"
-#include "axsys/sha256.h"
 
 #ifndef MAP_ANONYMOUS
 #define MAP_ANONYMOUS MAP_ANON
@@ -69,12 +69,24 @@ static_assert(sizeof(native_record) == 48, "native record layout");
 static_assert(sizeof(native_index) == 112, "native index layout");
 static_assert(sizeof(native_super) == 184, "native superblock layout");
 
+/* Odd references address this process-local overlay; aligned references are
+ * immutable committed file offsets. No overlay reference reaches disk. */
+typedef struct native_work_node {
+  native_index node;
+  uint64_t emitted; /* immutable staged record, reusable after a failed Save */
+} native_work_node;
+
 typedef struct native_store {
   pl_store* store;
   int fd, writer_fd, commit_fd;
   bool readonly, poisoned, reserved;
   uint64_t mapped, sealed, next;
   native_super committed, work;
+  native_work_node* nodes;
+  /* All native operations hold save_mu (or are in construction/destruction).
+   * Inspectors own separate contexts; nothing mutable is shared across stores.
+   */
+  EVP_MD_CTX* digest;
   unsigned slot;
   pl_cell* slots;
   pl_native_fault_fn fault;
@@ -153,13 +165,20 @@ static bool nread(int fd, void* dst, size_t len, uint64_t off) {
   }
   return true;
 }
-static void ndigest(void* p, size_t len) {
-  ax_sha256((uint8_t*)p + 32, len - 32, p);
+static bool nhash(native_store* n, const void* bytes, size_t len,
+                  uint8_t out[32]) {
+  unsigned size = 0;
+  return EVP_DigestInit_ex(n->digest, NULL, NULL) == 1 &&
+         EVP_DigestUpdate(n->digest, bytes, len) == 1 &&
+         EVP_DigestFinal_ex(n->digest, out, &size) == 1 && size == 32;
 }
-static bool nchecksum(const void* p, size_t len) {
+static void ndigest(native_store* n, void* p, size_t len) {
+  ax_assume(nhash(n, (uint8_t*)p + 32, len - 32, p), "native SHA-256 failed");
+}
+static bool nchecksum(native_store* n, const void* p, size_t len) {
   uint8_t sum[32];
-  ax_sha256((const uint8_t*)p + 32, len - 32, sum);
-  return memcmp(sum, p, 32) == 0;
+  return nhash(n, (const uint8_t*)p + 32, len - 32, sum) &&
+         memcmp(sum, p, 32) == 0;
 }
 static native_record* nheader(uint64_t off, uint64_t end, uint64_t type) {
   if (!nbound(off, sizeof(native_record), end))
@@ -173,28 +192,43 @@ static native_record* nheader(uint64_t off, uint64_t end, uint64_t type) {
     return NULL;
   return r;
 }
-static native_record* nrecord(uint64_t off, uint64_t end, uint64_t type) {
+static native_record* nrecord(native_store* n, uint64_t off, uint64_t end,
+                              uint64_t type) {
   native_record* r = nheader(off, end, type);
-  return r != NULL && nchecksum(r, (size_t)r->len) ? r : NULL;
+  return r != NULL && nchecksum(n, r, (size_t)r->len) ? r : NULL;
 }
-static native_index* nnode(uint64_t off, uint64_t end) {
-  native_record* r = nrecord(off, end, N_INDEX);
+static native_index* nnode(native_store* n, uint64_t off, uint64_t end) {
+  native_record* r = nrecord(n, off, end, N_INDEX);
   if (r == NULL || r->len != sizeof(native_index))
     return NULL;
   native_index* p = (native_index*)r;
-  return p->bit <= 256 ? p : NULL;
+  if (p->bit > 256 || (p->bit < 256 && (!nbound(p->child[0], sizeof(*p), end) ||
+                                        !nbound(p->child[1], sizeof(*p), end))))
+    return NULL;
+  return p;
 }
 static unsigned nbit(const uint8_t key[32], uint64_t bit) {
   return (key[bit / 8] >> (7 - bit % 8)) & 1u;
 }
-static bool nlookup(uint64_t root, const uint8_t key[32], uint64_t end,
-                    uint64_t* value, char* err, size_t cap) {
+static native_index* nworking_node(native_store* n, uint64_t ref) {
+  if ((ref & 1) == 0)
+    return nnode(n, ref, n->committed.end);
+  uint64_t slot = ref >> 1;
+  if (slot >= (uint64_t)ax_arrlen(n->nodes))
+    return NULL;
+  /* These nodes were created by this writer, under save_mu, and have no
+   * serialized checksum yet. Disk nodes always take the validating path. */
+  return &n->nodes[slot].node;
+}
+static bool nlookup_inner(native_store* n, uint64_t root, const uint8_t key[32],
+                          uint64_t end, bool working, uint64_t* value,
+                          char* err, size_t cap) {
   *value = 0;
   uint64_t prior = 0;
   bool first = true;
   for (unsigned depth = 0; root != 0 && depth <= 256; depth++) {
-    native_index* p = nnode(root, end);
-    if (p == NULL || (!first && p->bit <= prior))
+    native_index* p = working ? nworking_node(n, root) : nnode(n, root, end);
+    if (p == NULL || p->bit > 256 || (!first && p->bit <= prior))
       return nerror(err, cap, "invalid native hash index");
     if (p->bit == 256) {
       if (memcmp(p->key, key, 32) == 0)
@@ -208,6 +242,15 @@ static bool nlookup(uint64_t root, const uint8_t key[32], uint64_t end,
       return nerror(err, cap, "empty native index branch");
   }
   return root == 0 || nerror(err, cap, "cyclic native index");
+}
+static bool nlookup(native_store* n, uint64_t root, const uint8_t key[32],
+                    uint64_t end, uint64_t* value, char* err, size_t cap) {
+  return nlookup_inner(n, root, key, end, false, value, err, cap);
+}
+static bool nworking_lookup(native_store* n, uint64_t root,
+                            const uint8_t key[32], uint64_t* value, char* err,
+                            size_t cap) {
+  return nlookup_inner(n, root, key, n->next, true, value, err, cap);
 }
 
 static bool nreserve(native_store* n, char* err, size_t cap) {
@@ -309,85 +352,116 @@ static native_record* nalloc(native_store* n, uint64_t type, uint64_t len,
   *off = at;
   return r;
 }
-static uint64_t nindex_new(native_store* n, const native_index* src, char* err,
-                           size_t cap) {
-  uint64_t off;
-  native_index* p =
-      (native_index*)nalloc(n, N_INDEX, sizeof(*p), &off, err, cap);
-  if (p == NULL)
-    return 0;
-  memcpy(p, src, sizeof(*p));
-  p->r.len = sizeof(*p);
-  p->r.type = N_INDEX;
-  ndigest(p, sizeof(*p));
-  return off;
+static uint64_t nworking_new(native_store* n, const native_index* src) {
+  native_work_node node = {.node = *src};
+  ax_arrpush(n->nodes, node);
+  return ((uint64_t)ax_arrlen(n->nodes) - 1) * 2 + 1;
 }
 static bool ninsert(native_store* n, uint64_t* root, const uint8_t key[32],
                     uint64_t value, char* err, size_t cap) {
+  /* Record one descent. Validate before mutating the overlay, so a corrupt
+   * committed path cannot leave a partially changed working index. */
   uint64_t path[256];
+  native_index ancestors[256];
   unsigned directions[256];
   size_t count = 0;
   uint64_t cur = *root;
   native_index leaf = {.bit = 256, .value = value};
   memcpy(leaf.key, key, 32);
   if (cur == 0) {
-    uint64_t fresh = nindex_new(n, &leaf, err, cap);
-    if (fresh == 0)
-      return false;
-    *root = fresh;
+    *root = nworking_new(n, &leaf);
     return true;
   }
   native_index* p;
-  uint64_t last_bit = 0;
-  bool first = true;
   for (;;) {
-    p = nnode(cur, n->next);
-    if (p == NULL || (!first && p->bit <= last_bit))
+    p = nworking_node(n, cur);
+    if (p == NULL || p->bit > 256 ||
+        (count != 0 && p->bit <= ancestors[count - 1].bit))
       return nerror(err, cap, "invalid native index while inserting");
     if (p->bit == 256)
       break;
-    last_bit = p->bit;
-    first = false;
-    cur = p->child[nbit(key, p->bit)];
+    if (count >= 256)
+      return nerror(err, cap, "invalid native index path");
+    path[count] = cur;
+    ancestors[count] = *p;
+    directions[count] = nbit(key, p->bit);
+    cur = p->child[directions[count++]];
   }
   uint64_t split = 0;
   while (split < 256 && nbit(key, split) == nbit(p->key, split))
     split++;
   if (split == 256 && p->value == value)
     return true;
-  cur = *root;
-  for (;;) {
-    p = nnode(cur, n->next);
-    if (p == NULL || count >= 256)
-      return nerror(err, cap, "invalid native index path");
-    if (p->bit >= split)
-      break;
-    path[count] = cur;
-    directions[count++] = nbit(key, p->bit);
-    cur = p->child[nbit(key, p->bit)];
+  while (count != 0 && ancestors[count - 1].bit >= split)
+    cur = path[--count];
+  uint64_t changed;
+  if (split == 256 && (cur & 1)) {
+    n->nodes[cur >> 1] = (native_work_node){.node = leaf};
+    changed = cur;
+  } else {
+    changed = nworking_new(n, &leaf);
   }
-  uint64_t changed = nindex_new(n, &leaf, err, cap);
-  if (changed == 0)
-    return false;
   if (split != 256) {
     native_index branch = {.bit = split};
     unsigned dir = nbit(key, split);
     branch.child[dir] = changed;
     branch.child[1 - dir] = cur;
-    changed = nindex_new(n, &branch, err, cap);
-    if (changed == 0)
-      return false;
+    changed = nworking_new(n, &branch);
   }
   while (count != 0) {
     count--;
-    native_index branch = *(native_index*)nptr(path[count]);
+    native_index branch = ancestors[count];
     branch.child[directions[count]] = changed;
-    changed = nindex_new(n, &branch, err, cap);
-    if (changed == 0)
-      return false;
+    if (path[count] & 1) {
+      n->nodes[path[count] >> 1] = (native_work_node){.node = branch};
+      changed = path[count];
+    } else {
+      changed = nworking_new(n, &branch);
+    }
   }
   *root = changed;
   return true;
+}
+/* Serialize only the final overlay, in dependency order, retaining immutable
+ * committed subtrees. Emitted nodes are never rewritten: after a failed Save
+ * a changed path loses its memoized offset, while unchanged nodes are reused.
+ * The recursion is bounded by the 256-bit Patricia key. */
+static bool nemit(native_store* n, uint64_t ref, uint64_t minimum,
+                  uint64_t* out, char* err, size_t cap) {
+  if ((ref & 1) == 0) {
+    if (ref != 0 && !nbound(ref, sizeof(native_index), n->committed.end))
+      return nerror(err, cap, "invalid committed native index reference");
+    *out = ref;
+    return true;
+  }
+  native_index* src = nworking_node(n, ref);
+  if (src == NULL || src->bit < minimum || src->bit > 256)
+    return nerror(err, cap, "invalid working native index");
+  native_work_node* node = &n->nodes[ref >> 1];
+  if (node->emitted != 0) {
+    *out = node->emitted;
+    return true;
+  }
+  native_index record = *src;
+  if (record.bit < 256) {
+    if (record.child[0] == 0 || record.child[1] == 0)
+      return nerror(err, cap, "missing working native index child");
+    if (!nemit(n, record.child[0], record.bit + 1, &record.child[0], err,
+               cap) ||
+        !nemit(n, record.child[1], record.bit + 1, &record.child[1], err, cap))
+      return false;
+  }
+  uint64_t off;
+  native_index* dst =
+      (native_index*)nalloc(n, N_INDEX, sizeof(*dst), &off, err, cap);
+  if (dst == NULL)
+    return false;
+  *dst = record;
+  dst->r.len = sizeof(*dst);
+  dst->r.type = N_INDEX;
+  ndigest(n, dst, sizeof(*dst));
+  node->emitted = *out = off;
+  return npoint(n, "index", err, cap);
 }
 
 bool pl_native_seal(pl_store* s, char* err, size_t cap) {
@@ -429,7 +503,7 @@ bool pl_native_stage(pl_store* s, const uint8_t hash[32], pl_val body,
   if (!nwritable(n, err, cap))
     return false;
   uint64_t found;
-  if (!nlookup(n->work.objects, hash, n->next, &found, err, cap))
+  if (!nworking_lookup(n, n->work.objects, hash, &found, err, cap))
     return false;
   if (found != 0)
     return pl_native_load(s, hash, out, err, cap);
@@ -506,7 +580,7 @@ bool pl_native_stage(pl_store* s, const uint8_t hash[32], pl_val body,
       for (uint32_t j = start; j < cells; j++)
         dst[j] = ntranslate(map, src[j], off);
   }
-  ndigest(r, (size_t)r->len);
+  ndigest(n, r, (size_t)r->len);
   if (!npoint(n, "object", err, cap) ||
       !ninsert(n, &n->work.objects, hash, off, err, cap))
     goto done;
@@ -554,18 +628,19 @@ static pl_cell* npin(uint64_t off, uint64_t end, uint64_t ids) {
   return p;
 }
 static bool nsb_valid(native_store* n, native_super* sb, uint64_t file_size) {
-  if (!nchecksum(sb, sizeof(*sb)) || sb->magic != N_MAGIC || sb->version != 1 ||
-      sb->layout != N_LAYOUT || sb->arch != N_ARCH || sb->endian != N_ENDIAN ||
-      sb->base != PL_NATIVE_BASE || sb->capacity != PL_NATIVE_BYTES ||
-      sb->end < N_START || sb->end > file_size || sb->end > PL_NATIVE_BYTES ||
+  if (!nchecksum(n, sb, sizeof(*sb)) || sb->magic != N_MAGIC ||
+      sb->version != 1 || sb->layout != N_LAYOUT || sb->arch != N_ARCH ||
+      sb->endian != N_ENDIAN || sb->base != PL_NATIVE_BASE ||
+      sb->capacity != PL_NATIVE_BYTES || sb->end < N_START ||
+      sb->end > file_size || sb->end > PL_NATIVE_BYTES ||
       sb->end % PL_NATIVE_GRANULE != 0 || sb->next_id == 0 ||
       sb->next_id > N_SLOT_COUNT)
     return false;
   if (!nmap(n, sb->end, false, NULL, 0))
     return false;
-  if (sb->objects != 0 && nnode(sb->objects, sb->end) == NULL)
+  if (sb->objects != 0 && nnode(n, sb->objects, sb->end) == NULL)
     return false;
-  if (sb->cache != 0 && nnode(sb->cache, sb->end) == NULL)
+  if (sb->cache != 0 && nnode(n, sb->cache, sb->end) == NULL)
     return false;
   if (sb->root != 0) {
     if (pl_tag(sb->root) != PL_TAG_PIN ||
@@ -575,12 +650,12 @@ static bool nsb_valid(native_store* n, native_super* sb, uint64_t file_size) {
     pl_cell* p = npin(off, sb->end, sb->next_id);
     uint64_t indexed;
     if (p == NULL || memcmp(p + 1, sb->root_hash, 32) != 0 ||
-        !nlookup(sb->objects, sb->root_hash, sb->end, &indexed, NULL, 0) ||
+        !nlookup(n, sb->objects, sb->root_hash, sb->end, &indexed, NULL, 0) ||
         indexed != off)
       return false;
   }
   if (sb->journal != 0) {
-    native_record* r = nrecord(sb->journal, sb->end, N_JOURNAL);
+    native_record* r = nrecord(n, sb->journal, sb->end, N_JOURNAL);
     if (r == NULL || r->len != sizeof(native_journal))
       return false;
     native_journal* j = (native_journal*)r;
@@ -625,7 +700,7 @@ bool pl_native_load(pl_store* s, const uint8_t hash[32], pl_val* out, char* err,
   if (!nrefresh(n, err, cap))
     return false;
   uint64_t off;
-  if (!nlookup(n->work.objects, hash, n->next, &off, err, cap))
+  if (!nworking_lookup(n, n->work.objects, hash, &off, err, cap))
     return false;
   if (off == 0)
     return nerror(err, cap, "missing native pin");
@@ -653,6 +728,9 @@ bool pl_native_checkpoint(pl_store* s, const uint8_t hash[32], char* err,
   native_super candidate = n->work;
   if (candidate.generation == UINT64_MAX)
     return nerror(err, cap, "native generation exhausted");
+  if (!nemit(n, n->work.objects, 0, &candidate.objects, err, cap) ||
+      !nemit(n, n->work.cache, 0, &candidate.cache, err, cap))
+    return false;
   candidate.generation++;
   candidate.root = root;
   memcpy(candidate.root_hash, hash, 32);
@@ -673,13 +751,13 @@ bool pl_native_checkpoint(pl_store* s, const uint8_t hash[32], char* err,
           (uint64_t)now.tv_sec * UINT64_C(1000000000) + (uint64_t)now.tv_nsec;
     j->entry.pack_bytes = nround(n->next);
     j->root = root;
-    ndigest(j, sizeof(*j));
+    ndigest(n, j, sizeof(*j));
     candidate.journal = off;
   }
   if (!pl_native_seal(s, err, cap))
     return false;
   candidate.end = n->next;
-  ndigest(&candidate, sizeof(candidate));
+  ndigest(n, &candidate, sizeof(candidate));
   if (!npoint(n, "before_data_sync", err, cap) ||
       msync(nptr(n->committed.end), (size_t)(candidate.end - n->committed.end),
             MS_SYNC) != 0 ||
@@ -701,6 +779,8 @@ bool pl_native_checkpoint(pl_store* s, const uint8_t hash[32], char* err,
     if (ok) {
       n->slot = slot;
       n->committed = n->work = candidate;
+      ax_arrfree(n->nodes);
+      n->nodes = NULL;
       n->poisoned = false;
     }
   }
@@ -716,9 +796,9 @@ static bool nget(void* ctx, const uint8_t key[32], uint8_t** out, size_t* len) {
   if (!nrefresh(n, NULL, 0))
     return false;
   uint64_t off;
-  if (!nlookup(n->work.cache, key, n->next, &off, NULL, 0) || off == 0)
+  if (!nworking_lookup(n, n->work.cache, key, &off, NULL, 0) || off == 0)
     return false;
-  native_record* r = nrecord(off, n->next, N_CACHE);
+  native_record* r = nrecord(n, off, n->next, N_CACHE);
   if (r == NULL || r->len != sizeof(*r) + 32)
     return false;
   *out = malloc(32);
@@ -734,7 +814,7 @@ static bool nput(void* ctx, const uint8_t key[32], const uint8_t* bytes,
   if (len != 32 || !nwritable(n, NULL, 0))
     return false;
   uint64_t target;
-  if (!nlookup(n->work.objects, bytes, n->next, &target, NULL, 0) ||
+  if (!nworking_lookup(n, n->work.objects, bytes, &target, NULL, 0) ||
       target == 0)
     return false;
   uint64_t off;
@@ -742,14 +822,14 @@ static bool nput(void* ctx, const uint8_t key[32], const uint8_t* bytes,
   if (r == NULL)
     return false;
   memcpy(r + 1, bytes, 32);
-  ndigest(r, (size_t)r->len);
+  ndigest(n, r, (size_t)r->len);
   return ninsert(n, &n->work.cache, key, off, NULL, 0);
 }
 static bool nhas(void* ctx, const uint8_t key[32]) {
   native_store* n = ctx;
   uint64_t off;
   return nrefresh(n, NULL, 0) &&
-         nlookup(n->work.objects, key, n->next, &off, NULL, 0) && off != 0;
+         nworking_lookup(n, n->work.objects, key, &off, NULL, 0) && off != 0;
 }
 static bool nput_root(void* ctx, const uint8_t hash[32]) {
   native_store* n = ctx;
@@ -779,6 +859,8 @@ static void nclose(void* ctx) {
   if (n->writer_fd >= 0)
     (void)close(n->writer_fd);
   pthread_mutex_unlock(&native_open_mu);
+  ax_arrfree(n->nodes);
+  EVP_MD_CTX_free(n->digest);
   free(n);
 }
 static pl_store* nopen(const char* path, bool readonly, char* err, size_t cap) {
@@ -796,6 +878,13 @@ static pl_store* nopen(const char* path, bool readonly, char* err, size_t cap) {
     nerror(err, cap,
            "native arena requires a supported 64-bit architecture and 4 KiB or "
            "16 KiB pages");
+    return NULL;
+  }
+  n->digest = EVP_MD_CTX_new();
+  if (n->digest == NULL ||
+      EVP_DigestInit_ex(n->digest, EVP_sha256(), NULL) != 1) {
+    nerror(err, cap, "cannot initialize native SHA-256 context");
+    nclose(n);
     return NULL;
   }
   n->readonly = readonly;
@@ -871,7 +960,7 @@ static pl_store* nopen(const char* path, bool readonly, char* err, size_t cap) {
                                   .generation = 1,
                                   .end = N_START,
                                   .next_id = 1};
-    ndigest(&n->committed, sizeof(n->committed));
+    ndigest(n, &n->committed, sizeof(n->committed));
     if (ftruncate(n->fd, N_START) != 0 ||
         !nwrite(n->fd, &n->committed, sizeof(n->committed), 0) ||
         !nsync(n->fd)) {
@@ -956,7 +1045,7 @@ static bool nwalk_inner(native_store* n, uint64_t off, uint64_t end,
   if (ax_hmgeti(*seen, off) >= 0)
     return nerror(err, cap, "shared or cyclic native index node");
   ax_hmput(*seen, off, 1);
-  native_index* p = nnode(off, end);
+  native_index* p = nnode(n, off, end);
   if (p == NULL || p->bit < minimum)
     return nerror(err, cap, "invalid native index tree");
   if (p->bit == 256)
@@ -998,7 +1087,7 @@ size_t pl_native_log(pl_store* s, uint64_t from, pl_store_root_entry* out,
   uint64_t off = n->committed.journal;
   uint64_t seq = n->committed.sequence;
   while (off != 0 && seq >= from) {
-    native_record* r = nrecord(off, n->committed.end, N_JOURNAL);
+    native_record* r = nrecord(n, off, n->committed.end, N_JOURNAL);
     if (r == NULL || r->len != sizeof(native_journal)) {
       count = 0;
       break;
@@ -1102,7 +1191,7 @@ static bool nedge(native_store* n, pl_val v, uint64_t owner,
       off < owner ? npin(off, n->committed.end, n->committed.next_id) : NULL;
   uint64_t indexed;
   return pin != NULL &&
-         nlookup(n->committed.objects, (uint8_t*)(pin + 1), n->committed.end,
+         nlookup(n, n->committed.objects, (uint8_t*)(pin + 1), n->committed.end,
                  &indexed, NULL, 0) &&
          indexed == off;
 }
@@ -1110,8 +1199,8 @@ static bool nverify_object(native_store* n, const native_index* leaf, void* ctx,
                            char* err, size_t cap) {
   (void)ctx;
   uint64_t indexed;
-  if (!nlookup(n->committed.objects, leaf->key, n->committed.end, &indexed, err,
-               cap) ||
+  if (!nlookup(n, n->committed.objects, leaf->key, n->committed.end, &indexed,
+               err, cap) ||
       indexed != leaf->value)
     return nerror(err, cap, "native index key is on the wrong branch");
   pl_cell* pin = npin(leaf->value, n->committed.end, n->committed.next_id);
@@ -1245,13 +1334,13 @@ done:
 static bool nverify_cache(native_store* n, const native_index* leaf, void* ctx,
                           char* err, size_t cap) {
   (void)ctx;
-  native_record* r = nrecord(leaf->value, n->committed.end, N_CACHE);
+  native_record* r = nrecord(n, leaf->value, n->committed.end, N_CACHE);
   uint64_t off, indexed;
   return (r != NULL && r->len == sizeof(*r) + 32 &&
-          nlookup(n->committed.cache, leaf->key, n->committed.end, &indexed,
+          nlookup(n, n->committed.cache, leaf->key, n->committed.end, &indexed,
                   err, cap) &&
           indexed == leaf->value &&
-          nlookup(n->committed.objects, (uint8_t*)(r + 1), n->committed.end,
+          nlookup(n, n->committed.objects, (uint8_t*)(r + 1), n->committed.end,
                   &off, err, cap) &&
           off != 0) ||
          nerror(err, cap, "invalid native compiler-cache reference");
@@ -1283,7 +1372,7 @@ static bool nscrub_records(native_store* n, char* err, size_t cap) {
       break;
     }
     native_record* raw = nptr(at);
-    native_record* r = nrecord(at, n->committed.end, raw->type);
+    native_record* r = nrecord(n, at, n->committed.end, raw->type);
     if (r == NULL || r->type < N_OBJECT || r->type > N_CACHE ||
         (r->len >= PL_NATIVE_GRANULE && at % PL_NATIVE_GRANULE != 0) ||
         (r->len < PL_NATIVE_GRANULE && r->len > boundary - at)) {
@@ -1321,7 +1410,7 @@ bool pl_store_verify(pl_store* s, char* err, size_t cap) {
   uint64_t off = n->committed.journal, seq = n->committed.sequence;
   uint64_t later_end = n->committed.end;
   while (ok && off != 0) {
-    native_record* r = nrecord(off, n->committed.end, N_JOURNAL);
+    native_record* r = nrecord(n, off, n->committed.end, N_JOURNAL);
     if (r == NULL || r->len != sizeof(native_journal)) {
       ok = false;
       break;
@@ -1331,8 +1420,8 @@ bool pl_store_verify(pl_store* s, char* err, size_t cap) {
     ok = j->entry.seq == seq && seq != 0 && j->entry.pack_bytes <= later_end &&
          j->entry.pack_bytes >= off + sizeof(*j) &&
          (j->previous == 0 || j->previous < off) &&
-         nlookup(n->committed.objects, j->entry.hash, n->committed.end, &object,
-                 err, cap) &&
+         nlookup(n, n->committed.objects, j->entry.hash, n->committed.end,
+                 &object, err, cap) &&
          object != 0 && j->entry.pack_bytes % PL_NATIVE_GRANULE == 0 &&
          npin(object, j->entry.pack_bytes, n->committed.next_id) != NULL &&
          j->root == pl_make(PL_TAG_PIN, nptr(object + sizeof(native_record)));
@@ -1353,10 +1442,10 @@ static bool nusage_leaf(native_store* n, const native_index* leaf, void* ctx,
   out->object_bytes += r->len;
   return true;
 }
-static bool nindex_size(uint64_t off, uint64_t end, uint64_t minimum,
-                        uint64_t* size) {
+static bool nindex_size(native_store* n, uint64_t off, uint64_t end,
+                        uint64_t minimum, uint64_t* size) {
   native_copy* seen = NULL;
-  bool ok = nwalk_inner(NULL, off, end, minimum, NULL, NULL, &seen, NULL, 0);
+  bool ok = nwalk_inner(n, off, end, minimum, NULL, NULL, &seen, NULL, 0);
   if (ok)
     *size += (uint64_t)ax_hmlen(seen) * sizeof(native_index);
   ax_hmfree(seen);
@@ -1370,13 +1459,13 @@ bool pl_store_get_usage(pl_store* s, pl_store_usage* out, char* err,
   memset(out, 0, sizeof(*out));
   pl_store_save_lock(s);
   native_store* n = s->be.ctx;
-  bool ok =
-      nrefresh(n, err, cap) &&
-      nwalk(n, n->committed.objects, n->committed.end, 0, nusage_leaf, out, err,
-            cap) &&
-      nindex_size(n->committed.objects, n->committed.end, 0,
-                  &out->index_bytes) &&
-      nindex_size(n->committed.cache, n->committed.end, 0, &out->index_bytes);
+  bool ok = nrefresh(n, err, cap) &&
+            nwalk(n, n->committed.objects, n->committed.end, 0, nusage_leaf,
+                  out, err, cap) &&
+            nindex_size(n, n->committed.objects, n->committed.end, 0,
+                        &out->index_bytes) &&
+            nindex_size(n, n->committed.cache, n->committed.end, 0,
+                        &out->index_bytes);
   if (ok) {
     out->committed_bytes = n->committed.end;
     out->journal_bytes = n->committed.sequence * sizeof(native_journal);
