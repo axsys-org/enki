@@ -16,9 +16,27 @@
 #define ENKI_REAVER_PLAN_DIR "./reaver/src/plan"
 #endif
 
+static char original_cwd[2048];
+static char absolute_plan_dir[4096];
+static char isolated_cwd[128];
+
+static void cli_setup(void) {
+  ASSERT_NOT_NULL(getcwd(original_cwd, sizeof(original_cwd)));
+  const char* plan = getenv("ENKI_REAVER_PLAN_DIR");
+  if (plan == NULL || plan[0] == 0)
+    plan = ENKI_REAVER_PLAN_DIR;
+  ASSERT_NOT_NULL(realpath(plan, absolute_plan_dir));
+  snprintf(isolated_cwd, sizeof(isolated_cwd), "/tmp/enki-cli-XXXXXX");
+  ASSERT_NOT_NULL(mkdtemp(isolated_cwd));
+  ASSERT_EQ(chdir(isolated_cwd), 0);
+}
+static void cli_teardown(void) {
+  ASSERT_EQ(chdir(original_cwd), 0);
+}
+TEST_FIXTURE(wisp_cli, cli_setup, cli_teardown)
+
 static const char* reaver_plan_dir(void) {
-  const char* env_c = getenv("ENKI_REAVER_PLAN_DIR");
-  return env_c != NULL && env_c[0] != '\0' ? env_c : ENKI_REAVER_PLAN_DIR;
+  return absolute_plan_dir;
 }
 
 static void reaver_src_dir(char* out, size_t out_cap) {
@@ -29,9 +47,7 @@ static void reaver_src_dir(char* out, size_t out_cap) {
     return;
   }
 
-  char cwd[2048];
-  ASSERT_NOT_NULL(getcwd(cwd, sizeof(cwd)), "failed to get cwd");
-  int s = snprintf(out, out_cap, "%s/reaver/src", cwd);
+  int s = snprintf(out, out_cap, "%s/reaver/src", original_cwd);
   ASSERT(s >= 0 && (size_t)s < out_cap, "reaver src path too long");
 }
 
@@ -99,7 +115,7 @@ static bool file_contains(const char* path, const char* needle) {
   return found;
 }
 
-TEST(wisp_cli, save_silo_snapshot_round_trip) {
+TEST(wisp_cli, save_native_snapshot_round_trip) {
   char dir[] = "/tmp/enki-snaptest-XXXXXX";
   ASSERT_NOT_NULL(mkdtemp(dir), "failed to make temp dir");
 
@@ -124,14 +140,14 @@ TEST(wisp_cli, save_silo_snapshot_round_trip) {
   char cmd[1024];
   char out[256];
 
-  /* BPLAN assemble: pins prog, Save publishes it as the Silo root. */
+  /* BPLAN assemble: pins prog, Save publishes it as the native root. */
   (void)snprintf(cmd, sizeof(cmd), "cd %s && %s %s save1 >/dev/null 2>&1", dir,
                  wisp_bin(), dir);
   int st = system(cmd);
   ASSERT(WIFEXITED(st) && WEXITSTATUS(st) == 0, "assemble failed");
 
-  (void)snprintf(path, sizeof(path), "%s/snap/pins.pack", dir);
-  ASSERT_EQ(access(path, F_OK), 0, "snap/pins.pack not written");
+  (void)snprintf(path, sizeof(path), "%s/snap/arena.dat", dir);
+  ASSERT_EQ(access(path, F_OK), 0, "snap/arena.dat not written");
 
   /* RPLAN resume: run the saved program, which prints "snap-ok" */
   (void)snprintf(cmd, sizeof(cmd), "cd %s && %s snap root _ 2>/dev/null", dir,
@@ -286,9 +302,9 @@ TEST(wisp_cli, profile_json_finalizes_after_runtime_error) {
 
 static int run_scenario(const char* bin, const char* fn, char* out,
                         size_t cap) {
-  char cmd[1024];
-  (void)snprintf(cmd, sizeof(cmd), "%s tests/plan actors %s 2>/dev/null", bin,
-                 fn);
+  char cmd[4096];
+  (void)snprintf(cmd, sizeof(cmd), "%s %s/tests/plan actors %s 2>/dev/null",
+                 bin, original_cwd, fn);
   return run_cmd(cmd, out, cap);
 }
 
@@ -328,6 +344,11 @@ TEST(wisp_cli, actor_differential_vs_reaver) {
     oracle = "./reaver/dist-newstyle/build/aarch64-osx/ghc-9.10.3/"
              "plan-assembler-0.1.0.0/x/plan-assembler/build/plan-assembler/"
              "plan-assembler";
+  char oracle_path[4096];
+  if (oracle[0] != '/') {
+    snprintf(oracle_path, sizeof(oracle_path), "%s/%s", original_cwd, oracle);
+    oracle = oracle_path;
+  }
   if (access(oracle, X_OK) != 0)
     SKIP_TEST("reaver oracle binary not available");
 

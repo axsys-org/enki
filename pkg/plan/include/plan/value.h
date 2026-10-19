@@ -22,6 +22,7 @@
 
 #include "axsys/assume.h"
 #include "axsys/perf.h"
+#include "plan/native.h"
 
 typedef uint64_t pl_val;
 typedef uint64_t pl_cell;
@@ -296,11 +297,28 @@ static inline pl_val pl_pin_body(pl_cell* p) {
 #define PL_CODE_PENDING                                                        \
   ((void*)(uintptr_t)2) /* a compile is in progress on some thread */
 
+/* Native PIN cell 6 is an immutable dense ID. Code pointers never enter the
+ * image. The side mapping is published before the store can be used and is
+ * released only after all its evaluators have stopped. */
+extern pl_cell* pl_native_code_slots;
+static inline pl_cell* pl_pin_code_slot(pl_cell* p) {
+  uintptr_t addr = (uintptr_t)p & PL_ADDR_MASK;
+  if (addr >= PL_NATIVE_BASE && addr < PL_NATIVE_BASE + PL_NATIVE_BYTES) {
+    pl_cell* slots = __atomic_load_n(&pl_native_code_slots, __ATOMIC_ACQUIRE);
+    /* Without an open native store this range may belong to another
+     * allocator. Its PINs still use the ordinary inline representation. */
+    if (slots != NULL)
+      return slots + p[6];
+  }
+  return &p[6];
+}
+
 static inline void* pl_pin_code_raw(pl_cell* p) {
   p = pl_pin_resolved(p);
   if (pl_pin_is_proxy(p))
     return NULL;
-  return (void*)(uintptr_t)__atomic_load_n(&p[6], __ATOMIC_ACQUIRE);
+  return (void*)(uintptr_t)__atomic_load_n(pl_pin_code_slot(p),
+                                           __ATOMIC_ACQUIRE);
 }
 /* Attached code, or NULL (including the sentinel states). */
 static inline void* pl_pin_code(pl_cell* p) {
@@ -310,7 +328,8 @@ static inline void* pl_pin_code(pl_cell* p) {
 static inline void pl_pin_set_code(pl_cell* p, void* code) {
   p = pl_pin_resolved(p);
   ax_assume(!pl_pin_is_proxy(p), "pl_pin_set_code on an unresolved PIN proxy");
-  __atomic_store_n(&p[6], (pl_cell)(uintptr_t)code, __ATOMIC_RELEASE);
+  __atomic_store_n(pl_pin_code_slot(p), (pl_cell)(uintptr_t)code,
+                   __ATOMIC_RELEASE);
 }
 static inline uint32_t pl_pin_npins(pl_cell* p) {
   p = pl_pin_resolved(p);

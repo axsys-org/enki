@@ -84,9 +84,9 @@ BUILD_CFLAGS_release := $(BUILD_CFLAGS_relbase) $(LTO_CFLAGS)
 BUILD_CFLAGS_profile := $(BUILD_CFLAGS_relbase) -g3 -fno-omit-frame-pointer -fdebug-info-for-profiling
 BUILD_CFLAGS_pgo-generate := $(BUILD_CFLAGS_relbase) -fprofile-instr-generate
 BUILD_CFLAGS_pgo := $(BUILD_CFLAGS_relbase) $(LTO_CFLAGS) -fprofile-instr-use=$(PGO_PROFILE) -Wno-error=profile-instr-unprofiled
-BUILD_CFLAGS_asan := -O1 -g3 -fsanitize=address -fno-omit-frame-pointer $(HARDEN_CFLAGS)
-BUILD_CFLAGS_ubsan := -O1 -g3 -fsanitize=undefined -fno-omit-frame-pointer $(HARDEN_CFLAGS)
-BUILD_CFLAGS_tsan := -O1 -g3 -fsanitize=thread -fno-omit-frame-pointer $(HARDEN_CFLAGS)
+BUILD_CFLAGS_asan := -DPL_NATIVE_SANITIZER -O1 -g3 -fsanitize=address -fno-omit-frame-pointer $(HARDEN_CFLAGS)
+BUILD_CFLAGS_ubsan := -DPL_NATIVE_SANITIZER -O1 -g3 -fsanitize=undefined -fno-omit-frame-pointer $(HARDEN_CFLAGS)
+BUILD_CFLAGS_tsan := -DPL_NATIVE_SANITIZER -O1 -g3 -fsanitize=thread -fno-omit-frame-pointer $(HARDEN_CFLAGS)
 BUILD_CFLAGS_coverage := -O1 -g3 --coverage -Wno-pedantic $(HARDEN_CFLAGS)
 
 BUILD_LDFLAGS_debug :=

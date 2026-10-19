@@ -1031,7 +1031,8 @@ static pl_val op_save(pl_thread* t, size_t ab) {
   char err[192] = {0};
   if (!pl_store_save_root(store, ARG(0), NULL, err, sizeof(err)))
     pl_raise_msgf(t, "Save: %s", err[0] != '\0' ? err : "store failure");
-  if (store->format == PL_STORE_FORMAT_SILO_V1) {
+  if (store->format == PL_STORE_FORMAT_SILO_V1 ||
+      store->format == PL_STORE_FORMAT_NATIVE_V1) {
     return 0;
   }
 

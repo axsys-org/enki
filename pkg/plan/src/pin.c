@@ -601,6 +601,38 @@ static void save_build_canonical(save_ctx* c) {
   }
 }
 
+static bool save_prepare_native(save_ctx* c, pl_val root) {
+  for (ptrdiff_t i = 0; i < ax_arrlen(c->items); i++) {
+    save_item* item = &c->items[i];
+    if (!save_prepare_table(c, item))
+      return false;
+    copy_entry* copies = NULL;
+    pl_val body =
+        save_copy_promoted(c, &copies, pl_pin_body(pl_ptr(item->source)), true);
+    ax_hmfree(copies);
+    pl_val* subpins = NULL;
+    for (ptrdiff_t j = 0; j < ax_arrlen(item->table); j++)
+      ax_arrpush(subpins, save_canonical_pin(c, item->table[j]));
+    bool ok = pl_silo_hash(body, subpins, (size_t)ax_arrlen(subpins),
+                           item->hash.b, c->err, c->err_cap);
+    if (ok) {
+      item->hash_ready = true;
+      ok = pl_native_stage(c->store, item->hash.b, body, subpins,
+                           (uint32_t)ax_arrlen(subpins), &item->canonical,
+                           c->err, c->err_cap);
+    }
+    ax_arrfree(subpins);
+    if (!ok)
+      return false;
+    ax_hmput(c->canonical, item->hash, item->canonical);
+  }
+  const uint8_t* hash = save_pin_hash(c, root);
+  if (hash == NULL)
+    return save_error(c, "native root hash was not prepared");
+  return c->no_root ? pl_native_seal(c->store, c->err, c->err_cap)
+                    : pl_native_checkpoint(c->store, hash, c->err, c->err_cap);
+}
+
 static void save_publish_targets(save_ctx* c) {
   for (ptrdiff_t i = 0; i < ax_arrlen(c->items); i++) {
     save_item* item = &c->items[i];
@@ -639,6 +671,15 @@ static bool save_canonical_root(save_ctx* c, pl_val input, bool* handled) {
   if (hash == NULL)
     return true;
   *handled = true;
+
+  if (c->store->format == PL_STORE_FORMAT_NATIVE_V1) {
+    if (c->no_root) {
+      pl_val found;
+      return pl_native_load(c->store, hash, &found, c->err, c->err_cap) &&
+             pl_native_seal(c->store, c->err, c->err_cap);
+    }
+    return pl_native_checkpoint(c->store, hash, c->err, c->err_cap);
+  }
 
   if (c->no_root) {
     /* already canonical: presence is all that matters, and the root
@@ -682,7 +723,9 @@ static bool pl_store_save_pin_or_root(pl_store* s, pl_val pin,
   }
   ok = save_discover_pin(&c, pin, 0);
   if (ok) {
-    if (s->format == PL_STORE_FORMAT_SILO_V1)
+    if (s->format == PL_STORE_FORMAT_NATIVE_V1)
+      ok = save_prepare_native(&c, pin);
+    else if (s->format == PL_STORE_FORMAT_SILO_V1)
       ok = save_prepare_silo(&c, pin);
     else
       ok = save_prepare_legacy(&c, pin);
@@ -693,7 +736,12 @@ static bool pl_store_save_pin_or_root(pl_store* s, pl_val pin,
      * source proxy has its canonical target.  Newly canonical laws get their
      * code on first entry (pl_store_code_demand), not here. */
     pl_store_lock(s);
-    save_build_canonical(&c);
+    if (s->format == PL_STORE_FORMAT_NATIVE_V1) {
+      for (ptrdiff_t i = 0; i < ax_arrlen(c.items); i++)
+        pl_store_register_canonical(s, c.items[i].canonical);
+    } else {
+      save_build_canonical(&c);
+    }
     save_publish_targets(&c);
     const uint8_t* root_hash = save_pin_hash(&c, pin);
     ax_assume(root_hash != NULL, "successful Save lost its root hash");
@@ -864,6 +912,8 @@ static bool silo_mem_rewind(void* ctx) {
 bool pl_store_load_silo_stream(pl_thread* t, pl_store* s, const uint8_t* bytes,
                                size_t len, pl_val* out, char* err,
                                size_t err_cap) {
+  pl_store_save_lock(s);
+  pl_store_lock(s);
   silo_mem_reader mem = {.b = bytes, .n = len, .pos = 0};
   pl_silo_reader reader = {.ctx = &mem,
                            .read = silo_mem_read,
@@ -928,7 +978,18 @@ bool pl_store_load_silo_stream(pl_thread* t, pl_store* s, const uint8_t* bytes,
     goto done;
   }
 
-  *out = pl_store_mk_pin(s, actual, body, (uint32_t)scan.used_count, subpins);
+  if (s->format == PL_STORE_FORMAT_NATIVE_V1) {
+    ok = pl_native_stage(s, actual, body, subpins, (uint32_t)scan.used_count,
+                         out, err, err_cap) &&
+         pl_native_seal(s, err, err_cap);
+    pl_store_release(s, mark);
+    marked = false;
+    if (!ok)
+      goto done;
+    pl_store_register_canonical(s, *out);
+  } else {
+    *out = pl_store_mk_pin(s, actual, body, (uint32_t)scan.used_count, subpins);
+  }
   marked = false;
   ok = true;
 
@@ -938,11 +999,15 @@ done:
   pl_silo_scan_free(&scan);
   free(resolved);
   ax_arrfree(subpins);
+  pl_store_unlock(s);
+  pl_store_save_unlock(s);
   return ok;
 }
 
 static bool load_silo_pin(pl_thread* t, pl_store* s, const uint8_t hash[32],
                           pl_val* out, char* err, size_t err_cap) {
+  if (s->format == PL_STORE_FORMAT_NATIVE_V1)
+    return pl_native_load(s, hash, out, err, err_cap);
   pl_val hit = pl_store_intern_get(s, hash);
   if (hit != 0) {
     *out = hit;
@@ -1126,7 +1191,11 @@ pl_val pl_store_load(pl_thread* t, const uint8_t hash[32]) {
   char err[192] = {0};
   pl_val pin = 0;
   bool ok;
-  if (s->format == PL_STORE_FORMAT_SILO_V1) {
+  if (s->format == PL_STORE_FORMAT_NATIVE_V1) {
+    ok = pl_native_load(s, hash, &pin, err, sizeof(err));
+    if (ok)
+      pl_store_register_canonical(s, pin);
+  } else if (s->format == PL_STORE_FORMAT_SILO_V1) {
     /* Silo builds directly into the arena and rolls the whole build back on
      * validation failure, so retain mu across its mark/build/release region. */
     pl_store_lock(s);

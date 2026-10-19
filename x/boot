@@ -36,7 +36,7 @@ EOF
 
 do_make
 
-if [[ "$1" == "--reset" || ! -e snap/root.plan ]]
+if [[ "${1-}" == "--reset" ]] || ! $PREFIX ./build/$BUILD_TYPE/bin/scry snap has-root
 then reset; load_stdlib
 fi
 

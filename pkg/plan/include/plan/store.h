@@ -10,8 +10,8 @@
  *     objects reference only store-region objects (the closure
  *     invariant); the collector treats store addresses as terminal.
  *   - the persistence backend: content-addressed byte storage keyed by
- *     pin hash.  Production backend is LMDB; a memory backend exists for
- *     tests and for linking libplan without LMDB.
+ *     pin hash. The native backend maps persistent objects directly; Silo,
+ *     LMDB and memory backends remain available for regression coverage.
  */
 
 #include <stddef.h>
@@ -30,11 +30,14 @@ typedef struct pl_hash {
 typedef enum pl_store_format {
   PL_STORE_FORMAT_LEGACY_V1 = 0,
   PL_STORE_FORMAT_SILO_V1 = 1,
+  PL_STORE_FORMAT_NATIVE_V1 = 2,
 } pl_store_format;
 
 typedef struct pl_store_backend {
   void* ctx;
-  /* get returns a malloc'd buffer the caller frees; false if missing. */
+  /* get returns a malloc'd buffer the caller frees; false if missing.
+   * Native byte entries are compiler-cache mappings; load PINs through
+   * pl_store_load instead of interpreting these entries as object streams. */
   bool (*get)(void* ctx, const uint8_t hash[32], uint8_t** out_b,
               size_t* out_s);
   bool (*put)(void* ctx, const uint8_t hash[32], const uint8_t* b, size_t s);
@@ -73,6 +76,7 @@ typedef struct pl_store {
   ax_arena* region;
   uint8_t* lo;
   uint8_t* hi;
+  uintptr_t native_lo, native_hi;
   pl_intern_entry* intern;             /* stb_ds hashmap: hash -> PIN val */
   pl_code_targets_entry* code_targets; /* law hash -> all runtime PINs */
   pl_code_cache_entry* code_cache;     /* active generation: hash -> code */
@@ -112,6 +116,17 @@ pl_store* pl_store_new_silo(const char* path, size_t map_size);
 /* Inspector open: MDB_RDONLY environment, pins.pack O_RDONLY.  Coexists
  * with a live writer; every mutating store operation fails cleanly. */
 pl_store* pl_store_new_silo_ro(const char* path, size_t map_size);
+/* Native images require an existing, fresh directory and their fixed address
+ * window. One writer per directory, one native store per process. */
+pl_store* pl_store_new_native(const char* path, char* err, size_t err_cap);
+pl_store* pl_store_new_native_ro(const char* path, char* err, size_t err_cap);
+bool pl_store_verify(pl_store* s, char* err, size_t err_cap);
+typedef struct pl_store_usage {
+  uint64_t committed_bytes, object_bytes, index_bytes, journal_bytes;
+  uint64_t overhead_bytes; /* headers, padding, and obsolete COW metadata */
+} pl_store_usage;
+bool pl_store_get_usage(pl_store* s, pl_store_usage* out, char* err,
+                        size_t cap);
 void pl_store_free(pl_store* s);
 
 /* Address-range test used by the collector (store vals are terminal).  The
@@ -119,7 +134,8 @@ void pl_store_free(pl_store* s);
  * non-immediate edge visited by GC. */
 static inline bool pl_store_owns(const pl_store* s, pl_val v) {
   uintptr_t p = pl_addr(v);
-  return p >= (uintptr_t)s->lo && p < (uintptr_t)s->hi;
+  return (p >= (uintptr_t)s->lo && p < (uintptr_t)s->hi) ||
+         (p >= s->native_lo && p < s->native_hi);
 }
 
 /*
@@ -206,8 +222,9 @@ size_t pl_store_root_log(pl_store* s, uint64_t from, pl_store_root_entry* out,
 
 /* Visit every committed object (hash order) with its pack placement.
  * Store-local staged objects are excluded. */
-typedef void (*pl_store_silo_object_fn)(void* ctx, const uint8_t hash[32],
-                                        uint64_t off, uint64_t len);
+typedef void (*pl_store_object_fn)(void* ctx, const uint8_t hash[32],
+                                   uint64_t off, uint64_t len);
+typedef pl_store_object_fn pl_store_silo_object_fn;
 size_t pl_store_silo_objects(pl_store* s, pl_store_silo_object_fn fn,
                              void* ctx);
 
@@ -217,6 +234,12 @@ size_t pl_store_silo_objects(pl_store* s, pl_store_silo_object_fn fn,
 bool pl_store_silo_object_info(pl_store* s, const uint8_t hash[32],
                                uint64_t* out_len, pl_hash** out_subpins,
                                size_t* out_nsub, char* err, size_t err_cap);
+/* Backend-neutral inspector interfaces. Native lengths are object extents,
+ * not serialized stream sizes; journal pack_bytes is the committed file end. */
+size_t pl_store_objects(pl_store* s, pl_store_object_fn fn, void* ctx);
+bool pl_store_object_info(pl_store* s, const uint8_t hash[32],
+                          uint64_t* out_len, pl_hash** out_subpins,
+                          size_t* out_nsub, char* err, size_t err_cap);
 
 /* Runtime singletons used by lazy Row construction (see op.c). */
 pl_val pl_store_ix0_expr(pl_store* s);

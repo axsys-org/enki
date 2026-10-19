@@ -110,4 +110,21 @@ void pl_store_register_canonical(pl_store* s, pl_val pin);
 /* Intern the pin of a small nat (used for the op-66 row exprs). */
 pl_val pl_store_pin_of_nat(pl_store* s, uint64_t n);
 
+/* Native operations require save_mu. Stage creates an immutable native
+ * extent, but does not publish the durable root or register runtime aliases. */
+bool pl_native_stage(pl_store* s, const uint8_t hash[32], pl_val body,
+                     const pl_val* subpins, uint32_t nsub, pl_val* out,
+                     char* err, size_t cap);
+bool pl_native_load(pl_store* s, const uint8_t hash[32], pl_val* out, char* err,
+                    size_t cap);
+bool pl_native_checkpoint(pl_store* s, const uint8_t hash[32], char* err,
+                          size_t cap);
+bool pl_native_seal(pl_store* s, char* err, size_t cap);
+uint64_t pl_native_log_head(pl_store* s);
+size_t pl_native_log(pl_store* s, uint64_t from, pl_store_root_entry* out,
+                     size_t cap);
+/* Deterministic failure/crash seam for tests. Called while save_mu is held. */
+typedef bool (*pl_native_fault_fn)(void* ctx, const char* point);
+void pl_native_set_fault(pl_store* s, pl_native_fault_fn fn, void* ctx);
+
 #endif

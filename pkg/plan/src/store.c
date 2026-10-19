@@ -116,6 +116,10 @@ bool pl_staged_put(pl_staged_blob** staged, const uint8_t hash[32],
 
 bool pl_staged_get(pl_staged_blob* staged, const uint8_t hash[32],
                    uint8_t** out, size_t* len) {
+  /* stb_ds lookup allocates a default entry for NULL. This pointer is passed
+   * by value, so an empty lookup must not create an unowned table. */
+  if (staged == NULL)
+    return false;
   pl_hash key;
   memcpy(key.b, hash, sizeof(key.b));
   ptrdiff_t at = ax_hmgeti(staged, key);
@@ -836,8 +840,41 @@ static void pl_store_code_set_arity_locked(pl_store* s, pl_hash key,
   code->arity = arity <= UINT32_MAX ? (uint32_t)arity : 0; /* 0: unknown */
 }
 
+/* The machine-wide cache retains its portable Silo boundary even when the
+ * store itself is native. No process addresses enter that shared cache. */
+static void pl_store_global_native_row(pl_store* s, const uint8_t key[32],
+                                       const uint8_t hash[32]) {
+  if (!plgc_configured())
+    return;
+  uint8_t* existing = NULL;
+  size_t existing_len = 0;
+  if (plgc_get(key, &existing, &existing_len)) {
+    free(existing);
+    return;
+  }
+  pl_val pin;
+  if (!pl_native_load(s, hash, &pin, NULL, 0))
+    return;
+  pl_cell* p = pl_ptr(pin);
+  uint8_t* bytes = NULL;
+  size_t len = 0;
+  uint8_t actual[32];
+  if (pl_silo_encode_buffer(pl_pin_body(p), pl_pin_subpins(p), pl_pin_npins(p),
+                            NULL, NULL, &bytes, &len, actual, NULL, 0))
+    plgc_put(key, bytes, len);
+  ax_arrfree(bytes);
+}
+
 void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
   pl_store_save_lock(s);
+  if (s->format == PL_STORE_FORMAT_NATIVE_V1) {
+    pl_val pin;
+    if (!pl_native_load(s, hash, &pin, NULL, 0)) {
+      pl_store_save_unlock(s);
+      return;
+    }
+    pl_store_register_canonical(s, pin);
+  }
   pl_store_lock(s);
   if (!s->compiler_f || s->compiler_t == NULL) {
     pl_store_unlock(s);
@@ -927,6 +964,8 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
             served = true;
             /* migrate snap-local entries machine-wide so older snaps'
              * work survives their deletion */
+            if (s->format == PL_STORE_FORMAT_NATIVE_V1)
+              pl_store_global_native_row(s, codecache_key, got);
             if (s->format == PL_STORE_FORMAT_SILO_V1) {
               uint8_t* have = NULL;
               size_t have_n = 0;
@@ -958,7 +997,8 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
      * earlier snap; subpin resolution against this store validates it */
     uint8_t* gb = NULL;
     size_t gbn = 0;
-    if (s->format == PL_STORE_FORMAT_SILO_V1 &&
+    if ((s->format == PL_STORE_FORMAT_SILO_V1 ||
+         s->format == PL_STORE_FORMAT_NATIVE_V1) &&
         plgc_get(codecache_key, &gb, &gbn)) {
       volatile bool served = false;
       pl_catch cc;
@@ -973,6 +1013,11 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
         pl_catch_pop(t, &cc);
         pl_cell* rp = loaded ? pl_as(PL_TAG_PIN, rowpin) : NULL;
         if (rp != NULL) {
+          /* The imported row is now store-owned. Include its local mapping
+           * in the next Save so later restarts need no global cache. */
+          if (s->format == PL_STORE_FORMAT_NATIVE_V1)
+            (void)pl_store_backend_put(s, codecache_key, pl_pin_hash(rowpin),
+                                       32);
           pl_code* code = pl_bytecode_from_val_in(s, pl_pin_body(rp));
           if (code != NULL) {
             pl_store_lock(s);
@@ -1081,6 +1126,8 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
       char err[192] = {0};
       if (pl_store_save_pin(s, t->vstack[rb], rowhash, err, sizeof(err))) {
         (void)pl_store_backend_put(s, codecache_key, rowhash, 32);
+        if (s->format == PL_STORE_FORMAT_NATIVE_V1)
+          pl_store_global_native_row(s, codecache_key, rowhash);
         if (s->format == PL_STORE_FORMAT_SILO_V1) {
           /* publish the encoded stream machine-wide: read the bytes
            * the save just wrote back out of the pack */
@@ -1141,7 +1188,7 @@ bool pl_store_put_compiler(pl_store* s, const uint8_t hash[32]) {
     pl_heap_free(s->compiler_h);
     s->compiler_h = NULL;
   }
-  s->compiler_f = enabled;
+  __atomic_store_n(&s->compiler_f, enabled, __ATOMIC_RELEASE);
   memcpy(s->compiler, hash, 32);
   bool install = s->compiler_f;
   if (install) {
@@ -1166,10 +1213,15 @@ void* pl_store_code_demand(pl_store* s, pl_val pin) {
   pl_cell* p = pl_pin_resolved(pl_ptr(pin));
   if (pl_pin_is_proxy(p) || (pl_hdr_flags(p[0]) & PL_F_PIN_HASHED) == 0)
     return NULL; /* unsaved: nothing to compile under */
-  if (!s->compiler_f)
-    return NULL; /* unsynchronized read: a stale answer only defers */
+  if (!__atomic_load_n(&s->compiler_f, __ATOMIC_ACQUIRE))
+    return NULL;
+  /* Native dependencies are traversed directly without a load/register
+   * sweep. Register this law only when execution first demands its code. */
+  if (s->format == PL_STORE_FORMAT_NATIVE_V1)
+    pl_store_register_canonical(s, pl_make(PL_TAG_PIN, p));
+  pl_cell* slot = pl_pin_code_slot(p);
   pl_cell expect = 0;
-  if (!__atomic_compare_exchange_n(&p[6], &expect,
+  if (!__atomic_compare_exchange_n(slot, &expect,
                                    (pl_cell)(uintptr_t)PL_CODE_PENDING, false,
                                    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
     /* attached, pending on another thread, or known uncompilable */
@@ -1178,11 +1230,11 @@ void* pl_store_code_demand(pl_store* s, pl_val pin) {
                : NULL;
   }
   pl_store_put_code(s, pl_pin_hash_bytes(p));
-  pl_cell after = __atomic_load_n(&p[6], __ATOMIC_ACQUIRE);
+  pl_cell after = __atomic_load_n(slot, __ATOMIC_ACQUIRE);
   if (after == (pl_cell)(uintptr_t)PL_CODE_PENDING) {
     /* nothing attached: the compile raised, the row did not decode, or the
      * compiler went away.  A new generation resets the slot to NULL. */
-    (void)__atomic_compare_exchange_n(&p[6], &after,
+    (void)__atomic_compare_exchange_n(slot, &after,
                                       (pl_cell)(uintptr_t)PL_CODE_NONE, false,
                                       __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
     return NULL;
@@ -1240,6 +1292,19 @@ void pl_store_register_canonical(pl_store* s, pl_val pin) {
 
 pl_val pl_store_mk_pin(pl_store* s, const uint8_t* hash, pl_val body,
                        uint32_t npins, const pl_val* subpins) {
+  if (s->format == PL_STORE_FORMAT_NATIVE_V1) {
+    pl_val pin = 0;
+    char err[192];
+    pl_store_save_lock(s);
+    bool ok = pl_native_stage(s, hash, body, subpins, npins, &pin, err,
+                              sizeof(err)) &&
+              pl_native_seal(s, err, sizeof(err));
+    if (ok)
+      pl_store_register_canonical(s, pin);
+    pl_store_save_unlock(s);
+    ax_assume(ok, "native PIN construction: %s", err);
+    return pin;
+  }
   ax_assume(hash != NULL, "pl_store_mk_pin requires a canonical hash");
   ax_assume(npins <= PL_HDR_META_MAX,
             "canonical PIN exceeds the direct PIN-table limit");

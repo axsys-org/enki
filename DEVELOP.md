@@ -6,7 +6,7 @@ enforced dependency direction:
 | package | prefix | contents |
 | ----------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `pkg/axsys` | `ax_` | GC-oblivious systems substrate: arena, vector, string builder, allocator, sha256. Knows nothing about the heap or value representation. |
-| `pkg/plan` | `pl_` | The PLAN core: value representation, semispace Cheney heap with safepoint+reserve discipline, the explicit-frame reduction machine (whnf/nf), primops, pins, and the content-addressed store (LMDB or in-memory backend). |
+| `pkg/plan` | `pl_` | The PLAN core: value representation, semispace Cheney heap with safepoint+reserve discipline, the explicit-frame reduction machine (whnf/nf), primops, pins, and the content-addressed store (native arena, Silo, LMDB, or memory). |
 | `pkg/enki` | `en_` | Everything above the core: the wisp PLAN-assembly front end (parser, macro expander, module loader) and the `wisp` / `assembler` apps. |
 
 ## GC Discipline
@@ -227,3 +227,130 @@ architecture. Remove a cache when a clean Nix store is needed:
 docker volume rm enki-nix-2-34-7-linux-amd64
 docker volume rm enki-nix-2-34-7-linux-arm64
 ```
+
+## Native persistence
+
+The default backend borrows the fixed-address persistence approach from
+[xocore-tech/PLAN](https://github.com/xocore-tech/PLAN), with a standalone native
+image rather than an LMDB object index. Its format is a local, trusted ABI
+image, not a portable interchange or untrusted input format. Native objects
+retain the canonical Silo SHA-256 identities; encoding is streamed into the
+hash and physical addresses never contribute to identity.
+
+| Profile | Fixed base | Reserved capacity |
+| --- | --- | --- |
+| macOS arm64, Linux x86-64 | `0x7a0000000000` | 256 GiB |
+| Linux arm64 | `0x100000000` | 256 GiB |
+| Linux arm64 with sanitizers | `0x100000000` | 8 GiB |
+
+Capacity is virtual address space, not file size or resident memory. The entire
+window is reserved without overwriting existing mappings. File pages replace
+only that reservation. Allocation and protection use 64 KiB granules on 4 KiB
+or 16 KiB hosts; files grow incrementally. Two superblocks occupy the first two
+granules. Each has its own SHA-256 checksum, generation, committed end, root
+address/hash, object/cache index roots, journal head, and next PIN identifier,
+as well as format/layout version, architecture, endian marker, base, and
+capacity. A different profile is incompatible, including the smaller Linux
+arm64 sanitizer profile.
+
+Each PIN record contains its canonical PIN and non-PIN body graph, preserving
+internal sharing. Nested PIN references point to earlier native records. Small
+records pack within granules; large records start on a granule boundary. PIN
+cell 6 contains an immutable identifier. `pl_pin_code_slot` resolves that ID to
+an atomic slot in a separate, lazily backed anonymous mapping. Transient PINs
+keep their inline slot. Compiled code is attached on demand; replaced code
+survives until store teardown so suspended frames remain valid. Actor payloads
+and other transient shared values continue to use the anonymous store region.
+
+Object and per-store compiler-cache indexes are append-only Patricia trees.
+Ice stages new extents and COW index paths, seals their granules read-only, and
+only then resolves source proxies. Save stages a journal record for a changed
+root, seals pages, synchronizes appended data, writes the inactive superblock,
+and synchronizes again (`F_FULLFSYNC` on macOS, `fsync` on Linux). Initial file
+creation also synchronizes the containing directory. Saving the same root
+checkpoints staged objects/cache mappings without duplicating history. There
+is no GC, compaction, relocation, migration, or multi-store address allocation.
+Each Ice/Save boundary starts subsequent allocation on a fresh granule, so
+many tiny Ice operations have a measurable padding cost.
+
+A writer holds `arena.writer.lock` for its lifetime. Readers acquire a separate
+`arena.commit.lock` while capturing a checkpoint and mapping extensions. They
+can retain old pointers because published records are immutable. Startup
+selects the newest valid checkpoint, checks its metadata/index heads/root,
+and ignores abandoned staging. Object body checksums are reserved for explicit
+verification, so opening or loading a large extent only faults in its header.
+Startup does not recursively deserialize Silo or
+scan/register all PINs. A writer truncates abandoned staging before appending.
+No valid checkpoint in an existing file is an error. Failures before
+superblock publication can be retried; ambiguous publication failures disable
+writes until reopen. Store teardown requires all its evaluator threads to have
+stopped and all store pointers to have been discarded.
+
+The optional machine-wide LMDB compiler/Memo cache remains independent.
+Compiler rows cross that boundary as canonical Silo streams. Import first
+stages native objects; the next Save checkpoints their local cache mapping.
+Cache absence, contention, and malformed rows remain nonfatal.
+
+`pl_store_objects` and `pl_store_object_info` provide backend-neutral inspector
+access. `scry` supports history, checkout, graph navigation, object attribution,
+`has-root`, `usage`, and `verify`. Native object lengths include record headers.
+Usage separates indexed object bytes, current index nodes, history records,
+and remaining overhead (superblocks, padding, cache records, obsolete COW
+nodes, and abandoned records included in a later commit). Full verification
+checks every committed record checksum, unique PIN IDs, live object layouts,
+local cycles, pointer bounds, dependency closure, canonical hashes, index
+routing, cache references, and history. Run it explicitly before using an
+image whose integrity is in doubt; ordinary startup intentionally avoids a
+full scrub.
+
+### Native tests and benchmarks
+
+`tests/unit/test_plan_native.c` uses fresh exec'd subprocesses for reopen,
+writer exclusion, live inspectors, and crash injection. It also covers exact
+addresses/collisions, sharing, large extents, canonical hashes, capacity and
+profile rejection, staged writes, retry/poison behavior, code-slot concurrency,
+compiler replacement, and global-cache export/import. The private fault hook
+covers growth, object staging, data synchronization, and both sides of
+superblock publication. A fresh empty image is also a valid checkpoint, so a
+torn first Save may recover that empty checkpoint.
+
+```sh
+make build/debug/tests/unit/test_plan_native
+build/debug/tests/unit/test_plan_native
+make BUILD_TYPE=asan test
+make BUILD_TYPE=ubsan test
+make BUILD_TYPE=tsan test
+make GC_STRESS=1 BUILD_DIR=build/stress test
+make BUILD_TYPE=release build/release/tests/perf/bench_native
+mkdir /tmp/native-bench /tmp/silo-bench
+build/release/tests/perf/bench_native native create /tmp/native-bench 10000
+build/release/tests/perf/bench_native native read /tmp/native-bench
+build/release/tests/perf/bench_native silo create /tmp/silo-bench 10000
+build/release/tests/perf/bench_native silo read /tmp/silo-bench
+```
+
+The benchmark reports Save latency, restart/open time, first useful evaluation,
+sparse access, evaluator throughput, anonymous store bytes, registered PINs,
+anonymous resident memory (when available), and peak RSS. Native reads assert that startup registers nothing and loading
+this graph registers only its root. Run each read in a new process; this is a
+process-cold measurement with a potentially warm filesystem cache, not a
+controlled cold-disk benchmark. On macOS arm64, five release-mode reads of a 10,000-PIN image measured a
+median 1.87 ms to first evaluation versus Silo's 43.53 ms. Anonymous
+resident memory was 3.52 MB versus 33.85 MB; anonymous store-object
+allocations were 96 bytes versus 27.4 MB. The single Save batch took
+117 ms versus 17 ms for Silo. Evaluator throughput was similar
+(54.5 versus 54.1 million identity applications/second). The first version
+trades additional COW index writes and checksumming for fast direct restart.
+Repeat measurements on the deployment filesystem before drawing throughput
+conclusions.
+
+Validation of this implementation covered the full debug, ASan, UBSan, and
+GC-stress suites on macOS arm64, Linux arm64, and emulated Linux x86-64;
+macOS also passed the release suite. The full TSan suite passed on macOS
+arm64 and Linux arm64 with fixed mapping enabled. Linux x86-64 TSan compiled,
+but exited before `main` in the emulated container with an incompatible memory
+layout / denied ASLR change. That profile still needs a native x86-64 TSan
+runner. Linux skipped the optional Haskell-oracle comparison because its
+binary was unavailable. The native suite contains 20 tests, including actual
+concurrent code-slot claims and cache attachment. Linux leak detection also
+exposed an existing empty staged-cache lookup allocation leak, now fixed.

@@ -862,6 +862,8 @@ fail_env:
 }
 
 uint64_t pl_store_root_log_head(pl_store* store) {
+  if (store != NULL && store->format == PL_STORE_FORMAT_NATIVE_V1)
+    return pl_native_log_head(store);
   if (store == NULL || store->format != PL_STORE_FORMAT_SILO_V1)
     return 0;
   silo_backend* b = store->be.ctx;
@@ -884,6 +886,8 @@ uint64_t pl_store_root_log_head(pl_store* store) {
 
 size_t pl_store_root_log(pl_store* store, uint64_t from,
                          pl_store_root_entry* out, size_t cap) {
+  if (store != NULL && store->format == PL_STORE_FORMAT_NATIVE_V1)
+    return pl_native_log(store, from, out, cap);
   if (store == NULL || store->format != PL_STORE_FORMAT_SILO_V1 || out == NULL)
     return 0;
   silo_backend* b = store->be.ctx;
