@@ -91,6 +91,70 @@ static bool fault_crash(void* ctx, const char* point) {
   return true;
 }
 
+#ifdef __linux__
+TEST(native, code_slots_reserve_without_commit_or_population) {
+  /* RSS alone cannot catch removal of MAP_NORESERVE: an ordinary anonymous
+   * mapping is also demand-paged, but charges the entire table to commit.
+   * Inspect this VMA rather than noisy, system-wide Committed_AS deltas. */
+  FILE* policy = fopen("/proc/sys/vm/overcommit_memory", "r");
+  ASSERT_NOT_NULL(policy);
+  int overcommit = -1;
+  int scanned = fscanf(policy, "%d", &overcommit);
+  ASSERT_EQ(fclose(policy), 0);
+  ASSERT_EQ(scanned, 1);
+  /* Linux ignores MAP_NORESERVE in strict mode. This checks the reservation
+   * flags without changing the host policy; it does not simulate mode 2. */
+  if (overcommit == 2)
+    SKIP_TEST("strict overcommit ignores MAP_NORESERVE");
+
+  uintptr_t slots = (uintptr_t)pl_native_code_slots;
+  ASSERT_NEQ(slots, 0);
+  uint64_t bytes =
+      (PL_NATIVE_BYTES / (PL_PIN_CELLS(0) * sizeof(pl_cell)) + 1) *
+      sizeof(pl_cell);
+  FILE* smaps = fopen("/proc/self/smaps", "r");
+  ASSERT_NOT_NULL(smaps);
+  char line[1024];
+  bool found = false, flags = false, noreserve = false, accounted = false;
+  bool have_rss = false, have_swap = false;
+  unsigned long rss = 0, swap = 0;
+  while (fgets(line, sizeof(line), smaps) != NULL) {
+    unsigned long long start, end;
+    if (sscanf(line, "%llx-%llx", &start, &end) == 2) {
+      if (found)
+        break;
+      if (slots < start || slots >= end)
+        continue;
+      found = true;
+      ASSERT_GTE(end - slots, bytes);
+    } else if (found) {
+      if (sscanf(line, "Rss: %lu kB", &rss) == 1)
+        have_rss = true;
+      else if (sscanf(line, "Swap: %lu kB", &swap) == 1)
+        have_swap = true;
+      else if (strncmp(line, "VmFlags:", 8) == 0) {
+        flags = true;
+        for (char* flag = strtok(line + 8, " \t\n"); flag != NULL;
+             flag = strtok(NULL, " \t\n")) {
+          noreserve |= strcmp(flag, "nr") == 0;
+          accounted |= strcmp(flag, "ac") == 0;
+        }
+      }
+    }
+  }
+  ASSERT_FALSE(ferror(smaps));
+  ASSERT_EQ(fclose(smaps), 0);
+  ASSERT(found);
+  ASSERT(flags);
+  ASSERT(noreserve, "code-slot VMA must have VmFlags nr (MAP_NORESERVE)");
+  ASSERT_FALSE(accounted, "code-slot VMA must not have VmFlags ac");
+  ASSERT(have_rss && have_swap);
+  /* Allow a little startup bookkeeping and page-size variation, but never
+   * eager population of the multi-GiB table. Include swapped-out pages. */
+  ASSERT_LTE(rss + swap, 1024);
+}
+#endif
+
 TEST(native, exact_address_staging_and_reopen) {
   uint8_t hash[32], root[32];
   pl_val p = save_nat(42, hash, false);
