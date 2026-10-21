@@ -109,9 +109,8 @@ TEST(native, code_slots_reserve_without_commit_or_population) {
 
   uintptr_t slots = (uintptr_t)pl_native_code_slots;
   ASSERT_NEQ(slots, 0);
-  uint64_t bytes =
-      (PL_NATIVE_BYTES / (PL_PIN_CELLS(0) * sizeof(pl_cell)) + 1) *
-      sizeof(pl_cell);
+  uint64_t bytes = (PL_NATIVE_BYTES / (PL_PIN_CELLS(0) * sizeof(pl_cell)) + 1) *
+                   sizeof(pl_cell);
   FILE* smaps = fopen("/proc/self/smaps", "r");
   ASSERT_NOT_NULL(smaps);
   char line[1024];
