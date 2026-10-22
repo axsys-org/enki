@@ -6,6 +6,8 @@
 #include <string.h>
 
 #include "internal.h"
+#include "jit.h"
+#include "batch.h"
 #include "plan/nat.h"
 
 /*
@@ -1322,7 +1324,9 @@ pl_code* pl_bytecode_from_val(pl_val val) {
     if (dump)
       bytecode_dump(out);
   }
+  pl_batch_prepare(out, is_target);
   free(starts);
+  pl_jit_prepare(out);
   return out;
 
 failed:
@@ -1341,6 +1345,8 @@ failed:
 void pl_bytecode_free(pl_code* code) {
   if (code == NULL)
     return;
+  pl_jit_free(code);
+  pl_batch_free(code);
   free(code->lawblks);
   free(code->ops);
   free(code);

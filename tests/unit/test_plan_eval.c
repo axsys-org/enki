@@ -2,6 +2,9 @@
 #include <string.h>
 
 #include "test_plan.h"
+#ifdef PL_SLJIT
+#include "../../pkg/plan/src/jit.h"
+#endif
 
 /* A lazy thunk whose body expr runs under an empty (1-slot) env. */
 static pl_val test_thunk(pl_thread* t, pl_val expr) {
@@ -334,7 +337,7 @@ TEST(apply, tailcall_loops_in_constant_frame_space) {
   loop_ops[4] = OP_TAILCALL;
   loop_ops[5] = 2;
   loop_ops[6] = PL_BAN_FAST;
-  static pl_code loop_code = {loop_ops, 7, 0, 0, 0, 0, NULL, 0};
+  static pl_code loop_code = {.ops = loop_ops, .nops = 7};
   pl_pin_set_code(pp, &loop_code);
 
   size_t fcap0 = t->fcap;
@@ -1257,7 +1260,7 @@ TEST(exec, force_delivers_whnf_result) {
   pl_thread* t = rt.t;
   size_t base = t->vsp;
   static pl_op_t ops[4] = {OP_PUSH_VAR, 1, OP_FORCE, OP_RET};
-  static pl_code code = {ops, 4, 0, 0, 0, 0, NULL, 0};
+  static pl_code code = {.ops = ops, .nops = 4};
   pl_val pin = test_code_pin(&rt, 1, &code);
   (void)pin;
   pl_vpush(t, test_thunk(t, 42)); /* lazy arg, forced by OP_FORCE */
@@ -1276,7 +1279,7 @@ TEST(exec, push_slot_duplicates_operand) {
   size_t base = t->vsp;
   static pl_op_t ops[8] = {OP_PUSH_VAR, 1,         OP_FORCE, OP_PUSH_SLOT,
                            0,           OP_MK_APP, 1,        OP_RET};
-  static pl_code code = {ops, 8, 0, 0, 0, 0, NULL, 0};
+  static pl_code code = {.ops = ops, .nops = 8};
   test_code_pin(&rt, 1, &code);
   pl_val r = test_run_call1(t, t->vstack[base], 42);
   pl_cell* p = pl_as(PL_TAG_APP, r);
@@ -1295,7 +1298,7 @@ TEST(exec, br_selects_arm_and_bounds) {
   static pl_op_t ops[13] = {OP_PUSH_VAR, 1,  OP_FORCE,    OP_BR, 2,
                             7,           10, OP_PUSH_LIT, 10,    OP_RET,
                             OP_PUSH_LIT, 20, OP_RET};
-  static pl_code code = {ops, 13, 0, 0, 0, 0, NULL, 0};
+  static pl_code code = {.ops = ops, .nops = 13};
   test_code_pin(&rt, 1, &code);
   ASSERT_EQ(test_run_call1(t, t->vstack[base], 0), 10);
   ASSERT_EQ(test_run_call1(t, t->vstack[base], 1), 20);
@@ -1320,7 +1323,7 @@ TEST(exec, jmp_loop_stays_preemptable) {
   pl_thread* t = rt.t;
   size_t base = t->vsp;
   static pl_op_t ops[3] = {OP_JMP, 0, OP_RET};
-  static pl_code code = {ops, 3, 0, 0, 0, 0, NULL, 0};
+  static pl_code code = {.ops = ops, .nops = 3};
   test_code_pin(&rt, 1, &code);
   size_t fcap0 = t->fcap;
   pl_vpush(t, t->vstack[base]);
@@ -1404,7 +1407,7 @@ TEST(exec, call_local_block_returns_forced) {
   static pl_op_t ops[14] = {OP_PUSH_LIT,  0, OP_PUSH_VAR, 1,     OP_CALL,
                             10,           1, OP_MK_APP,   1,     OP_RET,
                             OP_PUSH_SLOT, 0, OP_FORCE,    OP_RET};
-  static pl_code code = {ops, 14, 0, 0, 0, 0, NULL, 0};
+  static pl_code code = {.ops = ops, .nops = 14};
   test_code_pin(&rt, 1, &code);
   pl_vpush(t, test_thunk(t, 42));
   pl_val r = test_run_call1(t, t->vstack[base], t->vstack[base + 1]);
@@ -1424,7 +1427,7 @@ TEST(exec, noupd_thke_reevaluates) {
   /* the code allocates a fresh row [x] on every execution */
   static pl_op_t ops[7] = {OP_PUSH_LIT, 0, OP_PUSH_VAR, 1,
                            OP_MK_APP,   1, OP_RET};
-  static pl_code code = {ops, 7, 0, 0, 0, 0, NULL, 0};
+  static pl_code code = {.ops = ops, .nops = 7};
   test_code_pin(&rt, 1, &code);
   pl_vpush(t, t->vstack[base]);
   pl_vpush(t, 7);
@@ -2722,12 +2725,12 @@ TEST(exec, call_fast_enters_law_direct) {
   size_t base = t->vsp;
   /* callee: force and return its argument */
   static pl_op_t id_ops[4] = {OP_PUSH_VAR, 1, OP_FORCE, OP_RET};
-  static pl_code id_code = {id_ops, 4, 0, 0, 0, 0, NULL, 0};
+  static pl_code id_code = {.ops = id_ops, .nops = 4};
   pl_val callee = test_code_pin_named(&rt, 1, 111, &id_code);
   /* caller: direct call of the callee on its (lazy) argument */
   pl_op_t caller_ops[8] = {OP_PUSH_LIT,  callee, OP_PUSH_VAR, 1,
                            OP_CALL_FAST, 1,      0,           OP_RET};
-  pl_code caller_code = {caller_ops, 8, 0, 0, 0, 0, NULL, 0};
+  pl_code caller_code = {.ops = caller_ops, .nops = 8};
   test_code_pin(&rt, 1, &caller_code);
   ASSERT_EQ(test_run_call1(t, t->vstack[base + 1], 42), 42);
   pl_vpush(t, test_thunk(t, 9));
@@ -2745,11 +2748,11 @@ TEST(exec, call_fast_arity_mismatch_degrades_to_apply) {
    * supplies one arg, so verification rejects it and the generic
    * apply path yields the WHNF partial application) */
   static pl_op_t id_ops[4] = {OP_PUSH_VAR, 1, OP_FORCE, OP_RET};
-  static pl_code id_code = {id_ops, 4, 0, 0, 0, 0, NULL, 0};
+  static pl_code id_code = {.ops = id_ops, .nops = 4};
   pl_val head2 = test_code_pin(&rt, 2, &id_code);
   pl_op_t caller_ops[8] = {OP_PUSH_LIT,  head2, OP_PUSH_VAR, 1,
                            OP_CALL_FAST, 1,     0,           OP_RET};
-  pl_code caller_code = {caller_ops, 8, 0, 0, 0, 0, NULL, 0};
+  pl_code caller_code = {.ops = caller_ops, .nops = 8};
   test_code_pin(&rt, 1, &caller_code);
   pl_val r = test_run_call1(t, t->vstack[base + 1], 42);
   pl_cell* p = pl_as(PL_TAG_APP, r);
@@ -2768,8 +2771,8 @@ TEST(exec, law_entry_checks_arity_from_the_code_header) {
   /* As the store publishes it: the code header carries the law's arity,
    * which exact-arity entries consult instead of the law object. */
   static pl_op_t id_ops[4] = {OP_PUSH_VAR, 1, OP_FORCE, OP_RET};
-  static pl_code id1 = {id_ops, 4, 0, 0, 0, 1, NULL, 0};
-  static pl_code id2 = {id_ops, 4, 0, 0, 0, 2, NULL, 0};
+  static pl_code id1 = {.ops = id_ops, .nops = 4, .arity = 1};
+  static pl_code id2 = {.ops = id_ops, .nops = 4, .arity = 2};
   pl_val callee = test_code_pin_named(&rt, 1, 444, &id1);
   pl_val head2 = test_code_pin_named(&rt, 2, 445, &id2);
   static pl_op_t call1_ops[8];
@@ -2780,8 +2783,8 @@ TEST(exec, law_entry_checks_arity_from_the_code_header) {
   memcpy(call2_ops, call_ops, sizeof(call_ops));
   call1_ops[1] = callee;
   call2_ops[1] = head2;
-  static pl_code call1 = {call1_ops, 8, 0, 0, 0, 0, NULL, 0};
-  static pl_code call2 = {call2_ops, 8, 0, 0, 0, 0, NULL, 0};
+  static pl_code call1 = {.ops = call1_ops, .nops = 8};
+  static pl_code call2 = {.ops = call2_ops, .nops = 8};
   test_code_pin_named(&rt, 1, 446, &call1);
   test_code_pin_named(&rt, 1, 447, &call2);
   /* exact arity: direct entry (also as a FAST thunk head) */
@@ -2804,13 +2807,13 @@ TEST(exec, call_slow_forces_head_then_applies) {
   pl_thread* t = rt.t;
   size_t base = t->vsp;
   static pl_op_t id_ops[4] = {OP_PUSH_VAR, 1, OP_FORCE, OP_RET};
-  static pl_code id_code = {id_ops, 4, 0, 0, 0, 0, NULL, 0};
+  static pl_code id_code = {.ops = id_ops, .nops = 4};
   pl_val callee = test_code_pin_named(&rt, 1, 222, &id_code);
   (void)callee;
   /* caller: head is a lazy thunk (forced by the slow path) */
   pl_op_t caller_ops[7] = {OP_PUSH_VAR,  1, OP_PUSH_LIT, 9,
                            OP_CALL_SLOW, 1, OP_RET};
-  pl_code caller_code = {caller_ops, 7, 0, 0, 0, 0, NULL, 0};
+  pl_code caller_code = {.ops = caller_ops, .nops = 7};
   test_code_pin(&rt, 1, &caller_code);
   pl_vpush(t, test_thunk(t, t->vstack[base]));
   ASSERT_EQ(test_run_call1(t, t->vstack[base + 1], t->vstack[base + 2]), 9);
@@ -2981,3 +2984,216 @@ TEST(ops, equal_survives_very_deep_structures) {
             0);
   test_rt_free(&rt);
 }
+
+#ifdef PL_SLJIT
+/* A loop entirely inside native code, with local block argument replacement.
+ * Compare every fuel quantum against the same decoded stream without its
+ * dispatch overlay, collecting the moving heap at every suspension. */
+TEST(sljit, loop_matches_interpreter_checkpoints) {
+  if (getenv("PL_JIT") != NULL && strcmp(getenv("PL_JIT"), "1") != 0)
+    SKIP_TEST("disabled by PL_JIT; enable with PL_JIT=1 or unset");
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  pl_vpush(t, test_p66(t));
+  pl_val p66 = t->vstack[0];
+  pl_val ops[] = {OP_PUSH_VAR,
+                  1,
+                  OP_FORCE,
+                  OP_PUSH_LIT,
+                  0,
+                  OP_TAILBLK,
+                  8,
+                  2,
+                  OP_PUSH_SLOT,
+                  0,
+                  OP_PUSH_LIT,
+                  0,
+                  OP_CALL_KNOWN,
+                  2,
+                  p66,
+                  ax_s3('C', 'm', 'p'),
+                  OP_BR,
+                  3,
+                  21,
+                  21,
+                  24,
+                  OP_PUSH_SLOT,
+                  1,
+                  OP_RET,
+                  OP_PUSH_SLOT,
+                  0,
+                  OP_PUSH_LIT,
+                  1,
+                  OP_CALL_KNOWN,
+                  2,
+                  p66,
+                  ax_s3('S', 'u', 'b'),
+                  OP_PUSH_SLOT,
+                  1,
+                  OP_PUSH_SLOT,
+                  0,
+                  OP_CALL_KNOWN,
+                  2,
+                  p66,
+                  ax_s3('A', 'd', 'd'),
+                  OP_TAILBLK,
+                  8,
+                  2,
+                  OP_RET};
+  pl_code* c = test_decode_ops(t, sizeof ops / sizeof ops[0], ops);
+  ASSERT_NOT_NULL(c);
+  ASSERT_NOT_NULL(c->jit_ops);
+  test_code_pin(&rt, 1, c); /* rooted at slot 1 */
+  pl_op_t* overlay = c->jit_ops;
+  for (unsigned env_backed = 0; env_backed < 2; env_backed++) {
+    c->max_var = env_backed ? UINT32_MAX : 1;
+    for (unsigned fuel = 2; fuel <= 33; fuel++) {
+      unsigned reference_yields = 0;
+      uint64_t reference_frames = 0;
+      for (unsigned native = 0; native < 2; native++) {
+        c->jit_ops = native ? overlay : NULL;
+        size_t base = t->vsp;
+        pl_vpush(t, t->vstack[1]);
+        pl_vpush(t, test_thunk(t, 20));
+        pl_gc_reserve(t, PL_THKE_CELLS(2));
+        pl_val call = pl_mk_thke(t, PL_BAN_FAST, 2, &t->vstack[base]);
+        t->vsp = base;
+        pl_thread_start(t, call);
+        unsigned yields = 0;
+        uint64_t frames = 0;
+        pl_run_status status;
+        while ((status = pl_thread_run(t, fuel)) == PL_RUN_YIELDED) {
+          ASSERT_LT(++yields, 2000);
+          for (size_t k = 0; k < t->fsp; k++) {
+            const pl_frame* frame = &t->fstack[k];
+            frames = frames * 33 + frame->kind * 17;
+            if (frame->kind == PL_F_EXEC || frame->kind == PL_F_EXECV)
+              frames += frame->k;
+          }
+          pl_gc_collect_now(t);
+        }
+        ASSERT_EQ(status, PL_RUN_DONE);
+        ASSERT_EQ(t->result, 210);
+        ASSERT_EQ(t->vsp, base);
+        ASSERT_EQ(t->fsp, 0);
+        if (native) {
+          ASSERT_EQ(yields, reference_yields);
+          ASSERT_EQ(frames, reference_frames);
+        } else {
+          reference_yields = yields;
+          reference_frames = frames;
+        }
+      }
+    }
+  }
+  ASSERT(pl_jit_compiled(c)); /* this must exercise machine code */
+  c->jit_ops = overlay;
+  pl_pin_set_code(pl_as(PL_TAG_PIN, t->vstack[1]), NULL);
+  pl_bytecode_free(c);
+  test_rt_free(&rt);
+}
+
+TEST(sljit, stack_growth_and_invalid_branch_fall_back) {
+  if (getenv("PL_JIT") != NULL && strcmp(getenv("PL_JIT"), "1") != 0)
+    SKIP_TEST("disabled by PL_JIT; enable with PL_JIT=1 or unset");
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  pl_val ops[] = {OP_PUSH_LIT,
+                  7,
+                  OP_PUSH_LIT,
+                  8,
+                  OP_PUSH_VAR,
+                  1,
+                  OP_BR,
+                  2,
+                  10,
+                  13,
+                  OP_PUSH_SLOT,
+                  0,
+                  OP_RET,
+                  OP_PUSH_SLOT,
+                  1,
+                  OP_RET};
+  pl_code* c = test_decode_ops(t, sizeof ops / sizeof ops[0], ops);
+  ASSERT_NOT_NULL(c);
+  ASSERT_NOT_NULL(c->jit_ops);
+  test_code_pin(&rt, 1, c);
+  for (unsigned k = 0; k < 100; k++)
+    ASSERT_EQ(test_run_call1(t, t->vstack[0], k % 2), k % 2 ? 8 : 7);
+  ASSERT(pl_jit_compiled(c));
+  /* Start close enough to capacity to grow while entering/inside the region. */
+  size_t cap = t->vcap;
+  while (t->vsp < cap - 3)
+    pl_vpush(t, 0);
+  ASSERT_EQ(test_run_call1(t, t->vstack[0], 1), 8);
+  ASSERT_GT(t->vcap, cap);
+  t->vsp = 1;
+  pl_vpush(t, t->vstack[0]);
+  pl_vpush(t, 2);
+  pl_gc_reserve(t, PL_THKE_CELLS(2));
+  pl_val call = pl_mk_thke(t, PL_BAN_FAST, 2, &t->vstack[1]);
+  t->vsp = 1;
+  pl_thread_start(t, call);
+  pl_run_status status;
+  while ((status = pl_thread_run(t, 100)) == PL_RUN_YIELDED)
+    pl_gc_collect_now(t);
+  ASSERT_EQ(status, PL_RUN_EXN);
+  ASSERT_EQ(t->vsp, 1);
+  ASSERT_EQ(t->fsp, 0);
+  pl_pin_set_code(pl_as(PL_TAG_PIN, t->vstack[0]), NULL);
+  pl_bytecode_free(c);
+  test_rt_free(&rt);
+}
+
+typedef struct {
+  pl_store* store;
+  pl_code* code;
+  bool ok;
+} jit_worker;
+
+static void* jit_publish_worker(void* opaque) {
+  jit_worker* w = opaque;
+  pl_heap* heap = pl_heap_new(4096, w->store);
+  pl_thread* t = pl_thread_new(heap);
+  pl_frame frame = {.code = w->code};
+  w->ok = true;
+  for (unsigned k = 0; k < 1000; k++) {
+    t->vsp = 0;
+    t->fuel = 100;
+    uint32_t pc = pl_jit_run(t, &frame, 0);
+    if (pc == 0) {
+      w->ok &= t->vsp == 0;
+    } else {
+      w->ok &= pc == 6 && t->vsp == 3 && t->vstack[0] == 7 &&
+               t->vstack[1] == 8 && t->vstack[2] == 9;
+    }
+  }
+  pl_thread_free(t);
+  pl_heap_free(heap);
+  return NULL;
+}
+
+TEST(sljit, concurrent_compilation_and_publication) {
+  if (getenv("PL_JIT") != NULL && strcmp(getenv("PL_JIT"), "1") != 0)
+    SKIP_TEST("disabled by PL_JIT; enable with PL_JIT=1 or unset");
+  test_rt rt = test_rt_new();
+  pl_val ops[] = {OP_PUSH_LIT, 7, OP_PUSH_LIT, 8, OP_PUSH_LIT, 9, OP_RET};
+  pl_code* c = test_decode_ops(rt.t, sizeof ops / sizeof ops[0], ops);
+  ASSERT_NOT_NULL(c);
+  ASSERT_NOT_NULL(c->jit_ops);
+  pthread_t threads[4];
+  jit_worker workers[4];
+  for (unsigned k = 0; k < 4; k++) {
+    workers[k] = (jit_worker){.store = rt.store, .code = c};
+    ASSERT_EQ(
+        pthread_create(&threads[k], NULL, jit_publish_worker, &workers[k]), 0);
+  }
+  for (unsigned k = 0; k < 4; k++) {
+    ASSERT_EQ(pthread_join(threads[k], NULL), 0);
+    ASSERT(workers[k].ok);
+  }
+  ASSERT(pl_jit_compiled(c));
+  pl_bytecode_free(c);
+  test_rt_free(&rt);
+}
+#endif

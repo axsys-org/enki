@@ -38,6 +38,13 @@ typedef struct pl_code {
                             verified from the code header alone. */
   pl_lawblk* lawblks;    /* unpinned laws implemented by blocks of this code */
   uint32_t nlawblks;
+  struct pl_batch* batches; /* fixed-shape construction plans */
+  uint32_t nbatches;
+  pl_op_t* batch_ops; /* private dispatch overlay; ops remain canonical */
+#ifdef PL_SLJIT
+  struct pl_jit* jit; /* optional process-local native regions */
+  pl_op_t* jit_ops;   /* dispatch overlay; canonical decoded ops stay intact */
+#endif
 } pl_code;
 
 typedef enum pl_op {
@@ -90,7 +97,11 @@ typedef enum pl_op {
    * The compiler emits it for tail calls of local functions (OP_CALL
    * for the others) and follows it with an unreachable OP_RET. */
   OP_TAILBLK = 27,
-  PL_OP_COUNT = 28, /* sentinel: sizes pl_run's exec dispatch table */
+#ifdef PL_SLJIT
+  OP_JIT = 29, /* private dispatch overlay only; never accepted in a row */
+#endif
+  OP_BUILD = 30, /* private construction entry; never accepted in a row */
+  PL_OP_COUNT = 31,
   /* Row-only, never dispatched: +law +target, a directory entry behind
    * the final RET saying the block at target implements that unpinned
    * law.  The decoder strips the directory into pl_code.lawblks. */
