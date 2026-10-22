@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <sys/stat.h>
 
 #include "axsys/allocator.h"
 #include "axsys/ds.h"
@@ -20,11 +21,11 @@
 /*
  * scry [--map-size BYTES] STORE-DIR [COMMAND [ARGS...]]
  *
- * Read-only Silo snapshot inspector: walk the root journal, check out
+ * Read-only native/Silo snapshot inspector: walk the root journal, check out
  * any historical snapshot, navigate and pretty-print its value graph,
- * and attribute pins.pack growth to the snapshots that appended it.
+ * and attribute arena or pack growth to the snapshots that appended it.
  * With a COMMAND it runs once and exits; without one it is a REPL.
- * Attaches alongside a live wisp (MDB_RDONLY + pins.pack O_RDONLY).
+ * Attaches alongside a live wisp using a committed read-only checkpoint.
  */
 
 #define SCRY_HEAP_CELLS     ((size_t)1 << 20) /* 8 MiB per semispace */
@@ -35,7 +36,7 @@
 
 typedef struct closure_entry {
   pl_hash key;
-  uint64_t value; /* stream length in pins.pack */
+  uint64_t value; /* native extent or Silo stream length */
 } closure_entry;
 
 typedef struct scry_object {
@@ -51,6 +52,7 @@ typedef struct scry {
   /* checkout: everything reachable is store-region (non-moving), so the
    * cursor path needs no GC rooting */
   bool loaded;
+  bool failed;
   uint64_t seq; /* 0: checked out by hash, not via the journal */
   uint8_t root_hash[32];
   pl_val path[SCRY_PATH_MAX];
@@ -208,7 +210,7 @@ static bool resolve_snapshot(pl_store* s, const char* arg, uint8_t out[32],
   }
   if (matches == 0) {
     prefix_scan ps = {.prefix = prefix, .plen = plen};
-    (void)pl_store_silo_objects(s, prefix_scan_object, &ps);
+    (void)pl_store_objects(s, prefix_scan_object, &ps);
     if (ps.matches > 0) {
       memcpy(out, ps.hash, 32);
       matches = ps.matches;
@@ -308,8 +310,7 @@ static bool closure_collect(pl_store* s, const uint8_t root[32],
     pl_hash* subs = NULL;
     size_t nsub = 0;
     char err[192] = {0};
-    if (!pl_store_silo_object_info(s, cur.b, &len, &subs, &nsub, err,
-                                   sizeof(err))) {
+    if (!pl_store_object_info(s, cur.b, &len, &subs, &nsub, err, sizeof(err))) {
       char hex[65];
       hash_hex(cur.b, 32, hex);
       fprintf(stderr, "scry: cannot read object %.12s: %s\n", hex, err);
@@ -370,7 +371,7 @@ static void cmd_log(scry* sc, const char* arg) {
     return;
   }
   size_t from = n > want ? n - (size_t)want : 0;
-  printf("%-5s %-19s %-16s %12s %12s\n", "seq", "time", "root", "pack",
+  printf("%-5s %-19s %-16s %12s %12s\n", "seq", "time", "root", "file",
          "delta");
   for (size_t i = from; i < n; i++) {
     char when[32], hex[65], pack[32], delta[32];
@@ -616,7 +617,7 @@ static void cmd_packmap(scry* sc, const char* arg) {
   size_t nlog = 0;
   pl_store_root_entry* entries = journal_fetch(sc->store, &nlog);
   scry_object* objects = NULL;
-  (void)pl_store_silo_objects(sc->store, collect_object, &objects);
+  (void)pl_store_objects(sc->store, collect_object, &objects);
   size_t nobj = (size_t)ax_arrlen(objects);
   qsort(objects, nobj, sizeof(*objects), object_off_asc);
 
@@ -719,7 +720,7 @@ static void where_object(void* ctx, const uint8_t hash[32], uint64_t off,
 }
 
 /* Pack placement of one object: "<hash> <offset> <length>" for tools
- * that read pins.pack directly. */
+ * that read object records directly. */
 static void cmd_where(scry* sc, const char* arg) {
   if (arg == NULL) {
     fprintf(stderr, "scry: where <seq|hash>\n");
@@ -729,7 +730,7 @@ static void cmd_where(scry* sc, const char* arg) {
   uint64_t seq;
   if (!resolve_snapshot(sc->store, arg, w.hash, &seq))
     return;
-  (void)pl_store_silo_objects(sc->store, where_object, &w);
+  (void)pl_store_objects(sc->store, where_object, &w);
   if (!w.found) {
     fprintf(stderr, "scry: object is not indexed\n");
     return;
@@ -742,7 +743,7 @@ static void cmd_where(scry* sc, const char* arg) {
 
 static void cmd_help(void) {
   printf("commands:\n"
-         "  log [n]            last n journal entries with pack growth\n"
+         "  log [n]            last n journal entries with file growth\n"
          "  root               current root hash\n"
          "  co [seq|hash]      check out a snapshot (default: current root)\n"
          "  ls                 children of the cursor\n"
@@ -750,7 +751,10 @@ static void cmd_help(void) {
          "  show [depth [w]]   pretty-print the cursor\n"
          "  size [seq|hash]    persisted bytes of a pin closure\n"
          "  diff <a> <b>       pins added/removed between two snapshots\n"
-         "  packmap [n]        pack growth bucketed by snapshot\n"
+         "  packmap [n]        object bytes bucketed by snapshot\n"
+         "  verify             validate a complete native image\n"
+         "  usage              native objects, metadata and padding bytes\n"
+         "  has-root           exit successfully if a checkpoint root exists\n"
          "  quit\n");
 }
 
@@ -761,7 +765,33 @@ static bool dispatch(scry* sc, int argc, char** argv) {
   const char* cmd = argv[0];
   const char* a1 = argc > 1 ? argv[1] : NULL;
   const char* a2 = argc > 2 ? argv[2] : NULL;
-  if (strcmp(cmd, "log") == 0)
+  if (strcmp(cmd, "verify") == 0) {
+    char err[256];
+    if (pl_store_verify(sc->store, err, sizeof(err)))
+      puts("native image verified");
+    else {
+      fprintf(stderr, "scry: %s\n", err);
+      sc->failed = true;
+    }
+  } else if (strcmp(cmd, "usage") == 0) {
+    pl_store_usage u;
+    char err[256];
+    if (pl_store_get_usage(sc->store, &u, err, sizeof(err)))
+      printf("committed=%llu objects=%llu indexes=%llu journal=%llu "
+             "overhead=%llu\n",
+             (unsigned long long)u.committed_bytes,
+             (unsigned long long)u.object_bytes,
+             (unsigned long long)u.index_bytes,
+             (unsigned long long)u.journal_bytes,
+             (unsigned long long)u.overhead_bytes);
+    else {
+      fprintf(stderr, "scry: %s\n", err);
+      sc->failed = true;
+    }
+  } else if (strcmp(cmd, "has-root") == 0) {
+    uint8_t hash[32];
+    sc->failed = !pl_store_get_root(sc->store, hash);
+  } else if (strcmp(cmd, "log") == 0)
     cmd_log(sc, a1);
   else if (strcmp(cmd, "root") == 0)
     cmd_root(sc);
@@ -845,9 +875,16 @@ int main(int argc, char** argv) {
   const char* dir = argv[at++];
 
   scry sc = {0};
-  sc.store = pl_store_new_silo_ro(dir, map_size);
+  char native_path[4096], err[256] = {0};
+  struct stat st;
+  int path_n = snprintf(native_path, sizeof(native_path), "%s/arena.dat", dir);
+  bool native = path_n >= 0 && (size_t)path_n < sizeof(native_path) &&
+                stat(native_path, &st) == 0;
+  sc.store = native ? pl_store_new_native_ro(dir, err, sizeof(err))
+                    : pl_store_new_silo_ro(dir, map_size);
   if (sc.store == NULL) {
-    fprintf(stderr, "scry: cannot open Silo store at %s (read-only)\n", dir);
+    fprintf(stderr, "scry: cannot open store at %s (read-only): %s\n", dir,
+            err);
     return 1;
   }
   sc.heap = pl_heap_new(SCRY_HEAP_CELLS, sc.store);
@@ -861,5 +898,5 @@ int main(int argc, char** argv) {
   pl_thread_free(sc.thread);
   pl_heap_free(sc.heap);
   pl_store_free(sc.store);
-  return 0;
+  return sc.failed ? 1 : 0;
 }

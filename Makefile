@@ -27,6 +27,7 @@ PGO_RAW_DIR ?= $(PGO_DIR)/raw
 PGO_PROFILE ?= $(PGO_DIR)/enki.profdata
 PGO_PROFILE_PATTERN ?= $(CURDIR)/$(PGO_RAW_DIR)/wisp-%m.profraw
 PGO_ASSEMBLER_PROFILE_PATTERN ?= $(CURDIR)/$(PGO_RAW_DIR)/assembler-%m.profraw
+PGO_SCRY_PROFILE_PATTERN ?= $(CURDIR)/$(PGO_RAW_DIR)/scry-%m.profraw
 PGO_REAVER_SRC ?= $(CURDIR)/reaver/src
 PGO_WORKLOAD ?= --file-root ./reaver/src ./reaver/src/plan reaver main
 
@@ -84,9 +85,9 @@ BUILD_CFLAGS_release := $(BUILD_CFLAGS_relbase) $(LTO_CFLAGS)
 BUILD_CFLAGS_profile := $(BUILD_CFLAGS_relbase) -g3 -fno-omit-frame-pointer -fdebug-info-for-profiling
 BUILD_CFLAGS_pgo-generate := $(BUILD_CFLAGS_relbase) -fprofile-instr-generate
 BUILD_CFLAGS_pgo := $(BUILD_CFLAGS_relbase) $(LTO_CFLAGS) -fprofile-instr-use=$(PGO_PROFILE) -Wno-error=profile-instr-unprofiled
-BUILD_CFLAGS_asan := -O1 -g3 -fsanitize=address -fno-omit-frame-pointer $(HARDEN_CFLAGS)
-BUILD_CFLAGS_ubsan := -O1 -g3 -fsanitize=undefined -fno-omit-frame-pointer $(HARDEN_CFLAGS)
-BUILD_CFLAGS_tsan := -O1 -g3 -fsanitize=thread -fno-omit-frame-pointer $(HARDEN_CFLAGS)
+BUILD_CFLAGS_asan := -DPL_NATIVE_SANITIZER -O1 -g3 -fsanitize=address -fno-omit-frame-pointer $(HARDEN_CFLAGS)
+BUILD_CFLAGS_ubsan := -DPL_NATIVE_SANITIZER -O1 -g3 -fsanitize=undefined -fno-omit-frame-pointer $(HARDEN_CFLAGS)
+BUILD_CFLAGS_tsan := -DPL_NATIVE_SANITIZER -O1 -g3 -fsanitize=thread -fno-omit-frame-pointer $(HARDEN_CFLAGS)
 BUILD_CFLAGS_coverage := -O1 -g3 --coverage -Wno-pedantic $(HARDEN_CFLAGS)
 
 BUILD_LDFLAGS_debug :=
@@ -360,6 +361,7 @@ pgo-profile:
 	$(MAKE) BUILD_TYPE=pgo-generate BUILD_DIR=$(PGO_GEN_BUILD_DIR) CC=$(PGO_CC) bin
 	cd $(PGO_RUN_DIR) && LLVM_PROFILE_FILE="$(PGO_PROFILE_PATTERN)" $(CURDIR)/$(PGO_GEN_BUILD_DIR)/bin/wisp $(PGO_WORKLOAD)
 	cd $(PGO_RUN_DIR) && LLVM_PROFILE_FILE="$(PGO_ASSEMBLER_PROFILE_PATTERN)" $(CURDIR)/$(PGO_GEN_BUILD_DIR)/bin/assembler </dev/null >/dev/null
+	cd $(PGO_RUN_DIR) && LLVM_PROFILE_FILE="$(PGO_SCRY_PROFILE_PATTERN)" $(CURDIR)/$(PGO_GEN_BUILD_DIR)/bin/scry snap log >/dev/null
 	$(LLVM_PROFDATA) merge -output=$(PGO_PROFILE) $(PGO_RAW_DIR)/*.profraw
 
 coverage:

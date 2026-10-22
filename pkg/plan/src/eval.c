@@ -203,7 +203,7 @@ static pl_code* pl_law_code(pl_thread* t, pl_val law) {
   if (pl_pin_is_proxy(p))
     return NULL; /* unsaved: no hash to compile under (checked inline —
                     fresh laws are entered constantly during a build) */
-  void* code = (void*)(uintptr_t)__atomic_load_n(&p[6], __ATOMIC_ACQUIRE);
+  void* code = pl_pin_code_raw(p);
   if (ax_likely((uintptr_t)code > (uintptr_t)PL_CODE_PENDING))
     return code;
   if (code != NULL)

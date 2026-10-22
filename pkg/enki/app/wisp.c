@@ -1,5 +1,6 @@
 #include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <setjmp.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -27,9 +28,9 @@
  *
  * Loads MODULE (and its @includes) from DIR, then optionally applies the
  * binding FUNCTION to a row of the remaining arguments.  Pins and the
- * saved root use the Silo pack by default; --text-hash selects the
- * reference canonical-text snapshots.  Mirrors the reference
- * loadAssembly / runRepl drivers.
+ * saved root use the fixed-address native arena by default; --text-hash selects
+ * the reference canonical-text snapshots.  Mirrors the reference loadAssembly /
+ * runRepl drivers.
  */
 
 /* 256 MiB per semispace, grows on demand.  The moving live set of a large
@@ -42,7 +43,6 @@
 // main  35.43s user 0.55s system 99% cpu 36.136 total
 #define BOOT_DEFAULT_FILE_ROOT         "./reaver/src"
 #define BOOT_DEFAULT_STORE_DIR         "./snap"
-#define BOOT_STORE_MAP_SIZE            ((size_t)1 << 30)
 #ifdef TRACY_ENABLE
 #define BOOT_TRACY_QUANTUM "18446744073709551615"
 #endif
@@ -496,21 +496,22 @@ static bool boot_load_assembly(boot_ctx* ctx, const char* mod_c,
   w->env = NULL;
 
   pl_store* store = pl_heap_store(w->t->heap);
-  bool silo_root_f = store->format == PL_STORE_FORMAT_SILO_V1 &&
+  bool silo_root_f = (store->format == PL_STORE_FORMAT_SILO_V1 ||
+                      store->format == PL_STORE_FORMAT_NATIVE_V1) &&
                      (strcmp(ctx->src_dir_c, "snap") == 0 ||
                       strcmp(ctx->src_dir_c, "./snap") == 0) &&
                      strcmp(mod_c, "root") == 0;
   if (silo_root_f) {
     uint8_t hash[32];
     if (!pl_store_get_root(store, hash)) {
-      fprintf(stderr, "wisp: Silo store has no root\n");
+      fprintf(stderr, "wisp: snapshot store has no root\n");
       return false;
     }
     pl_val root = pl_store_load(w->t, hash);
     if (fn_c == NULL)
       return true;
     if (strcmp(fn_c, "_") != 0) {
-      fprintf(stderr, "wisp: Silo root only binds _\n");
+      fprintf(stderr, "wisp: snapshot root only binds _\n");
       return false;
     }
     /* A snapshot rooted at plain data (a value some non-repl run
@@ -706,16 +707,34 @@ int main(int argc, char** argv) {
   if (text_hash_f) {
     store = pl_store_new_mem();
   } else {
-    if (mkdir(BOOT_DEFAULT_STORE_DIR, 0777) != 0 && errno != EEXIST) {
-      fprintf(stderr, "wisp: cannot create Silo store %s\n",
+    bool created = mkdir(BOOT_DEFAULT_STORE_DIR, 0777) == 0;
+    if (!created && errno != EEXIST) {
+      fprintf(stderr, "wisp: cannot create snapshot store %s\n",
               BOOT_DEFAULT_STORE_DIR);
       (void)ax_profile_json_finish();
       return 1;
     }
-    store = pl_store_new_silo(BOOT_DEFAULT_STORE_DIR, BOOT_STORE_MAP_SIZE);
+    /* Reopening also finishes a directory barrier interrupted during an
+     * earlier creation attempt. */
+    {
+      int parent = open(".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+      int synced = parent < 0 ? -1 : fsync(parent);
+      if (parent >= 0)
+        close(parent);
+      if (synced != 0) {
+        fprintf(stderr,
+                "wisp: cannot synchronize snapshot directory creation: %s\n",
+                strerror(errno));
+        (void)ax_profile_json_finish();
+        return 1;
+      }
+    }
+    char store_err[256];
+    store = pl_store_new_native(BOOT_DEFAULT_STORE_DIR, store_err,
+                                sizeof(store_err));
     if (store == NULL) {
-      fprintf(stderr, "wisp: cannot open Silo store %s\n",
-              BOOT_DEFAULT_STORE_DIR);
+      fprintf(stderr, "wisp: cannot open native store %s: %s\n",
+              BOOT_DEFAULT_STORE_DIR, store_err);
       (void)ax_profile_json_finish();
       return 1;
     }
