@@ -829,7 +829,8 @@ TEST(actor, cross_actor_payload_is_store_resident) {
 
 TEST(actor, halted_actor_releases_unreachable_scratch) {
   test_rt rt = test_rt_new();
-  er_scheduler* sys = er_scheduler_new(rt.store, (er_config){.heap_cells = 262144});
+  er_scheduler* sys =
+      er_scheduler_new(rt.store, (er_config){.heap_cells = 262144});
   for (size_t i = 0; i < 16; i++) {
     er_actor* a = er_scheduler_actor(sys);
     pl_thread* t = er_actor_thread(a);
