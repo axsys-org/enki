@@ -181,6 +181,7 @@
             linuxTestBuildTypes)))
           // {
             tests-release-sljit = mkCheckArgs "release" "-sljit" "SLJIT_DIR=${sljit}";
+            tests-ubsan-sljit = mkCheckArgs "ubsan" "-sljit" "SLJIT_DIR=${sljit}";
             # YIELD_STRESS (spec §10.1): every depth-0 safepoint suspends
             tests-debug-yield-stress =
               mkCheckArgs "debug" "-yield-stress" "YIELD_STRESS=1";

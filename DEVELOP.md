@@ -554,17 +554,19 @@ The backend prepares a private dispatch overlay after bytecode validation and
 optimization. It instruments runs of at least three supported instructions,
 and lazily compiles code objects of at most 8192 bytecode slots. It supports
 variable/literal/slot loads, guarded nat63 Add/Sub/Cmp, already-evaluated Force,
-branches, jumps, and local tail blocks with up to 32 arguments. The top operand
+branches, jumps, local tail blocks with up to 32 arguments, and the bounded
+construction batches described below. The top operand
 stays in a register across straight-line sequences. Branch joins materialize
 it; resumes inside a sequence reload it through an entry stub.
 
-Native code makes no C calls and cannot allocate, collect, raise, or suspend.
+Native code makes no C calls and cannot collect, raise, or suspend. It can
+allocate a complete construction batch after checking heap and stack space.
 It spills the value-stack cursor, cached operand and fuel before returning the
 bytecode offset of the pending instruction. That instruction executes once in
 the interpreter, even when its overlay says JIT. This preserves generic
 fallbacks, exact fuel checkpoints, and exception/GC behavior without native
-stack maps. Thunk allocation, general calls, returns, and tail numeric primops
-still use the evaluator. Executable memory and entry tables belong to the
+stack maps. Construction outside a planned batch, general calls, returns, and
+tail numeric primops still use the evaluator. Executable memory and entry tables belong to the
 specific `pl_code` version and are freed with it; they are never persisted.
 Compilation is serialized and native entries are published with release/acquire
 atomics so shared code can be entered by multiple evaluator threads.
@@ -662,3 +664,37 @@ million iterations); removing reserve checks alone is not a demonstrated speedup
 The plans also provide bounded construction metadata for native lowering.
 `PL_CACHE_STATS` reports reserve calls, and the existing workload runner accepts
 `--toggle PL_BATCH` for same-binary comparisons with `PL_JIT=0`.
+
+SLJIT lowers each plan to native header/payload stores and a single heap-cursor
+publication. Stack room, variable bounds, and heap headroom are checked before
+construction; a failed guard returns to the batch's original interpreter entry.
+There are no native entry points in the middle of construction. Literal loads
+still go through canonical decoded bytecode, and newly constructed objects can
+be shared by later steps. Known primitive thunks retain their resolved index
+and NOUPD flag; potentially raising primitives remain lazy.
+
+`PL_GC_STRESS` and `PL_CACHE_STATS` builds deliberately use the C batch path to
+retain forced collections and allocation counters. The native batch tests
+compare graph sharing, fuel checkpoints, and moving roots against both the
+canonical and batched interpreters. They also exercise exact heap fits and
+transactional fallback for insufficient heap/stack space and invalid variables.
+
+An Apple Silicon release build, using the same binary with `PL_JIT=1` and
+`PL_BATCH=0,1,1,0`, produced these medians (one warmup and two timed samples
+per process, four measured samples per mode). All 72 workload checksums passed.
+This is a local comparison, not a cross-platform or PGO result; the first
+control process was slower than the second.
+
+| Workload | Batching off | Batching on | Speedup |
+| --- | ---: | ---: | ---: |
+| nfib | 83.308 ms | 72.750 ms | 1.145x |
+| listwork | 53.925 ms | 50.635 ms | 1.065x |
+| rowwork | 165.620 ms | 151.628 ms | 1.092x |
+| sortwork | 2016.872 ms | 1782.283 ms | 1.132x |
+| bstwork | 672.172 ms | 608.589 ms | 1.104x |
+| compwork | 596.682 ms | 540.727 ms | 1.103x |
+
+After those runs, the isolated two-row loop took 8.8–9.0 ms with SLJIT but no
+batching, 4.0–4.3 ms with native batches, and 13.9–14.6 ms with both disabled
+(per million iterations, five timed samples after warmup in each process).
+The earlier reservation-only measurements above were taken separately.

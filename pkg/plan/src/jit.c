@@ -8,9 +8,9 @@
 #include <string.h>
 #include <time.h>
 
-/* Experimental, non-allocating native regions. There are no native calls,
- * GC safepoints, or surviving native continuations. Every exit spills the
- * operand stack and fuel, before executing the pending bytecode once in C.
+/* Native regions with guarded, bounded heap construction. There are no native
+ * calls, GC safepoints, or surviving native continuations. Every exit spills
+ * the operand stack and fuel, before executing the pending bytecode once in C.
  * Code and its dispatch overlay are private to one decoded pl_code version.
  * SLJIT memory is released together with that version, never on replacement.
  */
@@ -62,42 +62,6 @@ static void configure(void) {
     (void)atexit(report);
 }
 
-/* Called only on a successfully validated stream. */
-static size_t width(const pl_op_t* o) {
-  switch (o[0]) {
-  case OP_PUSH_VAR:
-  case OP_PUSH_LIT:
-  case OP_MK_APP:
-  case OP_INTERP:
-  case OP_PUSH_SLOT:
-  case OP_JMP:
-  case OP_ENTRY:
-  case OP_CALL_SLOW:
-    return 2;
-  case OP_CALL:
-  case OP_CALL_FAST:
-  case OP_TAILBLK:
-    return 3;
-  case OP_CALL_KNOWN:
-  case OP_CALL_READY:
-  case OP_ADD:
-  case OP_SUB:
-  case OP_CMP:
-    return 4;
-  case OP_BR:
-    return 2 + (size_t)o[1];
-  case OP_MK_THK:
-  case OP_TAILCALL:
-  case OP_TAIL_READY:
-  case OP_TAIL_ADD:
-  case OP_TAIL_SUB:
-  case OP_TAIL_CMP:
-    return (o[2] & PL_BAN_MASK) == PL_BAN_PRIM_KNOWN ? 5 : 3;
-  default:
-    return 1;
-  }
-}
-
 static bool supported(const pl_op_t* o) {
   switch (o[0]) {
   case OP_PUSH_VAR:
@@ -126,8 +90,8 @@ void pl_jit_prepare(pl_code* c) {
   (void)pthread_once(&config_once, configure);
   if (!enabled || c->jit != NULL || c->nops > 8192 || c->nops == 0)
     return;
-  /* Instrument only runs of at least three supported instructions. Native
-   * compilation can also traverse shorter runs reached by internal edges. */
+  /* Instrument runs of at least three supported instructions, or a complete
+   * construction batch. Compilation also traverses shorter internal runs. */
   pl_op_t* overlay = malloc(c->nops * sizeof(*overlay));
   struct pl_jit* j = calloc(1, sizeof(*j));
   if (overlay == NULL || j == NULL) {
@@ -140,20 +104,25 @@ void pl_jit_prepare(pl_code* c) {
   bool any = false;
   for (size_t pc = 0; pc <= c->nops;) {
     bool batch = pc < c->nops && pl_batch_ops(c)[pc] == OP_BUILD;
-    if (pc < c->nops && !batch && supported(c->ops + pc)) {
-      if (count++ == 0)
+    if (pc < c->nops && (batch || supported(c->ops + pc))) {
+      if (count == 0)
         start = pc;
+      count += batch ? 3 : 1;
     } else {
       if (count >= 3) {
         any = true;
-        for (size_t k = start; k < pc; k += width(c->ops + k))
+        for (size_t k = start; k < pc;) {
           overlay[k] = OP_JIT;
+          const pl_batch* b = pl_batch_at(c, (uint32_t)k);
+          k = b ? b->end : k + pl_bytecode_width(c->ops + k);
+        }
       }
       count = 0;
     }
     if (pc == c->nops)
       break;
-    pc = batch ? pl_batch_at(c, (uint32_t)pc)->end : pc + width(c->ops + pc);
+    pc = batch ? pl_batch_at(c, (uint32_t)pc)->end
+               : pc + pl_bytecode_width(c->ops + pc);
   }
   if (!any) {
     free(overlay);
@@ -252,6 +221,95 @@ static void room(emitter* e) {
   guard(e, SLJIT_GREATER_EQUAL, SP, 0, SLJIT_R0, 0);
 }
 
+/* All guards precede construction: a failure resumes OP_BUILD in C, which
+ * reserves/collects with the original stack rooted. No exits, calls or fuel
+ * points occur after the first store. R2 is the cursor, TOP the heap, R4 the
+ * variable base; the ordinary top cache is flushed for this whole region. */
+static void emit_batch(emitter* e, pl_code* code, const pl_batch* b) {
+#if defined(PL_GC_STRESS) || defined(PL_CACHE_STATS)
+  /* Keep forced collections and allocation instrumentation authoritative. */
+  (void)code;
+  leave(e, b->start, e->cached);
+  e->cached = false;
+#else
+  flush(e);
+  e->cached = false;
+  need(e, b->depth);
+  mov(e, SLJIT_R0, 0, M(T), OFF(pl_thread, vcap));
+  binary(e, SLJIT_SHL, SLJIT_R0, SLJIT_R0, 0, I, 3);
+  binary(e, SLJIT_ADD, SLJIT_R0, VS, 0, SLJIT_R0, 0);
+  binary(e, SLJIT_ADD, SLJIT_R1, SP, 0, I, (sljit_sw)b->extra * 8);
+  guard(e, SLJIT_GREATER, SLJIT_R1, 0, SLJIT_R0, 0);
+  if (b->vars) {
+    (void)sljit_emit_op1(e->c, SLJIT_MOV_U32, SLJIT_R1, 0, M(F),
+                         OFF(pl_frame, argc));
+    struct sljit_jump* heap =
+        sljit_emit_cmp(e->c, SLJIT_EQUAL, SLJIT_R1, 0, I, 0);
+    guard(e, SLJIT_LESS, SLJIT_R1, 0, I, b->vars);
+    mov(e, SLJIT_R4, 0, M(F), OFF(pl_frame, b));
+    binary(e, SLJIT_SHL, SLJIT_R4, SLJIT_R4, 0, I, 3);
+    binary(e, SLJIT_ADD, SLJIT_R4, VS, 0, SLJIT_R4, 0);
+    struct sljit_jump* loaded = sljit_emit_jump(e->c, SLJIT_JUMP);
+    sljit_set_label(heap, sljit_emit_label(e->c));
+    mov(e, SLJIT_R4, 0, M(F), OFF(pl_frame, a));
+    binary(e, SLJIT_AND, SLJIT_R4, SLJIT_R4, 0, I, (sljit_sw)PL_ADDR_MASK);
+    mov(e, SLJIT_R1, 0, M(SLJIT_R4), 0);
+    binary(e, SLJIT_LSHR, SLJIT_R1, SLJIT_R1, 0, I, 32);
+    guard(e, SLJIT_LESS_EQUAL, SLJIT_R1, 0, I, b->vars);
+    binary(e, SLJIT_ADD, SLJIT_R4, SLJIT_R4, 0, I, 8);
+    sljit_set_label(loaded, sljit_emit_label(e->c));
+  }
+  mov(e, TOP, 0, M(T), OFF(pl_thread, heap));
+  mov(e, SLJIT_R2, 0, M(TOP), OFF(pl_heap, free));
+  mov(e, SLJIT_R1, 0, M(TOP), OFF(pl_heap, limit));
+  binary(e, SLJIT_SUB, SLJIT_R1, SLJIT_R1, 0, SLJIT_R2, 0);
+  guard(e, SLJIT_LESS, SLJIT_R1, 0, I, (sljit_sw)b->cells * 8);
+  for (uint32_t k = 0; k < b->nsteps; k++) {
+    const pl_batch_step* s = b->steps + k;
+    if (s->op == OP_PUSH_LIT) {
+      mov(e, SLJIT_R0, 0, I, (sljit_sw)(uintptr_t)&code->ops[s->arg]);
+      mov(e, SLJIT_R0, 0, M(SLJIT_R0), 0);
+    } else if (s->op == OP_PUSH_VAR) {
+      mov(e, SLJIT_R0, 0, M(SLJIT_R4), (sljit_sw)s->arg * 8);
+    } else if (s->op == OP_PUSH_SLOT) {
+      mov(e, SLJIT_R0, 0, M(BASE), (sljit_sw)s->arg * 8);
+    } else {
+      bool app = s->op == OP_MK_APP;
+      bool known = !app && (s->flags & PL_BAN_MASK) == PL_BAN_PRIM_KNOWN;
+      uint32_t count = s->arg + (app ? 1u : 0u);
+      uint32_t cells = app ? PL_APP_CELLS(s->arg)
+                           : PL_THKE_CELLS(s->arg + (known ? 1u : 0u));
+      pl_cell hdr =
+          pl_hdr_make(app ? PL_K_APP : PL_K_THKE, 0, app ? s->aux : 0, cells);
+      mov(e, M(SLJIT_R2), 0, I, (sljit_sw)hdr);
+      if (!app) {
+        mov(e, M(SLJIT_R2), 8, I,
+            (sljit_sw)(known ? s->flags : (uint64_t)(pl_bane)s->flags));
+        if (known)
+          mov(e, M(SLJIT_R2), 16, I, s->aux);
+      }
+      for (uint32_t j = 0; j < count; j++) {
+        mov(e, SLJIT_R0, 0, M(SP), ((sljit_sw)j - count) * 8);
+        mov(e, M(SLJIT_R2),
+            ((sljit_sw)j + (app     ? 1
+                            : known ? 3
+                                    : 2)) *
+                8,
+            SLJIT_R0, 0);
+      }
+      binary(e, SLJIT_SUB, SP, SP, 0, I, (sljit_sw)count * 8);
+      binary(e, SLJIT_AND, SLJIT_R0, SLJIT_R2, 0, I, (sljit_sw)PL_ADDR_MASK);
+      binary(e, SLJIT_OR, SLJIT_R0, SLJIT_R0, 0, I,
+             (sljit_sw)((uint64_t)(app ? PL_TAG_APP : PL_TAG_DEFER) << 56));
+      binary(e, SLJIT_ADD, SLJIT_R2, SLJIT_R2, 0, I, (sljit_sw)cells * 8);
+    }
+    mov(e, M(SP), 0, SLJIT_R0, 0);
+    binary(e, SLJIT_ADD, SP, SP, 0, I, 8);
+  }
+  mov(e, M(TOP), OFF(pl_heap, free), SLJIT_R2, 0);
+#endif
+}
+
 static bool compile_code(pl_code* code) {
   size_t n = code->nops;
   struct sljit_label** labels = calloc(n, sizeof(*labels));
@@ -265,7 +323,7 @@ static bool compile_code(pl_code* code) {
   if (!labels || !targets || !cached || !entries || !e.c || !e.exits ||
       !e.edges)
     goto done;
-  for (size_t pc = 0; pc < n; pc += width(code->ops + pc)) {
+  for (size_t pc = 0; pc < n; pc += pl_bytecode_width(code->ops + pc)) {
     const pl_op_t* o = code->ops + pc;
     if (o[0] == OP_JMP || o[0] == OP_CALL || o[0] == OP_TAILBLK)
       targets[o[1]] = true;
@@ -286,7 +344,9 @@ static bool compile_code(pl_code* code) {
   binary(&e, SLJIT_ADD, BASE, VS, 0, BASE, 0);
   (void)sljit_emit_ijump(e.c, SLJIT_JUMP, SLJIT_R2, 0);
 
-  for (size_t pc = 0; pc < n; pc += width(code->ops + pc)) {
+  for (size_t pc = 0, next_pc = 0; pc < n; pc = next_pc) {
+    const pl_batch* b = pl_batch_at(code, (uint32_t)pc);
+    next_pc = b ? b->end : pc + pl_bytecode_width(code->ops + pc);
     const pl_op_t* o = code->ops + pc;
     e.pc = (uint32_t)pc;
     if (targets[pc]) {
@@ -295,7 +355,11 @@ static bool compile_code(pl_code* code) {
     }
     cached[pc] = e.cached;
     labels[pc] = sljit_emit_label(e.c);
-    if (pl_batch_ops(code)[pc] == OP_BUILD || !supported(o)) {
+    if (b) {
+      emit_batch(&e, code, b);
+      continue;
+    }
+    if (!supported(o)) {
       leave(&e, (uint32_t)pc, e.cached);
       e.cached = false;
       continue;
@@ -441,7 +505,7 @@ static bool compile_code(pl_code* code) {
     sljit_set_label(e.edges[k].jump, labels[e.edges[k].target]);
   /* A VM resume can enter inside a linear region. Restore its expected
    * register cache from the materialized VM stack before joining the body. */
-  for (size_t pc = 0; pc < n; pc += width(code->ops + pc)) {
+  for (size_t pc = 0; pc < n; pc += pl_bytecode_width(code->ops + pc)) {
     if (code->jit_ops[pc] != OP_JIT)
       continue;
     struct sljit_label* body = labels[pc];
@@ -460,7 +524,7 @@ static bool compile_code(pl_code* code) {
   void* memory = sljit_generate_code(e.c, 0, NULL);
   if (memory == NULL)
     goto done;
-  for (size_t pc = 0; pc < n; pc += width(code->ops + pc))
+  for (size_t pc = 0; pc < n; pc += pl_bytecode_width(code->ops + pc))
     if (code->jit_ops[pc] == OP_JIT)
       entries[pc] = sljit_get_label_addr(labels[pc]);
   code->jit->memory = memory;
