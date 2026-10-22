@@ -13,6 +13,12 @@ nix flake check -L
 make nix-ci
 ```
 
+`nix build`, `make`, and `x/boot` default to a Clang PGO build with SLJIT
+enabled. Local binaries are under `build/pgo-sljit/bin`; the first build runs
+the PGO training workload. Set `PL_JIT=0` to disable native execution at runtime.
+Use `make BUILD_TYPE=debug` for a debug build or `make SLJIT_DIR=` for PGO
+without SLJIT. See [DEVELOP.md](DEVELOP.md#clang-pgo) for build details.
+
 ## Entering a reaver dev environment
 
 ```sh

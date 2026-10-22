@@ -56,7 +56,25 @@
         "flake-utils": "flake-utils",
         "nixpkgs": "nixpkgs",
         "reaver": "reaver",
+        "sljit": "sljit",
         "treefmt-nix": "treefmt-nix"
+      }
+    },
+    "sljit": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1790763332,
+        "narHash": "sha256-VsUT4OstReLpIMN+jduSYFszhSgEafWSj2M+/YkWHSg=",
+        "owner": "zherczeg",
+        "repo": "sljit",
+        "rev": "39c508d1b8fbae332d60c7450db20236913089da",
+        "type": "github"
+      },
+      "original": {
+        "owner": "zherczeg",
+        "repo": "sljit",
+        "rev": "39c508d1b8fbae332d60c7450db20236913089da",
+        "type": "github"
       }
     },
     "systems": {

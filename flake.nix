@@ -12,6 +12,10 @@
       url = "github:axsys-org/shrine-plan/main";
       flake = false;
     };
+    sljit = {
+      url = "github:zherczeg/sljit/39c508d1b8fbae332d60c7450db20236913089da";
+      flake = false;
+    };
   };
 
   outputs = {
@@ -20,6 +24,7 @@
     flake-utils,
     treefmt-nix,
     reaver,
+    sljit,
   }:
     flake-utils.lib.eachSystem [
       "x86_64-linux"
@@ -87,7 +92,7 @@
           selected = compilerFor buildType;
         in
           import ./nix/mkenki.nix {
-            inherit lib src;
+            inherit lib src sljit;
             inherit (pkgs) gnumake curl gmp lmdb openssl libsodium libblake3;
             inherit (selected) stdenv compiler cc;
           };
@@ -109,7 +114,7 @@
           }).overrideAttrs (_old: {
             installPhase = ''
               runHook preInstall
-              make install BUILD_TYPE=${buildType} PREFIX=$out ${pgoMakeArgs}
+              make install BUILD_TYPE=${buildType} PREFIX=$out SLJIT_DEFAULT_DIR=${sljit} ${pgoMakeArgs}
               runHook postInstall
             '';
           });
@@ -175,6 +180,7 @@
             })
             linuxTestBuildTypes)))
           // {
+            tests-release-sljit = mkCheckArgs "release" "-sljit" "SLJIT_DIR=${sljit}";
             # YIELD_STRESS (spec §10.1): every depth-0 safepoint suspends
             tests-debug-yield-stress =
               mkCheckArgs "debug" "-yield-stress" "YIELD_STRESS=1";
@@ -273,6 +279,10 @@
         formatter = treefmtEval.config.build.wrapper;
 
         devShells.default = pkgs.mkShell {
+          CC = "${pkgs.llvmPackages.stdenv.cc}/bin/clang";
+          PGO_CC = "${pkgs.llvmPackages.stdenv.cc}/bin/clang";
+          LLVM_PROFDATA = "${pkgs.llvmPackages.llvm}/bin/llvm-profdata";
+          SLJIT_DEFAULT_DIR = "${sljit}";
           ENKI_REAVER_SRC_DIR = "${reaver}/src";
           ENKI_REAVER_PLAN_DIR = "${reaver}/src/plan";
 
@@ -281,6 +291,7 @@
               pkgs.gcc
               pkgs.clang
               pkgs.clang-tools
+              pkgs.llvmPackages.llvm
               pkgs.bear
               pkgs.gnumake
               pkgs.curl
@@ -307,8 +318,9 @@
             enki development shell
 
             Common targets:
-              make
+              make                              # PGO + SLJIT
               make test
+              make BUILD_TYPE=debug test
               make BUILD_TYPE=asan test
               make BUILD_TYPE=ubsan test
               make BUILD_TYPE=tsan test

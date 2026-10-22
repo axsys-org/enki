@@ -1,10 +1,16 @@
-BUILD_TYPE ?= debug
+BUILD_TYPE ?= pgo
 .DEFAULT_GOAL := all
 PROFILE ?=
 CC ?= cc
 PREFIX ?= /usr/local
+SLJIT_REV := 39c508d1b8fbae332d60c7450db20236913089da
+SLJIT_CACHE_DIR := build/deps/sljit-$(SLJIT_REV)
+SLJIT_DEFAULT_DIR ?= $(SLJIT_CACHE_DIR)
+# PGO builds include SLJIT by default. An explicit empty SLJIT_DIR opts out.
+SLJIT_DIR ?= $(if $(filter pgo pgo-generate,$(BUILD_TYPE)),$(SLJIT_DEFAULT_DIR),)
+SLJIT_SUFFIX := $(if $(SLJIT_DIR),-sljit,)
 BUILD_PROFILE_SUFFIX := $(if $(PROFILE),-$(PROFILE),)
-BUILD_DIR ?= build/$(BUILD_TYPE)$(BUILD_PROFILE_SUFFIX)$(if $(SLJIT_DIR),-sljit,)
+BUILD_DIR ?= build/$(BUILD_TYPE)$(BUILD_PROFILE_SUFFIX)$(SLJIT_SUFFIX)
 AR ?= ar
 DOCKER ?= docker
 
@@ -19,9 +25,14 @@ VALID_BUILD_TYPES := debug release asan ubsan tsan coverage profile
 VALID_BUILD_TYPES += pgo-generate pgo
 
 PGO_CC ?= clang
+ifneq ($(filter pgo pgo-generate,$(BUILD_TYPE)),)
+ifeq ($(origin CC),default)
+CC = $(PGO_CC)
+endif
+endif
 LLVM_PROFDATA ?= llvm-profdata
-PGO_DIR ?= build/pgo
-PGO_GEN_BUILD_DIR ?= build/pgo-generate
+PGO_DIR ?= build/pgo$(SLJIT_SUFFIX)
+PGO_GEN_BUILD_DIR ?= build/pgo-generate$(SLJIT_SUFFIX)
 PGO_USE_BUILD_DIR ?= $(PGO_DIR)
 PGO_RUN_DIR ?= $(PGO_DIR)/run
 PGO_RAW_DIR ?= $(PGO_DIR)/raw
@@ -132,6 +143,12 @@ CFLAGS_ALL += -DTRACY_ENABLE
 LDFLAGS_ALL += -L/opt/homebrew/opt/tracy/lib -Wl,-rpath,/opt/homebrew/opt/tracy/lib -lTracyClient
 endif
 
+# Test drivers are absent from application training and may define functions
+# (notably main) with the same names but different control flow. Keep PGO in
+# the runtime libraries without applying application profiles to test drivers.
+TEST_CFLAGS_ALL = $(filter-out -fprofile-instr-use=%,$(CFLAGS_ALL))
+TEST_LDFLAGS_ALL = $(filter-out -fprofile-instr-use=%,$(LDFLAGS_ALL))
+
 AXSYS_SRCS := $(wildcard pkg/axsys/src/*.c)
 PLAN_SRCS := $(wildcard pkg/plan/src/*.c)
 ENKI_SRCS := $(wildcard pkg/enki/src/*.c)
@@ -159,6 +176,18 @@ ifneq ($(SLJIT_DIR),)
 CPPFLAGS_ALL += -DPL_SLJIT -isystem $(SLJIT_DIR)/sljit_src
 PLAN_OBJS += $(BUILD_DIR)/vendor/sljit.o
 SLJIT_ALLOC_FLAGS := $(if $(filter Darwin,$(UNAME_S)),,-DSLJIT_WX_EXECUTABLE_ALLOCATOR=1)
+# Fetch only the default cache; caller-supplied checkouts are never modified.
+ifeq ($(SLJIT_DIR),$(SLJIT_CACHE_DIR))
+$(SLJIT_DIR)/sljit_src/sljitLir.c:
+	@mkdir -p $(dir $(SLJIT_CACHE_DIR))
+	@set -eu; checkout=$$(mktemp -d "$(SLJIT_CACHE_DIR).tmp.XXXXXX"); \
+		trap 'rm -rf "$$checkout"' EXIT HUP INT TERM; \
+		git -C "$$checkout" init -q; \
+		git -C "$$checkout" fetch -q --depth=1 https://github.com/zherczeg/sljit.git $(SLJIT_REV); \
+		git -C "$$checkout" checkout -q --detach FETCH_HEAD; \
+		mv "$$checkout" "$(SLJIT_CACHE_DIR)"
+endif
+$(BUILD_DIR)/pkg/plan/src/jit.o: | $(SLJIT_DIR)/sljit_src/sljitLir.c
 $(BUILD_DIR)/vendor/sljit.o: $(SLJIT_DIR)/sljit_src/sljitLir.c $(wildcard $(SLJIT_DIR)/sljit_src/*.h) $(wildcard $(SLJIT_DIR)/sljit_src/*.c) $(wildcard $(SLJIT_DIR)/sljit_src/allocator_src/*.c)
 	@mkdir -p $(dir $@)
 	$(CC) $(BASE_CPPFLAGS) $(BASE_CFLAGS) $(BUILD_CFLAGS_$(BUILD_TYPE)) -w -DSLJIT_ARGUMENT_CHECKS=1 $(SLJIT_ALLOC_FLAGS) -c $< -o $@
@@ -195,8 +224,11 @@ ifeq ($(BUILD_TYPE),pgo)
 PGO_PROFILE_TARGETS := $(LIB_OBJS) $(THEFT_OBJS) $(APP_BINS) $(UNIT_BINS) \
 	$(TSAN_UNIT_BINS) $(PROPERTY_BINS) $(FUZZ_BINS) $(PERF_BINS)
 $(PGO_PROFILE_TARGETS): $(PGO_PROFILE)
+ifneq ($(SLJIT_DIR),)
+$(PGO_PROFILE): | $(SLJIT_DIR)/sljit_src/sljitLir.c
+endif
 $(PGO_PROFILE):
-	$(MAKE) pgo-profile
+	$(MAKE) pgo-profile CC=$(CC) PGO_CC=$(CC)
 endif
 
 TIDY_FILES := $(AXSYS_SRCS) $(PLAN_SRCS) $(ENKI_SRCS) $(UNIT_SRCS) $(PROPERTY_SRCS) $(FUZZ_SRCS) $(TSAN_UNIT_SRCS)
@@ -220,11 +252,14 @@ LCOV_IGNORE_ERRORS ?= --ignore-errors inconsistent,inconsistent,mismatch,mismatc
 LCOV_NORMALIZE_AWK = function emit(tag, count, i) { printf "%s%s", tag, field[1]; for (i = 2; i <= count; i++) printf ",%s", field[i]; printf "\n" } /^SF:/ { prefix = "SF:" source_root "/"; if (index($$0, prefix) == 1) print "SF:" substr($$0, length(prefix) + 1); else print; next } /^DA:/ { count = split(substr($$0, 4), field, ","); field[2] = field[2] == "0" ? "0" : "1"; emit("DA:", count); next } /^FNA:/ { count = split(substr($$0, 5), field, ","); field[2] = field[2] == "0" ? "0" : "1"; emit("FNA:", count); next } /^BRDA:/ { count = split(substr($$0, 6), field, ","); if (field[4] != "-") field[4] = field[4] == "0" ? "0" : "1"; emit("BRDA:", count); next } { print }
 LCOV_NORMALIZE_HTML_AWK = function replace(line, position) { while ((position = index(line, source_root)) != 0) line = substr(line, 1, position - 1) "." substr(line, position + length(source_root)); return line } { print replace($$0) }
 
-.PHONY: all lib bin install test test-binaries test-unit test-property fuzz fuzz-bin perf-binaries pgo \
+.PHONY: all lib bin install print-build-dir test test-binaries test-unit test-property fuzz fuzz-bin perf-binaries pgo \
 	pgo-profile coverage tidy check-layering format format-check compile-commands nix-ci linux-check \
 	linux-shell clean distclean
 
 all: lib bin
+
+print-build-dir:
+	@printf '%s\n' '$(BUILD_DIR)'
 
 nix-ci:
 	./tools/nix-ci
@@ -289,17 +324,17 @@ $(BUILD_DIR)/pkg/enki/%.o: pkg/enki/%.c
 
 $(BUILD_DIR)/tests/%.o: tests/%.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS_ALL) $(ENKI_INC) $(CFLAGS_ALL) -c $< -o $@
+	$(CC) $(CPPFLAGS_ALL) $(ENKI_INC) $(TEST_CFLAGS_ALL) -c $< -o $@
 
 $(BUILD_DIR)/tests/unit/%: tests/unit/%.c tests/support/test.h \
 		tests/support/greatest.h $(LIBS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS_ALL) $(ENKI_INC) $(CFLAGS_ALL) $< $(LIB_ENKI) $(LIB_PLAN) $(LIB_AXSYS) $(LDFLAGS_ALL) -o $@
+	$(CC) $(CPPFLAGS_ALL) $(ENKI_INC) $(TEST_CFLAGS_ALL) $< $(LIB_ENKI) $(LIB_PLAN) $(LIB_AXSYS) $(TEST_LDFLAGS_ALL) -o $@
 
 $(BUILD_DIR)/tests/property/%: tests/property/%.c $(LIBS) $(THEFT_OBJS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS_ALL) $(ENKI_INC) $(CFLAGS_ALL) $< $(LIB_ENKI) $(LIB_PLAN) $(LIB_AXSYS) $(THEFT_OBJS) \
-		$(LDFLAGS_ALL) -o $@
+	$(CC) $(CPPFLAGS_ALL) $(ENKI_INC) $(TEST_CFLAGS_ALL) $< $(LIB_ENKI) $(LIB_PLAN) $(LIB_AXSYS) $(THEFT_OBJS) \
+		$(TEST_LDFLAGS_ALL) -o $@
 
 $(BUILD_DIR)/tests/fuzz/%: tests/fuzz/%.c $(LIBS)
 	@if ! $(CC) --version 2>/dev/null | grep -qi clang; then \
@@ -312,7 +347,7 @@ $(BUILD_DIR)/tests/fuzz/%: tests/fuzz/%.c $(LIBS)
 
 $(BUILD_DIR)/tests/perf/%: tests/perf/%.c $(LIBS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS_ALL) $(ENKI_INC) $(CFLAGS_ALL) $< $(LIB_ENKI) $(LIB_PLAN) $(LIB_AXSYS) $(LDFLAGS_ALL) -o $@
+	$(CC) $(CPPFLAGS_ALL) $(ENKI_INC) $(TEST_CFLAGS_ALL) $< $(LIB_ENKI) $(LIB_PLAN) $(LIB_AXSYS) $(TEST_LDFLAGS_ALL) -o $@
 
 install: lib bin
 	install -d $(PREFIX)/lib $(PREFIX)/include/axsys $(PREFIX)/include/plan $(PREFIX)/include/enki

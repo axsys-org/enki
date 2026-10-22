@@ -2990,23 +2990,56 @@ TEST(ops, equal_survives_very_deep_structures) {
  * Compare every fuel quantum against the same decoded stream without its
  * dispatch overlay, collecting the moving heap at every suspension. */
 TEST(sljit, loop_matches_interpreter_checkpoints) {
-  if (getenv("PL_JIT") == NULL || strcmp(getenv("PL_JIT"), "1") != 0)
-    SKIP_TEST("enable with PL_JIT=1");
+  if (getenv("PL_JIT") != NULL && strcmp(getenv("PL_JIT"), "1") != 0)
+    SKIP_TEST("disabled by PL_JIT; enable with PL_JIT=1 or unset");
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
   pl_vpush(t, test_p66(t));
   pl_val p66 = t->vstack[0];
-  pl_val ops[] = {
-      OP_PUSH_VAR, 1, OP_FORCE, OP_PUSH_LIT, 0, OP_TAILBLK, 8, 2,
-      OP_PUSH_SLOT, 0, OP_PUSH_LIT, 0,
-      OP_CALL_KNOWN, 2, p66, ax_s3('C', 'm', 'p'),
-      OP_BR, 3, 21, 21, 24,
-      OP_PUSH_SLOT, 1, OP_RET,
-      OP_PUSH_SLOT, 0, OP_PUSH_LIT, 1,
-      OP_CALL_KNOWN, 2, p66, ax_s3('S', 'u', 'b'),
-      OP_PUSH_SLOT, 1, OP_PUSH_SLOT, 0,
-      OP_CALL_KNOWN, 2, p66, ax_s3('A', 'd', 'd'),
-      OP_TAILBLK, 8, 2, OP_RET};
+  pl_val ops[] = {OP_PUSH_VAR,
+                  1,
+                  OP_FORCE,
+                  OP_PUSH_LIT,
+                  0,
+                  OP_TAILBLK,
+                  8,
+                  2,
+                  OP_PUSH_SLOT,
+                  0,
+                  OP_PUSH_LIT,
+                  0,
+                  OP_CALL_KNOWN,
+                  2,
+                  p66,
+                  ax_s3('C', 'm', 'p'),
+                  OP_BR,
+                  3,
+                  21,
+                  21,
+                  24,
+                  OP_PUSH_SLOT,
+                  1,
+                  OP_RET,
+                  OP_PUSH_SLOT,
+                  0,
+                  OP_PUSH_LIT,
+                  1,
+                  OP_CALL_KNOWN,
+                  2,
+                  p66,
+                  ax_s3('S', 'u', 'b'),
+                  OP_PUSH_SLOT,
+                  1,
+                  OP_PUSH_SLOT,
+                  0,
+                  OP_CALL_KNOWN,
+                  2,
+                  p66,
+                  ax_s3('A', 'd', 'd'),
+                  OP_TAILBLK,
+                  8,
+                  2,
+                  OP_RET};
   pl_code* c = test_decode_ops(t, sizeof ops / sizeof ops[0], ops);
   ASSERT_NOT_NULL(c);
   ASSERT_NOT_NULL(c->jit_ops);
@@ -3061,13 +3094,26 @@ TEST(sljit, loop_matches_interpreter_checkpoints) {
 }
 
 TEST(sljit, stack_growth_and_invalid_branch_fall_back) {
-  if (getenv("PL_JIT") == NULL || strcmp(getenv("PL_JIT"), "1") != 0)
-    SKIP_TEST("enable with PL_JIT=1");
+  if (getenv("PL_JIT") != NULL && strcmp(getenv("PL_JIT"), "1") != 0)
+    SKIP_TEST("disabled by PL_JIT; enable with PL_JIT=1 or unset");
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
-  pl_val ops[] = {OP_PUSH_LIT, 7, OP_PUSH_LIT, 8, OP_PUSH_VAR, 1,
-                  OP_BR, 2, 10, 13, OP_PUSH_SLOT, 0, OP_RET,
-                  OP_PUSH_SLOT, 1, OP_RET};
+  pl_val ops[] = {OP_PUSH_LIT,
+                  7,
+                  OP_PUSH_LIT,
+                  8,
+                  OP_PUSH_VAR,
+                  1,
+                  OP_BR,
+                  2,
+                  10,
+                  13,
+                  OP_PUSH_SLOT,
+                  0,
+                  OP_RET,
+                  OP_PUSH_SLOT,
+                  1,
+                  OP_RET};
   pl_code* c = test_decode_ops(t, sizeof ops / sizeof ops[0], ops);
   ASSERT_NOT_NULL(c);
   ASSERT_NOT_NULL(c->jit_ops);
@@ -3128,8 +3174,8 @@ static void* jit_publish_worker(void* opaque) {
 }
 
 TEST(sljit, concurrent_compilation_and_publication) {
-  if (getenv("PL_JIT") == NULL || strcmp(getenv("PL_JIT"), "1") != 0)
-    SKIP_TEST("enable with PL_JIT=1");
+  if (getenv("PL_JIT") != NULL && strcmp(getenv("PL_JIT"), "1") != 0)
+    SKIP_TEST("disabled by PL_JIT; enable with PL_JIT=1 or unset");
   test_rt rt = test_rt_new();
   pl_val ops[] = {OP_PUSH_LIT, 7, OP_PUSH_LIT, 8, OP_PUSH_LIT, 9, OP_RET};
   pl_code* c = test_decode_ops(rt.t, sizeof ops / sizeof ops[0], ops);
@@ -3139,7 +3185,8 @@ TEST(sljit, concurrent_compilation_and_publication) {
   jit_worker workers[4];
   for (unsigned k = 0; k < 4; k++) {
     workers[k] = (jit_worker){.store = rt.store, .code = c};
-    ASSERT_EQ(pthread_create(&threads[k], NULL, jit_publish_worker, &workers[k]), 0);
+    ASSERT_EQ(
+        pthread_create(&threads[k], NULL, jit_publish_worker, &workers[k]), 0);
   }
   for (unsigned k = 0; k < 4; k++) {
     ASSERT_EQ(pthread_join(threads[k], NULL), 0);

@@ -2,6 +2,7 @@
   lib,
   stdenv,
   src,
+  sljit,
   gnumake,
   curl,
   gmp,
@@ -45,7 +46,7 @@ stdenv.mkDerivation {
 
   buildPhase = ''
     runHook preBuild
-    make ${makeTarget} BUILD_TYPE=${buildType} CC=${compiler}/bin/${cc} ${makeArgs}
+    make ${makeTarget} BUILD_TYPE=${buildType} CC=${compiler}/bin/${cc} SLJIT_DEFAULT_DIR=${sljit} ${makeArgs}
     runHook postBuild
   '';
 
@@ -53,7 +54,7 @@ stdenv.mkDerivation {
     if installPackage
     then ''
       runHook preInstall
-      make install BUILD_TYPE=${buildType} PREFIX=$out
+      make install BUILD_TYPE=${buildType} PREFIX=$out SLJIT_DEFAULT_DIR=${sljit} ${makeArgs}
       runHook postInstall
     ''
     else ''

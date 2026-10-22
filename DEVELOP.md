@@ -20,7 +20,7 @@ scanning. A `GC_STRESS=1 make` build collects on every reserve, turning any
 rooting violation into a deterministic failure:
 
 ```sh
-GC_STRESS=1 make BUILD_DIR=build/stress test
+GC_STRESS=1 make BUILD_TYPE=debug BUILD_DIR=build/stress test
 ```
 
 ## Quickstart
@@ -38,11 +38,15 @@ direnv allow
 ```
 
 The Makefile also works without Nix when the required tools are installed
-(gmp, lmdb, openssl):
+(Clang, matching llvm-profdata, Git, GMP, LMDB, OpenSSL, curl, libsodium, and
+BLAKE3). Plain `make` builds PGO with SLJIT under `build/pgo-sljit`; its first
+build fetches the pinned SLJIT source and runs PGO training. In `nix develop`,
+the pinned source and profiling tools are supplied by Nix.
 
 ```sh
 make
 make test
+make BUILD_TYPE=debug test
 make BUILD_TYPE=asan test
 ```
 
@@ -51,6 +55,7 @@ make BUILD_TYPE=asan test
 ```sh
 nix build
 nix build .#enki
+nix build .#enki-release
 nix build .#enki-debug
 nix build .#enki-asan
 nix build .#enki-ubsan
@@ -58,7 +63,11 @@ nix build .#enki-tsan
 nix build .#enki-coverage
 ```
 
-Each package is derived from the same `mkenki` helper and calls:
+The default package, `enki`, `wisp`, and `assembler` use PGO with SLJIT.
+`enki-release` uses an ordinary release build without PGO or SLJIT. Explicit
+debug, sanitizer, and coverage packages also retain their interpreter builds;
+CI additionally runs the release suite with SLJIT. Each package is derived
+from the same `mkenki` helper and calls:
 
 ```sh
 make BUILD_TYPE=<type>
@@ -131,29 +140,36 @@ The Nix build writes the report under `result/html/`.
 
 ## Clang PGO
 
-Build a Clang profile-guided `wisp` and `assembler` locally:
+Plain `make` builds Clang profile-guided `wisp`, `assembler`, and `scry` with
+SLJIT. To regenerate the profile and rebuild explicitly:
 
 ```sh
 make pgo
 ```
 
-The target builds an instrumented binary under `build/pgo-generate`, runs this
-training workload from `build/pgo/run`:
+The target builds instrumented binaries under `build/pgo-generate-sljit`,
+runs this training workload from `build/pgo-sljit/run`:
 
 ```sh
-../../../build/pgo-generate/bin/wisp --file-root ./reaver/src ../reaver/src/plan reaver main
+../../pgo-generate-sljit/bin/wisp --file-root ./reaver/src ./reaver/src/plan reaver main
 ```
 
-and merges the generated profiles into `build/pgo/enki.profdata`. Any snapshots
-created by the workload stay under `build/pgo/run/snap`. It then rebuilds the
-optimized binaries under `build/pgo/bin` with
-`-fprofile-instr-use=build/pgo/enki.profdata`.
+and trains `assembler` and `scry`, then merges the generated profiles into
+`build/pgo-sljit/enki.profdata`. Any snapshots created by the workload stay
+under `build/pgo-sljit/run/snap`. It then rebuilds the optimized binaries under
+`build/pgo-sljit/bin` with `-fprofile-instr-use=build/pgo-sljit/enki.profdata`.
+Subsequent `make` runs reuse that profile; use `make pgo` to retrain after
+changing the workload or runtime. SLJIT and interpreter-only builds use
+separate profile and binary directories.
 
 Useful overrides:
 
 ```sh
 make pgo PGO_CC=/path/to/clang LLVM_PROFDATA=/path/to/llvm-profdata
-make pgo PGO_WORKLOAD="--file-root ./reaver/src ../reaver/src/plan reaver main"
+make pgo PGO_WORKLOAD="--file-root ./reaver/src ./reaver/src/plan reaver main"
+make SLJIT_DIR=                  # PGO interpreter, under build/pgo
+make BUILD_TYPE=debug            # debug interpreter, under build/debug
+make BUILD_TYPE=release          # release interpreter, under build/release
 ```
 
 ## SPLAN Profiling Zones
@@ -320,12 +336,12 @@ superblock publication. A fresh empty image is also a valid checkpoint, so a
 torn first Save may recover that empty checkpoint.
 
 ```sh
-make build/debug/tests/unit/test_plan_native
+make BUILD_TYPE=debug build/debug/tests/unit/test_plan_native
 build/debug/tests/unit/test_plan_native
 make BUILD_TYPE=asan test
 make BUILD_TYPE=ubsan test
 make BUILD_TYPE=tsan test
-make GC_STRESS=1 BUILD_DIR=build/stress test
+make GC_STRESS=1 BUILD_TYPE=debug BUILD_DIR=build/stress test
 make BUILD_TYPE=release build/release/tests/perf/bench_native
 mkdir /tmp/native-bench /tmp/silo-bench
 build/release/tests/perf/bench_native native create /tmp/native-bench 10000
@@ -500,10 +516,13 @@ Linux x86-64. Linux also passed the native suite with GCC UBSan. The optional
 Haskell-oracle CLI comparison was skipped on Linux. Native x86-64 TSan still
 requires the non-emulated runner noted above.
 
-## Optional SLJIT experiment
+## SLJIT backend
 
-The SLJIT backend is an opt-in experiment. Ordinary builds have no SLJIT
-dependency. For a reproducible dependency checkout and release build:
+The experimental SLJIT backend is included and enabled by default in PGO
+builds. Make fetches commit `39c508d1b8fbae332d60c7450db20236913089da` into
+`build/deps/`; Nix pins the same source in `flake.lock`. Set `SLJIT_DIR=` to
+build without it, or supply a checkout to enable it in another build type.
+For an explicit release build with SLJIT:
 
 ```sh
 git clone https://github.com/zherczeg/sljit.git build/sljit-src
@@ -522,8 +541,9 @@ policy. On Apple Silicon its allocator uses MAP_JIT and per-thread write
 protection; other platforms use its W^X allocator. Only macOS arm64 has been
 measured for this experiment.
 
-`PL_JIT=1` enables native execution; unset or `PL_JIT=0` keeps the bytecode
-interpreter. Configuration is read once on the first bytecode decode.
+Native execution is enabled when `PL_JIT` is unset or set to `1`.
+`PL_JIT=0` disables it and keeps the bytecode interpreter; other explicit
+values also disable it. Configuration is read once on the first bytecode decode.
 `PL_JIT_THRESHOLD` is the number of eligible interpreter encounters per code
 object before compilation (default 32, minimum 1). `PL_JIT_STATS=1` reports
 compiled/failed code objects, native entries, compilation nanoseconds and
@@ -552,6 +572,7 @@ atomics so shared code can be entered by multiple evaluator threads.
 Correctness checks (repeat with debug/GC_STRESS and UBSan build directories):
 
 ```sh
+env -u PL_JIT -u PL_JIT_THRESHOLD build/release-sljit/tests/unit/test_plan_eval
 PL_JIT=1 PL_JIT_THRESHOLD=1 build/release-sljit/tests/unit/test_plan_eval
 PL_JIT=1 PL_JIT_THRESHOLD=1 build/release-sljit/tests/unit/test_plan_thread
 PL_JIT=0 build/release-sljit/tests/unit/test_plan_eval
@@ -612,10 +633,10 @@ That counter-enabled run was excluded from the timing table.
 
 The strong local-loop improvement shows that native regions are useful when
 execution remains inside them. This subset is not a general speedup for the
-realistic workload mix. Keep it opt-in; the next useful comparison is call and
-return lowering, plus identifying which short regions pay more in crossing
-costs than they save. Backend compilation time alone does not explain the
-whole-program results.
+realistic workload mix. Use `PL_JIT=0` to compare against the interpreter. The
+next useful comparison is call and return lowering, plus identifying which
+short regions pay more in crossing costs than they save. Backend compilation
+time alone does not explain the whole-program results.
 
 Validation: the release evaluator suite passed 97 tests / 17,025 assertions
 with compilation threshold 1, including concurrent publication. The same

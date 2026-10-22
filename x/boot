@@ -6,7 +6,7 @@
 
 set -ex
 
-BUILD_TYPE=${BUILD_TYPE:-"profile"}
+BUILD_DIR=$(make --no-print-directory -s print-build-dir)
 PREFIX=${PREFIX-""}
 case "${1-}" in
   ''|--reset) ;;
@@ -14,16 +14,16 @@ case "${1-}" in
 esac
 
 do_make () {
-  BUILD_TYPE=$BUILD_TYPE make
+  make
 }
 
 
 reset () {
-	$PREFIX ./build/$BUILD_TYPE/bin/wisp --file-root ./reaver/src ./reaver/src/plan reaver main
+	$PREFIX "$BUILD_DIR/bin/wisp" --file-root ./reaver/src ./reaver/src/plan reaver main
 }
 
 repl () {
-	$PREFIX ./build/$BUILD_TYPE/bin/wisp --file-root ./reaver/src snap root _ # run from snapshot
+	$PREFIX "$BUILD_DIR/bin/wisp" --file-root ./reaver/src snap root _ # run from snapshot
 }
 
 load_stdlib () {
@@ -36,7 +36,7 @@ EOF
 
 do_make
 
-if [[ "${1-}" == "--reset" ]] || ! $PREFIX ./build/$BUILD_TYPE/bin/scry snap has-root
+if [[ "${1-}" == "--reset" ]] || ! $PREFIX "$BUILD_DIR/bin/scry" snap has-root
 then reset; load_stdlib
 fi
 

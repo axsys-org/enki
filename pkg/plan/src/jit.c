@@ -49,7 +49,7 @@ static void report(void) {
 
 static void configure(void) {
   const char* v = getenv("PL_JIT");
-  enabled = v != NULL && strcmp(v, "1") == 0;
+  enabled = v == NULL || strcmp(v, "1") == 0;
   statistics = getenv("PL_JIT_STATS") != NULL;
   v = getenv("PL_JIT_THRESHOLD");
   if (v != NULL) {
