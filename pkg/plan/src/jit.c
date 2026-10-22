@@ -3,6 +3,7 @@
 #ifdef PL_SLJIT
 #include <sljitLir.h>
 #include "internal.h"
+#include "plan/int63.h"
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -63,8 +64,9 @@ static void configure(void) {
     (void)atexit(report);
 }
 
-/* Explicit allowlist: set 66 also contains effects and evaluator control.
- * Dispatch is resolved from the descriptor, never from an untrusted hint. */
+/* Explicit allowlist: sets 66 and 83 also contain effects and evaluator
+ * control. Dispatch is resolved from the descriptor, never from an untrusted
+ * hint. */
 typedef enum {
   JP_NONE,
   JP_Inc,
@@ -149,6 +151,22 @@ typedef enum {
   JP_Force,
   JP_DeepSeq,
   JP_Equal,
+  JP_I63Inc,
+  JP_I63Dec,
+  JP_I63Neg,
+  JP_I63Abs,
+  JP_I63Add,
+  JP_I63Sub,
+  JP_I63Mul,
+  JP_I63Div,
+  JP_I63Mod,
+  JP_I63Eq,
+  JP_I63Ne,
+  JP_I63Lt,
+  JP_I63Le,
+  JP_I63Gt,
+  JP_I63Ge,
+  JP_I63MulDiv,
 } jit_prim;
 
 static jit_prim primitive(const pl_op_t* o, const pl_opdesc** desc) {
@@ -178,6 +196,27 @@ static jit_prim primitive(const pl_op_t* o, const pl_opdesc** desc) {
     return JP_NONE;
   }
   const pl_opdesc* d = &pl_ops[idx];
+  if (d->opset == 83 && d->name_c != NULL) {
+    static const struct {
+      const char* name;
+      jit_prim prim;
+    } signed_ops[] = {
+        {"I63Inc", JP_I63Inc}, {"I63Dec", JP_I63Dec},
+        {"I63Neg", JP_I63Neg}, {"I63Abs", JP_I63Abs},
+        {"I63Add", JP_I63Add}, {"I63Sub", JP_I63Sub},
+        {"I63Mul", JP_I63Mul}, {"I63Div", JP_I63Div},
+        {"I63Mod", JP_I63Mod}, {"I63Eq", JP_I63Eq},
+        {"I63Ne", JP_I63Ne},   {"I63Lt", JP_I63Lt},
+        {"I63Le", JP_I63Le},   {"I63Gt", JP_I63Gt},
+        {"I63Ge", JP_I63Ge},   {"I63MulDiv", JP_I63MulDiv},
+    };
+    for (size_t k = 0; k < sizeof(signed_ops) / sizeof(signed_ops[0]); k++) {
+      if (strcmp(d->name_c, signed_ops[k].name) == 0) {
+        *desc = d;
+        return signed_ops[k].prim;
+      }
+    }
+  }
   if (d->opset != 66)
     return JP_NONE;
   *desc = d;
@@ -541,6 +580,109 @@ static void boolean(emitter* e, int cond, int a, sljit_sw aw, int b,
   sljit_set_label(no, sljit_emit_label(e->c));
 }
 
+/* Decode zigzag to a sign-extended machine word. R5 is scratch. */
+static void int63_decode(emitter* e, int r) {
+  binary(e, SLJIT_AND, SLJIT_R5, r, 0, I, 1);
+  binary(e, SLJIT_SUB, SLJIT_R5, I, 0, SLJIT_R5, 0);
+  binary(e, SLJIT_LSHR, r, r, 0, I, 1);
+  binary(e, SLJIT_XOR, r, r, 0, SLJIT_R5, 0);
+}
+
+/* Encode the low 63 bits of R2, using bit 62 as the wrapped sign. */
+static void int63_encode(emitter* e) {
+  binary(e, SLJIT_SHL, SLJIT_R2, SLJIT_R2, 0, I, 1);
+  binary(e, SLJIT_ASHR, SLJIT_R5, SLJIT_R2, 0, I, 63);
+  binary(e, SLJIT_XOR, SLJIT_R2, SLJIT_R2, 0, SLJIT_R5, 0);
+  binary(e, SLJIT_AND, SLJIT_R2, SLJIT_R2, 0, I, PL_NAT63_MAX);
+}
+
+/* Magnitude of a decoded int63, including MIN. R5 is scratch. */
+static void int63_magnitude(emitter* e, int r) {
+  binary(e, SLJIT_ASHR, SLJIT_R5, r, 0, I, 63);
+  binary(e, SLJIT_XOR, r, r, 0, SLJIT_R5, 0);
+  binary(e, SLJIT_SUB, r, r, 0, SLJIT_R5, 0);
+}
+
+/* Exact unsigned 128-bit product / 63-bit magnitude. Keep the low quotient
+ * word and exact remainder: higher quotient bits cannot affect rounding or
+ * the final modulo-2^63 result. No calls, allocation, or unbounded loops. */
+static void int63_muldiv(emitter* e) {
+  int63_decode(e, SLJIT_R4);
+  guard(e, SLJIT_EQUAL, SLJIT_R4, 0, I, 0);
+  guard(e, SLJIT_GREATER, SLJIT_R6, 0, I, PL_INT63_ROUND_EVEN);
+  int63_magnitude(e, SLJIT_R0);
+  int63_magnitude(e, SLJIT_R1);
+  int63_magnitude(e, SLJIT_R4);
+  (void)sljit_emit_op0(e->c, SLJIT_LMUL_UW); /* R1:R0 = abs(a*b) */
+  struct sljit_jump* wide =
+      sljit_emit_cmp(e->c, SLJIT_NOT_EQUAL, SLJIT_R1, 0, I, 0);
+  mov(e, SLJIT_R1, 0, SLJIT_R4, 0);
+  (void)sljit_emit_op0(e->c, SLJIT_DIVMOD_UW);
+  mov(e, SLJIT_R2, 0, SLJIT_R0, 0);
+  struct sljit_jump* divided = sljit_emit_jump(e->c, SLJIT_JUMP);
+
+  sljit_set_label(wide, sljit_emit_label(e->c));
+  mov(e, SLJIT_R2, 0, SLJIT_R0, 0); /* retain low product word */
+  mov(e, SLJIT_R0, 0, SLJIT_R1, 0);
+  mov(e, SLJIT_R1, 0, SLJIT_R4, 0);
+  (void)sljit_emit_op0(e->c, SLJIT_DIVMOD_UW); /* high word % divisor */
+  mov(e, SLJIT_R0, 0, SLJIT_R2, 0);
+  mov(e, SLJIT_R2, 0, I, 0);
+  mov(e, SLJIT_R6, 0, I, 64);
+  struct sljit_label* loop = sljit_emit_label(e->c);
+  binary(e, SLJIT_LSHR, SLJIT_R5, SLJIT_R0, 0, I, 63);
+  binary(e, SLJIT_SHL, SLJIT_R0, SLJIT_R0, 0, I, 1);
+  /* remainder < divisor <= 2^62, so this shift cannot overflow. */
+  binary(e, SLJIT_SHL, SLJIT_R1, SLJIT_R1, 0, I, 1);
+  binary(e, SLJIT_OR, SLJIT_R1, SLJIT_R1, 0, SLJIT_R5, 0);
+  binary(e, SLJIT_SHL, SLJIT_R2, SLJIT_R2, 0, I, 1);
+  struct sljit_jump* below =
+      sljit_emit_cmp(e->c, SLJIT_LESS, SLJIT_R1, 0, SLJIT_R4, 0);
+  binary(e, SLJIT_SUB, SLJIT_R1, SLJIT_R1, 0, SLJIT_R4, 0);
+  binary(e, SLJIT_OR, SLJIT_R2, SLJIT_R2, 0, I, 1);
+  sljit_set_label(below, sljit_emit_label(e->c));
+  binary(e, SLJIT_SUB, SLJIT_R6, SLJIT_R6, 0, I, 1);
+  sljit_set_label(sljit_emit_cmp(e->c, SLJIT_NOT_EQUAL, SLJIT_R6, 0, I, 0),
+                  loop);
+  sljit_set_label(divided, sljit_emit_label(e->c));
+
+  /* The original encoded operands still hold their sign bits. */
+  binary(e, SLJIT_XOR, SLJIT_R6, M(SP), -32, M(SP), -24);
+  binary(e, SLJIT_XOR, SLJIT_R6, SLJIT_R6, 0, M(SP), -16);
+  binary(e, SLJIT_AND, SLJIT_R6, SLJIT_R6, 0, I, 1);
+  mov(e, SLJIT_R0, 0, M(SP), -8); /* plain rounding mode */
+  struct sljit_jump* done[6];
+  struct sljit_jump* increment[3];
+  done[0] = sljit_emit_cmp(e->c, SLJIT_EQUAL, SLJIT_R1, 0, I, 0);
+  done[1] =
+      sljit_emit_cmp(e->c, SLJIT_EQUAL, SLJIT_R0, 0, I, PL_INT63_ROUND_ZERO);
+  struct sljit_jump* not_floor = sljit_emit_cmp(e->c, SLJIT_NOT_EQUAL, SLJIT_R0,
+                                                0, I, PL_INT63_ROUND_FLOOR);
+  done[2] = sljit_emit_cmp(e->c, SLJIT_EQUAL, SLJIT_R6, 0, I, 0);
+  increment[0] = sljit_emit_jump(e->c, SLJIT_JUMP);
+  sljit_set_label(not_floor, sljit_emit_label(e->c));
+  struct sljit_jump* not_ceil = sljit_emit_cmp(e->c, SLJIT_NOT_EQUAL, SLJIT_R0,
+                                               0, I, PL_INT63_ROUND_CEIL);
+  done[3] = sljit_emit_cmp(e->c, SLJIT_NOT_EQUAL, SLJIT_R6, 0, I, 0);
+  increment[1] = sljit_emit_jump(e->c, SLJIT_JUMP);
+  sljit_set_label(not_ceil, sljit_emit_label(e->c));
+  binary(e, SLJIT_SHL, SLJIT_R1, SLJIT_R1, 0, I, 1);
+  done[4] = sljit_emit_cmp(e->c, SLJIT_LESS, SLJIT_R1, 0, SLJIT_R4, 0);
+  increment[2] = sljit_emit_cmp(e->c, SLJIT_GREATER, SLJIT_R1, 0, SLJIT_R4, 0);
+  binary(e, SLJIT_AND, SLJIT_R5, SLJIT_R2, 0, I, 1);
+  done[5] = sljit_emit_cmp(e->c, SLJIT_EQUAL, SLJIT_R5, 0, I, 0);
+  struct sljit_label* up = sljit_emit_label(e->c);
+  for (size_t k = 0; k < 3; k++)
+    sljit_set_label(increment[k], up);
+  binary(e, SLJIT_ADD, SLJIT_R2, SLJIT_R2, 0, I, 1);
+  struct sljit_label* rounded = sljit_emit_label(e->c);
+  for (size_t k = 0; k < 6; k++)
+    sljit_set_label(done[k], rounded);
+  binary(e, SLJIT_SUB, SLJIT_R6, I, 0, SLJIT_R6, 0);
+  binary(e, SLJIT_XOR, SLJIT_R2, SLJIT_R2, 0, SLJIT_R6, 0);
+  binary(e, SLJIT_SUB, SLJIT_R2, SLJIT_R2, 0, SLJIT_R6, 0);
+}
+
 static void emit_primitive(emitter* e, const pl_op_t* o, jit_prim prim,
                            const pl_opdesc* d) {
   unsigned argc = d->argc;
@@ -563,11 +705,20 @@ static void emit_primitive(emitter* e, const pl_op_t* o, jit_prim prim,
     mov(e, SLJIT_R1, 0, M(SP), (1 - (sljit_sw)argc) * 8);
   if (argc > 2)
     mov(e, SLJIT_R4, 0, M(SP), (2 - (sljit_sw)argc) * 8);
-  bool numeric = prim <= JP_Bytes || (prim >= JP_Eq && prim <= JP_Cmp);
+  if (prim == JP_I63MulDiv)
+    mov(e, SLJIT_R6, 0, M(SP), -8);
+  bool signed63 = prim >= JP_I63Inc && prim <= JP_I63MulDiv;
+  bool numeric =
+      signed63 || prim <= JP_Bytes || (prim >= JP_Eq && prim <= JP_Cmp);
+  if (signed63) {
+    (void)sljit_emit_op1(e->c, SLJIT_MOV_U8, SLJIT_R5, 0, M(T),
+                         OFF(pl_thread, rplan_f));
+    guard(e, SLJIT_EQUAL, SLJIT_R5, 0, I, 0);
+  }
   if (numeric) {
-    const int args[] = {SLJIT_R0, SLJIT_R1, SLJIT_R4};
+    const int args[] = {SLJIT_R0, SLJIT_R1, SLJIT_R4, SLJIT_R6};
     for (unsigned k = 0; k < argc; k++) {
-      if (thunk)
+      if (thunk || signed63)
         guard(e, SLJIT_SIG_LESS, args[k], 0, I, 0);
       else
         small_nat(e, args[k]);
@@ -583,7 +734,63 @@ static void emit_primitive(emitter* e, const pl_op_t* o, jit_prim prim,
       }
     }
   }
+  if (signed63) {
+    int63_decode(e, SLJIT_R0);
+    if (argc > 1)
+      int63_decode(e, SLJIT_R1);
+  }
   switch (prim) {
+  case JP_I63MulDiv:
+    int63_muldiv(e);
+    break;
+  case JP_I63Inc:
+  case JP_I63Add:
+    binary(e, SLJIT_ADD, SLJIT_R2, SLJIT_R0, 0,
+           prim == JP_I63Inc ? I : SLJIT_R1, prim == JP_I63Inc ? 1 : 0);
+    break;
+  case JP_I63Dec:
+  case JP_I63Sub:
+    binary(e, SLJIT_SUB, SLJIT_R2, SLJIT_R0, 0,
+           prim == JP_I63Dec ? I : SLJIT_R1, prim == JP_I63Dec ? 1 : 0);
+    break;
+  case JP_I63Neg:
+    binary(e, SLJIT_SUB, SLJIT_R2, I, 0, SLJIT_R0, 0);
+    break;
+  case JP_I63Abs:
+    binary(e, SLJIT_ASHR, SLJIT_R5, SLJIT_R0, 0, I, 63);
+    binary(e, SLJIT_XOR, SLJIT_R2, SLJIT_R0, 0, SLJIT_R5, 0);
+    binary(e, SLJIT_SUB, SLJIT_R2, SLJIT_R2, 0, SLJIT_R5, 0);
+    break;
+  case JP_I63Mul:
+    /* Only the low 63 bits survive; machine-word overflow is intentional. */
+    binary(e, SLJIT_MUL, SLJIT_R2, SLJIT_R0, 0, SLJIT_R1, 0);
+    break;
+  case JP_I63Div:
+  case JP_I63Mod:
+    guard(e, SLJIT_EQUAL, SLJIT_R1, 0, I, 0);
+    /* -2^62 / -1 fits a machine word, then wraps during encoding. */
+    (void)sljit_emit_op0(e->c,
+                         prim == JP_I63Div ? SLJIT_DIV_SW : SLJIT_DIVMOD_SW);
+    mov(e, SLJIT_R2, 0, prim == JP_I63Div ? SLJIT_R0 : SLJIT_R1, 0);
+    break;
+  case JP_I63Eq:
+    boolean(e, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_R1, 0);
+    break;
+  case JP_I63Ne:
+    boolean(e, SLJIT_NOT_EQUAL, SLJIT_R0, 0, SLJIT_R1, 0);
+    break;
+  case JP_I63Lt:
+    boolean(e, SLJIT_SIG_LESS, SLJIT_R0, 0, SLJIT_R1, 0);
+    break;
+  case JP_I63Le:
+    boolean(e, SLJIT_SIG_LESS_EQUAL, SLJIT_R0, 0, SLJIT_R1, 0);
+    break;
+  case JP_I63Gt:
+    boolean(e, SLJIT_SIG_GREATER, SLJIT_R0, 0, SLJIT_R1, 0);
+    break;
+  case JP_I63Ge:
+    boolean(e, SLJIT_SIG_GREATER_EQUAL, SLJIT_R0, 0, SLJIT_R1, 0);
+    break;
   case JP_Inc:
   case JP_Add:
     binary(e, SLJIT_ADD, SLJIT_R2, SLJIT_R0, 0, prim == JP_Inc ? I : SLJIT_R1,
@@ -906,6 +1113,14 @@ static void emit_primitive(emitter* e, const pl_op_t* o, jit_prim prim,
    * existing projection shortcut. Guard before consuming any operands. */
   if (!thunk && !numeric && prim != JP_Nil && prim != JP_Truth)
     whnf(e, SLJIT_R2);
+  if (signed63) {
+    if (prim <= JP_I63Mod || prim == JP_I63MulDiv)
+      int63_encode(e);
+    /* Match op_body's op-83 Memo barrier, after every fallback guard. */
+    mov(e, SLJIT_R5, 0, M(T), OFF(pl_thread, effect_epoch));
+    binary(e, SLJIT_ADD, SLJIT_R5, SLJIT_R5, 0, I, 1);
+    mov(e, M(T), OFF(pl_thread, effect_epoch), SLJIT_R5, 0);
+  }
   mov(e, TOP, 0, SLJIT_R2, 0);
   e->cached = true;
   binary(e, SLJIT_SUB, SP, SP, 0, I, (sljit_sw)(argc - 1) * 8);

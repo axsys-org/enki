@@ -192,6 +192,67 @@ separate lane, and spans are paused while an actor is yielded or blocked. The
 JSON export contains explicit zones only; automatic law attribution remains a
 Tracy-only feature.
 
+## Signed 63-bit arithmetic
+
+Op set 83 exposes pure `I63Inc`, `I63Dec`, `I63Neg`, `I63Abs`, `I63Add`,
+`I63Sub`, `I63Mul`, `I63Div`, and `I63Mod` primitives. Comparisons `I63Eq`,
+`I63Ne`, `I63Lt`, `I63Le`, `I63Gt`, and `I63Ge` return ordinary boolean nats
+(`0` or `1`). All operands are strict and must be direct nats; heap nats
+and non-nats raise an error. Like other op-83 primitives, these operations
+require RPLAN mode.
+
+Signed values use zigzag encoding: nonnegative `n` is stored as `2*n`, and
+negative `n` as `-2*n-1`. Thus `0, -1, 1, -2, 2` encode as `0, 1, 2, 3, 4`.
+The signed range is `-2^62` through `2^62-1`, and every encoded value fits
+in the runtime's existing 63-bit direct-nat representation. For example,
+calling op 83 with the row `("I63Add" 13 6)` computes `-7 + 3` and returns
+`7`, the encoding of `-4`.
+
+Arithmetic wraps modulo `2^63`. Incrementing the maximum gives the minimum;
+negating or taking the absolute value of the minimum returns the minimum.
+Division truncates toward zero, and remainder has the dividend's sign:
+`-7 / 3 = -2` and `-7 % 3 = -1`. Minimum divided by `-1` wraps to minimum,
+with remainder zero. Both division and remainder raise on a zero divisor.
+
+The allocation-free C helpers in `plan/int63.h` provide encoding, decoding,
+and arithmetic with the same semantics. `pl_int63_encode` wraps any `int64_t`
+input to the signed 63-bit range. Decoding and arithmetic require valid
+direct-nat operands; the C division/remainder helpers additionally require
+a nonzero divisor. Runtime primitives validate those preconditions.
+
+`I63MulDiv(a, b, divisor, rounding)` computes `a*b/divisor` with an exact
+signed 128-bit product, rounds the quotient, and only then wraps to 63 bits.
+The first three arguments are zigzag integers; `rounding` is a plain nat:
+
+| Mode | Meaning | `7/2` | `-7/2` |
+| --- | --- | --- | --- |
+| `0` | Toward zero | `3` | `-3` |
+| `1` | Floor, toward negative infinity | `3` | `-4` |
+| `2` | Ceiling, toward positive infinity | `4` | `-3` |
+| `3` | Nearest, with exact ties going to the even integer | `4` | `-4` |
+
+For ties-to-even, `5/2` and `-5/2` round to `2` and `-2`. Exact integer
+quotients are unchanged in every mode. Negative divisors are supported.
+For example, the op-83 row `("I63MulDiv" 13 2 4 3)` computes
+`roundEven(-7*1/2)` and returns `7`, the encoding of `-4`. A fixed-point
+projection `2^40 * 2^30 / 2^35` returns `2^35`, even though the intermediate
+product exceeds 63 bits. Using `I63Mul` followed by `I63Div` would wrap the
+product prematurely. Final overflow still wraps; this is not saturating or
+checked arithmetic. Unknown rounding modes, non-direct arguments, and zero
+divisors raise errors. The C helper `pl_int63_muldiv` uses the
+`PL_INT63_ROUND_ZERO`, `PL_INT63_ROUND_FLOOR`, `PL_INT63_ROUND_CEIL`,
+and `PL_INT63_ROUND_EVEN` enum values and requires
+valid operands, a nonzero divisor, and a valid rounding mode.
+
+SLJIT executes all sixteen `I63*` primitives natively for direct-nat operands
+in known calls and tail calls, including calls with already-forced operands.
+The native path preserves the RPLAN-mode gate, op-83 memoization barrier,
+and evaluator fuel accounting. Deferred or invalid operands and zero divisors
+resume the interpreter at the original call, as do invalid rounding modes.
+`I63MulDiv` uses a full-width multiply and a bounded 64-step division for
+products wider than a machine word; smaller products use machine division.
+Neither native path allocates or calls C. Unforced primitive thunks remain lazy.
+
 ## Formatting And Analysis
 
 ```sh

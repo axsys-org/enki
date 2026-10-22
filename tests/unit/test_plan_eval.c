@@ -3,6 +3,7 @@
 
 #include "test_plan.h"
 #include "plan/canon.h"
+#include "plan/int63.h"
 #ifdef PL_SLJIT
 #include "../../pkg/plan/src/jit.h"
 #endif
@@ -2996,10 +2997,12 @@ static pl_code* jit_primitive_code(pl_thread* t, uint64_t name, unsigned argc,
   for (unsigned k = 0; k < argc; k++) {
     ops[n++] = OP_PUSH_VAR;
     ops[n++] = k + 1;
+    if (form >= 3)
+      ops[n++] = OP_FORCE;
   }
-  ops[n++] = form == 0 ? OP_CALL_KNOWN : OP_MK_THK;
+  ops[n++] = form == 0 || form == 3 ? OP_CALL_KNOWN : OP_MK_THK;
   ops[n++] = argc;
-  if (form != 0)
+  if (form != 0 && form != 3)
     ops[n++] = PL_BAN_PRIM_KNOWN | (form == 2 ? PL_BAN_NOUPD : 0);
   ops[n++] = t->vstack[0];
   ops[n++] = name;
@@ -3011,7 +3014,7 @@ static pl_code* jit_primitive_code(pl_thread* t, uint64_t name, unsigned argc,
     ops[n++] = OP_PUSH_SLOT;
     ops[n++] = 2;
   }
-  *end = form == 1 ? PL_JIT_RETURN : (uint32_t)n;
+  *end = form == 1 || form == 4 ? PL_JIT_RETURN : (uint32_t)n;
   ops[n++] = OP_RET;
   return test_decode_ops(t, n, ops);
 }
@@ -3149,6 +3152,163 @@ TEST(sljit, pure_primitives_execute_natively) {
   test_rt_free(&rt);
 }
 
+TEST(sljit, int63_primitives_execute_natively) {
+  if (getenv("PL_JIT") != NULL && strcmp(getenv("PL_JIT"), "1") != 0)
+    SKIP_TEST("disabled by PL_JIT");
+  static const char* names[] = {"I63Inc", "I63Dec", "I63Neg", "I63Abs",
+                                "I63Add", "I63Sub", "I63Mul", "I63Div",
+                                "I63Mod", "I63Eq",  "I63Ne",  "I63Lt",
+                                "I63Le",  "I63Gt",  "I63Ge"};
+  static const int64_t edges[] = {
+      PL_INT63_MIN,     PL_INT63_MIN + 1, -7, -2, -1, 0, 1, 2, 7,
+      PL_INT63_MAX - 1, PL_INT63_MAX};
+  const size_t edge_n = sizeof(edges) / sizeof(edges[0]);
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  t->rplan_f = true;
+  pl_vpush(t, pl_pin(t, 83));
+  for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+    unsigned argc = i < 4 ? 1 : 2;
+    uint64_t name = jit_test_name(names[i]);
+    /* Known calls, tail calls, and their ready-operand forms. */
+    for (unsigned form = 0; form < 5; form++) {
+      if (form == 2)
+        continue; /* Op-83 thunks retain the interpreter's lazy semantics. */
+      uint32_t end;
+      pl_code* code = jit_primitive_code(t, name, argc, form, &end);
+      ASSERT_NOT_NULL(code);
+      ASSERT_NOT_NULL(code->jit_ops);
+      uint64_t random = UINT64_C(0x9e3779b97f4a7c15);
+      for (size_t sample = 0; sample < edge_n * edge_n + 256; sample++) {
+        pl_val x, y;
+        if (sample < edge_n * edge_n) {
+          x = pl_int63_encode(edges[sample / edge_n]);
+          y = pl_int63_encode(edges[sample % edge_n]);
+        } else {
+          random ^= random << 13;
+          random ^= random >> 7;
+          random ^= random << 17;
+          x = random & PL_NAT63_MAX;
+          random ^= random << 13;
+          random ^= random >> 7;
+          random ^= random << 17;
+          y = random & PL_NAT63_MAX;
+        }
+        if ((i == 7 || i == 8) && y == 0)
+          continue; /* Zero-divisor fallback is tested below. */
+        t->vsp = 1;
+        pl_vpush(t, 0);
+        pl_vpush(t, x);
+        if (argc == 2)
+          pl_vpush(t, y);
+        size_t ab = t->vsp;
+        pl_vpush(t, test_app(t, name, argc, &t->vstack[2]));
+        pl_val expected = pl_apply(t, t->vstack[0], t->vstack[ab]);
+        t->vsp = ab;
+        pl_frame frame = {.kind = PL_F_EXECV,
+                          .code = code,
+                          .b = 1,
+                          .argc = argc + 1,
+                          .argbase = (uint32_t)ab};
+        uint32_t pc = 0;
+        for (unsigned warm = 0; warm < 128; warm++) {
+          t->vsp = ab;
+          t->fuel = 1000;
+          uint64_t epoch = t->effect_epoch;
+          pc = pl_jit_run(t, &frame, 0);
+          if (pl_jit_compiled(code)) {
+            ASSERT_EQ(t->effect_epoch, epoch + 1, "%s form %u", names[i], form);
+            break;
+          }
+        }
+        ASSERT(pl_jit_compiled(code));
+        ASSERT_EQ(pc, end, "%s form %u sample %zu fell back at %u", names[i],
+                  form, sample, pc);
+        ASSERT_EQ(t->vstack[t->vsp - 1], expected, "%s form %u sample %zu",
+                  names[i], form, sample);
+      }
+      t->vsp = 1;
+      pl_bytecode_free(code);
+    }
+  }
+  test_rt_free(&rt);
+}
+
+TEST(sljit, int63_muldiv_executes_wide_products_and_rounding_natively) {
+  if (getenv("PL_JIT") != NULL && strcmp(getenv("PL_JIT"), "1") != 0)
+    SKIP_TEST("disabled by PL_JIT");
+  static const int64_t edges[] = {
+      PL_INT63_MIN,     PL_INT63_MIN + 1, -7, -5, -2, -1, 0, 1, 2, 5, 7,
+      PL_INT63_MAX - 1, PL_INT63_MAX};
+  size_t edge_n = sizeof(edges) / sizeof(edges[0]);
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  t->rplan_f = true;
+  pl_vpush(t, pl_pin(t, 83));
+  pl_vpush(t, pl_nat_from_bytes(t, (const uint8_t*)"I63MulDiv", 9));
+  for (unsigned form = 0; form < 5; form++) {
+    if (form == 2)
+      continue;
+    uint32_t end;
+    pl_code* code = jit_primitive_code(t, t->vstack[1], 4, form, &end);
+    ASSERT_NOT_NULL(code);
+    ASSERT_NOT_NULL(code->jit_ops);
+    uint64_t random = UINT64_C(0x9e3779b97f4a7c15);
+    for (size_t sample = 0; sample < edge_n * edge_n * edge_n + 1000;
+         sample++) {
+      pl_val args[4];
+      if (sample < edge_n * edge_n * edge_n) {
+        args[0] = pl_int63_encode(edges[sample / (edge_n * edge_n)]);
+        args[1] = pl_int63_encode(edges[(sample / edge_n) % edge_n]);
+        args[2] = pl_int63_encode(edges[sample % edge_n]);
+      } else {
+        for (unsigned k = 0; k < 3; k++) {
+          random ^= random << 13;
+          random ^= random >> 7;
+          random ^= random << 17;
+          args[k] = random & PL_NAT63_MAX;
+        }
+      }
+      if (args[2] == 0)
+        continue;
+      for (unsigned mode = 0; mode < 4; mode++) {
+        args[3] = mode;
+        t->vsp = 2;
+        pl_vpush(t, 0);
+        for (unsigned k = 0; k < 4; k++)
+          pl_vpush(t, args[k]);
+        size_t ab = t->vsp;
+        pl_val expected =
+            pl_int63_muldiv(args[0], args[1], args[2], (pl_int63_round)mode);
+        pl_frame frame = {.kind = PL_F_EXECV,
+                          .code = code,
+                          .b = 2,
+                          .argc = 5,
+                          .argbase = (uint32_t)ab};
+        uint32_t pc = 0;
+        for (unsigned warm = 0; warm < 128; warm++) {
+          t->vsp = ab;
+          t->fuel = 1000;
+          uint64_t epoch = t->effect_epoch;
+          pc = pl_jit_run(t, &frame, 0);
+          if (pl_jit_compiled(code)) {
+            ASSERT_EQ(t->effect_epoch, epoch + 1);
+            break;
+          }
+        }
+        ASSERT(pl_jit_compiled(code));
+        ASSERT_EQ(pc, end, "form %u sample %zu mode %u fell back at %u", form,
+                  sample, mode, pc);
+        ASSERT_EQ(t->vstack[t->vsp - 1], expected, "form %u sample %zu mode %u",
+                  form, sample, mode);
+      }
+    }
+    t->vsp = 2;
+    pl_bytecode_free(code);
+  }
+  test_rt_free(&rt);
+}
+
 TEST(sljit, primitive_fallbacks_and_checkpoints_match_interpreter) {
   if (getenv("PL_JIT") != NULL && strcmp(getenv("PL_JIT"), "1") != 0)
     SKIP_TEST("disabled by PL_JIT");
@@ -3158,6 +3318,35 @@ TEST(sljit, primitive_fallbacks_and_checkpoints_match_interpreter) {
     pl_val x, y, z;
     unsigned lazy;
   } cases[] = {
+      /* The top bits select the plain rounding mode for I63MulDiv. */
+      {"I63MulDiv", 4, PL_NAT63_MAX - 1, PL_NAT63_MAX - 1, PL_NAT63_MAX - 1, 0},
+      {"I63MulDiv", 4, 13, 2, 4, 1u << 12},
+      {"I63MulDiv", 4, 13, 2, 4, 2u << 12},
+      {"I63MulDiv", 4, 13, 2, 4, 3u << 12},
+      {"I63MulDiv", 4, 13, 2, 4, 3},        /* deferred multiplicands */
+      {"I63MulDiv", 4, 13, 2, 4, 512},      /* deferred rounding */
+      {"I63MulDiv", 4, 13, 2, 4, 1024},     /* throwing rounding */
+      {"I63MulDiv", 4, 13, 2, 4, 8},        /* throwing divisor */
+      {"I63MulDiv", 4, 13, 2, 4, 64},       /* boxed multiplicand */
+      {"I63MulDiv", 4, 13, 2, 4, 128},      /* non-nat multiplicand */
+      {"I63MulDiv", 4, 13, 2, 4, 4u << 12}, /* invalid mode */
+      {"I63MulDiv", 4, 13, 2, 0, 0},        /* zero divisor */
+      {"I63MulDiv", 4, 13, 2, 4, 256},      /* mode gate */
+      {"I63Inc", 1, PL_NAT63_MAX - 1, 0, 0, 0},
+      {"I63Dec", 1, PL_NAT63_MAX, 0, 0, 0},
+      {"I63Neg", 1, PL_NAT63_MAX, 0, 0, 0},
+      {"I63Abs", 1, PL_NAT63_MAX, 0, 0, 0},
+      {"I63Add", 2, 13, 6, 0, 3},
+      {"I63Sub", 2, 13, 6, 0, 0},
+      {"I63Mul", 2, PL_NAT63_MAX, PL_NAT63_MAX - 1, 0, 0},
+      {"I63Div", 2, PL_NAT63_MAX, 1, 0, 0},
+      {"I63Mod", 2, 13, 6, 0, 0},
+      {"I63Div", 2, 13, 0, 0, 0},
+      {"I63Mod", 2, 0, 0, 0, 0},
+      {"I63Neg", 1, 0, 0, 0, 64},   /* boxed operand */
+      {"I63Add", 2, 0, 0, 0, 128},  /* non-nat operand */
+      {"I63Add", 2, 13, 0, 0, 4},   /* throwing second operand */
+      {"I63Add", 2, 13, 6, 0, 256}, /* mode gate */
       {"Inc", 1, 0, 0, 0, 0},
       {"Inc", 1, PL_NAT63_MAX, 0, 0, 0},
       {"Dec", 1, 0, 0, 0, 0},
@@ -3205,13 +3394,18 @@ TEST(sljit, primitive_fallbacks_and_checkpoints_match_interpreter) {
       {"Unpin", 1, 0, 0, 0, 32},
   };
   for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
-    for (unsigned form = 0; form < 2; form++) {
+    for (unsigned form = 0; form < 5; form++) {
+      if (form == 2)
+        continue;
       test_rt rt = test_rt_new();
       pl_thread* t = rt.t;
-      pl_vpush(t, test_p66(t));
+      bool signed63 = strncmp(cases[i].name, "I63", 3) == 0;
+      t->rplan_f = signed63;
+      pl_vpush(t, signed63 ? pl_pin(t, 83) : test_p66(t));
       uint32_t end;
-      pl_code* c = jit_primitive_code(t, jit_test_name(cases[i].name),
-                                      cases[i].argc, form, &end);
+      pl_val name = pl_nat_from_bytes(t, (const uint8_t*)cases[i].name,
+                                      strlen(cases[i].name));
+      pl_code* c = jit_primitive_code(t, name, cases[i].argc, form, &end);
       ASSERT_NOT_NULL(c);
       ASSERT_NOT_NULL(c->jit_ops);
       test_code_pin(&rt, cases[i].argc, c); /* slot 1 */
@@ -3232,11 +3426,15 @@ TEST(sljit, primitive_fallbacks_and_checkpoints_match_interpreter) {
       }
       ASSERT(pl_jit_compiled(c));
       t->vsp = 2;
+      if (cases[i].lazy & 256)
+        t->rplan_f = false;
       for (unsigned fuel = 2; fuel <= 16; fuel++) {
         unsigned reference_yields = 0;
         uint64_t reference_frames = 0;
         pl_run_status reference_status = PL_RUN_DONE;
         char* reference = NULL;
+        char reference_error[256] = {0};
+        uint64_t reference_epochs = 0;
         for (unsigned native = 0; native < 2; native++) {
           c->jit_ops = native ? overlay : NULL;
           pl_vpush(t, t->vstack[1]);
@@ -3244,6 +3442,12 @@ TEST(sljit, primitive_fallbacks_and_checkpoints_match_interpreter) {
                    cases[i].lazy & 1 ? test_thunk(t, cases[i].x) : cases[i].x);
           if (cases[i].lazy & 16)
             t->vstack[3] = test_app1_thunk_to(t, 42);
+          if (cases[i].lazy & 64) {
+            pl_gc_reserve(t, PL_NAT_CELLS(1));
+            t->vstack[3] = pl_mk_nat_u64(t, UINT64_C(1) << 63);
+          }
+          if (cases[i].lazy & 128)
+            t->vstack[3] = test_app1(t, 0, 42);
           if (cases[i].lazy & 32)
             t->vstack[3] = pl_pin(t, 71);
           if (cases[i].argc > 1)
@@ -3252,13 +3456,22 @@ TEST(sljit, primitive_fallbacks_and_checkpoints_match_interpreter) {
                                             : cases[i].y);
           if (cases[i].argc > 2)
             pl_vpush(t, cases[i].lazy & 8 ? test_throwing(t, 99) : cases[i].z);
-          if (cases[i].argc > 3)
-            pl_vpush(t, test_throwing(t, 99)); /* unselected Case3 fallback */
+          if (cases[i].argc > 3) {
+            if (signed63) {
+              pl_val mode = cases[i].lazy >> 12;
+              pl_vpush(t, cases[i].lazy & 512    ? test_thunk(t, mode)
+                          : cases[i].lazy & 1024 ? test_throwing(t, 99)
+                                                 : mode);
+            } else {
+              pl_vpush(t, test_throwing(t, 99)); /* unselected Case3 fallback */
+            }
+          }
           pl_gc_reserve(t, PL_THKE_CELLS(cases[i].argc + 1));
           pl_val call =
               pl_mk_thke(t, PL_BAN_FAST, cases[i].argc + 1, &t->vstack[2]);
           t->vsp = 2;
           pl_thread_start(t, call);
+          uint64_t epoch = t->effect_epoch;
           unsigned yields = 0;
           uint64_t frames = 0;
           pl_run_status status;
@@ -3281,6 +3494,11 @@ TEST(sljit, primitive_fallbacks_and_checkpoints_match_interpreter) {
                   : NULL;
           if (native) {
             ASSERT_EQ(status, reference_status, "%s", cases[i].name);
+            ASSERT_EQ(t->effect_epoch - epoch, reference_epochs, "%s",
+                      cases[i].name);
+            if (status == PL_RUN_EXN)
+              ASSERT_STR_EQ(t->exn_msg ? t->exn_msg : "", reference_error, "%s",
+                            cases[i].name);
             ASSERT_EQ(yields, reference_yields, "%s form %u fuel %u",
                       cases[i].name, form, fuel);
             ASSERT_EQ(frames, reference_frames, "%s form %u fuel %u",
@@ -3288,6 +3506,10 @@ TEST(sljit, primitive_fallbacks_and_checkpoints_match_interpreter) {
             if (result)
               ASSERT_STR_EQ(result, reference, "%s", cases[i].name);
           } else {
+            reference_epochs = t->effect_epoch - epoch;
+            if (status == PL_RUN_EXN)
+              snprintf(reference_error, sizeof(reference_error), "%s",
+                       t->exn_msg ? t->exn_msg : "");
             reference_status = status;
             reference_yields = yields;
             reference_frames = frames;

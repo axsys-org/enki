@@ -18,6 +18,7 @@
 #include "plan/debug.h"
 #include "plan/value.h"
 #include "plan/nat.h"
+#include "plan/int63.h"
 #include "plan/store.h"
 #include "store_internal.h"
 
@@ -145,6 +146,114 @@ static pl_val op_mod(pl_thread* t, size_t ab) {
   COERCE(1);
   return pl_nat_mod(t, &ARG(0), &ARG(1));
 }
+/* Signed arithmetic accepts only zigzag-encoded direct nats. */
+static pl_val op_int63_arg(pl_thread* t, pl_val value) {
+  if (!pl_is_nat63(value))
+    pl_raise_msg(t, "I63: expected a 63-bit zigzag integer");
+  return value;
+}
+
+static pl_val op_i63_inc(pl_thread* t, size_t ab) {
+  pl_val a = op_int63_arg(t, ARG(0));
+  return pl_int63_add(a, 2);
+}
+
+static pl_val op_i63_dec(pl_thread* t, size_t ab) {
+  pl_val a = op_int63_arg(t, ARG(0));
+  return pl_int63_sub(a, 2);
+}
+
+static pl_val op_i63_neg(pl_thread* t, size_t ab) {
+  pl_val a = op_int63_arg(t, ARG(0));
+  return pl_int63_neg(a);
+}
+
+static pl_val op_i63_abs(pl_thread* t, size_t ab) {
+  pl_val a = op_int63_arg(t, ARG(0));
+  return pl_int63_abs(a);
+}
+
+static pl_val op_i63_add(pl_thread* t, size_t ab) {
+  pl_val a = op_int63_arg(t, ARG(0));
+  pl_val b = op_int63_arg(t, ARG(1));
+  return pl_int63_add(a, b);
+}
+
+static pl_val op_i63_sub(pl_thread* t, size_t ab) {
+  pl_val a = op_int63_arg(t, ARG(0));
+  pl_val b = op_int63_arg(t, ARG(1));
+  return pl_int63_sub(a, b);
+}
+
+static pl_val op_i63_mul(pl_thread* t, size_t ab) {
+  pl_val a = op_int63_arg(t, ARG(0));
+  pl_val b = op_int63_arg(t, ARG(1));
+  return pl_int63_mul(a, b);
+}
+
+static pl_val op_i63_div(pl_thread* t, size_t ab) {
+  pl_val a = op_int63_arg(t, ARG(0));
+  pl_val b = op_int63_arg(t, ARG(1));
+  if (b == 0)
+    pl_raise_msg(t, "I63: division by zero");
+  return pl_int63_div(a, b);
+}
+
+static pl_val op_i63_mod(pl_thread* t, size_t ab) {
+  pl_val a = op_int63_arg(t, ARG(0));
+  pl_val b = op_int63_arg(t, ARG(1));
+  if (b == 0)
+    pl_raise_msg(t, "I63: division by zero");
+  return pl_int63_mod(a, b);
+}
+
+static pl_val op_i63_muldiv(pl_thread* t, size_t ab) {
+  pl_val a = op_int63_arg(t, ARG(0));
+  pl_val b = op_int63_arg(t, ARG(1));
+  pl_val divisor = op_int63_arg(t, ARG(2));
+  if (!pl_is_nat63(ARG(3)) || ARG(3) > PL_INT63_ROUND_EVEN)
+    pl_raise_msg(t, "I63MulDiv: invalid rounding mode");
+  if (divisor == 0)
+    pl_raise_msg(t, "I63: division by zero");
+  return pl_int63_muldiv(a, b, divisor, (pl_int63_round)ARG(3));
+}
+
+static pl_val op_i63_eq(pl_thread* t, size_t ab) {
+  pl_val a = op_int63_arg(t, ARG(0));
+  pl_val b = op_int63_arg(t, ARG(1));
+  return pl_int63_decode(a) == pl_int63_decode(b);
+}
+
+static pl_val op_i63_ne(pl_thread* t, size_t ab) {
+  pl_val a = op_int63_arg(t, ARG(0));
+  pl_val b = op_int63_arg(t, ARG(1));
+  return pl_int63_decode(a) != pl_int63_decode(b);
+}
+
+static pl_val op_i63_lt(pl_thread* t, size_t ab) {
+  pl_val a = op_int63_arg(t, ARG(0));
+  pl_val b = op_int63_arg(t, ARG(1));
+  return pl_int63_decode(a) < pl_int63_decode(b);
+}
+
+static pl_val op_i63_le(pl_thread* t, size_t ab) {
+  pl_val a = op_int63_arg(t, ARG(0));
+  pl_val b = op_int63_arg(t, ARG(1));
+  return pl_int63_decode(a) <= pl_int63_decode(b);
+}
+
+static pl_val op_i63_gt(pl_thread* t, size_t ab) {
+  pl_val a = op_int63_arg(t, ARG(0));
+  pl_val b = op_int63_arg(t, ARG(1));
+  return pl_int63_decode(a) > pl_int63_decode(b);
+}
+
+static pl_val op_i63_ge(pl_thread* t, size_t ab) {
+  pl_val a = op_int63_arg(t, ARG(0));
+  pl_val b = op_int63_arg(t, ARG(1));
+  return pl_int63_decode(a) >= pl_int63_decode(b);
+}
+
 static pl_val op_rsh(pl_thread* t, size_t ab) {
   COERCE(0);
   COERCE(1);
@@ -1253,6 +1362,24 @@ const pl_opdesc pl_ops[] = {
     OP83C("ReadBat", 1, 0b1, 0, pl_op83_read_bat),
     OP83_LOCAL_DEEP("BatEq", 2, 0b11, 0b11, op_bateq),
     OP83_LOCAL_DEEP("BatHash", 1, 0b1, 0b1, op_bathash),
+
+    /* Zigzag signed 63-bit arithmetic; preserve all earlier indices. */
+    OP83_LOCAL("I63Inc", 1, 0b1, op_i63_inc),
+    OP83_LOCAL("I63Dec", 1, 0b1, op_i63_dec),
+    OP83_LOCAL("I63Neg", 1, 0b1, op_i63_neg),
+    OP83_LOCAL("I63Abs", 1, 0b1, op_i63_abs),
+    OP83_LOCAL("I63Add", 2, 0b11, op_i63_add),
+    OP83_LOCAL("I63Sub", 2, 0b11, op_i63_sub),
+    OP83_LOCAL("I63Mul", 2, 0b11, op_i63_mul),
+    OP83_LOCAL("I63Div", 2, 0b11, op_i63_div),
+    OP83_LOCAL("I63Mod", 2, 0b11, op_i63_mod),
+    OP83_LOCAL("I63Eq", 2, 0b11, op_i63_eq),
+    OP83_LOCAL("I63Ne", 2, 0b11, op_i63_ne),
+    OP83_LOCAL("I63Lt", 2, 0b11, op_i63_lt),
+    OP83_LOCAL("I63Le", 2, 0b11, op_i63_le),
+    OP83_LOCAL("I63Gt", 2, 0b11, op_i63_gt),
+    OP83_LOCAL("I63Ge", 2, 0b11, op_i63_ge),
+    OP83_LOCAL("I63MulDiv", 4, 0b1111, op_i63_muldiv),
 };
 
 const size_t pl_nops = sizeof(pl_ops) / sizeof(pl_ops[0]);
@@ -1297,11 +1424,13 @@ static const uint16_t pl_op82_argc1[] = {105, 106, 107, 108, 110, 111, 112,
 static const uint16_t pl_op82_argc2[] = {109, 116, 117, 119};
 static const uint16_t pl_op82_argc3[] = {120, 123};
 
-static const uint16_t pl_op83_argc1[] = {124, 126, 127, 128, 132,
-                                         134, 135, 136, 142, 144};
-static const uint16_t pl_op83_argc2[] = {125, 137, 139, 140, 143};
+static const uint16_t pl_op83_argc1[] = {124, 126, 127, 128, 132, 134, 135,
+                                         136, 142, 144, 145, 146, 147, 148};
+static const uint16_t pl_op83_argc2[] = {125, 137, 139, 140, 143, 149,
+                                         150, 151, 152, 153, 154, 155,
+                                         156, 157, 158, 159};
 static const uint16_t pl_op83_argc3[] = {138};
-static const uint16_t pl_op83_argc4[] = {131};
+static const uint16_t pl_op83_argc4[] = {131, 160};
 
 static pl_opbucket pl_op_lookup_bucket(uint64_t opset, uint32_t argc) {
   switch (opset) {
