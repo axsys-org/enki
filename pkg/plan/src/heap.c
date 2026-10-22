@@ -214,7 +214,8 @@ struct pl_heap {
 static pl_cell* pl_space_alloc(size_t cells) {
   pl_cell* p = mmap(NULL, cells * sizeof(pl_cell), PROT_READ | PROT_WRITE,
                     MAP_PRIVATE | MAP_ANON, -1, 0);
-  ax_assume(p != MAP_FAILED, "heap semispace allocation failed (%zu cells)", cells);
+  ax_assume(p != MAP_FAILED, "heap semispace allocation failed (%zu cells)",
+            cells);
   ax_assume(((uintptr_t)p & 7u) == 0, "semispace not 8-aligned");
   ax_assume(((uintptr_t)(p + cells) & ~PL_ADDR_MASK) == 0,
             "heap address exceeds 56 bits");
@@ -235,7 +236,8 @@ static void pl_space_reuse(pl_cell* space, size_t cells) {
 #if defined(__APPLE__)
   (void)madvise(space, cells * sizeof(pl_cell), MADV_FREE_REUSE);
 #else
-  (void)space; (void)cells;
+  (void)space;
+  (void)cells;
 #endif
 }
 
