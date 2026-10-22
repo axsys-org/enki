@@ -4,6 +4,8 @@
 #include "batch.h"
 
 #ifdef PL_SLJIT
+/* A completed native primitive tail call; result is on the value stack. */
+#define PL_JIT_RETURN UINT32_MAX
 void pl_jit_prepare(pl_code* code);
 void pl_jit_free(pl_code* code);
 bool pl_jit_compiled(const pl_code* code);
