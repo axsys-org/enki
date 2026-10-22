@@ -13,6 +13,7 @@
 #include "axsys/allocator.h"
 #include "axsys/perf.h"
 #include "internal.h"
+#include "jit.h"
 #include "plan/build.h"
 #include "plan/canon.h"
 #include "plan/nat.h"
@@ -732,6 +733,9 @@ static pl_run_status pl_run(pl_thread* t, pl_val v, size_t base,
       [OP_CALL_SLOW] = &&x_call_slow,
       [OP_NOP] = &&x_nop,
       [OP_TAILBLK] = &&x_tailblk,
+#ifdef PL_SLJIT
+      [OP_JIT] = &&x_jit,
+#endif
   };
   static void* const ret_tbl[PL_F_KIND_COUNT] = {
       [PL_F_UPDATE] = &&ret_update, [PL_F_APPLY] = &&ret_apply,
@@ -891,9 +895,9 @@ exec: {
   /*
    * Threaded bytecode dispatch: each handler ends in its own indirect
    * branch through op_tbl.  The installed compiler is trusted, so the
-   * fetch and opcode bounds checks are debug-only; op_tbl has an entry
-   * for every opcode below PL_OP_COUNT, so no handler-NULL check is
-   * needed here (pass 1 of the decoder rejects anything else).
+   * fetch and opcode bounds checks are debug-only. The decoder rejects
+   * non-executable opcodes and strips the law directory; the optional
+   * private dispatch overlay adds only OP_JIT.
    */
 #define NEXT()  (assert(xpc < fr->code->nops), xops[xpc++])
 #define XSYNC() (fr->k = xpc)
@@ -904,9 +908,20 @@ exec: {
     goto* op_tbl[op_];                                                         \
   } while (0)
   fr = &t->fstack[t->fsp - 1];
-  xops = fr->code->ops;
+  xops = pl_jit_ops(fr->code);
   xpc = fr->k;
   DISPATCH();
+
+#ifdef PL_SLJIT
+x_jit: {
+  /* Native exits materialize the exact pre-instruction state. Execute that
+   * instruction once in the interpreter, even when its overlay says JIT. */
+  xpc = pl_jit_run(t, fr, xpc - 1);
+  fr->k = xpc;
+  pl_op_t op = fr->code->ops[xpc++];
+  goto* op_tbl[op];
+}
+#endif
 
 x_push_var: {
   pl_op_t slot = NEXT();

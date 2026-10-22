@@ -1,9 +1,10 @@
 BUILD_TYPE ?= debug
+.DEFAULT_GOAL := all
 PROFILE ?=
 CC ?= cc
 PREFIX ?= /usr/local
 BUILD_PROFILE_SUFFIX := $(if $(PROFILE),-$(PROFILE),)
-BUILD_DIR ?= build/$(BUILD_TYPE)$(BUILD_PROFILE_SUFFIX)
+BUILD_DIR ?= build/$(BUILD_TYPE)$(BUILD_PROFILE_SUFFIX)$(if $(SLJIT_DIR),-sljit,)
 AR ?= ar
 DOCKER ?= docker
 
@@ -154,6 +155,14 @@ PERF_SRCS := $(wildcard $(PERF_DIR)/*.c)
 
 AXSYS_OBJS := $(patsubst %.c,$(BUILD_DIR)/%.o,$(AXSYS_SRCS))
 PLAN_OBJS := $(patsubst %.c,$(BUILD_DIR)/%.o,$(PLAN_SRCS))
+ifneq ($(SLJIT_DIR),)
+CPPFLAGS_ALL += -DPL_SLJIT -isystem $(SLJIT_DIR)/sljit_src
+PLAN_OBJS += $(BUILD_DIR)/vendor/sljit.o
+SLJIT_ALLOC_FLAGS := $(if $(filter Darwin,$(UNAME_S)),,-DSLJIT_WX_EXECUTABLE_ALLOCATOR=1)
+$(BUILD_DIR)/vendor/sljit.o: $(SLJIT_DIR)/sljit_src/sljitLir.c $(wildcard $(SLJIT_DIR)/sljit_src/*.h) $(wildcard $(SLJIT_DIR)/sljit_src/*.c) $(wildcard $(SLJIT_DIR)/sljit_src/allocator_src/*.c)
+	@mkdir -p $(dir $@)
+	$(CC) $(BASE_CPPFLAGS) $(BASE_CFLAGS) $(BUILD_CFLAGS_$(BUILD_TYPE)) -w -DSLJIT_ARGUMENT_CHECKS=1 $(SLJIT_ALLOC_FLAGS) -c $< -o $@
+endif
 ENKI_OBJS := $(patsubst %.c,$(BUILD_DIR)/%.o,$(ENKI_SRCS))
 LIB_OBJS := $(AXSYS_OBJS) $(PLAN_OBJS) $(ENKI_OBJS)
 

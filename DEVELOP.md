@@ -499,3 +499,127 @@ suites on Linux arm64; and full debug, ASan, and UBSan suites on emulated
 Linux x86-64. Linux also passed the native suite with GCC UBSan. The optional
 Haskell-oracle CLI comparison was skipped on Linux. Native x86-64 TSan still
 requires the non-emulated runner noted above.
+
+## Optional SLJIT experiment
+
+The SLJIT backend is an opt-in experiment. Ordinary builds have no SLJIT
+dependency. For a reproducible dependency checkout and release build:
+
+```sh
+git clone https://github.com/zherczeg/sljit.git build/sljit-src
+git -C build/sljit-src checkout 39c508d1b8fbae332d60c7450db20236913089da
+make BUILD_TYPE=release SLJIT_DIR="$PWD/build/sljit-src" \
+  build/release-sljit/bin/wisp \
+  build/release-sljit/tests/unit/test_plan_eval \
+  build/release-sljit/tests/unit/test_plan_thread \
+  build/release-sljit/tests/perf/bench_jit
+```
+
+Use the normal development environment for Enki's other dependencies. The
+`-sljit` build-directory suffix is automatic unless `BUILD_DIR` is supplied.
+The external SLJIT source is compiled separately from the project's warning
+policy. On Apple Silicon its allocator uses MAP_JIT and per-thread write
+protection; other platforms use its W^X allocator. Only macOS arm64 has been
+measured for this experiment.
+
+`PL_JIT=1` enables native execution; unset or `PL_JIT=0` keeps the bytecode
+interpreter. Configuration is read once on the first bytecode decode.
+`PL_JIT_THRESHOLD` is the number of eligible interpreter encounters per code
+object before compilation (default 32, minimum 1). `PL_JIT_STATS=1` reports
+compiled/failed code objects, native entries, compilation nanoseconds and
+machine-code bytes at process exit. Leave statistics off for performance
+comparisons: its atomic entry counter changes the measured workload.
+
+The backend prepares a private dispatch overlay after bytecode validation and
+optimization. It instruments runs of at least three supported instructions,
+and lazily compiles code objects of at most 8192 bytecode slots. It supports
+variable/literal/slot loads, guarded nat63 Add/Sub/Cmp, already-evaluated Force,
+branches, jumps, and local tail blocks with up to 32 arguments. The top operand
+stays in a register across straight-line sequences. Branch joins materialize
+it; resumes inside a sequence reload it through an entry stub.
+
+Native code makes no C calls and cannot allocate, collect, raise, or suspend.
+It spills the value-stack cursor, cached operand and fuel before returning the
+bytecode offset of the pending instruction. That instruction executes once in
+the interpreter, even when its overlay says JIT. This preserves generic
+fallbacks, exact fuel checkpoints, and exception/GC behavior without native
+stack maps. Thunk allocation, general calls, returns, and tail numeric primops
+still use the evaluator. Executable memory and entry tables belong to the
+specific `pl_code` version and are freed with it; they are never persisted.
+Compilation is serialized and native entries are published with release/acquire
+atomics so shared code can be entered by multiple evaluator threads.
+
+Correctness checks (repeat with debug/GC_STRESS and UBSan build directories):
+
+```sh
+PL_JIT=1 PL_JIT_THRESHOLD=1 build/release-sljit/tests/unit/test_plan_eval
+PL_JIT=1 PL_JIT_THRESHOLD=1 build/release-sljit/tests/unit/test_plan_thread
+PL_JIT=0 build/release-sljit/tests/unit/test_plan_eval
+```
+
+The evaluator tests retain canonical decoded opcodes for their existing
+assertions. Additional JIT tests compare loop results and suspended frame/PC
+sequences against the interpreter at fuel quanta 2–33, collect at every yield,
+exercise environment and stack argument storage, overflow and lazy-operand
+fallbacks through the existing numeric suite, stack growth, invalid branch
+exceptions, and concurrent compilation/publication. The JIT-specific tests
+assert that machine code was actually compiled.
+
+Benchmarks:
+
+```sh
+PL_JIT=0 build/release-sljit/tests/perf/bench_jit 1000000
+PL_JIT=1 build/release-sljit/tests/perf/bench_jit 1000000
+python3 tools/bench-sljit.py build/release-sljit/bin/wisp \
+  --output build/sljit-results-new
+```
+
+The microbenchmark sums 1..N using a local tail loop and checks every result.
+Sample 0 includes warmup/compilation. The workload runner copies `reaver/src`
+into a new output directory and runs the existing P6 benchmark bodies with
+checksums, one warmup and five timed batches per workload. It runs JIT off/on/
+on/off in separate processes with separate native snapshots and persistent
+compiler caching disabled. JSON records, source/binary fingerprints, and logs
+stay in the output directory. Reported workload medians exclude the first
+sample per workload; process wall time also includes startup, source loading,
+compiler installation, warmup, and snapshots.
+
+### Initial results (2026-10-22)
+
+Measured on macOS 26.3 arm64, Apple Clang 21, `-O3 -DNDEBUG -flto`, using
+SLJIT commit `39c508d1b8fbae332d60c7450db20236913089da`. Both modes used the
+same executable. Each median contains ten post-warmup samples from two
+processes; the workload batches below contain the listed iteration counts.
+
+| Workload | Iterations per batch | Interpreter median | JIT median | Speedup |
+| --- | ---: | ---: | ---: | ---: |
+| Local tail loop (sum 1..3,000,000) | 1 | 25.075 ms | 10.572 ms | 2.37x |
+| nfib | 20 | 91.151 ms | 77.609 ms | 1.17x |
+| listwork | 3 | 54.582 ms | 55.788 ms | 0.98x |
+| rowwork | 3 | 175.857 ms | 178.452 ms | 0.99x |
+| sortwork | 3 | 1947.321 ms | 2024.952 ms | 0.96x |
+| bstwork | 3 | 673.966 ms | 654.048 ms | 1.03x |
+| compwork | 300 | 583.269 ms | 614.423 ms | 0.95x |
+
+All workload checksums passed. Whole-process times were 73.12/79.65 seconds
+with JIT off and 75.52/82.18 seconds with JIT on. These exploratory runs were
+not on an isolated CPU; process and sample variation make the small workload
+differences inconclusive. There is no demonstrated overall startup benefit.
+A separate instrumented P6/nfib smoke run compiled 236 code objects, reported
+6.13 ms of backend compilation time and 2,278,112 emitted machine-code bytes
+(excluding allocator granularity, overlays, entry tables and compiler scratch).
+That counter-enabled run was excluded from the timing table.
+
+The strong local-loop improvement shows that native regions are useful when
+execution remains inside them. This subset is not a general speedup for the
+realistic workload mix. Keep it opt-in; the next useful comparison is call and
+return lowering, plus identifying which short regions pay more in crossing
+costs than they save. Backend compilation time alone does not explain the
+whole-program results.
+
+Validation: the release evaluator suite passed 97 tests / 17,025 assertions
+with compilation threshold 1, including concurrent publication. The same
+suite passed with GC stress and UBSan; the existing thread suite passed with
+JIT enabled. A build with no SLJIT dependency also passed the evaluator suite.
+Generated machine code is not instrumented by UBSan, so its checks complement
+the interpreter/native differential tests rather than replacing them.
