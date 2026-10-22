@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare one SLJIT-enabled wisp binary with PL_JIT=0/1.
+"""Compare one wisp binary with PL_JIT=0/1 (or --toggle PL_BATCH).
 
 Copy the source tree into a fresh output directory, install P6 once per
 process, and measure all six existing workloads repeatedly. No user source
@@ -63,7 +63,7 @@ def summary(records):
         seen = set()
         for name, ns in record["samples"]:
             if name in seen:
-                groups[record["jit"], name].append(ns / 1e6)
+                groups[record.get("mode", record["jit"]), name].append(ns / 1e6)
             seen.add(name)
     rows = []
     for name in WORKLOADS:
@@ -71,7 +71,7 @@ def summary(records):
         if off and on:
             a, b = statistics.median(off), statistics.median(on)
             rows.append(dict(workload=name, iterations=WORKLOADS[name],
-                             interpreter_ms=a, jit_ms=b, speedup=a / b,
+                             off_ms=a, on_ms=b, speedup=a / b,
                              interpreter_samples=len(off), jit_samples=len(on)))
     return rows
 
@@ -84,6 +84,7 @@ def main():
                         help="new directory for isolated sources, snapshots, logs and JSON")
     parser.add_argument("--samples", type=int, default=5)
     parser.add_argument("--modes", default="0,1,1,0")
+    parser.add_argument("--toggle", choices=("PL_JIT", "PL_BATCH"), default="PL_JIT")
     args = parser.parse_args()
     modes = args.modes.split(",")
     if args.samples < 1 or any(mode not in ("0", "1") for mode in modes):
@@ -95,14 +96,15 @@ def main():
     metadata = dict(platform=platform.platform(), binary=str(binary),
                     binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
                     original_benchmark_sha256=digest, workloads=WORKLOADS,
-                    warmups=1, samples=args.samples, modes=modes)
+                    warmups=1, samples=args.samples, modes=modes, toggle=args.toggle)
     (output / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
     records = []
     for run, mode in enumerate(modes):
         wd = output / f"run-{run}-{mode}"
         wd.mkdir()
         env = os.environ.copy()
-        env.update(PL_JIT=mode, PL_CODECACHE="0", PL_CODECACHE_DIR=str(output / "cache"))
+        env.update(PL_CODECACHE="0", PL_CODECACHE_DIR=str(output / "cache"))
+        env[args.toggle] = mode
         for key in ("PL_JIT_STATS", "PL_JIT_THRESHOLD", "PL_NO_BYTECODE"):
             env.pop(key, None)
         log = output / f"run-{run}-{mode}.log"
@@ -118,18 +120,18 @@ def main():
         text = log.read_text()
         samples = [(name, int(ns)) for name, ns in re.findall(
             r'"BENCH-NS" "p6" "(\w+)" "(\d+)"', text)]
-        records.append(dict(run=run, jit=mode, wall_s=elapsed,
+        records.append(dict(run=run, mode=mode, jit=env.get("PL_JIT", "1"), wall_s=elapsed,
                             returncode=result.returncode, samples=samples))
         (output / "results.json").write_text(json.dumps(records, indent=2) + "\n")
         expected = (args.samples + 1) * len(WORKLOADS)
         if result.returncode or len(samples) != expected or text.count('"BENCH-OK"') != expected:
             raise SystemExit(f"Benchmark failed; see {log}")
-        print(f"JIT={mode}: {elapsed:.2f}s total, {len(samples)} checked samples", flush=True)
+        print(f"{args.toggle}={mode}: {elapsed:.2f}s total, {len(samples)} checked samples", flush=True)
         rows = summary(records)
         (output / "summary.json").write_text(json.dumps(rows, indent=2) + "\n")
     for row in summary(records):
-        print(f"{row['workload']:12} {row['interpreter_ms']:9.3f} -> "
-              f"{row['jit_ms']:9.3f} ms  {row['speedup']:.3f}x")
+        print(f"{row['workload']:12} {row['off_ms']:9.3f} -> "
+              f"{row['on_ms']:9.3f} ms  {row['speedup']:.3f}x")
 
 
 if __name__ == "__main__":

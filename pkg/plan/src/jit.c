@@ -135,11 +135,12 @@ void pl_jit_prepare(pl_code* c) {
     free(j);
     return;
   }
-  memcpy(overlay, c->ops, c->nops * sizeof(*overlay));
+  memcpy(overlay, pl_batch_ops(c), c->nops * sizeof(*overlay));
   size_t count = 0, start = 0;
   bool any = false;
   for (size_t pc = 0; pc <= c->nops;) {
-    if (pc < c->nops && supported(c->ops + pc)) {
+    bool batch = pc < c->nops && pl_batch_ops(c)[pc] == OP_BUILD;
+    if (pc < c->nops && !batch && supported(c->ops + pc)) {
       if (count++ == 0)
         start = pc;
     } else {
@@ -152,7 +153,7 @@ void pl_jit_prepare(pl_code* c) {
     }
     if (pc == c->nops)
       break;
-    pc += width(c->ops + pc);
+    pc = batch ? pl_batch_at(c, (uint32_t)pc)->end : pc + width(c->ops + pc);
   }
   if (!any) {
     free(overlay);
@@ -294,7 +295,7 @@ static bool compile_code(pl_code* code) {
     }
     cached[pc] = e.cached;
     labels[pc] = sljit_emit_label(e.c);
-    if (!supported(o)) {
+    if (pl_batch_ops(code)[pc] == OP_BUILD || !supported(o)) {
       leave(&e, (uint32_t)pc, e.cached);
       e.cached = false;
       continue;

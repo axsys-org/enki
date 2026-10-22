@@ -65,6 +65,8 @@ static void pl_cache_stats_print(void) {
             pl_cache_kind_names[i] == NULL ? "UNKNOWN" : pl_cache_kind_names[i],
             s->alloc_objects[i], s->alloc_cells[i]);
   }
+  fprintf(stderr, "PLAN_CACHE_STATS reserves calls=%" PRIu64 "\n",
+          s->reserve_calls);
   fprintf(stderr,
           "PLAN_CACHE_STATS gc collections=%" PRIu64 " copied_objects=%" PRIu64
           " copied_cells=%" PRIu64 " root_slots=%" PRIu64
@@ -133,6 +135,7 @@ static void pl_cache_stats_merge(const pl_cache_stats* s) {
   }
 #define PL_CACHE_ADD(field) pl_cache_stats_total.field += s->field
   PL_CACHE_ADD(gc_collections);
+  PL_CACHE_ADD(reserve_calls);
   PL_CACHE_ADD(gc_copied_objects);
   PL_CACHE_ADD(gc_copied_cells);
   PL_CACHE_ADD(gc_root_slots);

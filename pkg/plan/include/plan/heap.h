@@ -113,6 +113,7 @@ typedef struct pl_cache_stats {
   uint64_t alloc_cells[PL_CACHE_KIND_CAP];
 
   uint64_t gc_collections;
+  uint64_t reserve_calls;
   uint64_t gc_copied_objects;
   uint64_t gc_copied_cells;
   uint64_t gc_root_slots;
@@ -394,6 +395,9 @@ void pl_gc_reserve_slow(pl_thread* t, size_t cells);
 /* Reserve headroom: the common no-collect case is a compare against the
  * frontier; collection and growth stay out of line. */
 static inline ax_always_inline void pl_gc_reserve(pl_thread* t, size_t cells) {
+#ifdef PL_CACHE_STATS
+  t->cache_stats.reserve_calls++;
+#endif
 #ifndef PL_GC_STRESS
   pl_heap* h = t->heap;
   if (ax_likely(h->free + cells <= h->limit))

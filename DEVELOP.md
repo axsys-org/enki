@@ -644,3 +644,21 @@ suite passed with GC stress and UBSan; the existing thread suite passed with
 JIT enabled. A build with no SLJIT dependency also passed the evaluator suite.
 Generated machine code is not instrumented by UBSan, so its checks complement
 the interpreter/native differential tests rather than replacing them.
+
+## Fixed-shape construction batches
+
+The decoder groups straight-line pushes and at least two fixed-size APP or
+THKE constructions into bounded plans (64 instructions, 4096 cells). Entry
+reserves stack and heap space once; the ordinary constructor handlers consume
+the reserved cells. Calls, forces, branches, entry targets, and eager primitive
+shortcuts terminate a plan. Canonical bytecode and literal ownership are
+unchanged. Collection happens before construction with inputs still rooted;
+there are no new fuel or suspension points inside a batch.
+
+Set `PL_BATCH=0` to disable planning. `tests/perf/bench_build.c` isolates two
+linked row allocations per loop iteration. On Apple Silicon, reservation-only
+batching was approximately neutral in this microbenchmark (about 15–16 ms per
+million iterations); removing reserve checks alone is not a demonstrated speedup.
+The plans also provide bounded construction metadata for native lowering.
+`PL_CACHE_STATS` reports reserve calls, and the existing workload runner accepts
+`--toggle PL_BATCH` for same-binary comparisons with `PL_JIT=0`.
