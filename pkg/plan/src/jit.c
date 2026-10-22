@@ -2,6 +2,7 @@
 
 #ifdef PL_SLJIT
 #include <sljitLir.h>
+#include "internal.h"
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -62,7 +63,298 @@ static void configure(void) {
     (void)atexit(report);
 }
 
+/* Explicit allowlist: set 66 also contains effects and evaluator control.
+ * Dispatch is resolved from the descriptor, never from an untrusted hint. */
+typedef enum {
+  JP_NONE,
+  JP_Inc,
+  JP_Dec,
+  JP_Add,
+  JP_Sub,
+  JP_Mul,
+  JP_Div,
+  JP_Mod,
+  JP_Rsh,
+  JP_Lsh,
+  JP_Test,
+  JP_Nib,
+  JP_Load8,
+  JP_LoadVar,
+  JP_Store8,
+  JP_Set,
+  JP_Clear,
+  JP_Bex,
+  JP_Trunc8,
+  JP_Trunc16,
+  JP_Trunc32,
+  JP_Trunc64,
+  JP_Trunc,
+  JP_Bits,
+  JP_Bytes,
+  JP_Nil,
+  JP_Truth,
+  JP_Eq,
+  JP_Ne,
+  JP_Lt,
+  JP_Le,
+  JP_Gt,
+  JP_Ge,
+  JP_Cmp,
+  JP_Nat,
+  JP_Type,
+  JP_IsPin,
+  JP_IsLaw,
+  JP_IsApp,
+  JP_IsNat,
+  JP_Arity,
+  JP_Name,
+  JP_Body,
+  JP_Unpin,
+  JP_Hd,
+  JP_Sz,
+  JP_Last,
+  JP_Ix,
+  JP_Ix0,
+  JP_Ix1,
+  JP_Ix2,
+  JP_Ix3,
+  JP_Ix4,
+  JP_Ix5,
+  JP_Ix6,
+  JP_Ix7,
+  JP_Or,
+  JP_Nor,
+  JP_And,
+  JP_If,
+  JP_Ifz,
+  JP_Seq,
+  JP_Seq2,
+  JP_Seq3,
+  JP_Case,
+  JP_Case2,
+  JP_Case3,
+  JP_Case4,
+  JP_Case5,
+  JP_Case6,
+  JP_Case7,
+  JP_Case8,
+  JP_Case9,
+  JP_Case10,
+  JP_Case11,
+  JP_Case12,
+  JP_Case13,
+  JP_Case14,
+  JP_Case15,
+  JP_Case16,
+  JP_Force,
+  JP_DeepSeq,
+  JP_Equal,
+} jit_prim;
+
+static jit_prim primitive(const pl_op_t* o, const pl_opdesc** desc) {
+  uint32_t idx;
+  switch (o[0]) {
+  case OP_CALL_KNOWN:
+  case OP_CALL_READY:
+  case OP_ADD:
+  case OP_SUB:
+  case OP_CMP:
+    idx = (uint32_t)o[2];
+    break;
+  case OP_TAILCALL:
+  case OP_TAIL_READY:
+  case OP_TAIL_ADD:
+  case OP_TAIL_SUB:
+  case OP_TAIL_CMP:
+  case OP_MK_THK:
+    if ((o[2] & PL_BAN_MASK) != PL_BAN_PRIM_KNOWN)
+      return JP_NONE;
+    /* Only speculate where the interpreter already permits eagerness. */
+    if (o[0] == OP_MK_THK && o[4] == PL_SPEC_NONE)
+      return JP_NONE;
+    idx = (uint32_t)o[3];
+    break;
+  default:
+    return JP_NONE;
+  }
+  const pl_opdesc* d = &pl_ops[idx];
+  if (d->opset != 66)
+    return JP_NONE;
+  *desc = d;
+  switch (d->name) {
+  case ax_s3('I', 'n', 'c'):
+    return JP_Inc;
+  case ax_s3('D', 'e', 'c'):
+    return JP_Dec;
+  case ax_s3('A', 'd', 'd'):
+    return JP_Add;
+  case ax_s3('S', 'u', 'b'):
+    return JP_Sub;
+  case ax_s3('M', 'u', 'l'):
+    return JP_Mul;
+  case ax_s3('D', 'i', 'v'):
+    return JP_Div;
+  case ax_s3('M', 'o', 'd'):
+    return JP_Mod;
+  case ax_s3('R', 's', 'h'):
+    return JP_Rsh;
+  case ax_s3('L', 's', 'h'):
+    return JP_Lsh;
+  case ax_s4('T', 'e', 's', 't'):
+    return JP_Test;
+  case ax_s3('N', 'i', 'b'):
+    return JP_Nib;
+  case ax_s5('L', 'o', 'a', 'd', '8'):
+    return JP_Load8;
+  case ax_s7('L', 'o', 'a', 'd', 'V', 'a', 'r'):
+    return JP_LoadVar;
+  case ax_s6('S', 't', 'o', 'r', 'e', '8'):
+    return JP_Store8;
+  case ax_s3('S', 'e', 't'):
+    return JP_Set;
+  case ax_s5('C', 'l', 'e', 'a', 'r'):
+    return JP_Clear;
+  case ax_s3('B', 'e', 'x'):
+    return JP_Bex;
+  case ax_s6('T', 'r', 'u', 'n', 'c', '8'):
+    return JP_Trunc8;
+  case ax_s7('T', 'r', 'u', 'n', 'c', '1', '6'):
+    return JP_Trunc16;
+  case ax_s7('T', 'r', 'u', 'n', 'c', '3', '2'):
+    return JP_Trunc32;
+  case ax_s7('T', 'r', 'u', 'n', 'c', '6', '4'):
+    return JP_Trunc64;
+  case ax_s5('T', 'r', 'u', 'n', 'c'):
+    return JP_Trunc;
+  case ax_s4('B', 'i', 't', 's'):
+    return JP_Bits;
+  case ax_s5('B', 'y', 't', 'e', 's'):
+    return JP_Bytes;
+  case ax_s3('N', 'i', 'l'):
+    return JP_Nil;
+  case ax_s5('T', 'r', 'u', 't', 'h'):
+    return JP_Truth;
+  case ax_s2('E', 'q'):
+    return JP_Eq;
+  case ax_s2('N', 'e'):
+    return JP_Ne;
+  case ax_s2('L', 't'):
+    return JP_Lt;
+  case ax_s2('L', 'e'):
+    return JP_Le;
+  case ax_s2('G', 't'):
+    return JP_Gt;
+  case ax_s2('G', 'e'):
+    return JP_Ge;
+  case ax_s3('C', 'm', 'p'):
+    return JP_Cmp;
+  case ax_s3('N', 'a', 't'):
+    return JP_Nat;
+  case ax_s4('T', 'y', 'p', 'e'):
+    return JP_Type;
+  case ax_s5('I', 's', 'P', 'i', 'n'):
+    return JP_IsPin;
+  case ax_s5('I', 's', 'L', 'a', 'w'):
+    return JP_IsLaw;
+  case ax_s5('I', 's', 'A', 'p', 'p'):
+    return JP_IsApp;
+  case ax_s5('I', 's', 'N', 'a', 't'):
+    return JP_IsNat;
+  case ax_s5('A', 'r', 'i', 't', 'y'):
+    return JP_Arity;
+  case ax_s4('N', 'a', 'm', 'e'):
+    return JP_Name;
+  case ax_s4('B', 'o', 'd', 'y'):
+    return JP_Body;
+  case ax_s5('U', 'n', 'p', 'i', 'n'):
+    return JP_Unpin;
+  case ax_s2('H', 'd'):
+    return JP_Hd;
+  case ax_s2('S', 'z'):
+    return JP_Sz;
+  case ax_s4('L', 'a', 's', 't'):
+    return JP_Last;
+  case ax_s2('I', 'x'):
+    return JP_Ix;
+  case ax_s3('I', 'x', '0'):
+    return JP_Ix0;
+  case ax_s3('I', 'x', '1'):
+    return JP_Ix1;
+  case ax_s3('I', 'x', '2'):
+    return JP_Ix2;
+  case ax_s3('I', 'x', '3'):
+    return JP_Ix3;
+  case ax_s3('I', 'x', '4'):
+    return JP_Ix4;
+  case ax_s3('I', 'x', '5'):
+    return JP_Ix5;
+  case ax_s3('I', 'x', '6'):
+    return JP_Ix6;
+  case ax_s3('I', 'x', '7'):
+    return JP_Ix7;
+  case ax_s2('O', 'r'):
+    return JP_Or;
+  case ax_s3('N', 'o', 'r'):
+    return JP_Nor;
+  case ax_s3('A', 'n', 'd'):
+    return JP_And;
+  case ax_s2('I', 'f'):
+    return JP_If;
+  case ax_s3('I', 'f', 'z'):
+    return JP_Ifz;
+  case ax_s3('S', 'e', 'q'):
+    return JP_Seq;
+  case ax_s4('S', 'e', 'q', '2'):
+    return JP_Seq2;
+  case ax_s4('S', 'e', 'q', '3'):
+    return JP_Seq3;
+  case ax_s4('C', 'a', 's', 'e'):
+    return JP_Case;
+  case ax_s5('C', 'a', 's', 'e', '2'):
+    return JP_Case2;
+  case ax_s5('C', 'a', 's', 'e', '3'):
+    return JP_Case3;
+  case ax_s5('C', 'a', 's', 'e', '4'):
+    return JP_Case4;
+  case ax_s5('C', 'a', 's', 'e', '5'):
+    return JP_Case5;
+  case ax_s5('C', 'a', 's', 'e', '6'):
+    return JP_Case6;
+  case ax_s5('C', 'a', 's', 'e', '7'):
+    return JP_Case7;
+  case ax_s5('C', 'a', 's', 'e', '8'):
+    return JP_Case8;
+  case ax_s5('C', 'a', 's', 'e', '9'):
+    return JP_Case9;
+  case ax_s6('C', 'a', 's', 'e', '1', '0'):
+    return JP_Case10;
+  case ax_s6('C', 'a', 's', 'e', '1', '1'):
+    return JP_Case11;
+  case ax_s6('C', 'a', 's', 'e', '1', '2'):
+    return JP_Case12;
+  case ax_s6('C', 'a', 's', 'e', '1', '3'):
+    return JP_Case13;
+  case ax_s6('C', 'a', 's', 'e', '1', '4'):
+    return JP_Case14;
+  case ax_s6('C', 'a', 's', 'e', '1', '5'):
+    return JP_Case15;
+  case ax_s6('C', 'a', 's', 'e', '1', '6'):
+    return JP_Case16;
+  case ax_s5('F', 'o', 'r', 'c', 'e'):
+    return JP_Force;
+  case ax_s7('D', 'e', 'e', 'p', 'S', 'e', 'q'):
+    return JP_DeepSeq;
+  case ax_s5('E', 'q', 'u', 'a', 'l'):
+    return JP_Equal;
+  default:
+    return JP_NONE;
+  }
+}
+
 static bool supported(const pl_op_t* o) {
+  const pl_opdesc* d;
+  if (primitive(o, &d) != JP_NONE)
+    return true;
   switch (o[0]) {
   case OP_PUSH_VAR:
   case OP_PUSH_SLOT:
@@ -138,7 +430,7 @@ void pl_jit_prepare(pl_code* c) {
 
 /* Register convention: S0 thread, S1 frame, S2 vstack base, S3 stack end,
  * S4 fuel, S5 operand base; R3 caches the top operand within a basic block.
- * R0-R2 and R4 are scratch. No heap pointers survive return to the VM.
+ * R0-R2 and R4-R6 are scratch. No heap pointers survive return to the VM.
  */
 #define T                SLJIT_S0
 #define F                SLJIT_S1
@@ -219,6 +511,410 @@ static void room(emitter* e) {
   binary(e, SLJIT_SHL, SLJIT_R0, SLJIT_R0, 0, I, 3);
   binary(e, SLJIT_ADD, SLJIT_R0, VS, 0, SLJIT_R0, 0);
   guard(e, SLJIT_GREATER_EQUAL, SP, 0, SLJIT_R0, 0);
+}
+
+/* Primitive emitters keep TOP and the stack intact until all guards pass.
+ * R0/R1/R4 hold arguments, R2 the result, R5/R6 temporary values. A guard
+ * resumes the original call, including forcing, exceptions and big nats. */
+static void whnf(emitter* e, int r) {
+  binary(e, SLJIT_LSHR, SLJIT_R5, r, 0, I, 56);
+  guard(e, SLJIT_EQUAL, SLJIT_R5, 0, I, PL_TAG_DEFER);
+}
+
+static void small_nat(emitter* e, int r) {
+  /* Direct nats need one check. On the cold path, WHNF non-nats coerce to
+   * zero; boxed nats and deferred values resume the original primitive. */
+  struct sljit_jump* nat =
+      sljit_emit_cmp(e->c, SLJIT_SIG_GREATER_EQUAL, r, 0, I, 0);
+  binary(e, SLJIT_LSHR, SLJIT_R5, r, 0, I, 56);
+  guard(e, SLJIT_EQUAL, SLJIT_R5, 0, I, PL_TAG_NAT);
+  guard(e, SLJIT_EQUAL, SLJIT_R5, 0, I, PL_TAG_DEFER);
+  mov(e, r, 0, I, 0);
+  sljit_set_label(nat, sljit_emit_label(e->c));
+}
+
+static void boolean(emitter* e, int cond, int a, sljit_sw aw, int b,
+                    sljit_sw bw) {
+  mov(e, SLJIT_R2, 0, I, 0);
+  struct sljit_jump* no = sljit_emit_cmp(e->c, cond ^ 1, a, aw, b, bw);
+  mov(e, SLJIT_R2, 0, I, 1);
+  sljit_set_label(no, sljit_emit_label(e->c));
+}
+
+static void emit_primitive(emitter* e, const pl_op_t* o, jit_prim prim,
+                           const pl_opdesc* d) {
+  unsigned argc = d->argc;
+  bool thunk = o[0] == OP_MK_THK;
+  bool tail = o[0] == OP_TAILCALL || o[0] == OP_TAIL_READY ||
+              o[0] == OP_TAIL_ADD || o[0] == OP_TAIL_SUB || o[0] == OP_TAIL_CMP;
+  unsigned steps =
+      thunk ? 0
+            : 1 + (unsigned)__builtin_popcount(d->strict_mask) + (unsigned)tail;
+  if (prim == JP_Equal)
+    steps += 2; /* deep-normalize both already-terminal nats */
+  if (prim == JP_DeepSeq)
+    steps++; /* evaluate the first argument, then the selected result */
+  need(e, argc);
+  if (steps)
+    guard(e, SLJIT_LESS_EQUAL, FUEL, 0, I, steps);
+  flush(e);
+  mov(e, SLJIT_R0, 0, M(SP), -(sljit_sw)argc * 8);
+  if (argc > 1)
+    mov(e, SLJIT_R1, 0, M(SP), (1 - (sljit_sw)argc) * 8);
+  if (argc > 2)
+    mov(e, SLJIT_R4, 0, M(SP), (2 - (sljit_sw)argc) * 8);
+  bool numeric = prim <= JP_Bytes || (prim >= JP_Eq && prim <= JP_Cmp);
+  if (numeric) {
+    const int args[] = {SLJIT_R0, SLJIT_R1, SLJIT_R4};
+    for (unsigned k = 0; k < argc; k++) {
+      if (thunk)
+        guard(e, SLJIT_SIG_LESS, args[k], 0, I, 0);
+      else
+        small_nat(e, args[k]);
+    }
+  } else {
+    for (unsigned k = 0; k < argc; k++) {
+      if ((d->strict_mask >> k) & 1u) {
+        mov(e, SLJIT_R6, 0, M(SP), ((sljit_sw)k - argc) * 8);
+        if (thunk && o[4] != PL_SPEC_BODY)
+          guard(e, SLJIT_SIG_LESS, SLJIT_R6, 0, I, 0);
+        else
+          whnf(e, SLJIT_R6);
+      }
+    }
+  }
+  switch (prim) {
+  case JP_Inc:
+  case JP_Add:
+    binary(e, SLJIT_ADD, SLJIT_R2, SLJIT_R0, 0, prim == JP_Inc ? I : SLJIT_R1,
+           prim == JP_Inc ? 1 : 0);
+    guard(e, SLJIT_SIG_LESS, SLJIT_R2, 0, I, 0);
+    break;
+  case JP_Dec:
+  case JP_Sub:
+    binary(e, SLJIT_SUB | SLJIT_SET_LESS, SLJIT_R2, SLJIT_R0, 0,
+           prim == JP_Dec ? I : SLJIT_R1, prim == JP_Dec ? 1 : 0);
+    (void)sljit_emit_select(e->c, SLJIT_LESS, SLJIT_R2, I, 0, SLJIT_R2);
+    break;
+  case JP_Mul:
+    binary(e, SLJIT_MUL | SLJIT_SET_OVERFLOW, SLJIT_R2, SLJIT_R0, 0, SLJIT_R1,
+           0);
+    e->exits[e->nexits++] =
+        (exit_patch){sljit_emit_jump(e->c, SLJIT_OVERFLOW), e->pc, e->cached};
+    guard(e, SLJIT_SIG_LESS, SLJIT_R2, 0, I, 0);
+    break;
+  case JP_Div:
+  case JP_Mod:
+    guard(e, SLJIT_EQUAL, SLJIT_R1, 0, I, 0);
+    (void)sljit_emit_op0(e->c, prim == JP_Div ? SLJIT_DIV_UW : SLJIT_DIVMOD_UW);
+    mov(e, SLJIT_R2, 0, prim == JP_Div ? SLJIT_R0 : SLJIT_R1, 0);
+    break;
+  case JP_Lsh:
+    guard(e, SLJIT_GREATER_EQUAL, SLJIT_R1, 0, I, 63);
+    binary(e, SLJIT_LSHR, SLJIT_R5, I, PL_NAT63_MAX, SLJIT_R1, 0);
+    guard(e, SLJIT_GREATER, SLJIT_R0, 0, SLJIT_R5, 0);
+    binary(e, SLJIT_SHL, SLJIT_R2, SLJIT_R0, 0, SLJIT_R1, 0);
+    break;
+  case JP_Rsh: {
+    mov(e, SLJIT_R2, 0, I, 0);
+    struct sljit_jump* large =
+        sljit_emit_cmp(e->c, SLJIT_GREATER_EQUAL, SLJIT_R1, 0, I, 63);
+    binary(e, SLJIT_LSHR, SLJIT_R2, SLJIT_R0, 0, SLJIT_R1, 0);
+    sljit_set_label(large, sljit_emit_label(e->c));
+    break;
+  }
+  case JP_Bex:
+  case JP_Set:
+    guard(e, SLJIT_GREATER_EQUAL, SLJIT_R0, 0, I, 63);
+    binary(e, SLJIT_SHL, SLJIT_R2, I, 1, SLJIT_R0, 0);
+    if (prim == JP_Set)
+      binary(e, SLJIT_OR, SLJIT_R2, SLJIT_R2, 0, SLJIT_R1, 0);
+    break;
+  case JP_Clear:
+  case JP_Test:
+  case JP_Nib:
+  case JP_Load8: {
+    unsigned unit = prim == JP_Nib ? 4 : prim == JP_Load8 ? 8 : 1;
+    mov(e, SLJIT_R2, 0, prim == JP_Clear ? SLJIT_R1 : I, 0);
+    struct sljit_jump* large =
+        sljit_emit_cmp(e->c, SLJIT_GREATER_EQUAL, SLJIT_R0, 0, I, 64 / unit);
+    if (unit != 1)
+      binary(e, SLJIT_SHL, SLJIT_R0, SLJIT_R0, 0, I, unit == 4 ? 2 : 3);
+    if (prim == JP_Clear) {
+      binary(e, SLJIT_SHL, SLJIT_R5, I, 1, SLJIT_R0, 0);
+      binary(e, SLJIT_XOR, SLJIT_R5, SLJIT_R5, 0, I, -1);
+      binary(e, SLJIT_AND, SLJIT_R2, SLJIT_R1, 0, SLJIT_R5, 0);
+    } else {
+      binary(e, SLJIT_LSHR, SLJIT_R2, SLJIT_R1, 0, SLJIT_R0, 0);
+      binary(e, SLJIT_AND, SLJIT_R2, SLJIT_R2, 0, I, (1 << unit) - 1);
+    }
+    sljit_set_label(large, sljit_emit_label(e->c));
+    break;
+  }
+  case JP_Trunc8:
+  case JP_Trunc16:
+  case JP_Trunc32:
+  case JP_Trunc64: {
+    sljit_sw mask = prim == JP_Trunc8    ? 0xff
+                    : prim == JP_Trunc16 ? 0xffff
+                    : prim == JP_Trunc32 ? UINT32_MAX
+                                         : PL_NAT63_MAX;
+    binary(e, SLJIT_AND, SLJIT_R2, SLJIT_R0, 0, I, mask);
+    break;
+  }
+  case JP_Trunc: {
+    mov(e, SLJIT_R2, 0, SLJIT_R1, 0);
+    struct sljit_jump* large =
+        sljit_emit_cmp(e->c, SLJIT_GREATER_EQUAL, SLJIT_R0, 0, I, 63);
+    binary(e, SLJIT_SHL, SLJIT_R5, I, 1, SLJIT_R0, 0);
+    binary(e, SLJIT_SUB, SLJIT_R5, SLJIT_R5, 0, I, 1);
+    binary(e, SLJIT_AND, SLJIT_R2, SLJIT_R1, 0, SLJIT_R5, 0);
+    sljit_set_label(large, sljit_emit_label(e->c));
+    break;
+  }
+  case JP_LoadVar: {
+    mov(e, SLJIT_R2, 0, I, 0);
+    struct sljit_jump* large =
+        sljit_emit_cmp(e->c, SLJIT_GREATER_EQUAL, SLJIT_R0, 0, I, 8);
+    binary(e, SLJIT_SHL, SLJIT_R0, SLJIT_R0, 0, I, 3);
+    binary(e, SLJIT_LSHR, SLJIT_R2, SLJIT_R4, 0, SLJIT_R0, 0);
+    struct sljit_jump* wide =
+        sljit_emit_cmp(e->c, SLJIT_GREATER_EQUAL, SLJIT_R1, 0, I, 8);
+    binary(e, SLJIT_SHL, SLJIT_R1, SLJIT_R1, 0, I, 3);
+    binary(e, SLJIT_SHL, SLJIT_R5, I, 1, SLJIT_R1, 0);
+    binary(e, SLJIT_SUB, SLJIT_R5, SLJIT_R5, 0, I, 1);
+    binary(e, SLJIT_AND, SLJIT_R2, SLJIT_R2, 0, SLJIT_R5, 0);
+    struct sljit_label* end = sljit_emit_label(e->c);
+    sljit_set_label(large, end);
+    sljit_set_label(wide, end);
+    break;
+  }
+  case JP_Store8:
+    guard(e, SLJIT_GREATER_EQUAL, SLJIT_R0, 0, I, 8);
+    binary(e, SLJIT_SHL, SLJIT_R0, SLJIT_R0, 0, I, 3);
+    binary(e, SLJIT_AND, SLJIT_R1, SLJIT_R1, 0, I, 0xff);
+    binary(e, SLJIT_SHL, SLJIT_R1, SLJIT_R1, 0, SLJIT_R0, 0);
+    binary(e, SLJIT_SHL, SLJIT_R5, I, 0xff, SLJIT_R0, 0);
+    binary(e, SLJIT_XOR, SLJIT_R5, SLJIT_R5, 0, I, -1);
+    binary(e, SLJIT_AND, SLJIT_R2, SLJIT_R4, 0, SLJIT_R5, 0);
+    binary(e, SLJIT_OR, SLJIT_R2, SLJIT_R2, 0, SLJIT_R1, 0);
+    guard(e, SLJIT_SIG_LESS, SLJIT_R2, 0, I, 0);
+    break;
+  case JP_Bits:
+  case JP_Bytes:
+    (void)sljit_emit_op1(e->c, SLJIT_CLZ, SLJIT_R2, 0, SLJIT_R0, 0);
+    binary(e, SLJIT_SUB, SLJIT_R2, I, 64, SLJIT_R2, 0);
+    if (prim == JP_Bytes) {
+      binary(e, SLJIT_ADD, SLJIT_R2, SLJIT_R2, 0, I, 7);
+      binary(e, SLJIT_LSHR, SLJIT_R2, SLJIT_R2, 0, I, 3);
+    }
+    break;
+  case JP_Eq:
+  case JP_Ne:
+  case JP_Lt:
+  case JP_Le:
+  case JP_Gt:
+  case JP_Ge: {
+    static const int conditions[] = {SLJIT_EQUAL,   SLJIT_NOT_EQUAL,
+                                     SLJIT_LESS,    SLJIT_LESS_EQUAL,
+                                     SLJIT_GREATER, SLJIT_GREATER_EQUAL};
+    boolean(e, conditions[prim - JP_Eq], SLJIT_R0, 0, SLJIT_R1, 0);
+    break;
+  }
+  case JP_Cmp: {
+    mov(e, SLJIT_R2, 0, I, 0);
+    struct sljit_jump* less =
+        sljit_emit_cmp(e->c, SLJIT_LESS, SLJIT_R0, 0, SLJIT_R1, 0);
+    mov(e, SLJIT_R2, 0, I, 1);
+    struct sljit_jump* equal =
+        sljit_emit_cmp(e->c, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_R1, 0);
+    mov(e, SLJIT_R2, 0, I, 2);
+    struct sljit_label* end = sljit_emit_label(e->c);
+    sljit_set_label(less, end);
+    sljit_set_label(equal, end);
+    break;
+  }
+  case JP_Nil:
+  case JP_Truth:
+    boolean(e, prim == JP_Nil ? SLJIT_EQUAL : SLJIT_NOT_EQUAL, SLJIT_R0, 0, I,
+            0);
+    break;
+  case JP_Nat:
+  case JP_IsNat: {
+    mov(e, SLJIT_R2, 0, prim == JP_Nat ? SLJIT_R0 : I, prim == JP_Nat ? 0 : 1);
+    struct sljit_jump* direct =
+        sljit_emit_cmp(e->c, SLJIT_SIG_GREATER_EQUAL, SLJIT_R0, 0, I, 0);
+    binary(e, SLJIT_LSHR, SLJIT_R5, SLJIT_R0, 0, I, 56);
+    struct sljit_jump* boxed =
+        sljit_emit_cmp(e->c, SLJIT_EQUAL, SLJIT_R5, 0, I, PL_TAG_NAT);
+    mov(e, SLJIT_R2, 0, I, 0);
+    struct sljit_label* end = sljit_emit_label(e->c);
+    sljit_set_label(direct, end);
+    sljit_set_label(boxed, end);
+    break;
+  }
+  case JP_Type:
+  case JP_IsPin:
+  case JP_IsLaw:
+  case JP_IsApp:
+    binary(e, SLJIT_LSHR, SLJIT_R5, SLJIT_R0, 0, I, 56);
+    if (prim != JP_Type) {
+      boolean(e, SLJIT_EQUAL, SLJIT_R5, 0, I,
+              prim == JP_IsPin   ? PL_TAG_PIN
+              : prim == JP_IsLaw ? PL_TAG_LAW
+                                 : PL_TAG_APP);
+    } else {
+      mov(e, SLJIT_R2, 0, I, 0);
+      for (unsigned k = 1; k <= 3; k++) {
+        unsigned tag = k == 1 ? PL_TAG_PIN : k == 2 ? PL_TAG_LAW : PL_TAG_APP;
+        struct sljit_jump* other =
+            sljit_emit_cmp(e->c, SLJIT_NOT_EQUAL, SLJIT_R5, 0, I, tag);
+        mov(e, SLJIT_R2, 0, I, k);
+        sljit_set_label(other, sljit_emit_label(e->c));
+      }
+    }
+    break;
+  case JP_Arity:
+  case JP_Name:
+  case JP_Body:
+  case JP_Unpin: {
+    mov(e, SLJIT_R2, 0, I, 0);
+    binary(e, SLJIT_LSHR, SLJIT_R5, SLJIT_R0, 0, I, 56);
+    struct sljit_jump* other =
+        sljit_emit_cmp(e->c, SLJIT_NOT_EQUAL, SLJIT_R5, 0, I,
+                       prim == JP_Unpin ? PL_TAG_PIN : PL_TAG_LAW);
+    binary(e, SLJIT_AND, SLJIT_R0, SLJIT_R0, 0, I, PL_ADDR_MASK);
+    if (prim == JP_Unpin) {
+      /* Proxy targets require an acquire load; let the runtime resolve them. */
+      binary(e, SLJIT_AND, SLJIT_R5, M(SLJIT_R0), 0, I, PL_F_PIN_PROXY << 8);
+      guard(e, SLJIT_NOT_EQUAL, SLJIT_R5, 0, I, 0);
+    }
+    mov(e, SLJIT_R2, 0, M(SLJIT_R0),
+        prim == JP_Arity  ? 8
+        : prim == JP_Name ? 16
+        : prim == JP_Body ? 24
+                          : 40);
+    sljit_set_label(other, sljit_emit_label(e->c));
+    break;
+  }
+  case JP_Hd:
+  case JP_Sz:
+  case JP_Last:
+  case JP_Ix:
+  case JP_Ix0:
+  case JP_Ix1:
+  case JP_Ix2:
+  case JP_Ix3:
+  case JP_Ix4:
+  case JP_Ix5:
+  case JP_Ix6:
+  case JP_Ix7:
+  case JP_Case: {
+    if (prim == JP_Ix)
+      small_nat(e, SLJIT_R0);
+    bool indexed = prim == JP_Ix || prim == JP_Case;
+    int row = indexed ? SLJIT_R1 : SLJIT_R0;
+    mov(e, SLJIT_R2, 0,
+        prim == JP_Hd     ? SLJIT_R0
+        : prim == JP_Case ? SLJIT_R4
+                          : I,
+        0);
+    binary(e, SLJIT_LSHR, SLJIT_R5, row, 0, I, 56);
+    struct sljit_jump* other =
+        sljit_emit_cmp(e->c, SLJIT_NOT_EQUAL, SLJIT_R5, 0, I, PL_TAG_APP);
+    binary(e, SLJIT_AND, SLJIT_R6, row, 0, I, PL_ADDR_MASK);
+    if (prim == JP_Hd) {
+      mov(e, SLJIT_R2, 0, M(SLJIT_R6), 8);
+    } else {
+      binary(e, SLJIT_LSHR, SLJIT_R5, M(SLJIT_R6), 0, I, 32);
+      binary(e, SLJIT_SUB, SLJIT_R5, SLJIT_R5, 0, I, 2);
+      if (prim == JP_Sz) {
+        mov(e, SLJIT_R2, 0, SLJIT_R5, 0);
+      } else {
+        struct sljit_jump* outside = NULL;
+        if (prim == JP_Last) {
+          binary(e, SLJIT_SUB, SLJIT_R0, SLJIT_R5, 0, I, 1);
+        } else {
+          if (!indexed)
+            mov(e, SLJIT_R0, 0, I, prim - JP_Ix0);
+          outside = sljit_emit_cmp(e->c, SLJIT_GREATER_EQUAL, SLJIT_R0, 0,
+                                   SLJIT_R5, 0);
+        }
+        binary(e, SLJIT_SHL, SLJIT_R0, SLJIT_R0, 0, I, 3);
+        binary(e, SLJIT_ADD, SLJIT_R6, SLJIT_R6, 0, SLJIT_R0, 0);
+        mov(e, SLJIT_R2, 0, M(SLJIT_R6), 16);
+        if (outside)
+          sljit_set_label(outside, sljit_emit_label(e->c));
+      }
+    }
+    sljit_set_label(other, sljit_emit_label(e->c));
+    break;
+  }
+  case JP_Or:
+  case JP_And:
+  case JP_If:
+  case JP_Ifz: {
+    mov(e, SLJIT_R2, 0, prim == JP_Or ? SLJIT_R0 : SLJIT_R1, 0);
+    struct sljit_jump* first =
+        sljit_emit_cmp(e->c, prim == JP_Ifz ? SLJIT_EQUAL : SLJIT_NOT_EQUAL,
+                       SLJIT_R0, 0, I, 0);
+    mov(e, SLJIT_R2, 0,
+        prim == JP_Or    ? SLJIT_R1
+        : prim == JP_And ? I
+                         : SLJIT_R4,
+        0);
+    sljit_set_label(first, sljit_emit_label(e->c));
+    break;
+  }
+  case JP_Nor: {
+    mov(e, SLJIT_R2, 0, I, 0);
+    struct sljit_jump* nonzero =
+        sljit_emit_cmp(e->c, SLJIT_NOT_EQUAL, SLJIT_R0, 0, I, 0);
+    whnf(e, SLJIT_R1);
+    boolean(e, SLJIT_EQUAL, SLJIT_R1, 0, I, 0);
+    sljit_set_label(nonzero, sljit_emit_label(e->c));
+    break;
+  }
+  case JP_Equal:
+    guard(e, SLJIT_SIG_LESS, SLJIT_R0, 0, I, 0);
+    guard(e, SLJIT_SIG_LESS, SLJIT_R1, 0, I, 0);
+    boolean(e, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_R1, 0);
+    break;
+  case JP_Force:
+  case JP_DeepSeq:
+    /* Terminal direct nats need no recursive normalization or writeback. */
+    guard(e, SLJIT_SIG_LESS, SLJIT_R0, 0, I, 0);
+    mov(e, SLJIT_R2, 0, prim == JP_Force ? SLJIT_R0 : SLJIT_R1, 0);
+    break;
+  case JP_Seq:
+  case JP_Seq2:
+  case JP_Seq3:
+    mov(e, SLJIT_R2, 0, M(SP), -8);
+    break;
+  default: { /* Case2 .. Case16, with the fallback in the final slot. */
+    mov(e, SLJIT_R2, 0, M(SP), -8);
+    struct sljit_jump* outside =
+        sljit_emit_cmp(e->c, SLJIT_GREATER_EQUAL, SLJIT_R0, 0, I, argc - 2);
+    binary(e, SLJIT_SHL, SLJIT_R0, SLJIT_R0, 0, I, 3);
+    binary(e, SLJIT_ADD, SLJIT_R0, SP, 0, SLJIT_R0, 0);
+    mov(e, SLJIT_R2, 0, M(SLJIT_R0), (1 - (sljit_sw)argc) * 8);
+    sljit_set_label(outside, sljit_emit_label(e->c));
+    break;
+  }
+  }
+  /* Returning a selected lazy field must evaluate it, unlike MK_THK's
+   * existing projection shortcut. Guard before consuming any operands. */
+  if (!thunk && !numeric && prim != JP_Nil && prim != JP_Truth)
+    whnf(e, SLJIT_R2);
+  mov(e, TOP, 0, SLJIT_R2, 0);
+  e->cached = true;
+  binary(e, SLJIT_SUB, SP, SP, 0, I, (sljit_sw)(argc - 1) * 8);
+  if (steps)
+    binary(e, SLJIT_SUB, FUEL, FUEL, 0, I, steps);
+  if (tail) {
+    leave(e, PL_JIT_RETURN, true);
+    e->cached = false;
+  }
 }
 
 /* All guards precede construction: a failure resumes OP_BUILD in C, which
@@ -317,7 +1013,7 @@ static bool compile_code(pl_code* code) {
   bool* cached = calloc(n, sizeof(*cached));
   sljit_uw* entries = calloc(n, sizeof(*entries));
   emitter e = {.c = sljit_create_compiler(NULL),
-               .exits = calloc(n * 8, sizeof(exit_patch)),
+               .exits = calloc(n * 12, sizeof(exit_patch)),
                .edges = calloc(n * 2, sizeof(edge_patch))};
   bool ok = false;
   if (!labels || !targets || !cached || !entries || !e.c || !e.exits ||
@@ -331,7 +1027,7 @@ static bool compile_code(pl_code* code) {
       for (size_t k = 0; k < o[1]; k++)
         targets[o[2 + k]] = true;
   }
-  (void)sljit_emit_enter(e.c, 0, SLJIT_ARGS3(W, P, P, W), 5, 6, 0);
+  (void)sljit_emit_enter(e.c, 0, SLJIT_ARGS3(W, P, P, W), 7, 6, 0);
   mov(&e, SLJIT_R2, 0, VS, 0); /* third argument is the entry address */
   mov(&e, VS, 0, M(T), OFF(pl_thread, vstack));
   mov(&e, SP, 0, M(T), OFF(pl_thread, vsp));
@@ -362,6 +1058,13 @@ static bool compile_code(pl_code* code) {
     if (!supported(o)) {
       leave(&e, (uint32_t)pc, e.cached);
       e.cached = false;
+      continue;
+    }
+    const pl_opdesc* d;
+    jit_prim prim = primitive(o, &d);
+    /* Retain the compact top-cache path for the original numeric opcodes. */
+    if (prim != JP_NONE && o[0] != OP_ADD && o[0] != OP_SUB && o[0] != OP_CMP) {
+      emit_primitive(&e, o, prim, d);
       continue;
     }
     switch (o[0]) {

@@ -2,6 +2,7 @@
 #include <string.h>
 
 #include "test_plan.h"
+#include "plan/canon.h"
 #ifdef PL_SLJIT
 #include "../../pkg/plan/src/jit.h"
 #endif
@@ -2986,6 +2987,325 @@ TEST(ops, equal_survives_very_deep_structures) {
 }
 
 #ifdef PL_SLJIT
+/* Keep the native coverage assertion separate from semantic equivalence:
+ * merely compiling a wrapper that immediately falls back is not coverage. */
+static pl_code* jit_primitive_code(pl_thread* t, uint64_t name, unsigned argc,
+                                   unsigned form, uint32_t* end) {
+  pl_val ops[64] = {OP_PUSH_LIT, 0, OP_PUSH_LIT, 0};
+  size_t n = 4;
+  for (unsigned k = 0; k < argc; k++) {
+    ops[n++] = OP_PUSH_VAR;
+    ops[n++] = k + 1;
+  }
+  ops[n++] = form == 0 ? OP_CALL_KNOWN : OP_MK_THK;
+  ops[n++] = argc;
+  if (form != 0)
+    ops[n++] = PL_BAN_PRIM_KNOWN | (form == 2 ? PL_BAN_NOUPD : 0);
+  ops[n++] = t->vstack[0];
+  ops[n++] = name;
+  if (form == 2) {
+    /* Keep MK_THK out of the decoder's tail-call peephole. */
+    ops[n++] = OP_PUSH_LIT;
+    ops[n++] = 0;
+    ops[n++] = OP_FORCE;
+    ops[n++] = OP_PUSH_SLOT;
+    ops[n++] = 2;
+  }
+  *end = form == 1 ? PL_JIT_RETURN : (uint32_t)n;
+  ops[n++] = OP_RET;
+  return test_decode_ops(t, n, ops);
+}
+
+static uint64_t jit_test_name(const char* name) {
+  uint64_t result = 0;
+  for (unsigned k = 0; name[k]; k++)
+    result |= (uint64_t)(unsigned char)name[k] << (8 * k);
+  return result;
+}
+
+TEST(sljit, pure_primitives_execute_natively) {
+  if (getenv("PL_JIT") != NULL && strcmp(getenv("PL_JIT"), "1") != 0)
+    SKIP_TEST("disabled by PL_JIT");
+  const struct {
+    const char* name;
+    unsigned argc;
+    bool speculate;
+  } cases[] = {
+      {"Inc", 1, true},      {"Dec", 1, true},      {"Add", 2, true},
+      {"Sub", 2, true},      {"Mul", 2, true},      {"Div", 2, false},
+      {"Mod", 2, false},     {"Rsh", 2, false},     {"Lsh", 2, false},
+      {"Test", 2, false},    {"Nib", 2, false},     {"Load8", 2, false},
+      {"LoadVar", 3, false}, {"Store8", 3, false},  {"Set", 2, false},
+      {"Clear", 2, false},   {"Bex", 1, false},     {"Trunc8", 1, false},
+      {"Trunc16", 1, false}, {"Trunc32", 1, false}, {"Trunc64", 1, false},
+      {"Trunc", 2, false},   {"Bits", 1, false},    {"Bytes", 1, false},
+      {"Nil", 1, true},      {"Truth", 1, true},    {"Eq", 2, true},
+      {"Ne", 2, true},       {"Lt", 2, true},       {"Le", 2, true},
+      {"Gt", 2, true},       {"Ge", 2, true},       {"Cmp", 2, true},
+      {"Nat", 1, true},      {"Type", 1, true},     {"IsPin", 1, true},
+      {"IsLaw", 1, true},    {"IsApp", 1, true},    {"IsNat", 1, true},
+      {"Arity", 1, false},   {"Name", 1, true},     {"Body", 1, true},
+      {"Unpin", 1, false},   {"Hd", 1, true},       {"Sz", 1, true},
+      {"Last", 1, true},     {"Ix", 2, true},       {"Ix0", 1, true},
+      {"Ix1", 1, true},      {"Ix2", 1, true},      {"Ix3", 1, true},
+      {"Ix4", 1, true},      {"Ix5", 1, true},      {"Ix6", 1, true},
+      {"Ix7", 1, true},      {"Or", 2, false},      {"Nor", 2, false},
+      {"And", 2, false},     {"If", 3, false},      {"Ifz", 3, false},
+      {"Seq", 2, false},     {"Seq2", 3, false},    {"Seq3", 4, false},
+      {"Case", 3, false},    {"Case2", 3, false},   {"Case3", 4, false},
+      {"Case4", 5, false},   {"Case5", 6, false},   {"Case6", 7, false},
+      {"Case7", 8, false},   {"Case8", 9, false},   {"Case9", 10, false},
+      {"Case10", 11, false}, {"Case11", 12, false}, {"Case12", 13, false},
+      {"Case13", 14, false}, {"Case14", 15, false}, {"Case15", 16, false},
+      {"Case16", 17, false}, {"Force", 1, false},   {"DeepSeq", 2, false},
+      {"Equal", 2, false},
+  };
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  pl_vpush(t, test_p66(t));
+  /* Root test objects through reference evaluation and forced collections. */
+  pl_val fields[] = {31, 32, 33, 34, 35, 36, 37, 38};
+  pl_vpush(t, test_app(t, 99, 8, fields));          /* 1: row */
+  pl_vpush(t, test_law(t, 5, 42, 91));              /* 2: law */
+  pl_vpush(t, pl_pin(t, 71));                       /* 3: saved canonical pin */
+  pl_vpush(t, pl_mk_nat_u64(t, UINT64_C(1) << 63)); /* 4: boxed */
+  char pin_error[192];
+  ASSERT(pl_store_save_root(rt.store, t->vstack[3], NULL, pin_error,
+                            sizeof(pin_error)),
+         "%s", pin_error);
+  t->vstack[3] = pl_pin_proxy_target(pl_ptr(t->vstack[3]));
+  ASSERT_NEQ(t->vstack[3], 0);
+  size_t base = t->vsp;
+  for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    unsigned argc = cases[i].argc;
+    uint64_t name = jit_test_name(cases[i].name);
+    for (unsigned form = 0; form < (cases[i].speculate ? 3u : 2u); form++) {
+      uint32_t end;
+      pl_code* code = jit_primitive_code(t, name, argc, form, &end);
+      ASSERT_NOT_NULL(code);
+      ASSERT_NOT_NULL(code->jit_ops);
+      /* Constants, all-zero inputs, and actual objects exercise both sides
+       * of selects and type guards. The first case must stay native. */
+      for (unsigned sample = 0; sample < 7; sample++) {
+        t->vsp = base;
+        pl_vpush(t, 0); /* variable group head */
+        for (unsigned k = 0; k < argc; k++)
+          pl_vpush(t, sample == 1 ? 0 : sample == 2 ? 1 : k + 2);
+        if (sample >= 3) {
+          t->vstack[base + 1] = t->vstack[sample == 3   ? 1
+                                          : sample == 4 ? 2
+                                          : sample == 5 ? 4
+                                                        : 3];
+          if (strcmp(cases[i].name, "Case") == 0 ||
+              strcmp(cases[i].name, "Ix") == 0) {
+            t->vstack[base + 1] = sample - 3;
+            t->vstack[base + 2] = t->vstack[1];
+          }
+        }
+        /* Div/Mod zero is an exception, tested with the resumable machine. */
+        if ((strcmp(cases[i].name, "Div") == 0 ||
+             strcmp(cases[i].name, "Mod") == 0) &&
+            sample == 1)
+          t->vstack[base + 2] = 1;
+        /* Avoid asking the reference to allocate an astronomically large nat.
+         */
+        if (sample == 5 && (strcmp(cases[i].name, "Bex") == 0 ||
+                            strcmp(cases[i].name, "Set") == 0 ||
+                            strcmp(cases[i].name, "Store8") == 0))
+          t->vstack[base + 1] = 63;
+        size_t ab = t->vsp;
+        pl_val expected = test_op66(t, name, argc, &t->vstack[base + 1]);
+        char* want = pl_show_val(ax_allocator_system(), expected, NULL);
+        pl_frame frame = {.kind = PL_F_EXECV,
+                          .code = code,
+                          .b = base,
+                          .argc = argc + 1,
+                          .argbase = (uint32_t)ab};
+        uint32_t pc = 0;
+        for (unsigned warm = 0; warm < 128; warm++) {
+          t->vsp = ab;
+          t->fuel = 1000;
+          pc = pl_jit_run(t, &frame, 0);
+          if (pl_jit_compiled(code))
+            break;
+        }
+        ASSERT(pl_jit_compiled(code));
+        if (sample == 0)
+          ASSERT_EQ(pc, end, "%s form %u fell back at %u", cases[i].name, form,
+                    pc);
+        if (pc == end) {
+          char* got =
+              pl_show_val(ax_allocator_system(), t->vstack[t->vsp - 1], NULL);
+          ASSERT_STR_EQ(got, want, "%s form %u sample %u", cases[i].name, form,
+                        sample);
+          ax_free(ax_allocator_system(), got);
+        }
+        ax_free(ax_allocator_system(), want);
+      }
+      t->vsp = base;
+      pl_bytecode_free(code);
+    }
+  }
+  test_rt_free(&rt);
+}
+
+TEST(sljit, primitive_fallbacks_and_checkpoints_match_interpreter) {
+  if (getenv("PL_JIT") != NULL && strcmp(getenv("PL_JIT"), "1") != 0)
+    SKIP_TEST("disabled by PL_JIT");
+  const struct {
+    const char* name;
+    unsigned argc;
+    pl_val x, y, z;
+    unsigned lazy;
+  } cases[] = {
+      {"Inc", 1, 0, 0, 0, 0},
+      {"Inc", 1, PL_NAT63_MAX, 0, 0, 0},
+      {"Dec", 1, 0, 0, 0, 0},
+      {"Dec", 1, 19, 0, 0, 1},
+      {"Nil", 1, 0, 0, 0, 1},
+      {"Truth", 1, 7, 0, 0, 0},
+      {"Add", 2, PL_NAT63_MAX, 1, 0, 0},
+      {"Sub", 2, 0, 1, 0, 0},
+      {"Mul", 2, PL_NAT63_MAX, PL_NAT63_MAX, 0, 0},
+      {"Div", 2, 42, 5, 0, 0},
+      {"Div", 2, 42, 0, 0, 0},
+      {"Mod", 2, 42, 0, 0, 0},
+      {"Lsh", 2, PL_NAT63_MAX, 1, 0, 0},
+      {"Lsh", 2, 1, 63, 0, 0},
+      {"Rsh", 2, PL_NAT63_MAX, 64, 0, 0},
+      {"Bex", 1, 63, 0, 0, 0},
+      {"Set", 2, 63, 0, 0, 0},
+      {"Clear", 2, 64, PL_NAT63_MAX, 0, 0},
+      {"Load8", 2, 8, PL_NAT63_MAX, 0, 0},
+      {"Nib", 2, 16, 7, 0, 0},
+      {"Trunc", 2, 63, PL_NAT63_MAX, 0, 0},
+      {"Bits", 1, 0, 0, 0, 0},
+      {"LoadVar", 3, 7, 8, PL_NAT63_MAX, 0},
+      {"LoadVar", 3, 8, 0, 42, 0},
+      {"Store8", 3, 7, 255, 42, 0},
+      {"Store8", 3, 8, 123, 42, 0},
+      {"Eq", 2, 42, 42, 0, 0},
+      {"Ne", 2, 42, 42, 0, 0},
+      {"Lt", 2, 42, 42, 0, 0},
+      {"Le", 2, 42, 42, 0, 0},
+      {"Gt", 2, 42, 42, 0, 0},
+      {"Ge", 2, 42, 42, 0, 0},
+      {"Nor", 2, 0, 0, 0, 0},
+      {"Nor", 2, 0, 7, 0, 2},
+      {"Or", 2, 1, 0, 0, 4},
+      {"And", 2, 0, 0, 0, 4},
+      {"If", 3, 1, 7, 0, 8},
+      {"Ifz", 3, 0, 7, 0, 8},
+      {"Case3", 4, 1, 77, 88, 0},
+      {"Seq", 2, 7, 9, 0, 2},
+      {"Force", 1, 7, 0, 0, 0},
+      {"DeepSeq", 2, 7, 9, 0, 0},
+      {"Equal", 2, 42, 42, 0, 0},
+      {"Ix0", 1, 0, 0, 0, 16},
+      {"Unpin", 1, 0, 0, 0, 32},
+  };
+  for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    for (unsigned form = 0; form < 2; form++) {
+      test_rt rt = test_rt_new();
+      pl_thread* t = rt.t;
+      pl_vpush(t, test_p66(t));
+      uint32_t end;
+      pl_code* c = jit_primitive_code(t, jit_test_name(cases[i].name),
+                                      cases[i].argc, form, &end);
+      ASSERT_NOT_NULL(c);
+      ASSERT_NOT_NULL(c->jit_ops);
+      test_code_pin(&rt, cases[i].argc, c); /* slot 1 */
+      pl_op_t* overlay = c->jit_ops;
+      /* Compile without running the evaluator; exercise the entry stub too. */
+      for (unsigned k = 0; k < cases[i].argc; k++)
+        pl_vpush(t, 2);
+      size_t ab = t->vsp;
+      pl_frame frame = {.kind = PL_F_EXECV,
+                        .code = c,
+                        .b = 1,
+                        .argc = cases[i].argc + 1,
+                        .argbase = (uint32_t)ab};
+      for (unsigned warm = 0; warm < 128 && !pl_jit_compiled(c); warm++) {
+        t->vsp = ab;
+        t->fuel = 1000;
+        (void)pl_jit_run(t, &frame, 0);
+      }
+      ASSERT(pl_jit_compiled(c));
+      t->vsp = 2;
+      for (unsigned fuel = 2; fuel <= 16; fuel++) {
+        unsigned reference_yields = 0;
+        uint64_t reference_frames = 0;
+        pl_run_status reference_status = PL_RUN_DONE;
+        char* reference = NULL;
+        for (unsigned native = 0; native < 2; native++) {
+          c->jit_ops = native ? overlay : NULL;
+          pl_vpush(t, t->vstack[1]);
+          pl_vpush(t,
+                   cases[i].lazy & 1 ? test_thunk(t, cases[i].x) : cases[i].x);
+          if (cases[i].lazy & 16)
+            t->vstack[3] = test_app1_thunk_to(t, 42);
+          if (cases[i].lazy & 32)
+            t->vstack[3] = pl_pin(t, 71);
+          if (cases[i].argc > 1)
+            pl_vpush(t, cases[i].lazy & 2   ? test_thunk(t, cases[i].y)
+                        : cases[i].lazy & 4 ? test_throwing(t, 99)
+                                            : cases[i].y);
+          if (cases[i].argc > 2)
+            pl_vpush(t, cases[i].lazy & 8 ? test_throwing(t, 99) : cases[i].z);
+          if (cases[i].argc > 3)
+            pl_vpush(t, test_throwing(t, 99)); /* unselected Case3 fallback */
+          pl_gc_reserve(t, PL_THKE_CELLS(cases[i].argc + 1));
+          pl_val call =
+              pl_mk_thke(t, PL_BAN_FAST, cases[i].argc + 1, &t->vstack[2]);
+          t->vsp = 2;
+          pl_thread_start(t, call);
+          unsigned yields = 0;
+          uint64_t frames = 0;
+          pl_run_status status;
+          while ((status = pl_thread_run(t, fuel)) == PL_RUN_YIELDED) {
+            ASSERT_LT(++yields, 100, "%s form %u fuel %u", cases[i].name, form,
+                      fuel);
+            for (size_t k = 0; k < t->fsp; k++) {
+              const pl_frame* f = &t->fstack[k];
+              frames = frames * 33 + f->kind * 17;
+              if (f->kind == PL_F_EXEC || f->kind == PL_F_EXECV)
+                frames += f->k;
+            }
+            pl_gc_collect_now(t);
+          }
+          ASSERT_EQ(t->vsp, 2);
+          ASSERT_EQ(t->fsp, 0);
+          char* result =
+              status == PL_RUN_DONE
+                  ? pl_show_val(ax_allocator_system(), t->result, NULL)
+                  : NULL;
+          if (native) {
+            ASSERT_EQ(status, reference_status, "%s", cases[i].name);
+            ASSERT_EQ(yields, reference_yields, "%s form %u fuel %u",
+                      cases[i].name, form, fuel);
+            ASSERT_EQ(frames, reference_frames, "%s form %u fuel %u",
+                      cases[i].name, form, fuel);
+            if (result)
+              ASSERT_STR_EQ(result, reference, "%s", cases[i].name);
+          } else {
+            reference_status = status;
+            reference_yields = yields;
+            reference_frames = frames;
+            reference = result;
+            result = NULL;
+          }
+          ax_free(ax_allocator_system(), result);
+        }
+        ax_free(ax_allocator_system(), reference);
+      }
+      c->jit_ops = overlay;
+      pl_pin_set_code(pl_as(PL_TAG_PIN, t->vstack[1]), NULL);
+      pl_bytecode_free(c);
+      test_rt_free(&rt);
+    }
+  }
+}
+
 /* A loop entirely inside native code, with local block argument replacement.
  * Compare every fuel quantum against the same decoded stream without its
  * dispatch overlay, collecting the moving heap at every suspension. */

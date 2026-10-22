@@ -920,6 +920,13 @@ x_jit: {
   /* Native exits materialize the exact pre-instruction state. Execute that
    * instruction once in the interpreter, even when its overlay says JIT. */
   xpc = pl_jit_run(t, fr, xpc - 1);
+  if (xpc == PL_JIT_RETURN) {
+    v = pl_vpop(t);
+    t->vsp = fr->kind == PL_F_EXECV ? (size_t)fr->b : fr->argbase;
+    t->fsp--;
+    pl_profile_tail_pop(t);
+    goto ret; /* native code already charged argument/result/entry fuel */
+  }
   fr->k = xpc;
   pl_op_t op = pl_batch_ops(fr->code)[xpc++];
   goto* op_tbl[op];

@@ -553,21 +553,46 @@ comparisons: its atomic entry counter changes the measured workload.
 The backend prepares a private dispatch overlay after bytecode validation and
 optimization. It instruments runs of at least three supported instructions,
 and lazily compiles code objects of at most 8192 bytecode slots. It supports
-variable/literal/slot loads, guarded nat63 Add/Sub/Cmp, already-evaluated Force,
-branches, jumps, local tail blocks with up to 32 arguments, and the bounded
-construction batches described below. The top operand
-stays in a register across straight-line sequences. Branch joins materialize
-it; resumes inside a sequence reload it through an entry stub.
+variable/literal/slot loads, already-evaluated Force, branches, jumps, local
+tail blocks with up to 32 arguments, the bounded construction batches below,
+and fast paths for 82 explicitly allowlisted opset-66 primitives:
 
-Native code makes no C calls and cannot collect, raise, or suspend. It can
-allocate a complete construction batch after checking heap and stack space.
-It spills the value-stack cursor, cached operand and fuel before returning the
-bytecode offset of the pending instruction. That instruction executes once in
-the interpreter, even when its overlay says JIT. This preserves generic
-fallbacks, exact fuel checkpoints, and exception/GC behavior without native
-stack maps. Construction outside a planned batch, general calls, returns, and
-tail numeric primops still use the evaluator. Executable memory and entry tables belong to the
-specific `pl_code` version and are freed with it; they are never persisted.
+- Arithmetic: Inc, Dec, Add, Sub, Mul, Div, Mod, Lsh, Rsh.
+- Bits/bytes: Test, Nib, Load8, LoadVar, Store8, Set, Clear, Bex,
+  Trunc8/16/32/64, Trunc, Bits, Bytes.
+- Comparisons and selection: Nil, Truth, Eq, Ne, Lt, Le, Gt, Ge, Cmp,
+  Or, Nor, And, If, Ifz, Case, Case2–Case16, Seq, Seq2, Seq3.
+- Inspection/projection: Nat, Type, IsPin, IsLaw, IsApp, IsNat, Arity,
+  Name, Body, Unpin, Hd, Sz, Last, Ix, Ix0–Ix7.
+- Terminal direct-nat cases of Force, DeepSeq, and Equal.
+
+The same lowering handles CALL_KNOWN/CALL_READY and known primitive tail
+calls, including the decoder's numeric opcodes. MK_THK KNOWN uses it only
+for the existing total, cheap-eagerness specializations. Arithmetic handles
+direct nats and WHNF non-nat coercion; big nats, overflow, division by zero,
+deferred strict operands, and deferred selected results resume the original
+instruction. Lazy branches check only the selected result. Unpin proxies use
+the runtime's acquire-load resolution. Force/DeepSeq/Equal retain runtime
+normalization and structural comparison for nonterminal values.
+
+The top operand stays in a register across straight-line sequences. Branch
+joins materialize it; resumes inside a sequence reload it through an entry
+stub. Native code makes no C calls and cannot collect, raise, or suspend. It
+can allocate a complete construction batch after checking heap and stack
+space. It spills the value-stack cursor, cached operand and fuel before
+returning the bytecode offset of the pending instruction. That instruction
+executes once in the interpreter, even when its overlay says JIT. Completed
+primitive tail calls return a separate sentinel; the evaluator pops the
+execution frame and delivers the already-evaluated result without primitive
+dispatch or argument relocation. Guards preserve exact fuel checkpoints and
+exception/GC behavior without native stack maps.
+
+This is a fragment JIT. General calls (including recursive law tail calls),
+returns, allocating primitives such as Pin/Law/Row/Rep/Slice/Weld/Init/Up,
+application/control primitives such as Elim/Sap/Try/Memo, and storage,
+tracing, compiler installation, and other non-allowlisted operations still
+use the evaluator. Executable memory and entry tables belong to the specific
+`pl_code` version and are freed with it; they are never persisted.
 Compilation is serialized and native entries are published with release/acquire
 atomics so shared code can be entered by multiple evaluator threads.
 
@@ -586,7 +611,12 @@ sequences against the interpreter at fuel quanta 2–33, collect at every yield,
 exercise environment and stack argument storage, overflow and lazy-operand
 fallbacks through the existing numeric suite, stack growth, invalid branch
 exceptions, and concurrent compilation/publication. The JIT-specific tests
-assert that machine code was actually compiled.
+assert that machine code was actually compiled. The primitive coverage test
+also checks the native exit PC, so a compiled wrapper that falls back at the
+primitive does not count as native coverage. Primitive differential tests
+cover ordinary/tail/speculative forms, coercion and overflow, lazy selected
+and unselected branches, exceptions, and identical yield/frame sequences at
+fuel quanta 2–16 with a collection at every yield.
 
 Benchmarks:
 
