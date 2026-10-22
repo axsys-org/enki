@@ -424,6 +424,8 @@ size_t pl_gc_live_cells(pl_heap* h);
 bool pl_gc_collect_if_pressure(pl_thread* t, size_t allocation_floor_cells);
 void pl_gc_collect_now(pl_thread* t); /* for tests */
 
+void pl_gc_trim(pl_thread* t);
+
 /* ── No-collect windows (debug accounting) ─────────────────────────────── */
 
 #ifndef NDEBUG
