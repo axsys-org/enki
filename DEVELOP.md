@@ -292,7 +292,8 @@ writes the inactive superblock, and synchronizes again (`F_FULLFSYNC` on macOS,
 `fsync` on Linux). Initial file
 creation also synchronizes the containing directory. Saving the same root
 checkpoints staged objects/cache mappings without duplicating history. There
-is no GC, compaction, relocation, migration, or multi-store address allocation.
+is no automatic reclamation, online compaction, migration, or multi-store
+address allocation.
 Each Ice/Save boundary starts subsequent allocation on a fresh granule, so
 many tiny Ice operations have a measurable padding cost.
 
@@ -335,6 +336,36 @@ routing, cache references, and history. Run it explicitly before using an
 image whose integrity is in doubt; ordinary startup intentionally avoids a
 full scrub.
 
+### Prototype offline arena compaction
+
+Native arena compaction currently runs offline and must be requested explicitly:
+
+```sh
+scry /path/to/store compact
+```
+
+Stop the world before running it. The operation refuses an active writer and
+must not run with an active store in the calling process. Close existing
+inspectors and reopen them after replacement. It requires downtime and temporary
+disk space for a second arena alongside the original.
+
+Compaction preserves the current root's canonical hash and every value reachable
+from that root, including application-retained x/y/z history when the world
+retains it. It collects superseded checkpoint roots that are not reachable from
+the current root, derived compiler caches, and obsolete native metadata. Native
+checkpoint journal history is therefore not the same as the application's
+retained history; this is not an archive of every historical checkpoint.
+
+The collector writes a replacement native arena, verifies the retained content,
+and atomically replaces `arena.dat`. A failure before replacement leaves the
+original; uncertainty after replacement requires reopening the store. Physical
+addresses can change. The operation does not update application contracts,
+mounted behavior, or a saved service/compiler.
+
+This is an interim storage-maintenance strategy for prototyping. Automatic
+reclamation and its performance characteristics remain unresolved. The harness
+does not require compaction to establish durable execution semantics.
+
 ### Native tests and benchmarks
 
 `tests/unit/test_plan_native.c` uses fresh exec'd subprocesses for reopen,
@@ -342,7 +373,10 @@ writer exclusion, live inspectors, and crash injection. It also covers exact
 addresses/collisions, cross-checkpoint body sharing, layout-1 upgrade and old-reader
 rejection, large extents, canonical hashes, capacity and
 profile rejection, staged writes, retry/poison behavior, code-slot concurrency,
-compiler replacement, and global-cache export/import. The private fault hook
+compiler replacement, global-cache export/import, and offline compaction.
+Compaction tests cover retained reachable history and shared raw graphs, writer
+exclusion, content verification, empty and missing stores, and failures before
+and after replacement. The private fault hook
 covers growth, object staging, data synchronization, and both sides of
 superblock publication. A fresh empty image is also a valid checkpoint, so a
 torn first Save may recover that empty checkpoint.

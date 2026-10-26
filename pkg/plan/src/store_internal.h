@@ -126,5 +126,8 @@ size_t pl_native_log(pl_store* s, uint64_t from, pl_store_root_entry* out,
 /* Deterministic failure/crash seam for tests. Called while save_mu is held. */
 typedef bool (*pl_native_fault_fn)(void* ctx, const char* point);
 void pl_native_set_fault(pl_store* s, pl_native_fault_fn fn, void* ctx);
+bool pl_native_compact(const char* path, uint64_t* before, uint64_t* after,
+                       pl_native_fault_fn fault, void* ctx, char* err,
+                       size_t cap);
 
 #endif

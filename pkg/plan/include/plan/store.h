@@ -127,6 +127,14 @@ typedef struct pl_store_usage {
 } pl_store_usage;
 bool pl_store_get_usage(pl_store* s, pl_store_usage* out, char* err,
                         size_t cap);
+/* Offline native graph collection. Retains the current root and everything
+ * reachable through it, including application history. Superseded checkpoint
+ * roots and derived compiler caches are collected. Rebuilds arena.dat in the
+ * same directory, verifies all retained hashes, then atomically replaces it.
+ * No store from this directory may be active in the calling process. A live
+ * writer is rejected. before/after may be NULL. */
+bool pl_store_native_compact(const char* path, uint64_t* before,
+                             uint64_t* after, char* err, size_t cap);
 void pl_store_free(pl_store* s);
 
 /* Address-range test used by the collector (store vals are terminal).  The
