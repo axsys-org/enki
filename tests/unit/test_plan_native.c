@@ -3,6 +3,7 @@ int native_test_main(int argc, char** argv);
 #define main native_test_main
 #include "test.h"
 #undef main
+#include <dirent.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <spawn.h>
@@ -282,6 +283,9 @@ TEST(native, shared_edges_require_real_earlier_node_boundaries) {
   free(bytes);
   reopen_rt();
   ASSERT_FALSE(pl_store_verify(rt.store, err, sizeof(err)));
+  close_rt();
+  ASSERT_FALSE(
+      pl_store_native_compact(native_dir, NULL, NULL, err, sizeof(err)));
 }
 TEST(native, layout_one_upgrade_keeps_roots_and_retires_old_readers) {
   uint8_t before[32], after[32];
@@ -1216,11 +1220,185 @@ TEST(native, digest_context_is_serialized_for_writer_and_inspector_threads) {
   }
 }
 
+/* A history value is reachable even when its original containing PIN is not.
+ * This is the important distinction between native raw edges and subpin-only
+ * reachability. The extra half of the old extent must actually be collected. */
+TEST(native, compaction_retains_live_history_and_borrowed_raw_graphs) {
+  char err[256];
+  uint8_t obsolete[32], root_hash[32], old_hash[32], restored[32];
+  size_t count = 1024 * 1024;
+  uint8_t* data = malloc(count);
+  ASSERT_NOT_NULL(data);
+  memset(data, 0xad, count);
+  pl_vpush(rt.t, pl_nat_from_bytes(rt.t, data, count));
+  memset(data, 0xbd, count);
+  pl_vpush(rt.t, pl_nat_from_bytes(rt.t, data, count));
+  free(data);
+  pl_val fields[2] = {rt.t->vstack[0], rt.t->vstack[1]};
+  pl_vpush(rt.t, pl_pin(rt.t, test_app(rt.t, 0, 2, fields)));
+  ASSERT(
+      pl_store_save_root(rt.store, rt.t->vstack[2], obsolete, err, sizeof(err)),
+      "%s", err);
+  pl_val raw = pl_app_args(
+      pl_ptr(pl_pin_body(pl_ptr(pl_store_load(rt.t, obsolete)))))[0];
+  pl_val old = save_nat(17, old_hash, false);
+  pl_val history[3] = {old, raw, raw};
+  pl_vpush(rt.t, pl_pin(rt.t, test_app(rt.t, 0, 3, history)));
+  ASSERT(pl_store_save_root(rt.store, rt.t->vstack[rt.t->vsp - 1], root_hash,
+                            err, sizeof(err)),
+         "%s", err);
+  close_rt();
+  uint64_t before, after;
+  ASSERT(pl_store_native_compact(native_dir, &before, &after, err, sizeof(err)),
+         "%s", err);
+  ASSERT_GT(before - after, count);
+  reopen_rt();
+  ASSERT(pl_store_get_root(rt.store, restored));
+  ASSERT_MEM_EQ(root_hash, restored, 32);
+  pl_val body = pl_pin_body(pl_ptr(pl_store_load(rt.t, restored)));
+  const pl_val* args = pl_app_args(pl_ptr(body));
+  ASSERT_EQ(pl_pin_body(pl_ptr(args[0])), 17);
+  ASSERT_EQ(args[1], args[2]);
+  ASSERT_EQ(pl_nat_byte_len(args[1]), count);
+  ASSERT_EQ(pl_nat_byte_at(args[1], count - 1), 0xad);
+  pl_val missing;
+  ASSERT_FALSE(pl_native_load(rt.store, obsolete, &missing, err, sizeof(err)));
+  ASSERT(pl_native_load(rt.store, old_hash, &missing, err, sizeof(err)), "%s",
+         err);
+  ASSERT_EQ(pl_store_root_log_head(rt.store), 1);
+  ASSERT(pl_store_verify(rt.store, err, sizeof(err)), "%s", err);
+  (void)save_nat(43, restored, true);
+  ASSERT_EQ(pl_store_root_log_head(rt.store), 2);
+  ASSERT(pl_store_verify(rt.store, err, sizeof(err)), "%s", err);
+  close_rt();
+  reopen_rt();
+  ASSERT(pl_native_load(rt.store, root_hash, &missing, err, sizeof(err)), "%s",
+         err);
+}
+TEST(native, compaction_is_exclusive_and_failure_keeps_original) {
+  uint8_t hash[32], retained[32];
+  (void)save_nat(42, hash, true);
+  ASSERT_EQ(child("compact-blocked", NULL, NULL), 0);
+  close_rt();
+  char err[256], path[256];
+  snprintf(path, sizeof(path), "%s/arena.dat", native_dir);
+  struct stat original, current;
+  ASSERT_EQ(stat(path, &original), 0);
+  const char* points[] = {"compact_after_copy", "compact_before_replace"};
+  for (size_t i = 0; i < 2; i++) {
+    ASSERT_FALSE(pl_native_compact(native_dir, NULL, NULL, fault_return,
+                                   (void*)points[i], err, sizeof(err)));
+    ASSERT_EQ(stat(path, &current), 0);
+    ASSERT_EQ(original.st_ino, current.st_ino);
+    ASSERT_EQ(original.st_size, current.st_size);
+    reopen_rt();
+    ASSERT(pl_store_get_root(rt.store, retained));
+    ASSERT_MEM_EQ(hash, retained, 32);
+    ASSERT(pl_store_verify(rt.store, err, sizeof(err)), "%s", err);
+    close_rt();
+  }
+}
+TEST(native, compaction_crashes_leave_a_complete_native_world) {
+  uint8_t hash[32], retained[32];
+  (void)save_nat(42, hash, true);
+  close_rt();
+  const char* points[] = {"compact_after_copy", "compact_before_replace",
+                          "compact_after_replace"};
+  char err[256];
+  for (size_t i = 0; i < 3; i++) {
+    ASSERT_EQ(child("compact-crash", points[i], NULL), 77);
+    reopen_rt();
+    ASSERT(pl_store_get_root(rt.store, retained));
+    ASSERT_MEM_EQ(hash, retained, 32);
+    ASSERT(pl_store_verify(rt.store, err, sizeof(err)), "%s", err);
+    close_rt();
+  }
+  /* Killed collectors can leave an uninstalled native candidate, never a
+   * second authoritative world. Remove this test's candidates. */
+  DIR* dir = opendir(native_dir);
+  ASSERT_NOT_NULL(dir);
+  struct dirent* item;
+  while ((item = readdir(dir))) {
+    if (strncmp(item->d_name, ".compact-", 9))
+      continue;
+    char path[512];
+    const char* files[] = {"arena.dat", "arena.commit.lock"};
+    for (size_t i = 0; i < 2; i++) {
+      snprintf(path, sizeof(path), "%s/%s/%s", native_dir, item->d_name,
+               files[i]);
+      (void)unlink(path);
+    }
+    snprintf(path, sizeof(path), "%s/%s", native_dir, item->d_name);
+    ASSERT_EQ(rmdir(path), 0);
+  }
+  closedir(dir);
+}
+TEST(native, compaction_verifies_content_before_replacing) {
+  pl_vpush(rt.t, pl_pin(rt.t, test_app1(rt.t, 0, 99)));
+  uint8_t hash[32];
+  char err[256], path[256];
+  ASSERT(pl_store_save_root(rt.store, rt.t->vstack[0], hash, err, sizeof(err)),
+         "%s", err);
+  pl_val pin = pl_store_load(rt.t, hash);
+  uint64_t off = pl_addr(pin) - PL_NATIVE_BASE - 48;
+  uint64_t body = pl_addr(pl_pin_body(pl_ptr(pin))) - PL_NATIVE_BASE - off;
+  close_rt();
+  snprintf(path, sizeof(path), "%s/arena.dat", native_dir);
+  int fd = open(path, O_RDWR);
+  ASSERT_GTE(fd, 0);
+  struct stat before, after;
+  ASSERT_EQ(fstat(fd, &before), 0);
+  uint64_t len;
+  ASSERT_EQ(pread(fd, &len, 8, (off_t)(off + 32)), 8);
+  uint8_t* bytes = malloc((size_t)len);
+  ASSERT_NOT_NULL(bytes);
+  ASSERT_EQ(pread(fd, bytes, (size_t)len, (off_t)off), (ssize_t)len);
+  /* Plausible graph with a valid record checksum, but the wrong content. */
+  ((pl_cell*)(bytes + body))[2] = 100;
+  ax_sha256(bytes + 32, (size_t)len - 32, bytes);
+  ASSERT_EQ(pwrite(fd, bytes, (size_t)len, (off_t)off), (ssize_t)len);
+  close(fd);
+  free(bytes);
+  ASSERT_FALSE(
+      pl_store_native_compact(native_dir, NULL, NULL, err, sizeof(err)));
+  ASSERT_EQ(stat(path, &after), 0);
+  ASSERT_EQ(before.st_ino, after.st_ino);
+  ASSERT_EQ(before.st_size, after.st_size);
+}
+TEST(native, compaction_of_empty_native_store_is_valid) {
+  close_rt();
+  char err[256];
+  ASSERT(pl_store_native_compact(native_dir, NULL, NULL, err, sizeof(err)),
+         "%s", err);
+  reopen_rt();
+  uint8_t hash[32];
+  ASSERT_FALSE(pl_store_get_root(rt.store, hash));
+  ASSERT(pl_store_verify(rt.store, err, sizeof(err)), "%s", err);
+}
+TEST(native, compaction_does_not_create_missing_arena) {
+  close_rt();
+  char path[256], err[256];
+  snprintf(path, sizeof(path), "%s/arena.dat", native_dir);
+  ASSERT_EQ(unlink(path), 0);
+  ASSERT_FALSE(
+      pl_store_native_compact(native_dir, NULL, NULL, err, sizeof(err)));
+  ASSERT_EQ(access(path, F_OK), -1);
+}
 static int child_main(int argc, char** argv) {
   if (argc < 6)
     return 90;
   const char* mode = argv[2];
   char err[256];
+  if (!strcmp(mode, "compact-crash")) {
+    (void)pl_native_compact(argv[3], NULL, NULL, fault_crash, argv[4], err,
+                            sizeof(err));
+    return 98;
+  }
+  if (!strcmp(mode, "compact-blocked"))
+    return !pl_store_native_compact(argv[3], NULL, NULL, err, sizeof(err)) &&
+                   strstr(err, "writer")
+               ? 0
+               : 91;
   bool writer =
       strcmp(mode, "crash") == 0 || strcmp(mode, "writer-blocked") == 0;
   pl_store* s = writer ? pl_store_new_native(argv[3], err, sizeof(err))

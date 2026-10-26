@@ -2,6 +2,7 @@
 #include <setjmp.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -752,6 +753,7 @@ static void cmd_help(void) {
          "  size [seq|hash]    persisted bytes of a pin closure\n"
          "  diff <a> <b>       pins added/removed between two snapshots\n"
          "  packmap [n]        object bytes bucketed by snapshot\n"
+         "  compact            offline collection of current root closure\n"
          "  verify             validate a complete native image\n"
          "  usage              native objects, metadata and padding bytes\n"
          "  has-root           exit successfully if a checkpoint root exists\n"
@@ -880,6 +882,18 @@ int main(int argc, char** argv) {
   int path_n = snprintf(native_path, sizeof(native_path), "%s/arena.dat", dir);
   bool native = path_n >= 0 && (size_t)path_n < sizeof(native_path) &&
                 stat(native_path, &st) == 0;
+  if (at + 1 == argc && strcmp(argv[at], "compact") == 0) {
+    uint64_t before, after;
+    if (!native ||
+        !pl_store_native_compact(dir, &before, &after, err, sizeof(err))) {
+      fprintf(stderr, "scry: native compaction failed: %s\n", err);
+      return 1;
+    }
+    printf("Native arena compacted: %" PRIu64 " -> %" PRIu64
+           " bytes; root content hash unchanged.\n",
+           before, after);
+    return 0;
+  }
   sc.store = native ? pl_store_new_native_ro(dir, err, sizeof(err))
                     : pl_store_new_silo_ro(dir, map_size);
   if (sc.store == NULL) {

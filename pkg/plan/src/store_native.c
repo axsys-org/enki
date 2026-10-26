@@ -1593,3 +1593,410 @@ bool pl_store_get_usage(pl_store* s, pl_store_usage* out, char* err,
   pl_store_save_unlock(s);
   return ok || nerror(err, cap, "invalid native storage accounting");
 }
+
+/* Offline native copying collection. Addresses change; content and PIN hashes
+ * do not. The current root owns application history, so history is traced by
+ * the same graph walk as every other value. Old restart checkpoints are not
+ * additional GC roots. No application codec or alternate store is involved. */
+typedef struct native_compact {
+  native_verify source;
+  native_copy *live, *touched;
+  pl_val* pins;
+  native_index* index;
+  int fd;
+  uint64_t end;
+} native_compact;
+
+static native_extent* ncompact_extent(native_compact* c, uint64_t off) {
+  size_t lo = 0, hi = (size_t)ax_arrlen(c->source.extents);
+  while (lo < hi) {
+    size_t mid = lo + (hi - lo) / 2;
+    if (c->source.extents[mid].off <= off)
+      lo = mid + 1;
+    else
+      hi = mid;
+  }
+  if (lo == 0 || off >= c->source.extents[lo - 1].end)
+    return NULL;
+  return &c->source.extents[lo - 1];
+}
+static bool ncompact_mark(native_store* n, native_compact* c, char* err,
+                          size_t cap) {
+  if (!nwalk(n, n->committed.objects, n->committed.end, 0, nverify_extent,
+             &c->source, err, cap))
+    return false;
+  qsort(c->source.extents, (size_t)ax_arrlen(c->source.extents),
+        sizeof(native_extent), nextent_order);
+  pl_val* todo = NULL;
+  ax_arrpush(todo, n->committed.root);
+  bool ok = false;
+  while (ax_arrlen(todo)) {
+    pl_val v = stbds_arrpop(todo);
+    if (pl_is_nat63(v) || ax_hmgeti(c->live, v) >= 0)
+      continue;
+    uint64_t addr = pl_addr(v);
+    if (addr < PL_NATIVE_BASE + N_START || (addr & 7) != 0)
+      goto bad;
+    native_extent* e = ncompact_extent(c, addr - PL_NATIVE_BASE);
+    if (e == NULL)
+      goto bad;
+    if (ax_hmgeti(c->touched, e->off) < 0) {
+      if (nrecord(n, e->off, n->committed.end, N_OBJECT) == NULL)
+        goto bad;
+      ax_hmput(c->touched, e->off, 1);
+    }
+    pl_cell* p = pl_ptr(v);
+    if (pl_tag(v) == PL_TAG_PIN) {
+      if (addr != PL_NATIVE_BASE + e->off + sizeof(native_record))
+        goto bad;
+      uint64_t indexed;
+      if (!nlookup(n, n->committed.objects, (uint8_t*)(p + 1), n->committed.end,
+                   &indexed, err, cap) ||
+          indexed != e->off)
+        goto bad;
+      ax_hmput(c->live, v, 1);
+      ax_arrpush(c->pins, v);
+      ax_arrpush(todo, p[5]);
+      for (uint32_t i = 0; i < pl_pin_npins(p); i++) {
+        if (pl_tag(p[7 + i]) != PL_TAG_PIN)
+          goto bad;
+        ax_arrpush(todo, p[7 + i]);
+      }
+      continue;
+    }
+    /* Bounds precede every dereference of a raw node's fields. The second
+     * pass below checks exact boundaries, including boxed-NAT payloads. */
+    uint32_t cells = pl_hdr_cells(p[0]);
+    pl_kind kind = pl_hdr_kind(p[0]);
+    if (addr - PL_NATIVE_BASE < e->first || cells == 0 ||
+        (uint64_t)cells * 8 > e->end - (addr - PL_NATIVE_BASE) ||
+        pl_hdr_flags(p[0]) != PL_F_NORMAL ||
+        (kind != PL_K_NAT && kind != PL_K_APP && kind != PL_K_LAW) ||
+        pl_tag(v) != pl_tag_for_kind(kind) || (kind == PL_K_NAT && cells < 2) ||
+        (kind == PL_K_APP && cells < 3) ||
+        (kind == PL_K_LAW && cells != PL_LAW_CELLS))
+      goto bad;
+    ax_hmput(c->live, v, 0);
+    if (kind != PL_K_NAT)
+      for (uint32_t i = kind == PL_K_LAW ? 2u : 1u; i < cells; i++)
+        ax_arrpush(todo, p[i]);
+  }
+  /* Scan each touched extent once, rather than rescanning it for every
+   * borrowed edge. Dead extents and their duplicated bodies are never read. */
+  for (ptrdiff_t i = 0; i < ax_hmlen(c->touched); i++) {
+    native_extent* e = ncompact_extent(c, c->touched[i].key);
+    for (uint64_t at = e->first; at < e->end;) {
+      pl_cell* p = nptr(at);
+      uint32_t cells = pl_hdr_cells(p[0]);
+      pl_kind kind = pl_hdr_kind(p[0]);
+      if (cells == 0 || (uint64_t)cells * 8 > e->end - at ||
+          pl_hdr_flags(p[0]) != PL_F_NORMAL ||
+          (kind != PL_K_NAT && kind != PL_K_APP && kind != PL_K_LAW))
+        goto bad;
+      ptrdiff_t found = ax_hmgeti(c->live, pl_make(pl_tag_for_kind(kind), p));
+      if (found >= 0)
+        c->live[found].value = 1;
+      at += (uint64_t)cells * 8;
+    }
+  }
+  for (ptrdiff_t i = 0; i < ax_hmlen(c->live); i++)
+    if (c->live[i].value != 1)
+      goto bad;
+  ok = true;
+  goto done;
+bad:
+  nerror(err, cap, "invalid reachable native graph during compaction");
+done:
+  ax_arrfree(todo);
+  return ok;
+}
+static int ncompact_pin_order(const void* a, const void* b) {
+  uint64_t x = pl_addr(*(const pl_val*)a), y = pl_addr(*(const pl_val*)b);
+  return (x > y) - (x < y);
+}
+static int ncompact_hash_order(const void* a, const void* b) {
+  return memcmp(((const native_index*)a)->key, ((const native_index*)b)->key,
+                32);
+}
+static uint64_t ncompact_alloc(native_compact* c, uint64_t bytes) {
+  if (bytes >= PL_NATIVE_GRANULE || bytes > nround(c->end + 1) - c->end)
+    c->end = nround(c->end);
+  uint64_t off = c->end;
+  c->end += bytes;
+  return off;
+}
+static pl_val ncompact_value(native_compact* c, pl_val v) {
+  if (pl_is_nat63(v))
+    return v;
+  ptrdiff_t at = ax_hmgeti(c->live, v);
+  return at >= 0 && c->live[at].value > 2 ? c->live[at].value : 0;
+}
+static bool ncompact_pin(native_store* n, native_compact* c, pl_val v,
+                         uint64_t id, char* err, size_t cap) {
+  pl_cell* pin = pl_ptr(v);
+  pl_val *todo = NULL, *nodes = NULL;
+  ax_arrpush(todo, pin[5]);
+  uint64_t size = sizeof(native_record) + (uint64_t)pl_hdr_cells(pin[0]) * 8;
+  while (ax_arrlen(todo)) {
+    pl_val raw = stbds_arrpop(todo);
+    if (pl_is_nat63(raw) || pl_tag(raw) == PL_TAG_PIN)
+      continue;
+    ptrdiff_t pos = ax_hmgeti(c->live, raw);
+    ax_assume(pos >= 0, "unmarked compacted node");
+    if (c->live[pos].value != 1)
+      continue;
+    c->live[pos].value = 2;
+    ax_arrpush(nodes, raw);
+    pl_cell* p = pl_ptr(raw);
+    uint32_t cells = pl_hdr_cells(p[0]);
+    size += (uint64_t)cells * 8;
+    if (pl_tag(raw) != PL_TAG_NAT)
+      for (uint32_t i = pl_tag(raw) == PL_TAG_LAW ? 2u : 1u; i < cells; i++)
+        ax_arrpush(todo, p[i]);
+  }
+  ax_arrfree(todo);
+  bool ok = false;
+  if (size > PL_NATIVE_BYTES - nround(c->end)) {
+    nerror(err, cap, "compacted image exceeds native capacity");
+    goto done;
+  }
+  uint8_t* bytes = calloc(1, (size_t)size);
+  if (bytes == NULL) {
+    nerror(err, cap, "out of memory compacting native object");
+    goto done;
+  }
+  uint64_t off = ncompact_alloc(c, size);
+  uint64_t at = sizeof(native_record) + (uint64_t)pl_hdr_cells(pin[0]) * 8;
+  for (ptrdiff_t i = 0; i < ax_arrlen(nodes); i++) {
+    pl_val raw = nodes[i];
+    ax_hmput(c->live, raw, pl_make(pl_tag(raw), nptr(off + at)));
+    at += (uint64_t)pl_hdr_cells(pl_ptr(raw)[0]) * 8;
+  }
+  native_record* record = (native_record*)bytes;
+  record->len = size;
+  record->type = N_OBJECT;
+  pl_cell* next = (pl_cell*)(record + 1);
+  memcpy(next, pin, (size_t)pl_hdr_cells(pin[0]) * 8);
+  next[6] = id;
+  for (uint32_t i = 5; i < pl_hdr_cells(pin[0]); i++) {
+    if (i == 6)
+      continue;
+    next[i] = ncompact_value(c, pin[i]);
+    if (!pl_is_nat63(pin[i]) && next[i] == 0)
+      goto bad;
+  }
+  at = sizeof(native_record) + (uint64_t)pl_hdr_cells(pin[0]) * 8;
+  for (ptrdiff_t i = 0; i < ax_arrlen(nodes); i++) {
+    pl_cell* src = pl_ptr(nodes[i]);
+    pl_cell* dst = (pl_cell*)(bytes + at);
+    uint32_t cells = pl_hdr_cells(src[0]);
+    memcpy(dst, src, (size_t)cells * 8);
+    if (pl_tag(nodes[i]) != PL_TAG_NAT)
+      for (uint32_t j = pl_tag(nodes[i]) == PL_TAG_LAW ? 2u : 1u; j < cells;
+           j++) {
+        dst[j] = ncompact_value(c, src[j]);
+        if (!pl_is_nat63(src[j]) && dst[j] == 0)
+          goto bad;
+      }
+    at += (uint64_t)cells * 8;
+  }
+  ndigest(n, record, (size_t)size);
+  ok = nwrite(c->fd, bytes, (size_t)size, off);
+  if (!ok)
+    nerror(err, cap, "cannot write compacted native object");
+  else {
+    ax_hmput(c->live, v, pl_make(PL_TAG_PIN, nptr(off + sizeof(*record))));
+    native_index leaf = {.r = {.len = sizeof(native_index), .type = N_INDEX},
+                         .bit = 256,
+                         .value = off};
+    memcpy(leaf.key, pin + 1, 32);
+    ax_arrpush(c->index, leaf);
+  }
+  goto free_bytes;
+bad:
+  nerror(err, cap, "native dependency order invalid during compaction");
+free_bytes:
+  free(bytes);
+done:
+  ax_arrfree(nodes);
+  return ok;
+}
+static bool ncompact_index(native_store* n, native_compact* c, size_t lo,
+                           size_t hi, uint64_t* out) {
+  native_index record = {.r = {.len = sizeof(record), .type = N_INDEX}};
+  if (hi - lo == 1)
+    record = c->index[lo];
+  else {
+    while (record.bit < 256 && nbit(c->index[lo].key, record.bit) ==
+                                   nbit(c->index[hi - 1].key, record.bit))
+      record.bit++;
+    if (record.bit == 256)
+      return false;
+    size_t split = lo + 1;
+    while (split < hi && !nbit(c->index[split].key, record.bit))
+      split++;
+    if (!ncompact_index(n, c, lo, split, &record.child[0]) ||
+        !ncompact_index(n, c, split, hi, &record.child[1]))
+      return false;
+  }
+  *out = ncompact_alloc(c, sizeof(record));
+  ndigest(n, &record, sizeof(record));
+  return nwrite(c->fd, &record, sizeof(record), *out);
+}
+static bool ncompact_image(native_store* n, native_compact* c, char* err,
+                           size_t cap) {
+  if (!ncompact_mark(n, c, err, cap))
+    return false;
+  qsort(c->pins, (size_t)ax_arrlen(c->pins), sizeof(pl_val),
+        ncompact_pin_order);
+  for (ptrdiff_t i = 0; i < ax_arrlen(c->pins); i++)
+    if (!ncompact_pin(n, c, c->pins[i], (uint64_t)i + 1, err, cap))
+      return false;
+  qsort(c->index, (size_t)ax_arrlen(c->index), sizeof(native_index),
+        ncompact_hash_order);
+  native_super sb = n->committed;
+  sb.layout = N_LAYOUT;
+  sb.generation = 1;
+  sb.cache = 0;
+  sb.objects = 0;
+  sb.journal = 0;
+  sb.sequence = sb.root == 0 ? 0 : 1;
+  sb.next_id = (uint64_t)ax_arrlen(c->pins) + 1;
+  if (ax_arrlen(c->index) &&
+      !ncompact_index(n, c, 0, (size_t)ax_arrlen(c->index), &sb.objects))
+    return nerror(err, cap, "cannot write compacted native index");
+  if (sb.root != 0) {
+    native_journal j = {.r = {.len = sizeof(j), .type = N_JOURNAL},
+                        .entry = {.seq = 1},
+                        .root = ncompact_value(c, sb.root)};
+    memcpy(j.entry.hash, sb.root_hash, 32);
+    native_journal* original = nptr(n->committed.journal);
+    j.entry.unix_ns = original->entry.unix_ns;
+    sb.root = j.root;
+    sb.journal = ncompact_alloc(c, sizeof(j));
+    j.entry.pack_bytes = nround(c->end);
+    ndigest(n, &j, sizeof(j));
+    if (!nwrite(c->fd, &j, sizeof(j), sb.journal))
+      return nerror(err, cap, "cannot write compacted native checkpoint");
+  }
+  sb.end = nround(c->end);
+  ndigest(n, &sb, sizeof(sb));
+  return (ftruncate(c->fd, (off_t)sb.end) == 0 &&
+          nwrite(c->fd, &sb, sizeof(sb), 0) &&
+          nwrite(c->fd, &sb, sizeof(sb), PL_NATIVE_GRANULE) && nsync(c->fd)) ||
+         nerror(err, cap, "cannot synchronize compacted native image");
+}
+
+bool pl_native_compact(const char* path, uint64_t* before, uint64_t* after,
+                       pl_native_fault_fn fault, void* ctx, char* err,
+                       size_t cap) {
+  int dir = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  struct stat existing;
+  if (dir < 0 || fstatat(dir, "arena.dat", &existing, 0) != 0 ||
+      !S_ISREG(existing.st_mode)) {
+    if (dir >= 0)
+      (void)close(dir);
+    return nerror(err, cap, "compaction requires an existing native arena");
+  }
+  pl_store* s = pl_store_new_native(path, err, cap);
+  if (s == NULL) {
+    (void)close(dir);
+    return false;
+  }
+  native_store* n = s->be.ctx;
+  n->fault = fault;
+  n->fault_ctx = ctx;
+  int writer = dup(n->writer_fd), commit = dup(n->commit_fd);
+  char* temporary = calloc(1, strlen(path) + 32);
+  char* image = calloc(1, strlen(path) + 64);
+  native_compact c = {.fd = -1, .end = N_START};
+  uint8_t root_hash[32];
+  memcpy(root_hash, n->committed.root_hash, 32);
+  bool has_root = n->committed.root != 0, ok = false;
+  if (before)
+    *before = n->committed.end;
+  if (writer < 0 || commit < 0 || dir < 0 || temporary == NULL || image == NULL)
+    goto done;
+  temporary[0] = image[0] = 0;
+  snprintf(temporary, strlen(path) + 32, "%s/.compact-XXXXXX", path);
+  if (mkdtemp(temporary) == NULL)
+    goto done;
+  snprintf(image, strlen(path) + 64, "%s/arena.dat", temporary);
+  c.fd = open(image, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+  if (c.fd < 0 || !ncompact_image(n, &c, err, cap) ||
+      !npoint(n, "compact_after_copy", err, cap))
+    goto done;
+  struct stat original;
+  if (fstat(n->fd, &original) != 0 ||
+      fchmod(c.fd, original.st_mode & 0777) != 0 || !nsync(c.fd))
+    goto done;
+  /* Keep the original writer lock through verification and replacement even
+   * though only one native image can be mapped in this process. */
+  pl_store_free(s);
+  s = NULL;
+  char lock_path[4096];
+  snprintf(lock_path, sizeof(lock_path), "%s/arena.commit.lock", temporary);
+  int lock = open(lock_path, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+  if (lock < 0)
+    goto done;
+  (void)close(lock);
+  s = pl_store_new_native_ro(temporary, err, cap);
+  if (s == NULL || !pl_store_verify(s, err, cap))
+    goto done;
+  uint8_t retained[32];
+  bool retained_root = pl_store_get_root(s, retained);
+  if (retained_root != has_root ||
+      (has_root && memcmp(root_hash, retained, 32))) {
+    nerror(err, cap, "compaction changed the native root hash");
+    goto done;
+  }
+  if (fault != NULL && !fault(ctx, "compact_before_replace")) {
+    nerror(err, cap, "injected native failure before compaction replacement");
+    goto done;
+  }
+  if (flock(commit, LOCK_EX) != 0 ||
+      renameat(AT_FDCWD, image, dir, "arena.dat") != 0)
+    goto done;
+  if ((fault != NULL && !fault(ctx, "compact_after_replace")) || !nsync(dir)) {
+    nerror(err, cap,
+           "compaction installed; directory sync uncertain, reopen required");
+    goto done;
+  }
+  if (after)
+    *after = nround(c.end);
+  ok = true;
+done:
+  if (!ok && err != NULL && cap && !err[0])
+    nerror(err, cap, "native compaction failed: %s", strerror(errno));
+  if (s != NULL)
+    pl_store_free(s);
+  if (c.fd >= 0)
+    (void)close(c.fd);
+  if (image != NULL && image[0])
+    (void)unlink(image);
+  if (temporary != NULL && temporary[0]) {
+    char cleanup_lock[4096];
+    snprintf(cleanup_lock, sizeof(cleanup_lock), "%s/arena.commit.lock",
+             temporary);
+    (void)unlink(cleanup_lock);
+    (void)rmdir(temporary);
+  }
+  free(temporary);
+  free(image);
+  ax_arrfree(c.source.extents);
+  ax_hmfree(c.live);
+  ax_hmfree(c.touched);
+  ax_arrfree(c.pins);
+  ax_arrfree(c.index);
+  if (dir >= 0)
+    (void)close(dir);
+  if (commit >= 0)
+    (void)close(commit);
+  if (writer >= 0)
+    (void)close(writer);
+  return ok;
+}
+bool pl_store_native_compact(const char* path, uint64_t* before,
+                             uint64_t* after, char* err, size_t cap) {
+  return pl_native_compact(path, before, after, NULL, NULL, err, cap);
+}
