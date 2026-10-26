@@ -1,4 +1,6 @@
-/* Native image format v1. All offsets and addresses are 64-bit native endian.
+/* Native image format v1, layout 2 (reads layout 1). Immutable raw nodes may
+ * be shared from earlier indexed extents. PLAN values and hashes are unchanged.
+ * All offsets and addresses are 64-bit native endian.
  * Never mutate a sealed granule. The two superblocks are the only overwrites.
  * save_mu serializes in-process access; flock separates writer lifetime from
  * checkpoint acquisition by independent inspectors. */
@@ -36,7 +38,7 @@
 #else
 #define N_ARCH 0u
 #endif
-#define N_LAYOUT     1u
+#define N_LAYOUT     2u
 #define N_SLOT_COUNT (PL_NATIVE_BYTES / (PL_PIN_CELLS(0) * 8) + 1)
 #define N_SLOT_BYTES (N_SLOT_COUNT * 8)
 
@@ -79,7 +81,7 @@ typedef struct native_work_node {
 typedef struct native_store {
   pl_store* store;
   int fd, writer_fd, commit_fd;
-  bool readonly, poisoned, reserved;
+  bool readonly, poisoned, reserved, legacy_slot;
   uint64_t mapped, sealed, next;
   native_super committed, work;
   native_work_node* nodes;
@@ -483,8 +485,8 @@ bool pl_native_seal(pl_store* s, char* err, size_t cap) {
   return true;
 }
 
-/* Build a pin in one extent. The map stores byte offsets for body nodes;
- * nested PINs must already be native, so this never traverses their bodies. */
+/* Store new nodes in one extent; keep earlier native raw nodes and PINs.
+ * The map stores byte offsets only for nodes not yet in the native arena. */
 typedef struct native_copy {
   pl_val key;
   uint64_t value;
@@ -496,6 +498,10 @@ static pl_val ntranslate(native_copy* map, pl_val v, uint64_t off) {
     pl_cell* p = pl_pin_resolved(pl_ptr(v));
     return pl_make(PL_TAG_PIN, p);
   }
+  /* Earlier native nodes keep their address and PLAN identity. */
+  if (pl_addr(v) >= PL_NATIVE_BASE + N_START &&
+      pl_addr(v) < PL_NATIVE_BASE + off)
+    return v;
   ptrdiff_t at = ax_hmgeti(map, v);
   ax_assume(at >= 0, "native body translation missing node");
   return pl_make(pl_tag(v), nptr(off + map[at].value));
@@ -535,6 +541,9 @@ bool pl_native_stage(pl_store* s, const uint8_t hash[32], pl_val body,
       }
       continue;
     }
+    if (pl_addr(v) >= PL_NATIVE_BASE + N_START &&
+        pl_addr(v) < PL_NATIVE_BASE + n->next)
+      continue;
     if (ax_hmgeti(map, v) >= 0)
       continue;
     pl_cell* p = pl_ptr(v);
@@ -623,8 +632,7 @@ static pl_cell* npin(uint64_t off, uint64_t end, uint64_t ids) {
       if (pl_tag(body) != PL_TAG_NAT && pl_tag(body) != PL_TAG_APP &&
           pl_tag(body) != PL_TAG_LAW)
         return NULL;
-      if (addr < PL_NATIVE_BASE + off + sizeof(*r) +
-                     (uint64_t)PL_PIN_CELLS(count) * 8 ||
+      if (addr < PL_NATIVE_BASE + N_START + sizeof(*r) ||
           addr > PL_NATIVE_BASE + off + r->len - 8)
         return NULL;
     }
@@ -633,10 +641,10 @@ static pl_cell* npin(uint64_t off, uint64_t end, uint64_t ids) {
 }
 static bool nsb_valid(native_store* n, native_super* sb, uint64_t file_size) {
   if (!nchecksum(n, sb, sizeof(*sb)) || sb->magic != N_MAGIC ||
-      sb->version != 1 || sb->layout != N_LAYOUT || sb->arch != N_ARCH ||
-      sb->endian != N_ENDIAN || sb->base != PL_NATIVE_BASE ||
-      sb->capacity != PL_NATIVE_BYTES || sb->end < N_START ||
-      sb->end > file_size || sb->end > PL_NATIVE_BYTES ||
+      sb->version != 1 || (sb->layout != 1 && sb->layout != N_LAYOUT) ||
+      sb->arch != N_ARCH || sb->endian != N_ENDIAN ||
+      sb->base != PL_NATIVE_BASE || sb->capacity != PL_NATIVE_BYTES ||
+      sb->end < N_START || sb->end > file_size || sb->end > PL_NATIVE_BYTES ||
       sb->end % PL_NATIVE_GRANULE != 0 || sb->next_id == 0 ||
       sb->next_id > N_SLOT_COUNT)
     return false;
@@ -727,7 +735,7 @@ bool pl_native_checkpoint(pl_store* s, const uint8_t hash[32], char* err,
       n->committed.root == 0 || memcmp(hash, n->committed.root_hash, 32) != 0;
   if (!changed && n->next == n->committed.end &&
       n->work.objects == n->committed.objects &&
-      n->work.cache == n->committed.cache)
+      n->work.cache == n->committed.cache && !n->legacy_slot)
     return true;
   native_super candidate = n->work;
   if (candidate.generation == UINT64_MAX)
@@ -736,6 +744,7 @@ bool pl_native_checkpoint(pl_store* s, const uint8_t hash[32], char* err,
       !nemit(n, n->work.cache, 0, &candidate.cache, err, cap))
     return false;
   candidate.generation++;
+  candidate.layout = N_LAYOUT;
   candidate.root = root;
   memcpy(candidate.root_hash, hash, 32);
   if (changed) {
@@ -780,8 +789,15 @@ bool pl_native_checkpoint(pl_store* s, const uint8_t hash[32], char* err,
                 slot * PL_NATIVE_GRANULE) &&
          npoint(n, "after_superblock", err, cap) && nsync(n->fd) &&
          npoint(n, "after_superblock_sync", err, cap);
+    /* A layout-1 reader must not silently select the older superblock after
+     * an acknowledged upgrade. Publish the same durable root in both slots. */
+    if (ok && n->legacy_slot)
+      ok = nwrite(n->fd, &candidate, sizeof(candidate),
+                  n->slot * PL_NATIVE_GRANULE) &&
+           nsync(n->fd);
     if (ok) {
       n->slot = slot;
+      n->legacy_slot = false;
       n->committed = n->work = candidate;
       ax_arrfree(n->nodes);
       n->nodes = NULL;
@@ -985,6 +1001,7 @@ static pl_store* nopen(const char* path, bool readonly, char* err, size_t cap) {
     }
     n->slot = vb && (!va || b.generation > a.generation) ? 1u : 0u;
     n->committed = n->slot ? b : a;
+    n->legacy_slot = (va && a.layout == 1) || (vb && b.layout == 1);
   }
   n->work = n->committed;
   n->next = n->sealed = n->committed.end;
@@ -1180,12 +1197,82 @@ typedef struct native_boundary {
   pl_val key;
   uint64_t value;
 } native_boundary;
+/* Full scrub indexes object ranges, not every historical node. Cross-extent
+ * edges must name an exact normal-node boundary in an earlier indexed object.
+ * Memoize only the boundaries actually referenced across extents. */
+typedef struct native_extent {
+  uint64_t off, first, end;
+} native_extent;
+typedef struct native_verify {
+  native_extent* extents;
+  native_boundary* shared;
+} native_verify;
+static bool nverify_extent(native_store* n, const native_index* leaf, void* ctx,
+                           char* err, size_t cap) {
+  native_verify* v = ctx;
+  pl_cell* pin = npin(leaf->value, n->committed.end, n->committed.next_id);
+  if (pin == NULL)
+    return nerror(err, cap, "invalid indexed native extent");
+  native_record* r = nptr(leaf->value);
+  native_extent extent = {leaf->value,
+                          leaf->value + sizeof(*r) +
+                              (uint64_t)pl_hdr_cells(pin[0]) * 8,
+                          leaf->value + r->len};
+  ax_arrpush(v->extents, extent);
+  return true;
+}
+static int nextent_order(const void* a, const void* b) {
+  uint64_t x = ((const native_extent*)a)->off;
+  uint64_t y = ((const native_extent*)b)->off;
+  return (x > y) - (x < y);
+}
+static bool nshared_edge(native_verify* v, pl_val value, uint64_t owner) {
+  uint64_t addr = pl_addr(value);
+  if (addr < PL_NATIVE_BASE + N_START || addr >= PL_NATIVE_BASE + owner ||
+      (addr & 7) != 0)
+    return false;
+  uint64_t target = addr - PL_NATIVE_BASE;
+  ptrdiff_t cached = ax_hmgeti(v->shared, value);
+  if (cached >= 0)
+    return v->shared[cached].value < owner;
+  size_t lo = 0, hi = (size_t)ax_arrlen(v->extents);
+  while (lo < hi) {
+    size_t mid = lo + (hi - lo) / 2;
+    if (v->extents[mid].off <= target)
+      lo = mid + 1;
+    else
+      hi = mid;
+  }
+  if (lo == 0)
+    return false;
+  native_extent* e = &v->extents[lo - 1];
+  if (e->off >= owner || target < e->first || target >= e->end)
+    return false;
+  uint64_t at = e->first;
+  while (at <= target) {
+    pl_cell* p = nptr(at);
+    uint32_t cells = pl_hdr_cells(p[0]);
+    pl_kind kind = pl_hdr_kind(p[0]);
+    if (cells == 0 || (uint64_t)cells * 8 > e->end - at ||
+        pl_hdr_flags(p[0]) != PL_F_NORMAL ||
+        (kind != PL_K_NAT && kind != PL_K_LAW && kind != PL_K_APP))
+      return false;
+    if (at == target) {
+      if (pl_tag(value) != pl_tag_for_kind(kind))
+        return false;
+      ax_hmput(v->shared, value, e->off);
+      return true;
+    }
+    at += (uint64_t)cells * 8;
+  }
+  return false;
+}
 static bool nedge(native_store* n, pl_val v, uint64_t owner,
-                  native_boundary* nodes) {
+                  native_boundary* nodes, native_verify* verify) {
   if (pl_is_nat63(v))
     return true;
   if (pl_tag(v) != PL_TAG_PIN)
-    return ax_hmgeti(nodes, v) >= 0;
+    return ax_hmgeti(nodes, v) >= 0 || nshared_edge(verify, v, owner);
   uintptr_t addr = pl_addr(v);
   if (addr < PL_NATIVE_BASE + N_START + sizeof(native_record))
     return false;
@@ -1201,7 +1288,7 @@ static bool nedge(native_store* n, pl_val v, uint64_t owner,
 }
 static bool nverify_object(native_store* n, const native_index* leaf, void* ctx,
                            char* err, size_t cap) {
-  (void)ctx;
+  native_verify* verify = ctx;
   uint64_t indexed;
   if (!nlookup(n, n->committed.objects, leaf->key, n->committed.end, &indexed,
                err, cap) ||
@@ -1232,11 +1319,11 @@ static bool nverify_object(native_store* n, const native_index* leaf, void* ctx,
     ax_hmput(nodes, pl_make(pl_tag_for_kind(kind), p), 0);
     at += (uint64_t)cells * 8;
   }
-  if (!nedge(n, pin[5], leaf->value, nodes))
+  if (!nedge(n, pin[5], leaf->value, nodes, verify))
     goto bad;
   for (uint32_t i = 0; i < pl_pin_npins(pin); i++)
     if (pl_tag(pin[7 + i]) != PL_TAG_PIN ||
-        !nedge(n, pin[7 + i], leaf->value, nodes))
+        !nedge(n, pin[7 + i], leaf->value, nodes, verify))
       goto bad;
   for (ptrdiff_t i = 0; i < ax_hmlen(nodes); i++) {
     pl_cell* p = pl_ptr(nodes[i].key);
@@ -1244,7 +1331,7 @@ static bool nverify_object(native_store* n, const native_index* leaf, void* ctx,
       continue;
     unsigned start = pl_tag(nodes[i].key) == PL_TAG_LAW ? 2 : 1;
     for (uint32_t j = start; j < pl_hdr_cells(p[0]); j++)
-      if (!nedge(n, p[j], leaf->value, nodes))
+      if (!nedge(n, p[j], leaf->value, nodes, verify))
         goto bad;
   }
   /* Iterative DFS rejects local cycles before the canonical encoder runs. */
@@ -1275,6 +1362,9 @@ static bool nverify_object(native_store* n, const native_index* leaf, void* ctx,
       if (pl_is_nat63(child) || pl_tag(child) == PL_TAG_PIN)
         continue;
       ptrdiff_t child_at = ax_hmgeti(nodes, child);
+      /* Cross-extent edges are strictly backward, hence cannot make cycles. */
+      if (child_at < 0)
+        continue;
       if (nodes[child_at].value == 1) {
         ax_arrfree(stack);
         goto bad;
@@ -1302,9 +1392,11 @@ static bool nverify_object(native_store* n, const native_index* leaf, void* ctx,
         uint64_t off = pl_addr(head) - PL_NATIVE_BASE - sizeof(native_record);
         native_record* record = nptr(off);
         uint64_t addr = pl_addr(body);
-        if (addr < pl_addr(head) + (uint64_t)pl_hdr_cells(dep[0]) * 8 ||
-            addr > PL_NATIVE_BASE + off + record->len - PL_LAW_CELLS * 8 ||
-            (addr & 7) != 0)
+        bool local =
+            addr >= pl_addr(head) + (uint64_t)pl_hdr_cells(dep[0]) * 8 &&
+            addr <= PL_NATIVE_BASE + off + record->len - PL_LAW_CELLS * 8 &&
+            (addr & 7) == 0;
+        if (!local && !nshared_edge(verify, body, off))
           goto bad;
         pl_cell* law = pl_ptr(body);
         if (pl_hdr_kind(law[0]) != PL_K_LAW ||
@@ -1321,11 +1413,6 @@ static bool nverify_object(native_store* n, const native_index* leaf, void* ctx,
     if (need != pl_hdr_meta(app[0]))
       goto bad;
   }
-  uint8_t hash[32];
-  if (!pl_silo_hash(pin[5], pl_pin_subpins(pin), pl_pin_npins(pin), hash, err,
-                    cap) ||
-      memcmp(hash, leaf->key, 32) != 0)
-    goto bad;
   ok = true;
   goto done;
 bad:
@@ -1334,6 +1421,20 @@ bad:
 done:
   ax_hmfree(nodes);
   return ok;
+}
+/* Validate every edge in the image before hashing through borrowed raw
+ * subgraphs. Index traversal is by hash, not by dependency order. */
+static bool nverify_hash(native_store* n, const native_index* leaf, void* ctx,
+                         char* err, size_t cap) {
+  (void)ctx;
+  pl_cell* pin = npin(leaf->value, n->committed.end, n->committed.next_id);
+  uint8_t hash[32];
+  return (pin != NULL &&
+          pl_silo_hash(pin[5], pl_pin_subpins(pin), pl_pin_npins(pin), hash,
+                       err, cap) &&
+          memcmp(hash, leaf->key, 32) == 0) ||
+         nerror(err, cap, "invalid native object hash at offset %" PRIu64,
+                leaf->value);
 }
 static bool nverify_cache(native_store* n, const native_index* leaf, void* ctx,
                           char* err, size_t cap) {
@@ -1406,11 +1507,20 @@ bool pl_store_verify(pl_store* s, char* err, size_t cap) {
     return nerror(err, cap, "verification requires a native store");
   pl_store_save_lock(s);
   native_store* n = s->be.ctx;
+  native_verify verify = {0};
   bool ok = nrefresh(n, err, cap) && nscrub_records(n, err, cap) &&
-            nwalk(n, n->committed.objects, n->committed.end, 0, nverify_object,
-                  NULL, err, cap) &&
-            nwalk(n, n->committed.cache, n->committed.end, 0, nverify_cache,
-                  NULL, err, cap);
+            nwalk(n, n->committed.objects, n->committed.end, 0, nverify_extent,
+                  &verify, err, cap);
+  if (ok)
+    qsort(verify.extents, (size_t)ax_arrlen(verify.extents),
+          sizeof(native_extent), nextent_order);
+  ok = ok &&
+       nwalk(n, n->committed.objects, n->committed.end, 0, nverify_object,
+             &verify, err, cap) &&
+       nwalk(n, n->committed.objects, n->committed.end, 0, nverify_hash, NULL,
+             err, cap) &&
+       nwalk(n, n->committed.cache, n->committed.end, 0, nverify_cache, NULL,
+             err, cap);
   uint64_t off = n->committed.journal, seq = n->committed.sequence;
   uint64_t later_end = n->committed.end;
   while (ok && off != 0) {
@@ -1434,6 +1544,8 @@ bool pl_store_verify(pl_store* s, char* err, size_t cap) {
     seq--;
   }
   ok = ok && seq == 0;
+  ax_arrfree(verify.extents);
+  ax_hmfree(verify.shared);
   pl_store_save_unlock(s);
   return ok || nerror(err, cap, "native verification failed");
 }

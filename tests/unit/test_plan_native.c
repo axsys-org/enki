@@ -190,6 +190,153 @@ TEST(native, same_root_checkpoints_staging_and_close_discards_ice) {
   ASSERT_FALSE(pl_native_load(rt.store, c, &found, err, sizeof(err)));
   ASSERT_EQ(pl_pin_body(pl_ptr(found)), 20);
 }
+TEST(native, checkpoints_share_unpinned_native_nodes_and_keep_history) {
+  size_t count = 1024 * 1024;
+  uint8_t* data = malloc(count);
+  ASSERT_NOT_NULL(data);
+  memset(data, 0xa7, count);
+  pl_vpush(rt.t, pl_nat_from_bytes(rt.t, data, count));
+  free(data);
+  pl_val fields[2] = {0, test_app1(rt.t, 0, rt.t->vstack[0])};
+  pl_vpush(rt.t, pl_pin(rt.t, test_app(rt.t, 0, 2, fields)));
+  uint8_t hashes[21][32], expected[32];
+  char err[256], path[256];
+  ASSERT(pl_store_save_root(rt.store, rt.t->vstack[1], hashes[0], err,
+                            sizeof(err)),
+         "%s", err);
+  pl_val first = pl_store_load(rt.t, hashes[0]);
+  pl_val shared = pl_app_args(pl_ptr(pl_pin_body(pl_ptr(first))))[1];
+  rt.t->vsp = 0;
+  snprintf(path, sizeof(path), "%s/arena.dat", native_dir);
+  struct stat before, after;
+  ASSERT_EQ(stat(path, &before), 0);
+  for (unsigned i = 1; i <= 20; i++) {
+    pl_val next[2] = {i, shared};
+    pl_vpush(rt.t, pl_pin(rt.t, test_app(rt.t, 0, 2, next)));
+    ASSERT(pl_store_save_root(rt.store, rt.t->vstack[0], hashes[i], err,
+                              sizeof(err)),
+           "%s", err);
+    pl_val root = pl_store_load(rt.t, hashes[i]);
+    ASSERT_EQ(pl_app_args(pl_ptr(pl_pin_body(pl_ptr(root))))[1], shared);
+    rt.t->vsp = 0;
+  }
+  ASSERT_EQ(stat(path, &after), 0);
+  ASSERT_LT((uint64_t)(after.st_size - before.st_size), 2 * 1024 * 1024);
+  /* Pin an existing raw child, not previously a PIN body. Its whole body
+   * is borrowed from an earlier extent without changing its content hash. */
+  ASSERT(pl_silo_hash(shared, NULL, 0, expected, err, sizeof(err)), "%s", err);
+  pl_vpush(rt.t, pl_pin(rt.t, shared));
+  uint8_t raw_hash[32];
+  ASSERT(
+      pl_store_save_root(rt.store, rt.t->vstack[0], raw_hash, err, sizeof(err)),
+      "%s", err);
+  ASSERT_MEM_EQ(raw_hash, expected, 32);
+  ASSERT_EQ(pl_pin_body(pl_ptr(pl_store_load(rt.t, raw_hash))), shared);
+  ASSERT(pl_store_verify(rt.store, err, sizeof(err)), "%s", err);
+  close_rt();
+  reopen_rt();
+  ASSERT_EQ(pl_pin_body(pl_ptr(pl_store_load(rt.t, raw_hash))), shared);
+  for (unsigned i = 0; i <= 20; i++) {
+    pl_val body = pl_pin_body(pl_ptr(pl_store_load(rt.t, hashes[i])));
+    ASSERT_EQ(pl_app_args(pl_ptr(body))[0], i);
+    ASSERT_EQ(pl_app_args(pl_ptr(body))[1], shared);
+    pl_val payload = pl_app_args(pl_ptr(shared))[0];
+    ASSERT_EQ(pl_nat_byte_len(payload), count);
+    ASSERT_EQ(pl_nat_byte_at(payload, count - 1), 0xa7);
+  }
+  ASSERT(pl_store_verify(rt.store, err, sizeof(err)), "%s", err);
+}
+TEST(native, shared_edges_require_real_earlier_node_boundaries) {
+  uint8_t data[128] = {0};
+  /* Place a plausible APP header inside NAT payload. It is not a node. */
+  uint64_t fake[3] = {pl_hdr_make(PL_K_APP, PL_F_NORMAL, 0, 3), 0, 99};
+  memcpy(data + 8, fake, sizeof(fake));
+  data[sizeof(data) - 1] = 1;
+  pl_vpush(rt.t, pl_pin(rt.t, pl_nat_from_bytes(rt.t, data, sizeof(data))));
+  uint8_t hash[32];
+  char err[256], path[256];
+  ASSERT(pl_store_save_root(rt.store, rt.t->vstack[0], hash, err, sizeof(err)),
+         "%s", err);
+  pl_val prior = pl_pin_body(pl_ptr(pl_store_load(rt.t, hash)));
+  pl_vpush(rt.t, pl_pin(rt.t, test_app1(rt.t, 0, prior)));
+  ASSERT(pl_store_save_root(rt.store, rt.t->vstack[1], hash, err, sizeof(err)),
+         "%s", err);
+  pl_val root = pl_store_load(rt.t, hash);
+  uint64_t off = pl_addr(root) - PL_NATIVE_BASE - 48;
+  uint64_t app_offset =
+      pl_addr(pl_pin_body(pl_ptr(root))) - PL_NATIVE_BASE - off;
+  pl_val forged = pl_make(PL_TAG_APP, (void*)(uintptr_t)(pl_addr(prior) + 16));
+  close_rt();
+  snprintf(path, sizeof(path), "%s/arena.dat", native_dir);
+  int fd = open(path, O_RDWR);
+  ASSERT_GTE(fd, 0);
+  uint64_t len;
+  ASSERT_EQ(pread(fd, &len, 8, (off_t)(off + 32)), 8);
+  uint8_t* bytes = malloc((size_t)len);
+  ASSERT_NOT_NULL(bytes);
+  ASSERT_EQ(pread(fd, bytes, (size_t)len, (off_t)off), (ssize_t)len);
+  memcpy(bytes + app_offset + 16, &forged, 8);
+  ax_sha256(bytes + 32, (size_t)len - 32, bytes);
+  ASSERT_EQ(pwrite(fd, bytes, (size_t)len, (off_t)off), (ssize_t)len);
+  close(fd);
+  free(bytes);
+  reopen_rt();
+  ASSERT_FALSE(pl_store_verify(rt.store, err, sizeof(err)));
+}
+TEST(native, layout_one_upgrade_keeps_roots_and_retires_old_readers) {
+  uint8_t before[32], after[32];
+  (void)save_nat(42, before, true);
+  close_rt();
+  char path[256];
+  snprintf(path, sizeof(path), "%s/arena.dat", native_dir);
+  int fd = open(path, O_RDWR);
+  ASSERT_GTE(fd, 0);
+  /* The object and journal layout is unchanged. Emulate the old writer's
+   * superblocks, including valid checksums, before opening with layout 2. */
+  uint8_t sb[184];
+  for (unsigned i = 0; i < 2; i++) {
+    ASSERT_EQ(pread(fd, sb, sizeof(sb), (off_t)(i * PL_NATIVE_GRANULE)),
+              sizeof(sb));
+    uint64_t one = 1;
+    memcpy(sb + 48, &one, 8);
+    ax_sha256(sb + 32, sizeof(sb) - 32, sb);
+    ASSERT_EQ(pwrite(fd, sb, sizeof(sb), (off_t)(i * PL_NATIVE_GRANULE)),
+              sizeof(sb));
+  }
+  close(fd);
+  reopen_rt();
+  ASSERT_EQ(pl_pin_body(pl_ptr(pl_store_load(rt.t, before))), 42);
+  pl_native_set_fault(rt.store, fault_return, "after_superblock_sync");
+  pl_vpush(rt.t, pl_pin(rt.t, 43));
+  char err[256];
+  ASSERT_FALSE(
+      pl_store_save_root(rt.store, rt.t->vstack[0], after, err, sizeof(err)));
+  close_rt();
+  reopen_rt();
+  /* Reopening may observe the new root before an earlier layout-1 slot was
+   * retired. An unchanged-root retry must still complete that retirement. */
+  ASSERT(pl_store_get_root(rt.store, after));
+  pl_val retained = pl_store_load(rt.t, after);
+  ASSERT_EQ(pl_pin_body(pl_ptr(retained)), 43);
+  ASSERT(pl_store_save_root(rt.store, retained, NULL, err, sizeof(err)), "%s",
+         err);
+  ASSERT_EQ(pl_pin_body(pl_ptr(pl_store_load(rt.t, before))), 42);
+  ASSERT(pl_store_verify(rt.store, err, sizeof(err)), "%s", err);
+  close_rt();
+  fd = open(path, O_RDONLY);
+  ASSERT_GTE(fd, 0);
+  for (unsigned i = 0; i < 2; i++) {
+    ASSERT_EQ(pread(fd, sb, sizeof(sb), (off_t)(i * PL_NATIVE_GRANULE)),
+              sizeof(sb));
+    uint64_t layout;
+    memcpy(&layout, sb + 48, 8);
+    ASSERT_EQ(layout, 2);
+  }
+  close(fd);
+  reopen_rt();
+  ASSERT_EQ(pl_pin_body(pl_ptr(pl_store_load(rt.t, before))), 42);
+  ASSERT_EQ(pl_pin_body(pl_ptr(pl_store_load(rt.t, after))), 43);
+}
 TEST(native, nested_graph_sharing_hash_and_code_slots) {
   uint8_t child_hash[32];
   pl_val leaf = save_nat(73, child_hash, false);

@@ -269,9 +269,14 @@ as well as format/layout version, architecture, endian marker, base, and
 capacity. A different profile is incompatible, including the smaller Linux
 arm64 sanitizer profile.
 
-Each PIN record contains its canonical PIN and non-PIN body graph, preserving
-internal sharing. Nested PIN references point to earlier native records. Small
-records pack within granules; large records start on a granule boundary. PIN
+Native layout 2 preserves sharing between checkpoints as well as within a PIN
+body. New records may reference immutable non-PIN nodes in earlier committed
+extents; changed paths are copied while retained subgraphs remain shared. Those
+references are checked against committed object boundaries. Canonical hashes do
+not depend on the physical representation, and `Ice` returns the native graph
+so callers can retain it for later checkpoints. Nested PIN references also point
+to earlier native records. Small records pack within granules; large records
+start on a granule boundary. PIN
 cell 6 contains an immutable identifier. `pl_pin_code_slot` resolves that ID to
 an atomic slot in a separate, lazily backed anonymous mapping. Transient PINs
 keep their inline slot. Compiled code is attached on demand; replaced code
@@ -290,6 +295,12 @@ checkpoints staged objects/cache mappings without duplicating history. There
 is no GC, compaction, relocation, migration, or multi-store address allocation.
 Each Ice/Save boundary starts subsequent allocation on a fresh granule, so
 many tiny Ice operations have a measurable padding cost.
+
+A layout-2 writer can open layout-1 images. Before publishing cross-record body
+references it retires both layout-1 superblock slots, retaining the root and
+history; older readers then reject the format rather than interpreting those
+references incorrectly. This is a native image-format change, independent of
+application contract identity and mounted behavior publication.
 
 A writer holds `arena.writer.lock` for its lifetime. Readers acquire a separate
 `arena.commit.lock` while capturing a checkpoint and mapping extensions. They
@@ -328,7 +339,8 @@ full scrub.
 
 `tests/unit/test_plan_native.c` uses fresh exec'd subprocesses for reopen,
 writer exclusion, live inspectors, and crash injection. It also covers exact
-addresses/collisions, sharing, large extents, canonical hashes, capacity and
+addresses/collisions, cross-checkpoint body sharing, layout-1 upgrade and old-reader
+rejection, large extents, canonical hashes, capacity and
 profile rejection, staged writes, retry/poison behavior, code-slot concurrency,
 compiler replacement, and global-cache export/import. The private fault hook
 covers growth, object staging, data synchronization, and both sides of
