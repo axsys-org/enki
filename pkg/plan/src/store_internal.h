@@ -42,6 +42,9 @@ void pl_codecache_put(const uint8_t key[32], const uint8_t* b, size_t n);
 void pl_codecache_reset(void);
 
 pl_cell* pl_store_alloc(pl_store* s, size_t cells);
+pl_cell* pl_store_try_alloc(pl_store* s, size_t cells);
+/* Opaque allocation checkpoint. Hold store.mu from mark through commit or
+ * release; never retain a checkpoint across a gc2 collection. */
 size_t pl_store_mark(pl_store* s);
 void pl_store_release(pl_store* s, size_t mark);
 
@@ -97,6 +100,8 @@ bool pl_store_load_silo_stream(pl_thread* t, pl_store* s, const uint8_t* bytes,
                                size_t len, pl_val* out, char* err,
                                size_t err_cap);
 
+pl_val pl_store_try_mk_pin(pl_store* s, const uint8_t* hash, pl_val body,
+                           uint32_t npins, const pl_val* subpins);
 pl_val pl_store_mk_pin(pl_store* s, const uint8_t* hash, pl_val body,
                        uint32_t npins, const pl_val* subpins);
 

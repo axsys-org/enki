@@ -15,7 +15,7 @@
 #include "plan/value.h"
 
 typedef struct er_msg {
-  pl_val payload; /* nat63 or store-resident — terminal for every GC */
+  pl_val payload; /* nat63 or store-resident; strong GC2 root */
   struct er_msg* next;
   uint32_t ncaps;
   er_actor* caps[]; /* actor refs, translated at send */

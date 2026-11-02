@@ -142,8 +142,11 @@ er_drive_status er_mt_executor_drive(er_mt_executor* ex, er_actor* root);
  * and replayed injections have a narrower portable encoding: the payload must
  * be a nat63 or a persistently hashed canonical store PIN.  Unhashed PINs and
  * non-PIN store snapshots cannot be recorded or replayed.  Host threads may
- * inject concurrently with an active MT run/drive call.  With the
- * deterministic executor, inject only between run/drive calls.
+ * inject concurrently with an active MT run/drive call. The payload must
+ * remain rooted while entering the store's mutator scope; use a registered
+ * host root or an outer pl_store_mutator_enter/leave scope covering its
+ * creation and this injection. A raw C local is not a GC2 lifetime handle.
+ * With the deterministic executor, inject only between run/drive calls.
  */
 void er_scheduler_inject(er_scheduler* sys, er_actor* to, pl_val payload);
 

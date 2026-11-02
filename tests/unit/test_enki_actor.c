@@ -853,3 +853,43 @@ TEST(actor, halted_actor_releases_unreachable_scratch) {
   er_scheduler_free(sys);
   test_rt_free(&rt);
 }
+
+/* GC2 must see messages and suspended roots while different workers take
+ * turns requesting collections. Keep the allocation budget deliberately tiny.
+ */
+TEST(actor, gc2_collections_during_message_slices) {
+  for (unsigned mt = 0; mt < 2; mt++) {
+    test_rt rt = test_rt_new();
+    pl_store_gc_set_threshold(rt.store, 1);
+    er_scheduler* sys = er_scheduler_new(rt.store, (er_config){.quantum = 2});
+    enum { COUNT = 12 };
+    er_actor* actors[COUNT];
+    for (unsigned i = 0; i < COUNT; i++) {
+      er_actor* a = actors[i] = er_scheduler_actor(sys);
+      pl_thread* t = er_actor_thread(a);
+      size_t base = t->vsp;
+      pl_vpush(t, test_app1(t, 0, 100 + i));
+      pl_val sargs[] = {0, t->vstack[base]};
+      pl_vpush(t, code_effect(t, ax_s4('S', 'e', 'n', 'd'), 2, sargs));
+      pl_vpush(t, recv_code(t));
+      pl_val body = code_seq(t, t->vstack[base + 1], t->vstack[base + 2]);
+      t->vsp = base;
+      er_actor_start(a, actor_fn(t, body));
+    }
+    er_mt_executor* ex =
+        mt ? er_mt_executor_new(sys, (er_mt_config){.workers = 4}) : NULL;
+    ASSERT_EQ(mt ? er_mt_executor_run(ex) : er_scheduler_run(sys), ER_RUN_IDLE);
+    for (unsigned i = 0; i < COUNT; i++) {
+      ASSERT_EQ(er_actor_state(actors[i]), ER_ACTOR_HALTED);
+      pl_val payload = pl_app_args(pl_ptr(er_actor_result(actors[i])))[0];
+      ASSERT_EQ(pl_app_args(pl_ptr(payload))[0], 100 + i);
+    }
+    ASSERT(pl_store_gc_stats(rt.store).collections > 0);
+    er_mt_executor_free(ex);
+    er_scheduler_free(sys);
+    pl_store_gc_collect(rt.store);
+    pl_store_gc_wait(rt.store);
+    ASSERT_EQ(pl_store_gc_stats(rt.store).allocated_bytes, 0);
+    test_rt_free(&rt);
+  }
+}

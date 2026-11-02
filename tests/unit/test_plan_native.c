@@ -1151,3 +1151,26 @@ int main(int argc, char** argv) {
     return 99;
   return native_test_main(argc, argv);
 }
+
+TEST(native, gc2_preserves_native_terminals_and_code_side_roots) {
+  uint8_t hash[32];
+  pl_val native = save_nat(777, hash, true);
+  pl_cell* p = pl_store_alloc(rt.store, PL_APP_CELLS(1));
+  p[0] = pl_hdr_make(PL_K_APP, PL_F_NORMAL, 0, PL_APP_CELLS(1));
+  p[1] = 0;
+  p[2] = native;
+  pl_op_t ops[] = {OP_PUSH_LIT, pl_make(PL_TAG_APP, p), OP_RET};
+  pl_code code = {.ops = ops, .nops = 3};
+  pl_pin_set_code(pl_ptr(native), &code);
+  pl_store_gc_collect(rt.store);
+  pl_store_gc_wait(rt.store);
+  ASSERT_EQ(pl_store_gc_stats(rt.store).allocated_bytes, 32);
+  ASSERT_EQ(pl_pin_body(pl_ptr(pl_app_args(pl_ptr(ops[1]))[0])), 777);
+  pl_pin_set_code(pl_ptr(native), NULL);
+  pl_store_gc_collect(rt.store);
+  pl_store_gc_wait(rt.store);
+  ASSERT_EQ(pl_store_gc_stats(rt.store).allocated_bytes, 0);
+  ASSERT_EQ(pl_pin_body(pl_ptr(native)), 777);
+  char err[192];
+  ASSERT(pl_store_verify(rt.store, err, sizeof(err)), "%s", err);
+}

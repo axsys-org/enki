@@ -23,6 +23,107 @@ rooting violation into a deterministic failure:
 GC_STRESS=1 make BUILD_TYPE=debug BUILD_DIR=build/stress test
 ```
 
+## Shared heap (gc2)
+
+The non-moving store region is collected independently of actor-local Cheney
+heaps (gc1) and native persistence (gc3). `ax_buddy` manages power-of-two
+extents in the reserved address window. Small objects use size-class slabs
+backed by 64 KiB buddy blocks; objects larger than 4096 bytes receive their
+own buddy extent. Empty spans are discarded and coalesced. Live objects never
+move. Actor semispaces continue to use their existing mappings.
+
+GC2 marks while store mutators are stopped, removes dead weak index entries,
+then resumes execution and sweeps in a background thread. Allocators can help
+sweep when they need a span. Unswept spans are excluded from allocation lists;
+new allocations use fresh or already-swept spans and cannot be reclaimed by
+that cycle. The next mark waits for the previous sweep to complete. Slab
+metadata and buddy splitting/coalescing are serialized by the GC2 mutex.
+
+Roots include every registered gc1 heap's root sources, actor mailboxes,
+registered host root sources, runtime singletons, and code dependencies. The
+marker walks only *reachable* gc1 objects, so garbage in an actor heap does
+not retain store objects. Shared graphs must remain closed over gc2/gc3.
+A resolved proxy contributes its canonical target, not its obsolete body.
+Interned PINs, the canonical-PIN list, and code-target indexes are weak and
+are pruned before execution resumes. The operation identity cache is cleared
+to prevent hits on reused addresses.
+
+Native images are gc2 terminals. Their process-local code slots are traced
+separately. Existing retained code generations and law-block tables still
+have store lifetime, and their literal graphs remain strong roots. GC2 does
+not collect code generations, compact live spans, or reclaim persistent data.
+
+Actor executors check allocation pressure between slices. The default budget
+is the larger of 64 MiB and the previous gc2 live size. Embedders can set the
+allocation floor with `pl_store_gc_set_threshold`; zero disables automatic
+requests. `pl_store_gc_request` requests a cycle, `pl_store_gc_poll` attempts
+one at a safe boundary, and `pl_store_gc_collect` waits for a mark handshake.
+`pl_store_gc_wait` waits for sweeping; `pl_store_gc_stats` reports allocated,
+marked-live and span bytes, collections, and reclaimed bytes. Allocations
+never initiate a collection themselves. Exhaustion in an infallible builder
+aborts; decoders use the fallible allocation path and roll back unpublished
+objects. Allocation checkpoints are opaque tokens, not byte offsets, and
+require `store.mu` across the whole transaction.
+
+A host sharing a store with active executors must use
+`pl_store_mutator_enter` / `pl_store_mutator_leave` around the entire operation,
+including object construction, reads, and root publication. These scopes nest.
+A value needed after leaving must be in a registered heap root or a source
+registered with `pl_store_gc_add_roots`. Entering a scope does not make an
+otherwise unrooted value safe while waiting for entry. Root callbacks must
+not allocate or acquire a mutator scope. Heap/root registration and teardown
+also need a scope when collections may run concurrently. Do not hold a scope
+across an executor run/drive or a call to collect/poll.
+
+Potentially blocking host effects call `pl_store_mutator_blocking` before the
+operation; this defers GC until the outer scope exits. A collector that was
+already waiting reopens the mutator gate, allowing another actor to complete
+the blocked operation. This avoids freezing a producer behind a blocked
+consumer. It also means long-running foreign calls can delay collection and
+increase memory use. The actor effect hook and HTTP/service paths supply this
+annotation; custom host integrations must do the same. Long pure C operations
+finish before their scope can acknowledge a collection. This first version
+does not promise bounded pauses or collection during indefinitely blocked I/O.
+
+The allocator and collector tests live in `test_buddy`, `test_plan_gc2`,
+`test_enki_actor`, and `test_plan_native`. They cover coalescing, cyclic shared
+graphs, gc1-to-gc2 reachability, weak interning/reload, proxy resolution,
+mailboxes, code literals, rollback, native code side roots, mutator handoff,
+blocking-effect deferral, and allocation during concurrent sweeping.
+
+GC2 microbenchmarks measured on macOS arm64 with Clang 22.1.1, release
+`-O3 -flto`, without SLJIT, on 2026-11-02 compare the working tree with the
+arena at commit `8961a1d`. Seven measured processes per case alternated the
+two builds after one warmup. One million 24-byte APP objects took 7.63 ms
+to allocate in the arena and 13.00 ms in GC2 (10% live case, 1.70x).
+
+| Live objects after 1M allocations | STW collection call | Through sweep completion | GC2 occupied slots | GC2 backing slabs |
+| --- | ---: | ---: | ---: | ---: |
+| 0% | 0.395 ms | 2.996 ms | 0 MB | 0 MB |
+| 10% | 3.200 ms | 4.801 ms | 3.2 MB | 32.05 MB |
+| 100% | 5.494 ms | 5.873 ms | 32 MB | 32.05 MB |
+
+The collector had no active mutators to wait for; these are uncontended
+collection costs, not loaded actor pause bounds. Survivors form a linked
+chain, with live nodes selected by `i % 100 < live_percent`. The scattered
+10% survivors keep every slab occupied. Slab/slot bytes exclude allocator
+metadata and are not process RSS; MB here means decimal megabytes.
+
+Ten rounds of 200,000 allocations, retaining only the current round's 10%
+live chain and collecting each round, took 15.67 ms with the arena versus
+29.61 ms with GC2 including completion of all sweeps. At the end the arena
+retained 48 MB; GC2 held 0.64 MB of live slots in 7.08 MB of backing slabs.
+The existing `bench_build` evaluator comparison was bimodal for the baseline
+(16.94–26.01 ms versus GC2's 16.78–18.73 ms); do not infer an evaluator or
+actor-throughput speedup from this experiment.
+
+Reproduce using `make BUILD_TYPE=release perf-binaries`, then
+`build/release/tests/perf/bench_gc2 1000000 10` or
+`build/release/tests/perf/bench_gc2 200000 10 10`. Copy that source into the
+baseline checkout and compile with `CFLAGS=-DBENCH_GC2_BASELINE` for the arena
+comparison. Startup, teardown, and checksum traversal are outside timings.
+Raw samples and methodology are in `tests/perf/gc2-results.json`.
+
 ## Quickstart
 
 Enter the reproducible shell:

@@ -121,9 +121,10 @@ int main(int argc, char** argv) {
         "check=%llu\n",
         argv[1], n, (unsigned long long)pl_addr(pin), opened - start,
         loaded - before, first - start, sparse - first,
-        100000000.0 / (eval_end - eval_start), pl_store_mark(s),
-        ax_arrlen(s->pins), (unsigned long long)anonymous_rss(),
-        (unsigned long long)rss, (unsigned long long)sum);
+        100000000.0 / (eval_end - eval_start),
+        pl_store_gc_stats(s).allocated_bytes, ax_arrlen(s->pins),
+        (unsigned long long)anonymous_rss(), (unsigned long long)rss,
+        (unsigned long long)sum);
     if (native && ax_arrlen(s->pins) != 1)
       abort();
   }

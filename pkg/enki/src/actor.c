@@ -59,6 +59,17 @@ static _Thread_local er_mt_worker* er_current_worker;
 
 /* ── Construction ──────────────────────────────────────────────────────── */
 
+/* Mailboxes outlive actor slices and are strong GC2 roots. The collector
+ * calls this only after all store mutator scopes have drained. */
+static void er_gc2_roots(pl_root_visit visit, void* ctx, void* source) {
+  er_scheduler* sys = source;
+  pthread_mutex_lock(&sys->mu);
+  for (er_actor* a = sys->all_head; a; a = a->all_next)
+    for (er_msg* m = a->mbox_head; m; m = m->next)
+      visit(&m->payload, ctx);
+  pthread_mutex_unlock(&sys->mu);
+}
+
 er_scheduler* er_scheduler_new(pl_store* store, er_config cfg) {
   ax_assume(store != NULL, "er_scheduler_new: store required");
   er_scheduler* sys = calloc(1, sizeof(*sys));
@@ -91,6 +102,7 @@ er_scheduler* er_scheduler_new(pl_store* store, er_config cfg) {
   ax_assume(sys->cfg.quantum >= 2, "er_scheduler_new: quantum must be >= 2");
   ax_assume(sys->cfg.root_quantum >= 2,
             "er_scheduler_new: root quantum must be >= 2");
+  pl_store_gc_add_roots(store, er_gc2_roots, sys);
   return sys;
 }
 
@@ -137,6 +149,8 @@ void er_scheduler_free(er_scheduler* sys) {
     return;
   ax_assume(sys->mt == NULL,
             "er_scheduler_free: free the MT executor before the scheduler");
+  pl_store_mutator_enter(sys->store);
+  pl_store_gc_del_roots(sys->store, er_gc2_roots, sys);
   er_http_teardown(sys); /* before the actors: transfers reference them */
   for (er_actor* a = sys->all_head; a != NULL;) {
     er_actor* next = a->all_next;
@@ -157,6 +171,7 @@ void er_scheduler_free(er_scheduler* sys) {
   }
   pthread_cond_destroy(&sys->cv);
   pthread_mutex_destroy(&sys->mu);
+  pl_store_mutator_leave(sys->store);
   free(sys);
 }
 
@@ -474,6 +489,7 @@ static int64_t er_load_caps(er_actor* a, size_t capslot, er_actor*** out) {
  * the actor already owns this worker; drop the global mutex around that work
  * so the replacement pool can keep scheduling unrelated actors. */
 static void er_service_unlock(er_scheduler* sys, bool locked) {
+  pl_store_mutator_blocking(sys->store);
   if (!locked)
     return;
   if (er_current_worker != NULL) {
@@ -744,15 +760,22 @@ static void er_step(er_scheduler* sys, er_actor* a, pl_run_status s,
 er_run_reason er_scheduler_run(er_scheduler* sys) {
   ax_assume(sys->mt == NULL,
             "er_scheduler_run: MT executor is attached; use it or free it");
+  pl_store_mutator_enter(sys->store);
   for (;;) {
+    pl_store_mutator_leave(sys->store);
+    (void)pl_store_gc_poll(sys->store);
+    pl_store_mutator_enter(sys->store);
     er_http_pump(sys);
     er_actor* a = er_dequeue(sys);
     if (a == NULL) {
       if (er_http_idle(sys))
         continue; /* an http completion made someone runnable */
       for (er_actor* it = sys->all_head; it != NULL; it = it->all_next)
-        if (it->status == ER_ACTOR_BLOCKED)
+        if (it->status == ER_ACTOR_BLOCKED) {
+          pl_store_mutator_leave(sys->store);
           return ER_RUN_QUIESCENT;
+        }
+      pl_store_mutator_leave(sys->store);
       return ER_RUN_IDLE;
     }
     ax_assume(!a->adopted,
@@ -843,6 +866,7 @@ static void er_mt_bind_locked(er_mt_worker* w, er_actor* a) {
  * A spawned actor permanently claims its current worker before a direct
  * handler can enter a blocking syscall.  The root already owns its caller. */
 static void er_actor_rplan_effect(pl_thread* t) {
+  pl_store_mutator_blocking(pl_heap_store(t->heap));
   er_actor* a = t->host;
   if (a == NULL)
     return;
@@ -923,17 +947,27 @@ static void* er_mt_worker_main(void* arg) {
       a = ex->root == NULL ? er_dequeue(sys) : er_dequeue_spawned(sys);
       if (a == NULL) {
         ex->busy_workers++;
-        w->holds_mu = false; /* er_http_mt_pump drops and reacquires mu */
+        w->holds_mu = false;
+        pthread_mutex_unlock(&sys->mu);
+        pl_store_mutator_enter(sys->store);
+        pthread_mutex_lock(&sys->mu);
         bool pumped = er_http_mt_pump(sys);
+        pthread_mutex_unlock(&sys->mu);
+        pl_store_mutator_leave(sys->store);
+        (void)pl_store_gc_poll(sys->store);
+        pthread_mutex_lock(&sys->mu);
         w->holds_mu = true;
         ex->busy_workers--;
+        /* We dropped mu even when no pump ran. The controller may have
+         * observed busy_workers, or work may have arrived in that interval. */
+        er_mt_notify_controller_locked(ex);
         if (pumped) {
           er_mt_maybe_complete_locked(ex);
           er_mt_notify_controller_locked(ex);
           continue;
         }
         er_mt_maybe_complete_locked(ex);
-        if (ex->running)
+        if (ex->running && sys->qhead == NULL)
           pthread_cond_wait(&sys->cv, &sys->mu);
         continue;
       }
@@ -947,10 +981,17 @@ static void* er_mt_worker_main(void* arg) {
     ex->busy_workers++;
     w->holds_mu = false;
     pthread_mutex_unlock(&sys->mu);
+    pl_store_mutator_enter(sys->store);
     pl_run_status s = pl_thread_run(a->t, sys->cfg.quantum);
     pthread_mutex_lock(&sys->mu);
     w->holds_mu = true;
     er_step(sys, a, s, true);
+    w->holds_mu = false;
+    pthread_mutex_unlock(&sys->mu);
+    pl_store_mutator_leave(sys->store);
+    (void)pl_store_gc_poll(sys->store);
+    pthread_mutex_lock(&sys->mu);
+    w->holds_mu = true;
     ex->busy_workers--;
     if (w->role == ER_MT_BOUND && w->actor == a &&
         (a->status == ER_ACTOR_HALTED || a->status == ER_ACTOR_CRASHED))
@@ -1073,7 +1114,11 @@ er_drive_status er_scheduler_drive(er_scheduler* sys, er_actor* root) {
             "er_scheduler_drive: MT executor is attached; use it or free it");
   root->status = ER_ACTOR_RUNNABLE;
   er_enqueue(root);
+  pl_store_mutator_enter(sys->store);
   for (;;) {
+    pl_store_mutator_leave(sys->store);
+    (void)pl_store_gc_poll(sys->store);
+    pl_store_mutator_enter(sys->store);
     er_http_pump(sys);
     er_actor* a = er_dequeue(sys);
     if (a == NULL) {
@@ -1081,6 +1126,7 @@ er_drive_status er_scheduler_drive(er_scheduler* sys, er_actor* root) {
         continue; /* an http completion made someone runnable */
       /* root is parked on Recv and nothing runnable can ever wake it */
       er_root_unwind(root);
+      pl_store_mutator_leave(sys->store);
       return ER_DRIVE_DEADLOCK;
     }
     if (a != root) {
@@ -1092,14 +1138,17 @@ er_drive_status er_scheduler_drive(er_scheduler* sys, er_actor* root) {
       er_enqueue(a);
       break;
     case PL_RUN_DONE:
+      pl_store_mutator_leave(sys->store);
       return ER_DRIVE_DONE; /* leftover actors stay parked/queued */
     case PL_RUN_EXN:
+      pl_store_mutator_leave(sys->store);
       return ER_DRIVE_EXN; /* pl_thread_run unwound to the watermarks */
     case PL_RUN_BLOCKED:
       er_service(sys, a, false);
       if (a->status == ER_ACTOR_CRASHED) {
         er_root_unwind(root); /* the embedder owns its fate */
-        return ER_DRIVE_EXN;  /* exn slots set by the service */
+        pl_store_mutator_leave(sys->store);
+        return ER_DRIVE_EXN; /* exn slots set by the service */
       }
       break;
     }
@@ -1117,6 +1166,7 @@ er_drive_status er_mt_executor_drive(er_mt_executor* ex, er_actor* root) {
             "executor");
 
   er_drive_status out = ER_DRIVE_DEADLOCK;
+  bool gc2_active = false;
   pthread_mutex_lock(&sys->mu);
   ax_assume(!ex->entered && !ex->running,
             "er_mt_executor_drive: executor already running");
@@ -1129,6 +1179,9 @@ er_drive_status er_mt_executor_drive(er_mt_executor* ex, er_actor* root) {
   for (;;) {
     if (root->status == ER_ACTOR_RUNNABLE) {
       pthread_mutex_unlock(&sys->mu);
+      (void)pl_store_gc_poll(sys->store);
+      pl_store_mutator_enter(sys->store);
+      gc2_active = true;
       pl_run_status s = pl_thread_run(root->t, sys->cfg.root_quantum);
       pthread_mutex_lock(&sys->mu);
       switch (s) {
@@ -1150,11 +1203,19 @@ er_drive_status er_mt_executor_drive(er_mt_executor* ex, er_actor* root) {
         }
         break;
       }
+      pthread_mutex_unlock(&sys->mu);
+      pl_store_mutator_leave(sys->store);
+      gc2_active = false;
+      pthread_mutex_lock(&sys->mu);
       continue;
     }
 
     if (root->status == ER_ACTOR_BLOCKED && ex->busy_workers == 0 &&
         !er_mt_has_runnable_spawned_locked(ex) && !er_http_outstanding(sys)) {
+      pthread_mutex_unlock(&sys->mu);
+      pl_store_mutator_enter(sys->store);
+      gc2_active = true;
+      pthread_mutex_lock(&sys->mu);
       er_root_unwind(root);
       out = ER_DRIVE_DEADLOCK;
       goto done;
@@ -1164,6 +1225,11 @@ er_drive_status er_mt_executor_drive(er_mt_executor* ex, er_actor* root) {
   }
 
 done:
+  if (gc2_active) {
+    pthread_mutex_unlock(&sys->mu);
+    pl_store_mutator_leave(sys->store);
+    pthread_mutex_lock(&sys->mu);
+  }
   ex->running = false;
   er_mt_wake_all_locked(ex);
   while (ex->busy_workers != 0 || sys->http_pumping)
@@ -1424,6 +1490,7 @@ static uint64_t er_inject_encode(pl_val payload, uint8_t buf[33]) {
 }
 
 void er_scheduler_inject(er_scheduler* sys, er_actor* to, pl_val payload) {
+  pl_store_mutator_enter(sys->store);
   ax_assume(to != NULL && to->sys == sys,
             "er_scheduler_inject: actor belongs to another scheduler");
   ax_assume(pl_is_nat63(payload) || pl_store_owns(sys->store, payload),
@@ -1431,6 +1498,7 @@ void er_scheduler_inject(er_scheduler* sys, er_actor* to, pl_val payload) {
   pthread_mutex_lock(&sys->mu);
   if (to->status == ER_ACTOR_HALTED || to->status == ER_ACTOR_CRASHED) {
     pthread_mutex_unlock(&sys->mu);
+    pl_store_mutator_leave(sys->store);
     return; /* a Chan nobody reads (reaver: send succeeds silently) */
   }
   if (sys->mode == ER_MODE_RECORD) {
@@ -1451,6 +1519,7 @@ void er_scheduler_inject(er_scheduler* sys, er_actor* to, pl_val payload) {
   }
   er_deliver(to, payload, 0, NULL);
   pthread_mutex_unlock(&sys->mu);
+  pl_store_mutator_leave(sys->store);
 }
 
 /* ── Log file round trip ───────────────────────────────────────────────── */

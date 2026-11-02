@@ -168,6 +168,8 @@ typedef struct pl_profile_zone {
 
 struct pl_thread {
   pl_heap* heap;
+  pl_thread*
+      gc2_next; /* heap's thread list, for code roots/cache invalidation */
 
   pl_val* vstack; /* operand/value stack — root source */
   size_t vsp, vcap;
@@ -370,6 +372,8 @@ struct pl_heap {
   size_t cells; /* per-space size */
   size_t live_cells;
   pl_store* store;
+  pl_heap* gc2_next;
+  pl_thread* threads;
   pl_root_entry* roots;
   size_t nroots, rootcap;
 #ifndef NDEBUG

@@ -1061,6 +1061,7 @@ bool er_http_mt_pump(er_scheduler* sys) {
   if (sys->curlm == NULL || sys->http_pumping || !er_http_outstanding(sys))
     return false;
   sys->http_pumping = true;
+  pl_store_mutator_blocking(sys->store);
   pthread_mutex_unlock(&sys->mu);
   int running = 0;
   curl_multi_perform(sys->curlm, &running);
@@ -1079,6 +1080,7 @@ bool er_http_mt_pump(er_scheduler* sys) {
  * curl computes its own timers (deadlines, connect timeouts), so the
  * outer timeout is just a backstop. */
 static void er_http_wait_for_done(er_scheduler* sys) {
+  pl_store_mutator_blocking(sys->store);
   while (sys->http_done_head == NULL && sys->http_inflight_n > 0) {
     int running = 0;
     curl_multi_perform(sys->curlm, &running);

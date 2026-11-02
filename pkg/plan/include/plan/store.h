@@ -5,10 +5,10 @@
  * Pins and the content-addressed store.
  *
  * Two tiers behind one interface:
- *   - the store region: a non-moving arena holding pinned closures in
+ *   - the store region: a collected, non-moving heap holding pinned closures in
  *     object format, directly traversable by the evaluator.  Store-region
- *     objects reference only store-region objects (the closure
- *     invariant); the collector treats store addresses as terminal.
+ *     objects reference only store-region or native-image objects (the
+ *     closure invariant); GC1 treats store addresses as terminal.
  *   - the persistence backend: content-addressed byte storage keyed by
  *     pin hash. The native backend maps persistent objects directly; Silo,
  *     LMDB and memory backends remain available for regression coverage.
@@ -18,7 +18,6 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "axsys/arena.h"
 #include "plan/heap.h"
 #include "plan/value.h"
 #include "plan/bytecode.h"
@@ -73,7 +72,8 @@ typedef struct pl_store {
    * this before `mu` on paths that need both locks. */
   pthread_mutex_t save_mu;
   pthread_mutex_t mu;
-  ax_arena* region;
+  struct pl_gc2* gc2;
+  pl_heap* heaps; /* registered gc1 heaps; protected by mu */
   uint8_t* lo;
   uint8_t* hi;
   uintptr_t native_lo, native_hi;
@@ -129,7 +129,43 @@ bool pl_store_get_usage(pl_store* s, pl_store_usage* out, char* err,
                         size_t cap);
 void pl_store_free(pl_store* s);
 
-/* Address-range test used by the collector (store vals are terminal).  The
+/* GC2: non-moving, STW mark / concurrent sweep. Heap root sources are
+ * included automatically. Register host values that survive a collection;
+ * intern/code-target registries are weak, not lifetime handles.
+ *
+ * Any host accessing a store shared with running executors must bracket the
+ * WHOLE operation (including construction and publication of its roots) in
+ * enter/leave. Scopes nest per store. Call mutator_blocking before waiting
+ * for another mutator; never call collect/poll inside a scope. The actor
+ * executors supply their own scopes.
+ * No collection occurs merely because an allocator was called. poll is a
+ * safe-boundary operation; collect requests a synchronous mark handshake.
+ * Root callbacks run stopped and must not allocate, enter, or modify roots.
+ * All attached heaps must be idle outside a scope. Registration and teardown
+ * must also occur within a scope when another thread can collect. */
+void pl_store_mutator_enter(pl_store* s);
+void pl_store_mutator_leave(pl_store* s);
+/* Before a potentially blocking host effect: defer collection until this
+ * outermost scope exits. Existing waiters reopen the gate so other actors
+ * can finish the effect. No-op when there is no enclosing scope. */
+void pl_store_mutator_blocking(pl_store* s);
+void pl_store_gc_add_roots(pl_store* s, pl_root_source fn, void* ctx);
+void pl_store_gc_del_roots(pl_store* s, pl_root_source fn, void* ctx);
+void pl_store_gc_request(pl_store* s);
+bool pl_store_gc_poll(pl_store* s);
+void pl_store_gc_collect(pl_store* s);
+void pl_store_gc_wait(pl_store* s); /* wait for concurrent sweep */
+/* Allocation budget between cycles; 0 disables automatic requests. Explicit
+ * requests still work. Default: 64 MiB, or the last live size if larger. */
+void pl_store_gc_set_threshold(pl_store* s, size_t bytes);
+typedef struct pl_gc2_stats {
+  size_t capacity_bytes, allocated_bytes, live_bytes, span_bytes;
+  uint64_t collections, reclaimed_bytes;
+  bool sweeping;
+} pl_gc2_stats;
+pl_gc2_stats pl_store_gc_stats(pl_store* s);
+
+/* Address-range test used by GC1 (store vals are terminal to GC1). The
  * region bounds are immutable after construction, and this runs for every
  * non-immediate edge visited by GC. */
 static inline bool pl_store_owns(const pl_store* s, pl_val v) {

@@ -26,6 +26,7 @@
 #include "internal.h"
 #include "plan/build.h"
 #include "store_internal.h"
+#include "gc2_internal.h"
 
 /* Default reserved (overcommitted) size of the store region. */
 #ifndef PL_STORE_REGION_BYTES
@@ -533,24 +534,31 @@ void pl_store_save_unlock(pl_store* s) {
 
 /* ── Region allocation ─────────────────────────────────────────────────── */
 
-pl_cell* pl_store_alloc(pl_store* s, size_t cells) {
+pl_cell* pl_store_try_alloc(pl_store* s, size_t cells) {
   pl_store_lock(s);
-  void* p = ax_arena_alloc_aligned(s->region, cells * sizeof(pl_cell), 8);
-  ax_assume(p != NULL, "store region exhausted");
+  pl_cell* p = pl_gc2_alloc(s, cells);
   pl_store_unlock(s);
   return p;
 }
 
+pl_cell* pl_store_alloc(pl_store* s, size_t cells) {
+  pl_cell* p = pl_store_try_alloc(s, cells);
+  ax_assume(p != NULL, "gc2 exhausted (request collection at a safe boundary)");
+  return p;
+}
+
+/* Opaque rollback tokens, not byte offsets. Callers retain mu across the
+ * transaction, so rollback cannot invalidate another builder's allocations. */
 size_t pl_store_mark(pl_store* s) {
   pl_store_lock(s);
-  size_t mark = s->region->off_o;
+  size_t mark = pl_gc2_checkpoint(s);
   pl_store_unlock(s);
   return mark;
 }
 
 void pl_store_release(pl_store* s, size_t mark) {
   pl_store_lock(s);
-  s->region->off_o = mark;
+  pl_gc2_rollback(s, mark);
   pl_store_unlock(s);
 }
 
@@ -1290,8 +1298,8 @@ void pl_store_register_canonical(pl_store* s, pl_val pin) {
   pl_store_unlock(s);
 }
 
-pl_val pl_store_mk_pin(pl_store* s, const uint8_t* hash, pl_val body,
-                       uint32_t npins, const pl_val* subpins) {
+pl_val pl_store_try_mk_pin(pl_store* s, const uint8_t* hash, pl_val body,
+                           uint32_t npins, const pl_val* subpins) {
   if (s->format == PL_STORE_FORMAT_NATIVE_V1) {
     pl_val pin = 0;
     char err[192];
@@ -1310,7 +1318,9 @@ pl_val pl_store_mk_pin(pl_store* s, const uint8_t* hash, pl_val body,
             "canonical PIN exceeds the direct PIN-table limit");
   ax_assume(pl_is_nat63(body) || pl_store_owns(s, body),
             "canonical PIN body is not closed");
-  pl_cell* p = pl_store_alloc(s, PL_PIN_CELLS(npins));
+  pl_cell* p = pl_store_try_alloc(s, PL_PIN_CELLS(npins));
+  if (p == NULL)
+    return 0;
   p[0] = pl_hdr_make(PL_K_PIN, PL_F_NORMAL | PL_F_PIN_HASHED, npins,
                      PL_PIN_CELLS(npins));
   memcpy(p + 1, hash, 32);
@@ -1324,6 +1334,13 @@ pl_val pl_store_mk_pin(pl_store* s, const uint8_t* hash, pl_val body,
               "canonical PIN table retained a moving PIN");
   pl_store_register_canonical(s, pin);
   return pin;
+}
+
+pl_val pl_store_mk_pin(pl_store* s, const uint8_t* hash, pl_val body,
+                       uint32_t npins, const pl_val* subpins) {
+  pl_val out = pl_store_try_mk_pin(s, hash, body, npins, subpins);
+  ax_assume(out != 0, "gc2 exhausted constructing canonical PIN");
+  return out;
 }
 
 bool pl_pin_is_hashed(pl_val pin) {
@@ -1399,6 +1416,62 @@ pl_val pl_store_ix1_expr(pl_store* s) {
   return s->ix1_expr;
 }
 
+/* Called with the world stopped and store.mu held. Code generations and
+ * their lock-free law tables retain their existing store lifetime for now.
+ * Their literal graphs must survive even when their original PIN dies. */
+void pl_store_gc_roots(pl_store* s, pl_root_visit visit,
+                       void (*visit_code)(const pl_code*, void*), void* ctx) {
+  visit(&s->ix0_expr, ctx);
+  visit(&s->ix1_expr, ctx);
+  for (ptrdiff_t i = 0; i < ax_arrlen(s->codes); i++)
+    visit_code(s->codes[i], ctx);
+  for (ptrdiff_t i = -1; i < ax_arrlen(s->lawblk_retired); i++) {
+    pl_lawblk_table* tb = i < 0 ? s->lawblk : s->lawblk_retired[i];
+    if (!tb)
+      continue;
+    for (size_t k = 0; k < tb->cap; k++) {
+      if (!tb->slots[k].law)
+        continue;
+      visit(&tb->slots[k].law, ctx);
+      visit_code(tb->slots[k].code, ctx);
+    }
+  }
+  /* Native images are terminals, but their process-local code slots aren't. */
+  for (ptrdiff_t i = 0; i < ax_arrlen(s->pins); i++) {
+    uintptr_t p = pl_addr(s->pins[i]);
+    if (p >= s->native_lo && p < s->native_hi)
+      visit_code(pl_pin_code(pl_ptr(s->pins[i])), ctx);
+  }
+}
+
+void pl_store_gc_weak(pl_store* s) {
+  for (ptrdiff_t i = ax_hmlen(s->intern); i-- > 0;)
+    if (!pl_gc2_live(s, s->intern[i].value)) {
+      pl_hash key = s->intern[i].key;
+      ax_hmdel(s->intern, key);
+    }
+  ptrdiff_t n = 0;
+  for (ptrdiff_t i = 0; i < ax_arrlen(s->pins); i++)
+    if (pl_gc2_live(s, s->pins[i]))
+      s->pins[n++] = s->pins[i];
+  if (s->pins)
+    ax_arrsetlen(s->pins, n);
+  for (ptrdiff_t i = ax_hmlen(s->code_targets); i-- > 0;) {
+    pl_val* vals = s->code_targets[i].value;
+    n = 0;
+    for (ptrdiff_t k = 0; k < ax_arrlen(vals); k++)
+      if (pl_gc2_live(s, vals[k]))
+        vals[n++] = vals[k];
+    if (n) {
+      ax_arrsetlen(vals, n);
+    } else {
+      ax_arrfree(vals);
+      pl_hash key = s->code_targets[i].key;
+      ax_hmdel(s->code_targets, key);
+    }
+  }
+}
+
 /* ── Store lifecycle ───────────────────────────────────────────────────── */
 
 pl_store* pl_store_new(pl_store_backend backend) {
@@ -1413,10 +1486,7 @@ pl_store* pl_store_new(pl_store_backend backend) {
             "save pthread_mutex_init");
   ax_assume(pthread_mutex_init(&s->mu, &attr) == 0, "pthread_mutex_init");
   pthread_mutexattr_destroy(&attr);
-  s->region = ax_arena_create_overcommit(PL_STORE_REGION_BYTES);
-  ax_assume(s->region != NULL, "store region reservation failed");
-  s->lo = (uint8_t*)s->region;
-  s->hi = (uint8_t*)ax_arena_end(s->region);
+  pl_gc2_init(s, PL_STORE_REGION_BYTES);
   ax_assume(((uintptr_t)s->hi & ~PL_ADDR_MASK) == 0,
             "store address exceeds 56 bits");
   s->intern = NULL;
@@ -1446,7 +1516,7 @@ void pl_store_free(pl_store* s) {
   ax_arrfree(s->loading);
   if (s->be.close != NULL)
     s->be.close(s->be.ctx);
-  ax_arena_destroy(s->region);
+  pl_gc2_destroy(s);
   pthread_mutex_destroy(&s->mu);
   pthread_mutex_destroy(&s->save_mu);
   free(s);
