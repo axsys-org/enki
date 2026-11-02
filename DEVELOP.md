@@ -322,9 +322,11 @@ On Apple Silicon, use the native platform for faster iteration:
 make linux-check LINUX_PLATFORM=linux/arm64
 ```
 
-Checks stage a clean source copy inside the container, excluding Git metadata,
-build artifacts, snapshots, and the local `reaver` checkout. This keeps linked
-Git worktrees reproducible without modifying the host workspace. The Docker
+Checks stage the current contents of Git-tracked files inside the container,
+excluding the local `reaver` checkout. Uncommitted edits are included; new
+files must be added to Git first. Untracked notes, scratch checkouts, build
+artifacts, and Git metadata are excluded. This keeps linked Git worktrees
+reproducible without modifying the host workspace. The Docker
 harness disables Nix's inner syscall filter for cross-architecture emulation;
 Docker remains the outer isolation boundary, and native CI keeps the filter.
 

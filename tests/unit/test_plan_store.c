@@ -1,4 +1,9 @@
+int store_test_main(int argc, char** argv);
+#define main store_test_main
 #include "test.h"
+#undef main
+#include <limits.h>
+#include <spawn.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <lmdb.h>
@@ -19,6 +24,9 @@
 #include "plan/canon.h"
 #include "../../pkg/plan/src/store_internal.h"
 #include "test_plan.h"
+
+extern char** environ;
+static char store_binary[PATH_MAX];
 
 typedef struct store_lock_probe {
   pl_store* store;
@@ -1999,17 +2007,23 @@ TEST(store, silo_serializes_concurrent_process_writers) {
   ASSERT_EQ(pipe(result[1]), 0);
   pid_t children[2];
   for (unsigned i = 0; i < 2; i++) {
-    children[i] = fork();
-    ASSERT_NEQ(children[i], -1);
-    if (children[i] == 0) {
-      (void)close(result[i][0]);
-      uint8_t hash[32];
-      silo_pin_nat(dir, 100 + i, hash);
-      bool ok =
-          write(result[i][1], hash, sizeof(hash)) == (ssize_t)sizeof(hash);
-      (void)close(result[i][1]);
-      _exit(ok ? 0 : 1);
+    char value[32];
+    snprintf(value, sizeof(value), "%u", 100 + i);
+    char* args[] = {store_binary, "--silo-writer", dir, value, NULL};
+    posix_spawn_file_actions_t actions;
+    ASSERT_EQ(posix_spawn_file_actions_init(&actions), 0);
+    ASSERT_EQ(
+        posix_spawn_file_actions_adddup2(&actions, result[i][1], STDOUT_FILENO),
+        0);
+    for (unsigned j = 0; j < 2; j++) {
+      ASSERT_EQ(posix_spawn_file_actions_addclose(&actions, result[j][0]), 0);
+      if (j >= i)
+        ASSERT_EQ(posix_spawn_file_actions_addclose(&actions, result[j][1]), 0);
     }
+    ASSERT_EQ(
+        posix_spawn(&children[i], store_binary, &actions, NULL, args, environ),
+        0);
+    ASSERT_EQ(posix_spawn_file_actions_destroy(&actions), 0);
     (void)close(result[i][1]);
   }
 
@@ -2298,4 +2312,28 @@ TEST(store, silo_object_info_reports_stream_and_subpins) {
   pl_heap_free(h);
   pl_store_free(s);
   cleanup_store_dir(dir, true);
+}
+
+int main(int argc, char** argv) {
+  if (argc == 4 && strcmp(argv[1], "--silo-writer") == 0) {
+    alarm(ENKI_TEST_TIMEOUT_SECONDS);
+    pl_store* store = pl_store_new_silo(argv[2], 1 << 20);
+    if (store == NULL)
+      return 1;
+    pl_heap* heap = pl_heap_new(1 << 16, store);
+    pl_thread* t = pl_thread_new(heap);
+    pl_vpush(t, pl_pin(t, strtoull(argv[3], NULL, 10)));
+    uint8_t hash[32];
+    char err[192];
+    bool ok = pl_store_save_root(store, t->vstack[0], hash, err, sizeof(err));
+    pl_thread_free(t);
+    pl_heap_free(heap);
+    pl_store_free(store);
+    if (ok)
+      ok = write(STDOUT_FILENO, hash, sizeof(hash)) == (ssize_t)sizeof(hash);
+    return ok ? 0 : 1;
+  }
+  if (realpath(argv[0], store_binary) == NULL)
+    return 99;
+  return store_test_main(argc, argv);
 }

@@ -266,7 +266,7 @@ nix-ci:
 
 linux-check:
 	@$(DOCKER) volume create $(LINUX_NIX_VOLUME) >/dev/null
-	$(DOCKER) run --rm --platform $(LINUX_PLATFORM) \
+	git ls-files --cached -z | $(DOCKER) run --rm --interactive --platform $(LINUX_PLATFORM) \
 		--volume $(LINUX_NIX_VOLUME):/nix \
 		--volume $(CURDIR):/source:ro \
 		--env 'NIX_CONFIG=filter-syscalls = false' \

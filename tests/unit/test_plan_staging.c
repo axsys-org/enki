@@ -1,4 +1,11 @@
+/* Store creation starts a sweeper: child store operations need a fresh
+ * process, not a continuation of a multithreaded fork. */
+int staging_test_main(int argc, char** argv);
+#define main staging_test_main
 #include "test.h"
+#undef main
+#include <limits.h>
+#include <spawn.h>
 #include <errno.h>
 #include <lmdb.h>
 #include <sys/stat.h>
@@ -6,6 +13,19 @@
 
 #include "../../pkg/plan/src/store_internal.h"
 #include "test_plan.h"
+
+extern char** environ;
+static char staging_binary[PATH_MAX];
+
+static pid_t staging_spawn(const char* mode, const char* dir, unsigned value) {
+  char number[32];
+  snprintf(number, sizeof(number), "%u", value);
+  char* args[] = {
+      staging_binary, "--staging-child", (char*)mode, (char*)dir, number, NULL};
+  pid_t pid;
+  ASSERT_EQ(posix_spawn(&pid, staging_binary, NULL, NULL, args, environ), 0);
+  return pid;
+}
 
 static test_rt staging_open(const char* dir, bool silo) {
   test_rt rt = {0};
@@ -272,23 +292,8 @@ TEST(staging, close_discards_staging_without_truncating_another_writer) {
     staging_ice(rt.t, 0);
     uint8_t staged_hash[32];
     memcpy(staged_hash, pl_pin_hash(rt.t->vstack[0]), 32);
-    pid_t pid = fork();
-    ASSERT_GTE(pid, 0);
-    if (pid == 0) {
-      pl_store* s = pl_store_new_silo(dir, 1 << 20);
-      if (s == NULL)
-        _exit(1);
-      pl_heap* h = pl_heap_new(1 << 16, s);
-      pl_thread* t = pl_thread_new(h);
-      /* On the second iteration this duplicates the parent's staged pin. */
-      pl_vpush(t, pl_pin(t, checkpoint ? 41 : 99));
-      char err[192];
-      bool ok = pl_store_save_root(s, t->vstack[0], NULL, err, sizeof(err));
-      pl_thread_free(t);
-      pl_heap_free(h);
-      pl_store_free(s);
-      _exit(ok ? 0 : 1);
-    }
+    /* The second writer duplicates the parent's staged pin. */
+    pid_t pid = staging_spawn("writer", dir, checkpoint ? 41 : 99);
     child_ok(pid);
     uint8_t root[32];
     ASSERT(pl_store_get_root(rt.store, root));
@@ -312,47 +317,74 @@ TEST(staging, close_discards_staging_without_truncating_another_writer) {
 TEST(staging, global_cache_only_commits_on_save) {
   char dir[] = "/tmp/enki-stage-cache-XXXXXX";
   ASSERT_NOT_NULL(mkdtemp(dir));
-  char path[256];
-  snprintf(path, sizeof(path), "%s/plgc.mdb", dir);
   for (unsigned phase = 0; phase < 4; phase++) {
-    pid_t pid = fork();
-    ASSERT_GTE(pid, 0);
-    if (pid == 0) {
-      if (setenv("PL_CODECACHE_DIR", dir, 1) != 0 ||
-          setenv("PL_CODECACHE", "1", 1) != 0)
-        _exit(1);
-      uint8_t f[32] = {0xF1}, x[32] = {0xF2};
-      if (phase == 3)
-        x[0] = 0xF3;
-      uint64_t out = 0;
-      bool found = pl_memo_probe(f, x, &out);
-      if (phase == 3)
-        _exit(found && out == 43 ? 0 : 2);
-      if (phase == 2 && (!found || out != 42))
-        _exit(3);
-      if (phase < 2 && found)
-        _exit(3);
-      if (phase == 2)
-        x[0] = 0xF3;
-      uint64_t value = phase == 2 ? 43 : 42;
-      pl_memo_record(f, x, value);
-      if (!pl_memo_probe(f, x, &out) || out != value ||
-          (phase < 2 && access(path, F_OK) == 0))
-        _exit(4);
-      if (phase != 0) {
-        /* Phase 2 upgrades the read-only cache opened by the probe. */
-        test_rt rt = test_rt_new();
-        pl_vpush(rt.t, pl_pin(rt.t, 1));
-        char err[192];
-        bool ok = pl_store_save_root(rt.store, rt.t->vstack[0], NULL, err,
-                                     sizeof(err));
-        test_rt_free(&rt);
-        if (!ok || access(path, F_OK) != 0)
-          _exit(5);
-      }
-      _exit(0);
-    }
+    pid_t pid = staging_spawn("cache", dir, phase);
     child_ok(pid);
   }
   staging_cleanup(dir);
+}
+
+static int staging_child(const char* mode, const char* dir, unsigned phase) {
+  if (strcmp(mode, "writer") == 0) {
+    pl_store* store = pl_store_new_silo(dir, 1 << 20);
+    if (store == NULL)
+      return 1;
+    pl_heap* heap = pl_heap_new(1 << 16, store);
+    pl_thread* t = pl_thread_new(heap);
+    pl_vpush(t, pl_pin(t, phase));
+    char err[192];
+    bool ok = pl_store_save_root(store, t->vstack[0], NULL, err, sizeof(err));
+    pl_thread_free(t);
+    pl_heap_free(heap);
+    pl_store_free(store);
+    return ok ? 0 : 1;
+  }
+  if (strcmp(mode, "cache") != 0 || phase > 3)
+    return 6;
+  char path[256];
+  snprintf(path, sizeof(path), "%s/plgc.mdb", dir);
+  if (setenv("PL_CODECACHE_DIR", dir, 1) != 0 ||
+      setenv("PL_CODECACHE", "1", 1) != 0)
+    return 1;
+  uint8_t f[32] = {0xF1}, x[32] = {0xF2};
+  if (phase == 3)
+    x[0] = 0xF3;
+  uint64_t out = 0;
+  bool found = pl_memo_probe(f, x, &out);
+  if (phase == 3)
+    return found && out == 43 ? 0 : 2;
+  if (phase == 2 && (!found || out != 42))
+    return 3;
+  if (phase < 2 && found)
+    return 3;
+  if (phase == 2)
+    x[0] = 0xF3;
+  uint64_t value = phase == 2 ? 43 : 42;
+  pl_memo_record(f, x, value);
+  if (!pl_memo_probe(f, x, &out) || out != value ||
+      (phase < 2 && access(path, F_OK) == 0))
+    return 4;
+  if (phase != 0) {
+    /* Phase 2 upgrades the read-only cache opened by the probe. */
+    test_rt rt = test_rt_new();
+    pl_vpush(rt.t, pl_pin(rt.t, 1));
+    char err[192];
+    bool ok =
+        pl_store_save_root(rt.store, rt.t->vstack[0], NULL, err, sizeof(err));
+    test_rt_free(&rt);
+    if (!ok || access(path, F_OK) != 0)
+      return 5;
+  }
+  return 0;
+}
+
+int main(int argc, char** argv) {
+  if (argc == 5 && strcmp(argv[1], "--staging-child") == 0) {
+    alarm(ENKI_TEST_TIMEOUT_SECONDS);
+    return staging_child(argv[2], argv[3],
+                         (unsigned)strtoul(argv[4], NULL, 10));
+  }
+  if (realpath(argv[0], staging_binary) == NULL)
+    return 99;
+  return staging_test_main(argc, argv);
 }

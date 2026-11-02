@@ -1448,7 +1448,7 @@ void pl_store_gc_weak(pl_store* s) {
   for (ptrdiff_t i = ax_hmlen(s->intern); i-- > 0;)
     if (!pl_gc2_live(s, s->intern[i].value)) {
       pl_hash key = s->intern[i].key;
-      ax_hmdel(s->intern, key);
+      (void)ax_hmdel(s->intern, key);
     }
   ptrdiff_t n = 0;
   for (ptrdiff_t i = 0; i < ax_arrlen(s->pins); i++)
@@ -1467,7 +1467,7 @@ void pl_store_gc_weak(pl_store* s) {
     } else {
       ax_arrfree(vals);
       pl_hash key = s->code_targets[i].key;
-      ax_hmdel(s->code_targets, key);
+      (void)ax_hmdel(s->code_targets, key);
     }
   }
 }
