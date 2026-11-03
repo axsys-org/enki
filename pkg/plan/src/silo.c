@@ -637,15 +637,10 @@ static pl_cell* decode_alloc(silo_dec* d, uint64_t cells) {
     silo_error(d->err, d->err_cap, "decoded object cell count overflow");
     return NULL;
   }
-  size_t bytes = (size_t)cells * sizeof(pl_cell);
-  size_t mark = pl_store_mark(d->store);
-  if (mark > d->store->region->cap_s ||
-      bytes > d->store->region->cap_s - mark) {
-    silo_error(d->err, d->err_cap,
-               "decoded object exceeds remaining store-region capacity");
-    return NULL;
-  }
-  return pl_store_alloc(d->store, (size_t)cells);
+  pl_cell* out = pl_store_try_alloc(d->store, (size_t)cells);
+  if (!out)
+    silo_error(d->err, d->err_cap, "decoded object exceeds gc2 capacity");
+  return out;
 }
 
 static bool dread(silo_dec* d, void* bytes, size_t len) {

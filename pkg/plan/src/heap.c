@@ -235,12 +235,29 @@ pl_heap* pl_heap_new(size_t cells, pl_store* store) {
   h->free = h->from;
   h->limit = h->from + cells;
   h->store = store;
+  if (store != NULL) {
+    pthread_mutex_lock(&store->mu);
+    h->gc2_next = store->heaps;
+    store->heaps = h;
+    pthread_mutex_unlock(&store->mu);
+  }
   return h;
 }
 
 void pl_heap_free(pl_heap* h) {
   if (h == NULL)
     return;
+  ax_assume(h->threads == NULL, "free heap before its threads");
+  if (h->store != NULL) {
+    pthread_mutex_lock(&h->store->mu);
+    pl_heap** at = &h->store->heaps;
+    while (*at != h) {
+      ax_assume(*at != NULL, "unregistered heap");
+      at = &(*at)->gc2_next;
+    }
+    *at = h->gc2_next;
+    pthread_mutex_unlock(&h->store->mu);
+  }
   pl_space_free(h->from, h->cells);
   pl_space_free(h->to, h->cells);
   free(h->roots);
@@ -635,6 +652,8 @@ pl_thread* pl_thread_new(pl_heap* h) {
       atomic_fetch_add_explicit(&pl_next_profile_lane, 1, memory_order_relaxed);
   ax_assume(t->profile_lane != 0, "profile lane id exhausted");
   pl_gc_add_root_source(h, pl_thread_roots, t);
+  t->gc2_next = h->threads;
+  h->threads = t;
   return t;
 }
 
@@ -646,6 +665,12 @@ void pl_thread_free(pl_thread* t) {
   pl_cache_stats_merge(&t->cache_stats);
 #endif
   pl_gc_del_root_source(t->heap, pl_thread_roots, t);
+  pl_thread** at = &t->heap->threads;
+  while (*at != t) {
+    ax_assume(*at != NULL, "unregistered thread");
+    at = &(*at)->gc2_next;
+  }
+  *at = t->gc2_next;
   free(t->vstack);
   free(t->fstack);
   free(t->ustack);

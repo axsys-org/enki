@@ -968,16 +968,6 @@ bool pl_store_load_silo_stream(pl_thread* t, pl_store* s, const uint8_t* bytes,
     goto done;
   }
 
-  size_t pin_cells = PL_PIN_CELLS((uint32_t)scan.used_count);
-  size_t region_mark = pl_store_mark(s);
-  if (region_mark > s->region->cap_s ||
-      pin_cells > (s->region->cap_s - region_mark) / sizeof(pl_cell)) {
-    (void)snprintf(err, err_cap,
-                   "decoded PIN exceeds remaining store-region capacity");
-    ok = false;
-    goto done;
-  }
-
   if (s->format == PL_STORE_FORMAT_NATIVE_V1) {
     ok = pl_native_stage(s, actual, body, subpins, (uint32_t)scan.used_count,
                          out, err, err_cap) &&
@@ -988,7 +978,13 @@ bool pl_store_load_silo_stream(pl_thread* t, pl_store* s, const uint8_t* bytes,
       goto done;
     pl_store_register_canonical(s, *out);
   } else {
-    *out = pl_store_mk_pin(s, actual, body, (uint32_t)scan.used_count, subpins);
+    *out = pl_store_try_mk_pin(s, actual, body, (uint32_t)scan.used_count,
+                               subpins);
+    if (*out == 0) {
+      (void)snprintf(err, err_cap, "decoded PIN exceeds gc2 capacity");
+      ok = false;
+      goto done;
+    }
   }
   marked = false;
   ok = true;
@@ -1079,17 +1075,12 @@ static bool load_silo_pin(pl_thread* t, pl_store* s, const uint8_t hash[32],
     goto done;
   }
 
-  size_t pin_cells = PL_PIN_CELLS((uint32_t)scan.used_count);
-  size_t region_mark = pl_store_mark(s);
-  if (region_mark > s->region->cap_s ||
-      pin_cells > (s->region->cap_s - region_mark) / sizeof(pl_cell)) {
-    (void)snprintf(err, err_cap,
-                   "decoded PIN exceeds remaining store-region capacity");
+  *out = pl_store_try_mk_pin(s, hash, body, (uint32_t)scan.used_count, subpins);
+  if (*out == 0) {
+    (void)snprintf(err, err_cap, "decoded PIN exceeds gc2 capacity");
     ok = false;
     goto done;
   }
-
-  *out = pl_store_mk_pin(s, hash, body, (uint32_t)scan.used_count, subpins);
   marked = false; /* the successful allocations now belong to the store */
   ok = true;
 

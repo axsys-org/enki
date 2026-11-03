@@ -634,6 +634,95 @@ TEST(actor, mt_adopted_root_abandon_drops_current_run_zones) {
   run_adopted_root_abandon_zones(true);
 }
 
+#ifdef __linux__
+typedef struct mt_deadlock_window {
+  er_scheduler* sys;
+  er_mt_executor* ex;
+  er_actor* root;
+  pthread_mutex_t mu;
+  pthread_cond_t cv;
+  bool reached, resume;
+  er_drive_status result;
+} mt_deadlock_window;
+
+static _Thread_local mt_deadlock_window* deadlock_window;
+void __real_pl_store_mutator_enter(pl_store* store);
+void __wrap_pl_store_mutator_enter(pl_store* store);
+
+/* The Linux test executable wraps entry so delivery happens after the first
+ * deadlock check and before reacquisition, without timing-dependent sleeps. */
+void __wrap_pl_store_mutator_enter(pl_store* store) {
+  mt_deadlock_window* window = deadlock_window;
+  if (window != NULL) {
+    pthread_mutex_lock(&window->sys->mu);
+    bool blocked = window->root->status == ER_ACTOR_BLOCKED;
+    pthread_mutex_unlock(&window->sys->mu);
+    if (blocked) {
+      deadlock_window = NULL; /* intercept this handoff only once */
+      pthread_mutex_lock(&window->mu);
+      window->reached = true;
+      pthread_cond_signal(&window->cv);
+      while (!window->resume)
+        pthread_cond_wait(&window->cv, &window->mu);
+      pthread_mutex_unlock(&window->mu);
+    }
+  }
+  __real_pl_store_mutator_enter(store);
+}
+
+static void* mt_deadlock_drive(void* arg) {
+  mt_deadlock_window* window = arg;
+  deadlock_window = window;
+  window->result = er_mt_executor_drive(window->ex, window->root);
+  deadlock_window = NULL;
+  return NULL;
+}
+
+TEST(actor, mt_deadlock_rechecks_after_concurrent_injection) {
+  test_rt rt = test_rt_new();
+  rt.t->rplan_f = true;
+  er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
+  er_mt_executor* ex = er_mt_executor_new(sys, (er_mt_config){.workers = 1});
+  er_actor* root = er_scheduler_adopt(sys, rt.t);
+  root_start_body(rt.t, recv_code(rt.t));
+  mt_deadlock_window window = {.sys = sys, .ex = ex, .root = root};
+  ASSERT_EQ(pthread_mutex_init(&window.mu, NULL), 0);
+  ASSERT_EQ(pthread_cond_init(&window.cv, NULL), 0);
+  pthread_t driver;
+  ASSERT_EQ(pthread_create(&driver, NULL, mt_deadlock_drive, &window), 0);
+  pthread_mutex_lock(&window.mu);
+  while (!window.reached)
+    pthread_cond_wait(&window.cv, &window.mu);
+  pthread_mutex_unlock(&window.mu);
+
+  er_scheduler_inject(sys, root, 123);
+  pthread_mutex_lock(&sys->mu);
+  bool delivered = root->status == ER_ACTOR_RUNNABLE && root->mbox_head == NULL;
+  pthread_mutex_unlock(&sys->mu);
+  /* Also cross a collection while the controller is outside its scope. */
+  pl_store_gc_collect(rt.store);
+  pl_store_gc_wait(rt.store);
+  pthread_mutex_lock(&window.mu);
+  window.resume = true;
+  pthread_cond_signal(&window.cv);
+  pthread_mutex_unlock(&window.mu);
+  ASSERT_EQ(pthread_join(driver, NULL), 0);
+  ASSERT(delivered);
+  ASSERT_EQ(window.result, ER_DRIVE_DONE);
+  pl_cell* response = pl_as(PL_TAG_APP, pl_thread_result(rt.t));
+  ASSERT_NOT_NULL(response);
+  ASSERT_EQ(pl_app_args(response)[0], 123);
+  /* A leaked nested mutator scope would prevent this collection. */
+  pl_store_gc_collect(rt.store);
+  pl_store_gc_wait(rt.store);
+  ASSERT_EQ(pthread_cond_destroy(&window.cv), 0);
+  ASSERT_EQ(pthread_mutex_destroy(&window.mu), 0);
+  er_mt_executor_free(ex);
+  er_scheduler_free(sys);
+  test_rt_free(&rt);
+}
+#endif
+
 TEST(actor, mt_free_detaches_bound_actor) {
   test_rt rt = test_rt_new();
   er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
@@ -852,4 +941,44 @@ TEST(actor, halted_actor_releases_unreachable_scratch) {
   }
   er_scheduler_free(sys);
   test_rt_free(&rt);
+}
+
+/* GC2 must see messages and suspended roots while different workers take
+ * turns requesting collections. Keep the allocation budget deliberately tiny.
+ */
+TEST(actor, gc2_collections_during_message_slices) {
+  for (unsigned mt = 0; mt < 2; mt++) {
+    test_rt rt = test_rt_new();
+    pl_store_gc_set_threshold(rt.store, 1);
+    er_scheduler* sys = er_scheduler_new(rt.store, (er_config){.quantum = 2});
+    enum { COUNT = 12 };
+    er_actor* actors[COUNT];
+    for (unsigned i = 0; i < COUNT; i++) {
+      er_actor* a = actors[i] = er_scheduler_actor(sys);
+      pl_thread* t = er_actor_thread(a);
+      size_t base = t->vsp;
+      pl_vpush(t, test_app1(t, 0, 100 + i));
+      pl_val sargs[] = {0, t->vstack[base]};
+      pl_vpush(t, code_effect(t, ax_s4('S', 'e', 'n', 'd'), 2, sargs));
+      pl_vpush(t, recv_code(t));
+      pl_val body = code_seq(t, t->vstack[base + 1], t->vstack[base + 2]);
+      t->vsp = base;
+      er_actor_start(a, actor_fn(t, body));
+    }
+    er_mt_executor* ex =
+        mt ? er_mt_executor_new(sys, (er_mt_config){.workers = 4}) : NULL;
+    ASSERT_EQ(mt ? er_mt_executor_run(ex) : er_scheduler_run(sys), ER_RUN_IDLE);
+    for (unsigned i = 0; i < COUNT; i++) {
+      ASSERT_EQ(er_actor_state(actors[i]), ER_ACTOR_HALTED);
+      pl_val payload = pl_app_args(pl_ptr(er_actor_result(actors[i])))[0];
+      ASSERT_EQ(pl_app_args(pl_ptr(payload))[0], 100 + i);
+    }
+    ASSERT(pl_store_gc_stats(rt.store).collections > 0);
+    er_mt_executor_free(ex);
+    er_scheduler_free(sys);
+    pl_store_gc_collect(rt.store);
+    pl_store_gc_wait(rt.store);
+    ASSERT_EQ(pl_store_gc_stats(rt.store).allocated_bytes, 0);
+    test_rt_free(&rt);
+  }
 }
