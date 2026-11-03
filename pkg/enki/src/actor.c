@@ -1216,9 +1216,19 @@ er_drive_status er_mt_executor_drive(er_mt_executor* ex, er_actor* root) {
       pl_store_mutator_enter(sys->store);
       gc2_active = true;
       pthread_mutex_lock(&sys->mu);
-      er_root_unwind(root);
-      out = ER_DRIVE_DEADLOCK;
-      goto done;
+      /* Injection or worker progress may have changed the predicate while
+       * we entered the mutator scope, including across a GC handshake. */
+      if (root->status == ER_ACTOR_BLOCKED && ex->busy_workers == 0 &&
+          !er_mt_has_runnable_spawned_locked(ex) && !er_http_outstanding(sys)) {
+        er_root_unwind(root);
+        out = ER_DRIVE_DEADLOCK;
+        goto done;
+      }
+      pthread_mutex_unlock(&sys->mu);
+      pl_store_mutator_leave(sys->store);
+      gc2_active = false;
+      pthread_mutex_lock(&sys->mu);
+      continue;
     }
 
     pthread_cond_wait(&ex->controller_cv, &sys->mu);
