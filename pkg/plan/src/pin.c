@@ -345,6 +345,11 @@ static pl_val save_copy_promoted(save_ctx* c, copy_entry** map, pl_val v,
     return v;
   if (pl_tag(v) == PL_TAG_PIN)
     return save_canonical_pin(c, v);
+  /* Native nodes are immutable and already contain canonical PIN edges.
+   * Keep their addresses so staging can share them across object extents. */
+  if (transient && c->store->format == PL_STORE_FORMAT_NATIVE_V1 &&
+      pl_addr(v) >= c->store->native_lo && pl_addr(v) < c->store->native_hi)
+    return v;
   ptrdiff_t hit = ax_hmgeti(*map, v);
   if (hit >= 0)
     return (*map)[hit].value;
