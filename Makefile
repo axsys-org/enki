@@ -331,6 +331,12 @@ $(BUILD_DIR)/tests/unit/%: tests/unit/%.c tests/support/test.h \
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS_ALL) $(ENKI_INC) $(TEST_CFLAGS_ALL) $< $(LIB_ENKI) $(LIB_PLAN) $(LIB_AXSYS) $(TEST_LDFLAGS_ALL) -o $@
 
+# Deterministically pause the adopted-root deadlock handoff in actor tests.
+# GNU ld wrapping affects only this test executable, not runtime libraries.
+ifeq ($(UNAME_S),Linux)
+$(BUILD_DIR)/tests/unit/test_enki_actor: TEST_LDFLAGS_ALL += -Wl,--wrap=pl_store_mutator_enter
+endif
+
 $(BUILD_DIR)/tests/property/%: tests/property/%.c $(LIBS) $(THEFT_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS_ALL) $(ENKI_INC) $(TEST_CFLAGS_ALL) $< $(LIB_ENKI) $(LIB_PLAN) $(LIB_AXSYS) $(THEFT_OBJS) \

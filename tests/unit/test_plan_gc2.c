@@ -22,6 +22,48 @@ static void collect_wait(pl_store* s) {
   pl_store_gc_wait(s);
 }
 
+#ifdef __linux__
+TEST(gc2, address_window_does_not_reserve_commit) {
+  FILE* policy = fopen("/proc/sys/vm/overcommit_memory", "r");
+  ASSERT_NOT_NULL(policy);
+  int overcommit = -1;
+  int scanned = fscanf(policy, "%d", &overcommit);
+  ASSERT_EQ(fclose(policy), 0);
+  ASSERT_EQ(scanned, 1);
+  if (overcommit == 2)
+    SKIP_TEST("strict overcommit ignores MAP_NORESERVE");
+
+  test_rt rt = test_rt_new();
+  uintptr_t address = (uintptr_t)rt.store->lo;
+  FILE* smaps = fopen("/proc/self/smaps", "r");
+  ASSERT_NOT_NULL(smaps);
+  char line[1024];
+  bool found = false, flags = false, noreserve = false, accounted = false;
+  while (fgets(line, sizeof(line), smaps) != NULL) {
+    unsigned long long start, end;
+    if (sscanf(line, "%llx-%llx", &start, &end) == 2) {
+      if (found)
+        break;
+      found = address >= start && address < end;
+      if (found)
+        ASSERT_GTE(end, (uintptr_t)rt.store->hi);
+    } else if (found && strncmp(line, "VmFlags:", 8) == 0) {
+      flags = true;
+      for (char* flag = strtok(line + 8, " \t\n"); flag != NULL;
+           flag = strtok(NULL, " \t\n")) {
+        noreserve |= strcmp(flag, "nr") == 0;
+        accounted |= strcmp(flag, "ac") == 0;
+      }
+    }
+  }
+  ASSERT_EQ(fclose(smaps), 0);
+  test_rt_free(&rt);
+  ASSERT(found && flags);
+  ASSERT(noreserve);
+  ASSERT_FALSE(accounted);
+}
+#endif
+
 TEST(gc2, reachable_actor_graph_and_dead_gc1_edges) {
   test_rt rt = test_rt_new();
   pl_val shared = app(rt.store, 42);

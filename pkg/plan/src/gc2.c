@@ -3,6 +3,7 @@
 #include "axsys/buddy.h"
 #include "axsys/ds.h"
 #include "batch.h"
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -241,9 +242,13 @@ void pl_gc2_init(pl_store* s, size_t capacity) {
   ax_assume(g != NULL, "oom");
   s->gc2 = g;
   ax_assume(ax_buddy_init(&g->buddy, capacity, GC2_PAGE), "gc2 buddy init");
-  s->lo = mmap(NULL, capacity, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON,
-               -1, 0);
-  ax_assume(s->lo != MAP_FAILED, "gc2 address reservation failed");
+  /* Reserve address space without charging the entire (normally 256 GiB)
+   * window against Linux's commit limit, as the previous arena did. */
+  s->lo = mmap(NULL, capacity, PROT_READ | PROT_WRITE,
+               MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
+  ax_assume(s->lo != MAP_FAILED,
+            "gc2 address reservation of %zu bytes failed: %s", capacity,
+            strerror(errno));
   s->hi = s->lo + capacity;
   g->pages = calloc(capacity / GC2_PAGE, sizeof(*g->pages));
   ax_assume(g->pages != NULL, "oom");
