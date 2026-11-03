@@ -71,6 +71,31 @@ static pl_val code_effect(pl_thread* t, pl_val name, size_t n,
   return out;
 }
 
+/* Effect whose operands are code expressions, so Spawn/Self can be used
+ * directly without forcing their result through Seq or embedding a nat ID. */
+static pl_val code_effect_expr(pl_thread* t, pl_val name, size_t n,
+                               const pl_val* exprs) {
+  size_t base = t->vsp;
+  for (size_t i = 0; i < n; i++)
+    pl_vpush(t, exprs[i]);
+  pl_vpush(t, code_lit(t, name));
+  for (size_t i = 0; i < n; i++)
+    t->vstack[base + n] = code_app(t, t->vstack[base + n], t->vstack[base + i]);
+  pl_vpush(t, code_lit(t, test_p82(t)));
+  pl_val out = code_app(t, t->vstack[base + n + 1], t->vstack[base + n]);
+  t->vsp = base;
+  return out;
+}
+
+static pl_val code_close_expr(pl_thread* t, pl_val expr) {
+  size_t base = t->vsp;
+  pl_vpush(t, expr);
+  pl_val name = pl_nat_from_bytes(t, (const uint8_t*)"CloseHandle", 11);
+  pl_val out = code_effect_expr(t, name, 1, &t->vstack[base]);
+  t->vsp = base;
+  return out;
+}
+
 /* Code performing (P83 % row) for a hand-built effect row. */
 static pl_val code_effect83(pl_thread* t, pl_val name, size_t n,
                             const pl_val* args) {
@@ -378,6 +403,7 @@ TEST(actor, mt_bound_spawn_wakes_general_worker_without_broadcast) {
   pl_vpush(t, actor_fn(t, 7));
   pl_val spawn_args[1] = {t->vstack[base + 2]};
   pl_vpush(t, code_effect(t, ax_s5('S', 'p', 'a', 'w', 'n'), 1, spawn_args));
+  t->vstack[base + 3] = code_close_expr(t, t->vstack[base + 3]);
   pl_vpush(t, code_seq(t, t->vstack[base + 1], t->vstack[base + 3]));
   pl_val body = code_seq(t, t->vstack[base], t->vstack[base + 4]);
   t->vsp = base;
@@ -417,7 +443,7 @@ TEST(actor, mt_bound_spawn_wakes_general_worker_without_broadcast) {
   ASSERT_EQ(pthread_join(runner, NULL), 0);
   ASSERT_EQ(task.reason, ER_RUN_IDLE);
   ASSERT_EQ(er_actor_state(parent), ER_ACTOR_HALTED);
-  ASSERT_EQ(er_actor_result(parent), 1);
+  ASSERT_EQ(er_actor_result(parent), 0);
   ASSERT_EQ(er_actor_state(sentinel), ER_ACTOR_HALTED);
   ASSERT_EQ(er_actor_result(sentinel), 9);
   er_actor* child = er_scheduler_actor_by_id(sys, 2);
@@ -800,7 +826,7 @@ TEST(actor, recv_blocks_until_injection) {
   test_rt_free(&rt);
 }
 
-TEST(actor, spawn_runs_child_and_returns_handle) {
+TEST(actor, spawn_handle_has_no_normal_form) {
   test_rt rt = test_rt_new();
   er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
   er_actor* parent = er_scheduler_actor(sys);
@@ -813,8 +839,8 @@ TEST(actor, spawn_runs_child_and_returns_handle) {
   er_actor_start(parent, actor_fn(t, body));
 
   ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
-  ASSERT_EQ(er_actor_state(parent), ER_ACTOR_HALTED);
-  ASSERT_EQ(er_actor_result(parent), 1); /* first minted handle */
+  ASSERT_EQ(er_actor_state(parent), ER_ACTOR_CRASHED);
+  ASSERT_STR_EQ(t->exn_msg, "<<wormhole>>");
   er_actor* child = er_scheduler_actor_by_id(sys, 1);
   ASSERT_NOT_NULL(child);
   ASSERT_EQ(er_actor_state(child), ER_ACTOR_HALTED);
@@ -823,39 +849,77 @@ TEST(actor, spawn_runs_child_and_returns_handle) {
   test_rt_free(&rt);
 }
 
+/* Run an expression at a host boundary while retaining the scheduler's
+ * effect suspension and the ordinary strictness of nested computations. */
+static er_drive_status drive_host_code(er_scheduler* sys, er_actor* a,
+                                       pl_val body) {
+  pl_thread* t = er_actor_thread(a);
+  size_t base = t->vsp;
+  t->rplan_f = true;
+  pl_vpush(t, actor_fn(t, body));
+  pl_vpush(t, 0);
+  pl_gc_reserve(t, PL_THKE_CELLS(2));
+  pl_val call = pl_mk_thke(t, PL_BAN_FAST, 2, &t->vstack[base]);
+  t->vsp = base;
+  pl_thread_start_host(t, call);
+  return er_scheduler_drive(sys, a);
+}
+
 TEST(actor, sendcaps_reminted_in_receiver) {
   test_rt rt = test_rt_new();
-  er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
-  er_actor* parent = er_scheduler_actor(sys);
-  pl_thread* t = er_actor_thread(parent);
-  /* parent: Seq(Spawn <recv-child>, SendCaps 1 5 [0]); the child handle
-   * is deterministically 1 (first minted), so the row embeds it. */
-  size_t base = t->vsp;
-  pl_vpush(t, actor_fn(t, recv_code(t))); /* child: Recv, halt */
-  pl_val spargs[1] = {t->vstack[base]};
-  pl_vpush(t, code_effect(t, ax_s5('S', 'p', 'a', 'w', 'n'), 1, spargs));
-  pl_vpush(t, test_app1(t, 0, 0)); /* caps row [0]: self */
-  pl_val scargs[3] = {1, 5, t->vstack[base + 2]};
-  pl_vpush(t, code_effect(t, ax_s8('S', 'e', 'n', 'd', 'C', 'a', 'p', 's'), 3,
-                          scargs));
-  pl_val body = code_seq(t, t->vstack[base + 1], t->vstack[base + 3]);
-  t->vsp = base;
-  er_actor_start(parent, actor_fn(t, body));
-
-  ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
-  ASSERT_EQ(er_actor_state(parent), ER_ACTOR_HALTED);
-  ASSERT_EQ(er_actor_result(parent), 0); /* SendCaps response */
-  er_actor* child = er_scheduler_actor_by_id(sys, 1);
-  ASSERT_NOT_NULL(child);
-  ASSERT_EQ(er_actor_state(child), ER_ACTOR_HALTED);
-  pl_cell* r = pl_as(PL_TAG_APP, er_actor_result(child));
-  ASSERT_NOT_NULL(r);
-  ASSERT_EQ(pl_app_args(r)[0], 5);
-  pl_cell* caps = pl_as(PL_TAG_APP, pl_app_args(r)[1]);
-  ASSERT_NOT_NULL(caps);
-  ASSERT_EQ(pl_app_n(caps), 1);
-  ASSERT_EQ(pl_app_args(caps)[0], 1); /* fresh receiver-local handle */
+  pl_store_gc_set_threshold(rt.store, 1);
+  er_scheduler* sys = er_scheduler_new(rt.store, (er_config){.quantum = 2});
+  er_actor* parent = er_scheduler_adopt(sys, rt.t);
+  pl_heap* heap = pl_heap_new(256, rt.store);
+  pl_thread* ct = pl_thread_new(heap);
+  er_actor* child = er_scheduler_adopt(sys, ct);
+  pl_thread* t = rt.t;
+  pl_vpush(t, er_actor_handle(parent, child));
+  pl_vpush(t, test_app1(t, 0, parent->self_handle));
+  pl_val args[3] = {t->vstack[0], 5, t->vstack[1]};
+  ASSERT_EQ(drive_host_code(
+                sys, parent,
+                code_effect(t, ax_s8('S', 'e', 'n', 'd', 'C', 'a', 'p', 's'), 3,
+                            args)),
+            ER_DRIVE_DONE, "%s", t->exn_msg);
+  ASSERT_EQ(drive_host_code(sys, child, recv_code(ct)), ER_DRIVE_DONE);
+  pl_vpush(ct, pl_thread_result(ct));
+  pl_cell* row = pl_ptr(ct->vstack[0]);
+  ASSERT_EQ(pl_app_args(row)[0], 5);
+  pl_val cap = pl_app_args(pl_ptr(pl_app_args(row)[1]))[0];
+  ASSERT(pl_is_wormhole(cap));
+  ASSERT(pl_store_owns(rt.store, cap));
+  pl_vpush(ct, cap);
+  pl_gc_collect_now(ct);
+  pl_store_gc_collect(rt.store);
+  pl_store_gc_wait(rt.store);
+  ASSERT_EQ(ct->vstack[1], cap);
+  /* Closing the sender's original does not revoke the transferred cap. */
+  pl_val close_name = pl_nat_from_bytes(t, (const uint8_t*)"CloseHandle", 11);
+  pl_val self[1] = {0};
+  ASSERT_EQ(drive_host_code(sys, parent, code_effect(t, close_name, 1, self)),
+            ER_DRIVE_DONE);
+  pl_val send[2] = {ct->vstack[1], 42};
+  ASSERT_EQ(
+      drive_host_code(sys, child,
+                      code_effect(ct, ax_s4('S', 'e', 'n', 'd'), 2, send)),
+      ER_DRIVE_DONE);
+  ASSERT_EQ(drive_host_code(sys, parent, recv_code(t)), ER_DRIVE_DONE);
+  ASSERT_EQ(pl_app_args(pl_ptr(pl_thread_result(t)))[0], 42);
+  /* Closing a wrapper revokes all aliases of that wrapper. */
+  close_name = pl_nat_from_bytes(ct, (const uint8_t*)"CloseHandle", 11);
+  pl_val close_cap[1] = {ct->vstack[1]};
+  ASSERT_EQ(
+      drive_host_code(sys, child, code_effect(ct, close_name, 1, close_cap)),
+      ER_DRIVE_DONE);
+  send[0] = ct->vstack[1];
+  ASSERT_EQ(
+      drive_host_code(sys, child,
+                      code_effect(ct, ax_s4('S', 'e', 'n', 'd'), 2, send)),
+      ER_DRIVE_EXN);
   er_scheduler_free(sys);
+  pl_thread_free(ct);
+  pl_heap_free(heap);
   test_rt_free(&rt);
 }
 
@@ -894,9 +958,9 @@ TEST(actor, cross_actor_payload_is_store_resident) {
   pl_vpush(t, test_law(t, 2, ax_s1('K'), 1)); /* payload: the K law */
   pl_val spargs[1] = {t->vstack[base]};
   pl_vpush(t, code_effect(t, ax_s5('S', 'p', 'a', 'w', 'n'), 1, spargs));
-  pl_val sargs[2] = {1, t->vstack[base + 1]};
-  pl_vpush(t, code_effect(t, ax_s4('S', 'e', 'n', 'd'), 2, sargs));
-  pl_val body = code_seq(t, t->vstack[base + 2], t->vstack[base + 3]);
+  pl_vpush(t, code_lit(t, t->vstack[base + 1]));
+  pl_val sargs[2] = {t->vstack[base + 2], t->vstack[base + 3]};
+  pl_val body = code_effect_expr(t, ax_s4('S', 'e', 'n', 'd'), 2, sargs);
   t->vsp = base;
   er_actor_start(parent, actor_fn(t, body));
 
@@ -981,4 +1045,74 @@ TEST(actor, gc2_collections_during_message_slices) {
     ASSERT_EQ(pl_store_gc_stats(rt.store).allocated_bytes, 0);
     test_rt_free(&rt);
   }
+}
+
+TEST(actor, self_is_a_wormhole_and_cannot_be_sent_as_payload) {
+  test_rt rt = test_rt_new();
+  er_scheduler* sys = er_scheduler_new(rt.store, (er_config){.quantum = 2});
+  er_actor* a = er_scheduler_adopt(sys, rt.t);
+  pl_thread* t = rt.t;
+  pl_val zero[1] = {0};
+  ASSERT_EQ(drive_host_code(sys, a,
+                            code_effect(t, ax_s4('S', 'e', 'l', 'f'), 1, zero)),
+            ER_DRIVE_DONE);
+  pl_vpush(t, pl_thread_result(t));
+  ASSERT(pl_is_wormhole(t->vstack[0]));
+  pl_gc_collect_now(t);
+  pl_val args[2] = {t->vstack[0], t->vstack[0]};
+  ASSERT_EQ(drive_host_code(sys, a,
+                            code_effect(t, ax_s4('S', 'e', 'n', 'd'), 2, args)),
+            ER_DRIVE_EXN);
+  ASSERT_STR_EQ(t->exn_msg, "<<wormhole>>");
+  ASSERT_NULL(a->mbox_head);
+  er_scheduler_free(sys);
+  test_rt_free(&rt);
+}
+
+TEST(actor, stale_capability_rejected_after_scheduler_teardown) {
+  test_rt rt = test_rt_new();
+  er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
+  er_actor* a = er_scheduler_adopt(sys, rt.t);
+  pl_vpush(rt.t, er_actor_handle(a, a));
+  er_scheduler_free(sys);
+  /* The adopted heap outlives the old actor. Never dereference its pointer
+   * when the receiving scheduler has a different lifetime scope. */
+  sys = er_scheduler_new(rt.store, (er_config){0});
+  a = er_scheduler_adopt(sys, rt.t);
+  pl_val args[2] = {rt.t->vstack[0], 42};
+  ASSERT_EQ(drive_host_code(
+                sys, a, code_effect(rt.t, ax_s4('S', 'e', 'n', 'd'), 2, args)),
+            ER_DRIVE_EXN);
+  ASSERT_STR_EQ(rt.t->exn_msg, "invalid actor handle");
+  ASSERT_NULL(a->mbox_head);
+  er_scheduler_free(sys);
+  test_rt_free(&rt);
+}
+
+TEST(actor, capability_elements_can_suspend_for_self) {
+  test_rt rt = test_rt_new();
+  er_scheduler* sys = er_scheduler_new(rt.store, (er_config){.quantum = 2});
+  er_actor* a = er_scheduler_adopt(sys, rt.t);
+  pl_thread* t = rt.t;
+  pl_val zero[1] = {0};
+  pl_vpush(t, code_effect(t, ax_s4('S', 'e', 'l', 'f'), 1, zero));
+  pl_vpush(t, code_lit(t, 0));
+  pl_vpush(t, code_app(t, t->vstack[1], t->vstack[0])); /* row [Self 0] */
+  pl_vpush(t, code_lit(t, 7));
+  pl_val exprs[3] = {t->vstack[1], t->vstack[3], t->vstack[2]};
+  ASSERT_EQ(
+      drive_host_code(
+          sys, a,
+          code_effect_expr(t, ax_s8('S', 'e', 'n', 'd', 'C', 'a', 'p', 's'), 3,
+                           exprs)),
+      ER_DRIVE_DONE);
+  ASSERT_EQ(drive_host_code(sys, a, recv_code(t)), ER_DRIVE_DONE);
+  pl_cell* response = pl_ptr(pl_thread_result(t));
+  ASSERT_EQ(pl_app_args(response)[0], 7);
+  pl_cell* caps = pl_ptr(pl_app_args(response)[1]);
+  ASSERT_EQ(pl_app_n(caps), 1);
+  ASSERT(pl_is_wormhole(pl_app_args(caps)[0]));
+  ASSERT_NEQ(pl_app_args(caps)[0], a->self_handle);
+  er_scheduler_free(sys);
+  test_rt_free(&rt);
 }

@@ -528,6 +528,7 @@ static void trace_drain(gc2_trace* tr) {
     uint32_t first = 0, count = 0;
     switch (pl_hdr_kind(p[0])) {
     case PL_K_NAT:
+    case PL_K_WORMHOLE: /* host type and payload bytes are opaque */
       break;
     case PL_K_APP:
     case PL_K_ENV:

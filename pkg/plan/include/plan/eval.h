@@ -14,6 +14,13 @@
 /* Force to weak head normal form. */
 pl_val pl_whnf(pl_thread* t, pl_val v);
 
+/* Host observation: evaluate to WHNF or an opaque wormhole. Strict
+ * computations inside v still require WHNF; this is not a global bypass.
+ * Like pl_whnf, this synchronous API cannot initiate coordination effects. */
+pl_val pl_host_value(pl_thread* t, pl_val v);
+/* Suspendable counterpart, including effects that return wormholes. */
+void pl_thread_start_host(pl_thread* t, pl_val v);
+
 /* The reference `%`: forces f (to decide arity); x stays lazy.  A
  * saturated application is executed to WHNF. */
 pl_val pl_apply(pl_thread* t, pl_val f, pl_val x);
@@ -75,10 +82,10 @@ pl_run_status pl_thread_run(pl_thread* t, uint64_t fuel);
 void pl_thread_abandon(pl_thread* t);
 
 /* Deposit an effect response into a PL_RUN_BLOCKED thread: the
- * machine resumes by RETURNing the response (a WHNF) to the pending
+ * machine resumes by RETURNing the response (WHNF or wormhole) to the pending
  * frame.  Coordination ops (op 82 Spawn/Send/SendCaps/Recv/CloseHandle)
  * are the PL_RUN_BLOCKED producers; the parked request is the spine
- * [OpName, args…] with strict args already forced. */
+ * [OpName, args…] with strict/host/deep arguments already prepared. */
 void pl_thread_deposit(pl_thread* t, pl_val response);
 
 /* Result of a completed run; valid until the next pl_thread_start or the

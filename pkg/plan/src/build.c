@@ -4,6 +4,7 @@
 
 #include "axsys/assume.h"
 #include "plan/nat.h"
+#include "store_internal.h"
 
 /* gcc -O3's inliner chains the pl_as-returned-NULL fact into
  * pl_arity's APP case and reports an impossible null dereference
@@ -157,4 +158,28 @@ pl_val pl_nf_field(pl_val v, uint32_t i) {
   default:
     ax_abort("pl_nf_field on tag 0x%llx", (unsigned long long)pl_tag(v));
   }
+}
+
+size_t pl_wormhole_cells(size_t n) {
+  if (n > ((uint64_t)UINT32_MAX - 3) * sizeof(pl_cell))
+    return 0;
+  return 3 + n / sizeof(pl_cell) + (n % sizeof(pl_cell) != 0);
+}
+
+pl_val pl_mk_wormhole(pl_thread* t, const void* type, const void* bytes,
+                      size_t n) {
+  size_t cells = pl_wormhole_cells(n);
+  pl_check(cells != 0 && (n == 0 || bytes != NULL), "invalid wormhole buffer");
+  pl_store* store = pl_heap_store(t->heap);
+  pl_check(store != NULL, "wormholes require a gc2 store");
+  pl_cell* p = pl_store_alloc(store, cells);
+  pl_cache_stat_alloc(t, PL_K_WORMHOLE, cells);
+  p[0] = pl_hdr_make(PL_K_WORMHOLE, 0, 0, (uint32_t)cells);
+  p[1] = n;
+  p[2] = (pl_cell)(uintptr_t)type;
+  if (n != 0) {
+    p[cells - 1] = 0;
+    memcpy(p + 3, bytes, n);
+  }
+  return pl_make(PL_TAG_DEFER, p);
 }

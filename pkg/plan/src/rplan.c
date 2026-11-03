@@ -795,12 +795,10 @@ pl_val pl_op82_spawn(pl_thread* t, size_t ab) {
 }
 
 pl_val pl_op82_send(pl_thread* t, size_t ab) {
-  rp_want_nat(t, ARG(0)); /* handle; the message stays lazy */
   return rp_request(t, ab, 2);
 }
 
 pl_val pl_op82_send_caps(pl_thread* t, size_t ab) {
-  rp_want_nat(t, ARG(0));
   return rp_request(t, ab, 3);
 }
 
@@ -811,7 +809,6 @@ pl_val pl_op82_recv(pl_thread* t, size_t ab) {
 }
 
 pl_val pl_op82_close_handle(pl_thread* t, size_t ab) {
-  rp_want_nat(t, ARG(0));
   return rp_request(t, ab, 1);
 }
 
@@ -1004,4 +1001,10 @@ pl_val pl_op83_ed25519_verify(pl_thread* t, size_t ab) {
                                                (unsigned long long)n, pk);
   free(message);
   return rc == 0 ? 1 : 0;
+}
+
+pl_val pl_op82_self(pl_thread* t, size_t ab) {
+  if (ARG(0) != 0)
+    pl_raise_msg(t, "Self expects 0");
+  return rp_request(t, ab, 1);
 }

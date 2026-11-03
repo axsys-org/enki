@@ -20,6 +20,11 @@
  * the stack.  Bodies may push F_APPLY/F_SEQ/F_NF frames and return a
  * value that the machine continues to evaluate.
  *
+ * host_mask evaluates an argument to WHNF or a wormhole; caps_mask does
+ * the same for each element of a WHNF row. These are deliberately absent
+ * from strict_mask: compiler strictness must not force a host capability.
+ * Mixed host/deep arguments are prepared in argument order after strict args.
+ *
  * host_effect marks operations that may enter embedder-controlled work;
  * the evaluator calls rplan_effect_f before their bodies begin.  Profiling
  * operations remain ordinary evaluator work even though they share op set 83.
@@ -37,6 +42,8 @@ typedef struct pl_opdesc {
   uint8_t argc;
   uint32_t strict_mask;
   uint32_t deep_mask;
+  uint32_t host_mask; /* evaluate to WHNF or wormhole, never infer strict */
+  uint32_t caps_mask; /* row spine to WHNF, each element to host value */
   bool host_effect;
   bool coord;
   pl_val (*body)(pl_thread* t, size_t ab);
@@ -93,6 +100,7 @@ pl_val pl_op82_read(pl_thread* t, size_t ab);
 pl_val pl_op82_write(pl_thread* t, size_t ab);
 
 /* op 82 coordination effects: validate + build the request spine. */
+pl_val pl_op82_self(pl_thread* t, size_t ab);
 pl_val pl_op82_spawn(pl_thread* t, size_t ab);
 pl_val pl_op82_send(pl_thread* t, size_t ab);
 pl_val pl_op82_send_caps(pl_thread* t, size_t ab);

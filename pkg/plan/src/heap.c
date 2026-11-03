@@ -19,23 +19,27 @@ static pl_cache_stats pl_cache_stats_total;
 static uint64_t pl_cache_stats_threads;
 
 static const char* const pl_cache_kind_names[PL_CACHE_KIND_CAP] = {
-    [PL_K_NAT] = "NAT",   [PL_K_APP] = "APP",     [PL_K_LAW] = "LAW",
-    [PL_K_PIN] = "PIN",   [PL_K_THUNK] = "THUNK", [PL_K_ENV] = "ENV",
-    [PL_K_IND] = "IND",   [PL_K_BH] = "BH",       [PL_K_FWD] = "FWD",
-    [PL_K_THKE] = "THKE",
+    [PL_K_NAT] = "NAT",           [PL_K_APP] = "APP",
+    [PL_K_LAW] = "LAW",           [PL_K_PIN] = "PIN",
+    [PL_K_THUNK] = "THUNK",       [PL_K_ENV] = "ENV",
+    [PL_K_IND] = "IND",           [PL_K_BH] = "BH",
+    [PL_K_FWD] = "FWD",           [PL_K_THKE] = "THKE",
+    [PL_K_WORMHOLE] = "WORMHOLE",
 };
 
 static const char* const pl_cache_frame_names[PL_CACHE_FRAME_CAP] = {
-    [PL_F_UPDATE] = "UPDATE", [PL_F_APPLY] = "APPLY",
-    [PL_F_SEQ] = "SEQ",       [PL_F_KAL] = "KAL",
-    [PL_F_KAPP] = "KAPP",     [PL_F_OPENT] = "OPENT",
-    [PL_F_OPARG] = "OPARG",   [PL_F_OPDEEP] = "OPDEEP",
-    [PL_F_NF] = "NF",         [PL_F_NFOBJ] = "NFOBJ",
-    [PL_F_EXEC] = "EXEC",     [PL_F_EXECV] = "EXECV",
-    [PL_F_UPD] = "UPD",       [PL_F_TRY] = "TRY",
-    [PL_F_JUDGE] = "JUDGE",   [PL_F_NIL] = "NIL",
-    [PL_F_PROF] = "PROF",     [PL_F_APPLYN] = "APPLYN",
-    [PL_F_MEMO] = "MEMO",
+    [PL_F_UPDATE] = "UPDATE",   [PL_F_APPLY] = "APPLY",
+    [PL_F_SEQ] = "SEQ",         [PL_F_KAL] = "KAL",
+    [PL_F_KAPP] = "KAPP",       [PL_F_OPENT] = "OPENT",
+    [PL_F_OPARG] = "OPARG",     [PL_F_OPDEEP] = "OPDEEP",
+    [PL_F_NF] = "NF",           [PL_F_NFOBJ] = "NFOBJ",
+    [PL_F_EXEC] = "EXEC",       [PL_F_EXECV] = "EXECV",
+    [PL_F_HOST] = "HOST",       [PL_F_STRICT] = "STRICT",
+    [PL_F_OPHOST] = "OPHOST",   [PL_F_CAPS] = "CAPS",
+    [PL_F_CAPITEM] = "CAPITEM", [PL_F_UPD] = "UPD",
+    [PL_F_TRY] = "TRY",         [PL_F_JUDGE] = "JUDGE",
+    [PL_F_NIL] = "NIL",         [PL_F_PROF] = "PROF",
+    [PL_F_APPLYN] = "APPLYN",   [PL_F_MEMO] = "MEMO",
 };
 
 static const char* const pl_cache_move_names[PL_CACHE_MOVE_COUNT] = {
@@ -417,6 +421,7 @@ static void pl_cheney_scan(pl_gc_ctx* gc) {
     uint32_t first = 0, count = 0;
     switch (kind) {
     case PL_K_NAT:
+    case PL_K_WORMHOLE: /* host bytes are not PLAN edges */
       break;
     case PL_K_APP:
     case PL_K_ENV:
