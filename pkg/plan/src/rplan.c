@@ -236,6 +236,12 @@ cleanup:
   return res;
 }
 
+bool pl_rplan_resolve_path(pl_thread* t, const char* path, bool writing,
+                           char** out) {
+  return writing ? rp_resolve_write_path(t, path, out)
+                 : rp_resolve_read_path(t, path, out);
+}
+
 /* bytesBar: the data bytes followed by a 0x01 terminator. */
 static pl_val rp_bar(pl_thread* t, const uint8_t* b, size_t n) {
   uint8_t* bar = malloc(n + 1);
@@ -795,12 +801,10 @@ pl_val pl_op82_spawn(pl_thread* t, size_t ab) {
 }
 
 pl_val pl_op82_send(pl_thread* t, size_t ab) {
-  rp_want_nat(t, ARG(0)); /* handle; the message stays lazy */
   return rp_request(t, ab, 2);
 }
 
 pl_val pl_op82_send_caps(pl_thread* t, size_t ab) {
-  rp_want_nat(t, ARG(0));
   return rp_request(t, ab, 3);
 }
 
@@ -811,7 +815,6 @@ pl_val pl_op82_recv(pl_thread* t, size_t ab) {
 }
 
 pl_val pl_op82_close_handle(pl_thread* t, size_t ab) {
-  rp_want_nat(t, ARG(0));
   return rp_request(t, ab, 1);
 }
 
@@ -1004,4 +1007,10 @@ pl_val pl_op83_ed25519_verify(pl_thread* t, size_t ab) {
                                                (unsigned long long)n, pk);
   free(message);
   return rc == 0 ? 1 : 0;
+}
+
+pl_val pl_op82_self(pl_thread* t, size_t ab) {
+  if (ARG(0) != 0)
+    pl_raise_msg(t, "Self expects 0");
+  return rp_request(t, ab, 1);
 }

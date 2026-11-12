@@ -1,0 +1,7 @@
+[
+  {"name":"short-final", "total":1040, "bloq":13, "index":1, "wire":"de", "length":16, "prefix":"de", "zero_tail":15},
+  {"name":"full-interior-zero-tail", "total":2048, "bloq":13, "index":0, "wire":"de", "length":1024, "prefix":"de", "zero_tail":1023},
+  {"name":"all-zero-final", "total":1040, "bloq":13, "index":1, "wire":"", "length":16, "prefix":"", "zero_tail":16},
+  {"name":"exact-multiple-final", "total":2048, "bloq":13, "index":1, "wire":"de00", "length":1024, "prefix":"de", "zero_tail":1023},
+  {"name":"single-leaf", "total":4, "bloq":13, "index":0, "wire":"de", "length":4, "prefix":"de", "zero_tail":3}
+]

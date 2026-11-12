@@ -23,6 +23,11 @@
 pl_val pl_rplan_read_folder(pl_thread* t, pl_val path);
 
 /* Read a binary file as a balanced BAT, zero on failure. Same jail. */
+/* Native adapters share the ReadFile/WriteFile path policy. Caller frees out.
+ */
+bool pl_rplan_resolve_path(pl_thread* t, const char* path, bool writing,
+                           char** out);
+
 pl_val pl_rplan_read_bat(pl_thread* t, pl_val path);
 
 #endif

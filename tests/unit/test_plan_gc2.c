@@ -176,13 +176,14 @@ TEST(gc2, host_roots_and_mailboxes) {
   test_rt rt = test_rt_new();
   er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
   er_actor* a = er_scheduler_actor(sys);
+  size_t handles = pl_store_gc_stats(rt.store).allocated_bytes;
   pl_val host = app(rt.store, 101);
   pl_store_gc_add_roots(rt.store, root, &host);
   er_scheduler_inject(sys, a, host);
   pl_store_gc_del_roots(rt.store, root, &host);
   collect_wait(rt.store); /* only the unstarted actor's mailbox owns it */
   ASSERT_EQ(pl_app_args(pl_ptr(host))[0], 101);
-  ASSERT_EQ(pl_store_gc_stats(rt.store).allocated_bytes, 32);
+  ASSERT_EQ(pl_store_gc_stats(rt.store).allocated_bytes, handles + 32);
   er_scheduler_free(sys);
   collect_wait(rt.store);
   ASSERT_EQ(pl_store_gc_stats(rt.store).allocated_bytes, 0);

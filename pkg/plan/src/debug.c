@@ -108,7 +108,9 @@ void pl_show_sb(ax_sb* sb, pl_val v) {
     ax_sb_append_lit(sb, ">");
     return;
   case PL_TAG_DEFER:
-    if (pl_hdr_kind(p[0]) == PL_K_BH)
+    if (pl_hdr_kind(p[0]) == PL_K_WORMHOLE)
+      ax_sb_append_lit(sb, "<wormhole>");
+    else if (pl_hdr_kind(p[0]) == PL_K_BH)
       ax_sb_append_lit(sb, "<bh>");
     else
       ax_sb_append_lit(sb, "<thk>");

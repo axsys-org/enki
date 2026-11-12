@@ -67,6 +67,11 @@ typedef enum {
                    /* vstack at argbase; the head slot is argbase-1     */
   PL_F_MEMO,       /* memo barrier (op 66 Memo); a: f pin, b: x pin,    */
                    /* epoch: effect-epoch watermark at entry            */
+  PL_F_HOST,       /* host result boundary: accepts a wormhole */
+  PL_F_STRICT,     /* explicit bytecode force: requires WHNF */
+  PL_F_OPHOST,     /* host arguments, including capability rows */
+  PL_F_CAPS,       /* force the capability row spine */
+  PL_F_CAPITEM,    /* a: copied row, k: host-evaluated element */
   PL_F_KIND_COUNT, /* sentinel: sizes pl_run's RETURN dispatch table    */
 } pl_frame_kind;
 
@@ -219,6 +224,7 @@ struct pl_thread {
 
   /* The reference vMode: op 82 (rplan I/O) is callable only in RPLAN
    * mode (REPL / snapshot execution), never while assembling modules. */
+  bool rplan_no_resources; /* record/replay cannot encode native handles */
   bool rplan_f;
 
   /* When non-NULL, ReadFile and ReadFolder resolve their arguments relative

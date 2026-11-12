@@ -1,0 +1,19 @@
+[package]
+name = "mesa-flow"
+description = "Deterministic durable message flows over signed Mesa reads"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+mesa-core = { path = "../mesa-core" }
+mesa-crypto = { path = "../mesa-crypto" }
+mesa-wire = { path = "../mesa-wire" }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"
+
+[lints]
+workspace = true

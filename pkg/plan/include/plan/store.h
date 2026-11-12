@@ -154,12 +154,20 @@ void pl_store_gc_del_roots(pl_store* s, pl_root_source fn, void* ctx);
 void pl_store_gc_request(pl_store* s);
 bool pl_store_gc_poll(pl_store* s);
 void pl_store_gc_collect(pl_store* s);
+/* Finalizers run outside allocator locks, on the calling thread. They must
+ * release native resources only: no PLAN access, callbacks, or resurrection.
+ * poll/wait and store teardown drain the queue; explicit draining is allowed.
+ */
+void pl_store_gc_run_finalizers(pl_store* s);
+/* Update estimated foreign bytes retained by a resource wormhole. */
+void pl_store_gc_charge(pl_store* s, pl_val resource, size_t bytes);
 void pl_store_gc_wait(pl_store* s); /* wait for concurrent sweep */
 /* Allocation budget between cycles; 0 disables automatic requests. Explicit
  * requests still work. Default: 64 MiB, or the last live size if larger. */
 void pl_store_gc_set_threshold(pl_store* s, size_t bytes);
 typedef struct pl_gc2_stats {
   size_t capacity_bytes, allocated_bytes, live_bytes, span_bytes;
+  size_t external_bytes; /* includes pending native finalizers */
   uint64_t collections, reclaimed_bytes;
   bool sweeping;
 } pl_gc2_stats;

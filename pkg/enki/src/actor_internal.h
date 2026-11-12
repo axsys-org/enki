@@ -34,9 +34,7 @@ struct er_actor {
   bool adopted;      /* embedder-owned thread/heap; never HALTED, never freed */
   er_msg* mbox_head; /* arrival-order FIFO (matches reaver's Chan) */
   er_msg* mbox_tail;
-  er_actor** handle_v; /* dense handle table; NULL = closed; [0] = self */
-  size_t handle_n;     /* next handle to mint (never reused) */
-  size_t handle_cap;
+  pl_val self_handle;  /* rooted wormhole; 0 remains a legacy self alias */
   er_http_xfer* http;  /* non-NULL: parked on a Fetch, not on Recv */
   bool effectful;      /* has initiated a descriptor-marked host effect */
   er_mt_worker* owner; /* dedicated MT worker after the first effect */
@@ -82,6 +80,7 @@ struct er_scheduler {
   er_actor* all_head; /* every actor, creation order */
   er_actor* all_tail;
   uint64_t next_id;
+  uint64_t scope; /* process-unique capability lifetime, not persisted */
   er_mode mode;
   er_log* rec;        /* RECORD sink */
   const er_log* play; /* REPLAY source */

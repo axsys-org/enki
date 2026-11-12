@@ -697,11 +697,10 @@ static pl_run_status pl_run(pl_thread* t, pl_val v, size_t base,
    * traces a/b regardless — so dispatch is one indexed load here
    * rather than a label stored in the frame.
    */
-  static void* const defer_tbl[PL_K_THKE + 1] = {
-      [PL_K_THUNK] = &&defer_thunk,
-      [PL_K_IND] = &&defer_ind,
-      [PL_K_BH] = &&defer_bh,
-      [PL_K_THKE] = &&defer_thke,
+  static void* const defer_tbl[PL_K_WORMHOLE + 1] = {
+      [PL_K_THUNK] = &&defer_thunk, [PL_K_IND] = &&defer_ind,
+      [PL_K_BH] = &&defer_bh,       [PL_K_THKE] = &&defer_thke,
+      [PL_K_WORMHOLE] = &&ret,
   };
   /* OP_TAILCALL is never emitted by the compiler — the ingest walker
    * fuses MK_THK+RET into it. */
@@ -749,7 +748,9 @@ static pl_run_status pl_run(pl_thread* t, pl_val v, size_t base,
       [PL_F_UPD] = &&ret_upd,       [PL_F_TRY] = &&ret_try,
       [PL_F_JUDGE] = &&ret_judge,   [PL_F_NIL] = &&ret_nil,
       [PL_F_PROF] = &&ret_prof,     [PL_F_APPLYN] = &&ret_applyn,
-      [PL_F_MEMO] = &&ret_memo,
+      [PL_F_MEMO] = &&ret_memo,     [PL_F_HOST] = &&ret_host,
+      [PL_F_STRICT] = &&ret_strict, [PL_F_OPHOST] = &&ret_ophost,
+      [PL_F_CAPS] = &&ret_caps,     [PL_F_CAPITEM] = &&ret_capitem,
   };
 
   if (entry == PL_RES_RETURN)
@@ -775,7 +776,7 @@ eval:
   {
     /* the kind is a raw 8-bit header field: bound it before indexing */
     pl_kind k = pl_hdr_kind(*pl_ptr(v));
-    if (ax_unlikely(k > PL_K_THKE || defer_tbl[k] == NULL))
+    if (ax_unlikely(k > PL_K_WORMHOLE || defer_tbl[k] == NULL))
       ax_abort("EVAL: bad defer kind");
     goto* defer_tbl[k];
   }
@@ -1322,6 +1323,8 @@ x_force:
   }
   v = pl_vpop(t);
   XSYNC();
+  fr = pl_fpush(t);
+  fr->kind = PL_F_STRICT;
   goto eval;
 
 x_push_slot: {
@@ -1398,8 +1401,8 @@ x_tailblk: {
 x_call: {
   /* [target, argc]: call a local block; the argc topmost operands
    * become the callee's operand-stack base, consumed by its RET, whose
-   * result arrives WHNF via ret_exec.  Every call takes a fuel step
-   * (self-recursive local calls would otherwise grow the frame stack
+   * result arrives via ret_exec (possibly a wormhole). Every call takes a fuel
+   * step (self-recursive local calls would otherwise grow the frame stack
    * unpreemptably); on exhaustion, yield rewound to re-execute the
    * call with fresh fuel. */
   size_t call_pc = xpc - 1;
@@ -1668,6 +1671,26 @@ eval_expr:
   goto ret;
 
 ret:
+  /* A wormhole is a host result, never a WHNF. Forwarding/update frames
+   * may carry it; strict consumers must fail even inside host evaluation.
+   * Check RETURN too: effect deposits bypass EVAL. */
+  if (ax_unlikely(pl_is_wormhole(v))) {
+    if (t->fsp == base)
+      pl_raise_msg(t, "<<wormhole>>");
+    switch (t->fstack[t->fsp - 1].kind) {
+    case PL_F_UPDATE:
+    case PL_F_UPD:
+    case PL_F_PROF:
+    case PL_F_EXEC:
+    case PL_F_EXECV:
+    case PL_F_HOST:
+    case PL_F_OPHOST:
+    case PL_F_CAPITEM:
+      break;
+    default:
+      pl_raise_msg(t, "<<wormhole>>");
+    }
+  }
   if (t->fsp == base) {
     t->result = v;
     return PL_RUN_DONE;
@@ -1676,6 +1699,16 @@ ret:
   if (ax_unlikely(fr->kind >= PL_F_KIND_COUNT || ret_tbl[fr->kind] == NULL))
     ax_abort("RETURN: bad frame kind %d", (int)fr->kind);
   goto* ret_tbl[fr->kind];
+
+ret_host:
+  ax_assume(t->fsp == base + 1, "host boundary is not the entry frame");
+  t->fsp--;
+  t->result = v;
+  return PL_RUN_DONE;
+
+ret_strict:
+  t->fsp--;
+  goto ret;
 
 ret_update:
   pl_thunk_update(t, fr->a, v);
@@ -1928,6 +1961,40 @@ ret_oparg: {
   goto oparg_next;
 }
 
+ret_ophost:
+  t->vstack[fr->argbase + fr->k] = v;
+  fr->k++;
+  goto ophost_next;
+
+ret_caps: {
+  /* Work on a private row: its source may be immutable store data. */
+  pl_cell* row = pl_as(PL_TAG_APP, v);
+  if (row == NULL) {
+    t->fsp--;
+    v = 0;
+    goto ret;
+  }
+  uint32_t n = pl_app_n(row);
+  fr->a = v;
+  pl_gc_reserve(t, PL_APP_CELLS(n));
+  row = pl_ptr(fr->a);
+  fr->a = pl_mk_app_from(t, 0, n, pl_app_args(row));
+  fr->kind = PL_F_CAPITEM;
+  fr->k = 0;
+  v = pl_app_args(pl_ptr(fr->a))[0];
+  goto eval;
+}
+
+ret_capitem:
+  pl_app_args(pl_ptr(fr->a))[fr->k++] = v;
+  if (fr->k < pl_app_n(pl_ptr(fr->a))) {
+    v = pl_app_args(pl_ptr(fr->a))[fr->k];
+    goto eval;
+  }
+  v = fr->a;
+  t->fsp--;
+  goto ret;
+
 ret_opdeep: {
   t->vstack[fr->argbase + fr->k] = v; /* deeply normalized arg k */
   fr->k++;
@@ -2104,6 +2171,15 @@ op_args_ready: {
     if ((d->strict_mask >> k) & 1u)
       assert(pl_is_whnf(t->vstack[op_base + k]));
 #endif
+  if ((d->host_mask | d->caps_mask) != 0) {
+    fr = pl_fpush(t);
+    fr->kind = PL_F_OPHOST;
+    fr->op = op_idx;
+    fr->argbase = (uint32_t)op_base;
+    fr->argc = op_argc;
+    fr->k = 0;
+    goto ophost_next;
+  }
   if (d->deep_mask != 0) {
     fr = pl_fpush(t);
     fr->kind = PL_F_OPDEEP;
@@ -2131,6 +2207,11 @@ oparg_next:
         goto eval;
       t->fuel--;
       fr->k++;
+    }
+    if ((d->host_mask | d->caps_mask) != 0) {
+      fr->kind = PL_F_OPHOST;
+      fr->k = 0;
+      goto ophost_next;
     }
     if (d->deep_mask != 0) {
       fr->kind = PL_F_OPDEEP;
@@ -2231,6 +2312,28 @@ judge_scan:
     t->vsp = jbase;
     goto eval_expr;
   }
+
+ophost_next:
+  fr = &t->fstack[t->fsp - 1];
+  {
+    const pl_opdesc* d = &pl_ops[fr->op];
+    /* Mixed host/deep arguments retain left-to-right initiation order:
+     * SendCaps resolves its target, normalizes its message, then its caps. */
+    while (fr->k < fr->argc &&
+           (((d->host_mask | d->caps_mask | d->deep_mask) >> fr->k) & 1u) == 0)
+      fr->k++;
+    if (fr->k < fr->argc) {
+      v = t->vstack[fr->argbase + fr->k];
+      if ((d->caps_mask >> fr->k) & 1u) {
+        fr = pl_fpush(t);
+        fr->kind = PL_F_CAPS;
+      } else if ((d->deep_mask >> fr->k) & 1u) {
+        pl_push_nf(t);
+      }
+      goto eval;
+    }
+  }
+  goto op_body;
 
 opdeep_next:
   /* fr is the F_OPDEEP frame on top of the stack.  Deep (nf) phase
@@ -2423,8 +2526,9 @@ void pl_thread_deposit(pl_thread* t, pl_val response) {
   ax_assume(t->status == PL_RUN_BLOCKED,
             "pl_thread_deposit: thread is not blocked");
   /* the machine resumes by RETURNing the response to the pending frame,
-   * which expects a WHNF (executors build rows/nats, never thunks) */
-  ax_assume(pl_is_whnf(response), "pl_thread_deposit: response must be WHNF");
+   * which accepts WHNF or a wormhole (executors never deposit thunks) */
+  ax_assume(pl_is_whnf(response) || pl_is_wormhole(response),
+            "pl_thread_deposit: response must be WHNF or a wormhole");
   t->resume_kind = PL_RES_RETURN;
   t->resume_val = response;
   t->blocked_on = 0;
@@ -2610,4 +2714,15 @@ pl_val pl_nf(pl_thread* t, pl_val v) {
   pl_frame* fr = pl_fpush(t);
   fr->kind = PL_F_NF;
   return pl_eval_public(t, v, base);
+}
+
+pl_val pl_host_value(pl_thread* t, pl_val v) {
+  size_t base = t->fsp;
+  pl_fpush(t)->kind = PL_F_HOST;
+  return pl_eval_public(t, v, base);
+}
+
+void pl_thread_start_host(pl_thread* t, pl_val v) {
+  pl_thread_start(t, v);
+  pl_fpush(t)->kind = PL_F_HOST;
 }

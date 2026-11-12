@@ -53,7 +53,7 @@ typedef enum pl_op {
   OP_MK_THK = 2,      /* +argc +bane[|NOUPD] (+op +name when KNOWN)        */
   OP_FORCE = 3,       /* pop, evaluate to WHNF, push the result            */
   OP_CALL = 4,        /* +target +argc: local block call; args become the  */
-                      /* callee's operand-stack base; result arrives WHNF  */
+                      /* callee's operand-stack base; WHNF or wormhole  */
   OP_TAILCALL = 5,    /* ingest-fused MK_THK+RET                           */
   OP_INTERP = 6,      /* +expr: interpret a kal expr under the env         */
   OP_RET = 7,         /* pop, reset the operand stack, return              */

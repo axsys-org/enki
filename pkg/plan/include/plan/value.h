@@ -37,7 +37,7 @@ typedef uint64_t pl_cell;
 #define PL_TAG_LAW   UINT64_C(0x83)
 #define PL_TAG_PIN   UINT64_C(0x84)
 #define PL_TAG_ENV   UINT64_C(0x85)
-#define PL_TAG_DEFER UINT64_C(0x86) /* THUNK | BLACKHOLE | IND */
+#define PL_TAG_DEFER UINT64_C(0x86) /* THUNK | BLACKHOLE | IND | WORMHOLE */
 
 /* Object kinds (authoritative, stored in the header). */
 typedef enum {
@@ -48,9 +48,10 @@ typedef enum {
   PL_K_THUNK,
   PL_K_ENV,
   PL_K_IND,
-  PL_K_BH,   /* TODO move (BH, IND) to newstyle thunks */
-  PL_K_FWD,  /* forwarding pointer, exists only during collection */
-  PL_K_THKE, /* newstyle thunks, variably sized */
+  PL_K_BH,       /* TODO move (BH, IND) to newstyle thunks */
+  PL_K_FWD,      /* forwarding pointer, exists only during collection */
+  PL_K_THKE,     /* newstyle thunks, variably sized */
+  PL_K_WORMHOLE, /* permanent blackhole with opaque host bytes */
 } pl_kind;
 
 /* executioner types for newstyle thunks */
@@ -382,6 +383,25 @@ static inline pl_val pl_resolve(pl_val v) {
          pl_hdr_kind(*pl_ptr(v)) == PL_K_IND)
     v = pl_ind_target(pl_ptr(v));
   return v;
+}
+
+/* WORMHOLE { hdr; byte length; host type identity; bytes[ceil(n/8)] }.
+ * Wrapper and buffer live together in non-moving gc2. Their addresses stay
+ * valid while the value is rooted and its store lives. Bytes and type are
+ * opaque to GC: embedded managed pointers are neither traced nor updated.
+ * No finalizer: ownership of resources named by these bytes stays with host.
+ */
+static inline bool pl_is_wormhole(pl_val v) {
+  return pl_tag(v) == PL_TAG_DEFER && pl_hdr_kind(*pl_ptr(v)) == PL_K_WORMHOLE;
+}
+static inline size_t pl_wormhole_size(pl_val v) {
+  ax_assume(pl_is_wormhole(v), "wormhole size on another kind");
+  return (size_t)pl_ptr(v)[1];
+}
+static inline void* pl_wormhole_data(pl_val v, const void* type) {
+  if (!pl_is_wormhole(v) || pl_ptr(v)[2] != (pl_cell)(uintptr_t)type)
+    return NULL;
+  return pl_ptr(v) + 3;
 }
 
 /* ── Convenience predicates (WHNF inputs) ──────────────────────────────── */

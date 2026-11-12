@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = ["crates/mesa-noun", "crates/mesa-wire", "crates/mesa-ffi", "crates/mesa-identity", "crates/mesa-crypto", "crates/mesa-core", "crates/mesa-lss", "crates/mesa-udp", "crates/mesa-flow", "crates/mesa-transport", "crates/mesa-store"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/gwbtc/libmesa"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
