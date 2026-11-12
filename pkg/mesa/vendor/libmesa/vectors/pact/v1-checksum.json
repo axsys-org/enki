@@ -1,0 +1,16 @@
+[
+  {
+    "name": "page-port80-exact",
+    "wire": "94968b180002e067100000010d08007075626c2f312f6d4005abababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab0501efbeadde0a01a8c05000",
+    "len": 101,
+    "checksum": "vere",
+    "origin": "Derived from page-next-if-hop3 by changing only port to 80 and recomputing gum; Hoon convention is source-derived, not live-extracted."
+  },
+  {
+    "name": "page-port80-atom",
+    "wire": "9436e5e00002e067100000010d08007075626c2f312f6d4005abababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab0501efbeadde0a01a8c05000",
+    "len": 101,
+    "checksum": "hoon",
+    "origin": "Derived from page-next-if-hop3 by changing only port to 80 and recomputing gum; Hoon convention is source-derived, not live-extracted."
+  }
+]

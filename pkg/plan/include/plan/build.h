@@ -24,6 +24,15 @@ size_t pl_wormhole_cells(size_t n);
 pl_val pl_mk_wormhole(pl_thread* t, const void* type, const void* bytes,
                       size_t n);
 
+/* Resource variant: owns context after successful construction. The finalizer
+ * receives context once after collection, rollback, or store teardown. It may
+ * run on any host thread and must not access PLAN. Payload bytes remain opaque.
+ * An explicit close should close the native object, leaving a valid closed
+ * control block for aliases; the finalizer later destroys that control block.
+ */
+pl_val pl_mk_resource(pl_thread* t, const void* type, const void* bytes,
+                      size_t n, void (*drop)(void*), void* context);
+
 /* Direct nat if < 2^63, else a boxed single-limb nat (2 cells). */
 pl_val pl_mk_nat_u64(pl_thread* t, uint64_t n);
 

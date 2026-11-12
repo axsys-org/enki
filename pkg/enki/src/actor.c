@@ -122,6 +122,7 @@ static er_actor* er_register(er_scheduler* sys, pl_heap* heap, pl_thread* t,
   a->id = sys->next_id++;
   a->heap = heap;
   a->t = t;
+  a->t->rplan_no_resources = sys->mode != ER_MODE_LIVE;
   a->t->host = a; /* effect attribution for the pl_io_hook */
   a->t->rplan_effect_f = er_actor_rplan_effect;
   a->adopted = adopted;
@@ -166,6 +167,7 @@ void er_scheduler_free(er_scheduler* sys) {
     }
     pl_gc_del_root_source(a->heap, er_actor_roots, a);
     a->t->host = NULL; /* the backpointer dies with the actor */
+    a->t->rplan_no_resources = false;
     a->t->rplan_effect_f = NULL;
     if (!a->adopted) { /* adopted threads/heaps stay with the embedder */
       pl_thread_free(a->t);
@@ -1465,6 +1467,8 @@ void er_scheduler_record(er_scheduler* sys, er_log* log) {
   ax_assume(er_log_events(log) == 0, "er_scheduler_record: log not empty");
   log->quantum = sys->cfg.quantum;
   sys->mode = ER_MODE_RECORD;
+  for (er_actor* a = sys->all_head; a; a = a->all_next)
+    a->t->rplan_no_resources = true;
   sys->rec = log;
   pl_set_io_hook(er_io_hook);
 }
@@ -1476,6 +1480,8 @@ void er_scheduler_replay(er_scheduler* sys, const er_log* log) {
   ax_assume(sys->curlm == NULL && sys->http_inflight_n == 0,
             "er_scheduler_replay: live http transfers exist");
   sys->mode = ER_MODE_REPLAY;
+  for (er_actor* a = sys->all_head; a; a = a->all_next)
+    a->t->rplan_no_resources = true;
   sys->play = log;
   sys->cursor = 0;
   pl_set_io_hook(er_io_hook);

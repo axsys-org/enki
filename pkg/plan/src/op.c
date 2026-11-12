@@ -1254,6 +1254,11 @@ const pl_opdesc pl_ops[] = {
     OP83_LOCAL_DEEP("BatEq", 2, 0b11, 0b11, op_bateq),
     OP83_LOCAL_DEEP("BatHash", 1, 0b1, 0b1, op_bathash),
     OP82C("Self", 1, 0b1, 0, pl_op82_self),
+/* Mesa: handle row elements use host observation; data is normal. */
+#define MESA_OP(name)                                                          \
+  {83, 0, name, 2, 0, 0b10, 0, 0b1, true, false, pl_op83_mesa},
+#include "../../mesa/include/ops.def"
+#undef MESA_OP
 };
 
 const size_t pl_nops = sizeof(pl_ops) / sizeof(pl_ops[0]);
@@ -1393,6 +1398,13 @@ static bool nat_name_eq(pl_val v, const char* s) {
   return true;
 }
 
+enum {
+  PL_MESA_OP_COUNT = 0
+#define MESA_OP(name) +1
+#include "../../mesa/include/ops.def"
+#undef MESA_OP
+};
+
 int pl_op_lookup(uint64_t opset, pl_val name, uint32_t argc) {
   pl_opbucket b = pl_op_lookup_bucket(opset, argc);
   for (size_t j = 0; j < b.n; j++) {
@@ -1403,6 +1415,11 @@ int pl_op_lookup(uint64_t opset, pl_val name, uint32_t argc) {
     if (d->name_c != NULL ? nat_name_eq(name, d->name_c)
                           : (pl_is_nat63(name) && d->name == name))
       return (int)i;
+  }
+  if (opset == 83 && argc == 2) {
+    for (size_t i = pl_nops - PL_MESA_OP_COUNT; i < pl_nops; i++)
+      if (nat_name_eq(name, pl_ops[i].name_c))
+        return (int)i;
   }
   return -1;
 }

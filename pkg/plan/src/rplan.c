@@ -236,6 +236,12 @@ cleanup:
   return res;
 }
 
+bool pl_rplan_resolve_path(pl_thread* t, const char* path, bool writing,
+                           char** out) {
+  return writing ? rp_resolve_write_path(t, path, out)
+                 : rp_resolve_read_path(t, path, out);
+}
+
 /* bytesBar: the data bytes followed by a 0x01 terminator. */
 static pl_val rp_bar(pl_thread* t, const uint8_t* b, size_t n) {
   uint8_t* bar = malloc(n + 1);

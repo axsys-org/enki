@@ -224,6 +224,7 @@ struct pl_thread {
 
   /* The reference vMode: op 82 (rplan I/O) is callable only in RPLAN
    * mode (REPL / snapshot execution), never while assembling modules. */
+  bool rplan_no_resources; /* record/replay cannot encode native handles */
   bool rplan_f;
 
   /* When non-NULL, ReadFile and ReadFolder resolve their arguments relative

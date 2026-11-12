@@ -46,10 +46,28 @@
           ];
         };
 
+        mesaBridge = pkgs.rustPlatform.buildRustPackage {
+          pname = "enki-mesa";
+          version = "0.1.0";
+          src = lib.cleanSourceWith {
+            src = ./pkg/mesa;
+            filter = path: type: baseNameOf path != "target";
+          };
+          cargoLock.lockFile = ./pkg/mesa/Cargo.lock;
+          __darwinAllowLocalNetworking = true;
+          installPhase = ''
+            runHook preInstall
+            install -Dm644 target/${pkgs.stdenv.hostPlatform.rust.rustcTarget}/release/libenki_mesa.a $out/lib/libenki_mesa.a
+            runHook postInstall
+          '';
+        };
+
         treefmtEval = treefmt-nix.lib.evalModule pkgs {
           projectRootFile = "flake.nix";
           programs.clang-format.enable = true;
           programs.alejandra.enable = true;
+          programs.rustfmt.enable = true;
+          settings.global.excludes = ["pkg/mesa/vendor/**"];
           programs.mdformat.enable = true;
           settings.formatter.clang-format.includes = [
             "*.c"
@@ -92,7 +110,7 @@
           selected = compilerFor buildType;
         in
           import ./nix/mkenki.nix {
-            inherit lib src sljit;
+            inherit lib src sljit mesaBridge;
             inherit (pkgs) gnumake curl gmp lmdb openssl libsodium libblake3;
             inherit (selected) stdenv compiler cc;
           };
@@ -251,6 +269,7 @@
           enki-release = enkiReleaseNoPGO;
           wisp = wispPackage;
           assembler = assemblerPackage;
+          mesa = mesaBridge;
           enki-debug = mkenki "debug";
           enki-asan = mkenki "asan";
           enki-ubsan = mkenki "ubsan";
@@ -294,6 +313,9 @@
               pkgs.clang-tools
               pkgs.llvmPackages.llvm
               pkgs.bear
+              pkgs.rustc
+              pkgs.cargo
+              pkgs.rustfmt
               pkgs.gnumake
               pkgs.curl
               pkgs.gmp

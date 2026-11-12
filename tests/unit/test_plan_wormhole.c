@@ -1,5 +1,6 @@
 #include "test.h"
 #include "test_plan.h"
+#include "../../pkg/plan/src/gc2_internal.h"
 
 static const char worm_type;
 static const char other_type;
@@ -161,4 +162,49 @@ TEST(wormhole, pin_and_persistence_reject_reachable_host_bytes) {
   ASSERT_STR_EQ(t->exn_msg, "<<wormhole>>");
   ASSERT_FALSE(pl_pin_is_hashed(t->vstack[2]));
   test_rt_free(&rt);
+}
+
+static void count_drop(void* context) {
+  ++*(unsigned*)context;
+}
+
+TEST(wormhole, resource_finalization_and_foreign_pressure) {
+  test_rt rt = test_rt_new();
+  unsigned drops = 0;
+  void* pointer = &drops;
+  pl_vpush(rt.t, pl_mk_resource(rt.t, &worm_type, &pointer, sizeof(pointer),
+                                count_drop, &drops));
+  pl_store_gc_set_threshold(rt.store, 1024);
+  pl_store_gc_charge(rt.store, rt.t->vstack[0], 4096);
+  ASSERT_EQ(pl_store_gc_stats(rt.store).external_bytes, 4096);
+  ASSERT(pl_store_gc_poll(rt.store));
+  pl_store_gc_wait(rt.store);
+  ASSERT_EQ(drops, 0);
+  pl_gc_collect_now(rt.t);
+  ASSERT_EQ(pl_wormhole_size(rt.t->vstack[0]), sizeof(pointer));
+  rt.t->vsp = 0;
+  collect_shared(rt.store);
+  ASSERT_EQ(drops, 1);
+  ASSERT_EQ(pl_store_gc_stats(rt.store).external_bytes, 0);
+  collect_shared(rt.store);
+  ASSERT_EQ(drops, 1);
+  (void)pl_mk_resource(rt.t, &worm_type, NULL, 0, count_drop, &drops);
+  test_rt_free(&rt);
+  ASSERT_EQ(drops, 2); /* live resources also close at store teardown */
+}
+
+TEST(wormhole, resource_rollback_queues_finalizer_once) {
+  test_rt rt = test_rt_new();
+  unsigned drops = 0;
+  pl_store_gc_wait(rt.store);
+  size_t checkpoint = pl_gc2_checkpoint(rt.store);
+  pl_val v = pl_mk_resource(rt.t, &worm_type, NULL, 0, count_drop, &drops);
+  pl_store_gc_charge(rt.store, v, 8192);
+  pl_gc2_rollback(rt.store, checkpoint);
+  ASSERT_EQ(drops, 0); /* rollback only queues native destruction */
+  pl_store_gc_run_finalizers(rt.store);
+  ASSERT_EQ(drops, 1);
+  ASSERT_EQ(pl_store_gc_stats(rt.store).external_bytes, 0);
+  test_rt_free(&rt);
+  ASSERT_EQ(drops, 1);
 }

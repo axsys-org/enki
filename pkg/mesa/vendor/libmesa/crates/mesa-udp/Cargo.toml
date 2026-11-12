@@ -1,0 +1,17 @@
+[package]
+name = "mesa-udp"
+description = "Bounded nonblocking UDP host for libmesa signed public reads"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+mesa-core = { path = "../mesa-core" }
+mesa-crypto = { path = "../mesa-crypto" }
+
+[dev-dependencies]
+mesa-wire = { path = "../mesa-wire" }
+
+[lints]
+workspace = true

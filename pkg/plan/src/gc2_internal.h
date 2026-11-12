@@ -2,6 +2,8 @@
 #define PL_GC2_INTERNAL_H
 #include "plan/store.h"
 
+void pl_gc2_set_finalizer(pl_store* s, pl_val v, void (*drop)(void*),
+                          void* context);
 void pl_gc2_init(pl_store* s, size_t capacity);
 void pl_gc2_destroy(pl_store* s);
 pl_cell* pl_gc2_alloc(pl_store* s, size_t cells);

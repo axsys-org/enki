@@ -5,6 +5,7 @@
 #include "axsys/assume.h"
 #include "plan/nat.h"
 #include "store_internal.h"
+#include "gc2_internal.h"
 
 /* gcc -O3's inliner chains the pl_as-returned-NULL fact into
  * pl_arity's APP case and reports an impossible null dereference
@@ -182,4 +183,11 @@ pl_val pl_mk_wormhole(pl_thread* t, const void* type, const void* bytes,
     memcpy(p + 3, bytes, n);
   }
   return pl_make(PL_TAG_DEFER, p);
+}
+
+pl_val pl_mk_resource(pl_thread* t, const void* type, const void* bytes,
+                      size_t n, void (*drop)(void*), void* context) {
+  pl_val v = pl_mk_wormhole(t, type, bytes, n);
+  pl_gc2_set_finalizer(pl_heap_store(t->heap), v, drop, context);
+  return v;
 }

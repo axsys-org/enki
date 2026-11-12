@@ -1,0 +1,93 @@
+[
+  {
+    "name": "peek-publ-galaxy",
+    "type": "peek",
+    "hoon": "[hop=0 %peek [[~zod 1] [13 ~] /publ/1/a/x/1//foo/bar]]",
+    "len": 36,
+    "wire": "10812c210002e067100000010d15007075626c2f312f612f782f312f2f666f6f2f626172",
+    "jam": "19f0e1cacad62517a40df8707562eca071f070707cd038039ed9db3be08985c905",
+    "roundtrip": true
+  },
+  {
+    "name": "peek-comet-datafrag",
+    "type": "peek",
+    "hoon": "[hop=0 %peek [[`@p`(dec (bex 128)) 1] [13 %data 5] /chum/5/~sampel-palnet/3/0va.bcdef]]",
+    "len": 63,
+    "wire": "105102400002e06703ffffffffffffffffffffffffffffffff010d0521006368756d2f352f7e73616d70656c2d70616c6e65742f332f3076612e6263646566",
+    "jam": "19f0e1cacad60520e0ffffffffffffffffffffffffffffff9f0bd2019f2c8c2e8c1bf0c7d0eada41eb00be7e73616d70656c2d70616c6e65f4a073000f18bb3017b131b232b3",
+    "roundtrip": true
+  },
+  {
+    "name": "peek-rift-1byte",
+    "type": "peek",
+    "hoon": "[hop=0 %peek [[~sampel-palnet 255] [0 ~] /a]]",
+    "len": 18,
+    "wire": "100194220002e067113ff1da60ff00010061",
+    "jam": "19f0e1cacad605fc9f786d3088ffd2e06101",
+    "roundtrip": true
+  },
+  {
+    "name": "peek-rift-2byte",
+    "type": "peek",
+    "hoon": "[hop=0 %peek [[~sampel-palnet 256] [0 ~] /a]]",
+    "len": 19,
+    "wire": "10d19a690002e067153ff1da60000100010061",
+    "jam": "19f0e1cacad605fc9f786d301880a5c1c302",
+    "roundtrip": true
+  },
+  {
+    "name": "page-sig-single",
+    "type": "page",
+    "hoon": "[hop=0 %page [[~zod 1] [13 ~] /publ/1/m] [tob=5 [%& %& `@uxJ`(fil 3 64 0xab)] dat=0xde.adbe.ef01] ~]",
+    "len": 95,
+    "wire": "907040e80002e067100000010d08007075626c2f312f6d4005abababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab0501efbeadde",
+    "jam": "19f0e1c2ceca955c9036e0c3d589b183c6c1db166e99000860757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575151005bcfbb67a0b",
+    "roundtrip": true
+  },
+  {
+    "name": "page-next-if-hop3",
+    "type": "page",
+    "hoon": "[hop=3 %page [[~zod 1] [13 ~] /publ/1/m] [tob=5 [%& %& `@uxJ`(fil 3 64 0xab)] dat=0xde.adbe.ef01] ~[[%if .192.168.1.10 1.337]]]",
+    "len": 101,
+    "wire": "94c679cb0002e067100000010d08007075626c2f312f6d4005abababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab0501efbeadde0a01a8c03905",
+    "jam": "a1033e5cd859b9920bd2067cb83a3176d03878dbc22d130001acaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae02a28077df56ef029f660e102804a00283cba9",
+    "roundtrip": true
+  },
+  {
+    "name": "page-lss-pair-frag",
+    "type": "page",
+    "hoon": "[hop=0 %page [[~zod 1] [13 %data 1] /publ/1/m] [tob=1.040 [%| ~ (fil 3 32 0x11) (fil 3 32 0x22)] dat=(fil 3 16 0x33)] ~]",
+    "len": 108,
+    "wire": "90802bb30002e067000000010d0108007075626c2f312f6d4d1004111111111111111111111111111111111111111111111111111111111111111122222222222222222222222222222222222222222222222222222222222222221033333333333333333333333333333333",
+    "jam": "19f0e1c2ceca955c900ef8646174610ef8707562eca071f0b6050e82c51980fd8888888888888888888888888888888888888888888888888888888888888808a05f4444444444444444444444444444444444444444444444444444444444444404e8cfcccccccccccccccccccccccccccccc02",
+    "roundtrip": true
+  },
+  {
+    "name": "poke-hmac",
+    "type": "poke",
+    "hoon": "[hop=0 %poke [[~zod 1] [13 ~] /flow/ack] [[`@p`(dec (bex 128)) 1] [13 ~] /flow/poke] [tob=4 [%& %| `@uxH`(fil 3 16 0x77)] dat=0xcafe.0042]]",
+    "len": 76,
+    "wire": "904183dd0002e067100000010d0800666c6f772f61636b13ffffffffffffffffffffffffffffffff010d0900666c6f772f706f6b65480477777777777777777777777777777777044200feca",
+    "jam": "19f0e1ded6ca955c9036e09bb1bddd035ed8d8da0a40c0ffffffffffffffffffffffffffffff3f37ea37fe6cb6619631c0ffeeeeeeeeeeeeeeeeeeeeeeeeeeeeee0e088400fc9501",
+    "roundtrip": true
+  },
+  {
+    "name": "peek-hop-saturate",
+    "type": "peek",
+    "hoon": "[hop=9 %peek [[~zod 1] [13 ~] /a]]  :: encode-only: en clamps hop to 7",
+    "len": 16,
+    "wire": "101f8a430002e067100000010d010061",
+    "jam": "4132e0c39595ad4b2e481b3c2c",
+    "roundtrip": false,
+    "hop_on_wire": 7
+  },
+  {
+    "name": "page-short-final-frag",
+    "type": "page",
+    "hoon": "[hop=0 %page [[~zod 1] [13 ~] /publ/1/z] [tob=4 [%& %& `@uxJ`(fil 3 64 0xab)] dat=0xde] ~]",
+    "len": 91,
+    "wire": "90e08b7e0002e067100000010d08007075626c2f312f7a4004abababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab01de",
+    "jam": "19f0e1c2ceca955c9036e0c3d589b183c6c1f51666990008607575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575751584b7",
+    "roundtrip": true
+  }
+]

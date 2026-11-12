@@ -147,6 +147,22 @@ endif
 # (notably main) with the same names but different control flow. Keep PGO in
 # the runtime libraries without applying application profiles to test drivers.
 TEST_CFLAGS_ALL = $(filter-out -fprofile-instr-use=%,$(CFLAGS_ALL))
+# The pinned Rust bridge is part of the default runtime. MESA=0 retains the
+# opcode table but reports an unavailable error, for C-only tooling builds.
+MESA ?= 1
+CARGO ?= cargo
+MESA_TARGET_DIR ?= $(abspath build/mesa)
+MESA_LIB ?= $(MESA_TARGET_DIR)/release/libenki_mesa.a
+ifeq ($(MESA),1)
+CPPFLAGS_ALL += -DPL_MESA
+LDFLAGS_ALL += $(MESA_LIB) -ldl -lm
+ifeq ($(UNAME_S),Darwin)
+LDFLAGS_ALL += -liconv
+else ifeq ($(UNAME_S),Linux)
+LDFLAGS_ALL += -lrt -lutil
+endif
+endif
+
 TEST_LDFLAGS_ALL = $(filter-out -fprofile-instr-use=%,$(LDFLAGS_ALL))
 
 AXSYS_SRCS := $(wildcard pkg/axsys/src/*.c)
@@ -206,6 +222,9 @@ LIB_AXSYS := $(BUILD_DIR)/lib/libaxsys.a
 LIB_PLAN := $(BUILD_DIR)/lib/libplan.a
 LIB_ENKI := $(BUILD_DIR)/lib/libenki.a
 LIBS := $(LIB_AXSYS) $(LIB_PLAN) $(LIB_ENKI)
+ifeq ($(MESA),1)
+LIBS += $(MESA_LIB)
+endif
 
 ifeq ($(BUILD_TYPE),tsan)
 ACTIVE_UNIT_BINS := $(UNIT_BINS) $(TSAN_UNIT_BINS)
@@ -360,6 +379,9 @@ install: lib bin
 	install -m 0644 $(LIB_AXSYS) $(PREFIX)/lib/libaxsys.a
 	install -m 0644 $(LIB_PLAN) $(PREFIX)/lib/libplan.a
 	install -m 0644 $(LIB_ENKI) $(PREFIX)/lib/libenki.a
+ifeq ($(MESA),1)
+	install -m 0644 $(MESA_LIB) $(PREFIX)/lib/libenki_mesa.a
+endif
 	install -m 0644 pkg/axsys/include/axsys/*.h $(PREFIX)/include/axsys/
 	install -m 0644 pkg/plan/include/plan/*.h $(PREFIX)/include/plan/
 	install -m 0644 pkg/enki/include/enki/*.h $(PREFIX)/include/enki/
@@ -455,3 +477,11 @@ distclean:
 # without these includes a header edit leaves stale test and app binaries.
 -include $(UNIT_BINS:=.d) $(TSAN_UNIT_BINS:=.d) $(PROPERTY_BINS:=.d)
 -include $(APP_BINS:=.d) $(PERF_BINS:=.d) $(FUZZ_BINS:=.d)
+
+MESA_SOURCES := $(wildcard pkg/mesa/src/*.rs pkg/mesa/Cargo.* pkg/mesa/vendor/libmesa/Cargo.* pkg/mesa/vendor/libmesa/crates/*/Cargo.toml pkg/mesa/vendor/libmesa/crates/*/src/*.rs pkg/mesa/vendor/libmesa/crates/*/src/*/*.rs)
+$(MESA_TARGET_DIR)/release/libenki_mesa.a: $(MESA_SOURCES)
+	CC="$(CC)" CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER="$(CC)" CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER="$(CC)" $(CARGO) build --manifest-path pkg/mesa/Cargo.toml --locked --release --target-dir $(MESA_TARGET_DIR)
+
+.PHONY: test-mesa
+test-mesa:
+	CC="$(CC)" CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER="$(CC)" CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER="$(CC)" $(CARGO) test --manifest-path pkg/mesa/Cargo.toml --locked --target-dir $(MESA_TARGET_DIR)

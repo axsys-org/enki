@@ -49,6 +49,7 @@ typedef struct pl_opdesc {
   pl_val (*body)(pl_thread* t, size_t ab);
 } pl_opdesc;
 
+pl_val pl_op83_mesa(pl_thread* t, size_t ab);
 extern const pl_opdesc pl_ops[];
 extern const size_t pl_nops;
 

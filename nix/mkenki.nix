@@ -3,6 +3,7 @@
   stdenv,
   src,
   sljit,
+  mesaBridge,
   gnumake,
   curl,
   gmp,
@@ -23,6 +24,8 @@
 stdenv.mkDerivation {
   inherit pname src;
   version = "0.1.0";
+  # Inherited by overridden install/coverage phases and recursive Make calls.
+  MESA_LIB = "${mesaBridge}/lib/libenki_mesa.a";
 
   nativeBuildInputs =
     [
