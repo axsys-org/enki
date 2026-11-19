@@ -291,8 +291,8 @@ void pl_gc2_init(pl_store* s, size_t capacity) {
   ax_assume(g != NULL, "oom");
   s->gc2 = g;
   ax_assume(ax_buddy_init(&g->buddy, capacity, GC2_PAGE), "gc2 buddy init");
-  s->lo = mmap(NULL, capacity, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON,
-               -1, 0);
+  s->lo = mmap(NULL, capacity, PROT_READ | PROT_WRITE,
+               MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
   ax_assume(s->lo != MAP_FAILED, "gc2 address reservation failed");
   s->hi = s->lo + capacity;
   g->pages = calloc(capacity / GC2_PAGE, sizeof(*g->pages));
