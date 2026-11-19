@@ -1322,9 +1322,8 @@ static const uint16_t pl_op82_argc1[] = {105, 106, 107, 108, 110, 111, 112,
 static const uint16_t pl_op82_argc2[] = {109, 116, 117, 119};
 static const uint16_t pl_op82_argc3[] = {120, 123};
 
-static const uint16_t pl_op83_argc1[] = {124, 126, 127, 128, 132, 134, 135,
-                                         136, 142, 144, 147, 148, 149,
-                                         150, 151};
+static const uint16_t pl_op83_argc1[] = {124, 126, 127, 128, 132, 134, 135, 136,
+                                         142, 144, 147, 148, 149, 150, 151};
 static const uint16_t pl_op83_argc2[] = {125, 137, 139, 140, 143, 152, 154};
 static const uint16_t pl_op83_argc3[] = {138};
 static const uint16_t pl_op83_argc4[] = {131, 153, 155, 156};
