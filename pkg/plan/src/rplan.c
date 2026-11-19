@@ -1766,6 +1766,9 @@ static bool host_ours(int dfd, pid_t pid) {
   return stat(path, &a) == 0 && fstat(dfd, &b) == 0 && a.st_dev == b.st_dev &&
          a.st_ino == b.st_ino;
 #else
+  /* No /proc to ask where the process stands: being alive is all that is
+   * checked here. */
+  (void)dfd;
   return true;
 #endif
 }
