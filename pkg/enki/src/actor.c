@@ -757,32 +757,52 @@ static void er_service(er_scheduler* sys, er_actor* a, bool locked) {
  * er_gc2_roots) and the actor record that capabilities and ids still name.
  * Without this every actor ever spawned kept its thread stacks and trimmed
  * semispaces until er_scheduler_free, so a program spawning one per request
- * grew without bound.  Runs inside the store mutator scope of the slice that
- * finished; the store lock pl_heap_free takes nests inside sys->mu as it
- * does elsewhere (the collector, which takes them the other way round,
- * cannot mark while this scope is open).  Capabilities held by other actors
- * keep naming the record; a send to it is dropped in er_deliver.
+ * grew without bound.  Capabilities held by other actors keep naming the
+ * record; a send to it is dropped in er_deliver.
+ *
+ * Runs inside the store mutator scope of the slice that finished, so nothing
+ * is collected before the result is rooted.  The collector takes the store's
+ * locks and then the scheduler mutex (er_gc2_roots), so nothing here touches
+ * the store while it holds that mutex: the snapshot is taken and the thread
+ * and heap are freed with it released, as every service does
+ * (er_service_unlock), and only the actor record changes under it.  The actor
+ * is marked halted together with its result, so nobody sees one without the
+ * other.
  */
-static void er_reap(er_actor* a) {
-  if (a->adopted || a->reaped)
+static void er_reap(er_scheduler* sys, er_actor* a, bool locked) {
+  if (a->adopted || a->reaped) {
+    a->status = ER_ACTOR_HALTED;
     return;
-  (void)er_pin_payload(a, pl_thread_result(a->t), &a->result);
-  for (er_msg* m = a->mbox_head; m != NULL;) {
-    er_msg* mn = m->next;
-    free(m);
-    m = mn;
   }
+  pl_val result = 0;
+  er_service_unlock(sys, locked);
+  (void)er_pin_payload(a, pl_thread_result(a->t), &result);
+  er_service_relock(sys, locked);
+
+  er_msg* mail = a->mbox_head;
+  pl_thread* t = a->t;
+  pl_heap* heap = a->heap;
+  a->status = ER_ACTOR_HALTED;
+  a->result = result;
   a->mbox_head = a->mbox_tail = NULL;
-  pl_gc_del_root_source(a->heap, er_actor_roots, a);
   a->self_handle = 0;
-  a->t->host = NULL;
-  a->t->rplan_no_resources = false;
-  a->t->rplan_effect_f = NULL;
-  pl_thread_free(a->t);
-  pl_heap_free(a->heap);
   a->t = NULL;
   a->heap = NULL;
   a->reaped = true;
+
+  er_service_unlock(sys, locked);
+  while (mail != NULL) {
+    er_msg* next = mail->next;
+    free(mail);
+    mail = next;
+  }
+  pl_gc_del_root_source(heap, er_actor_roots, a);
+  t->host = NULL;
+  t->rplan_no_resources = false;
+  t->rplan_effect_f = NULL;
+  pl_thread_free(t);
+  pl_heap_free(heap);
+  er_service_relock(sys, locked);
 }
 
 /* One scheduling step of a spawned (scheduler-owned) actor. */
@@ -793,8 +813,7 @@ static void er_step(er_scheduler* sys, er_actor* a, pl_run_status s,
     er_enqueue(a); /* round-robin fairness */
     break;
   case PL_RUN_DONE:
-    a->status = ER_ACTOR_HALTED;
-    er_reap(a); /* the result stays readable (er_actor_result) */
+    er_reap(sys, a, locked); /* the result stays readable (er_actor_result) */
     break;
   case PL_RUN_EXN:
     er_crash(a);
