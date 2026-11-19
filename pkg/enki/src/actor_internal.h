@@ -38,6 +38,8 @@ struct er_actor {
   er_http_xfer* http;  /* non-NULL: parked on a Fetch, not on Recv */
   bool effectful;      /* has initiated a descriptor-marked host effect */
   er_mt_worker* owner; /* dedicated MT worker after the first effect */
+  bool reaped;         /* halted: thread, heap, mailbox and self handle freed */
+  pl_val result; /* a reaped actor's result, store-resident (a GC2 root) */
   er_actor* qnext;
   er_actor* all_next;
 };
