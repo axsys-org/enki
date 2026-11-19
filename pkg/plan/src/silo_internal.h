@@ -34,6 +34,7 @@ typedef struct pl_silo_scan {
   size_t pin_count;
   uint32_t* used; /* first-occurrence indices into pins */
   size_t used_count;
+  bool has_law; /* the stream itself holds a LAW node (subpins not followed) */
 } pl_silo_scan;
 
 /* Save-time encoding can resolve hashes which are computed for a batch but

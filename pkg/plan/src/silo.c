@@ -1230,6 +1230,8 @@ static bool decode_node(silo_dec* d, uint32_t depth, pl_val* out,
     if (!decode_node(d, depth + 1, &body, &body_info))
       return false;
     info->kind = SILO_NODE_LAW;
+    if (!d->build && d->scan != NULL)
+      d->scan->has_law = true;
     if (d->build) {
       pl_cell* p = decode_alloc(d, PL_LAW_CELLS);
       if (p == NULL)
