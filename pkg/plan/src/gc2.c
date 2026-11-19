@@ -63,6 +63,7 @@ typedef struct gc2_scope {
   pl_store* store;
   size_t depth;
   bool blocking;
+  bool parked; /* inside a syscall that touches neither heap nor store */
   struct gc2_scope* next;
 } gc2_scope;
 static _Thread_local gc2_scope* scopes;
@@ -130,6 +131,40 @@ void pl_store_mutator_blocking(pl_store* s) {
   /* A collector already waiting for active scopes must reopen the gate:
    * another actor may be needed to complete this operation. */
   pthread_cond_broadcast(&g->world_cv);
+  pthread_mutex_unlock(&g->world_mu);
+}
+
+void pl_store_mutator_park(pl_store* s) {
+  if (!s)
+    return;
+  gc2_scope* sc = scope_for(s);
+  if (!sc || sc->parked)
+    return;
+  struct pl_gc2* g = s->gc2;
+  pthread_mutex_lock(&g->world_mu);
+  sc->parked = true;
+  ax_assume(g->active != 0, "gc2 park without an active scope");
+  g->active--;
+  if (sc->blocking)
+    g->blocking--;
+  pthread_cond_broadcast(&g->world_cv);
+  pthread_mutex_unlock(&g->world_mu);
+}
+
+void pl_store_mutator_unpark(pl_store* s) {
+  if (!s)
+    return;
+  gc2_scope* sc = scope_for(s);
+  if (!sc || !sc->parked)
+    return;
+  struct pl_gc2* g = s->gc2;
+  pthread_mutex_lock(&g->world_mu);
+  while (g->stopped)
+    pthread_cond_wait(&g->world_cv, &g->world_mu);
+  g->active++;
+  if (sc->blocking)
+    g->blocking++;
+  sc->parked = false;
   pthread_mutex_unlock(&g->world_mu);
 }
 

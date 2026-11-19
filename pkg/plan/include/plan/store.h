@@ -149,6 +149,15 @@ void pl_store_mutator_leave(pl_store* s);
  * outermost scope exits. Existing waiters reopen the gate so other actors
  * can finish the effect. No-op when there is no enclosing scope. */
 void pl_store_mutator_blocking(pl_store* s);
+/* Around the syscall alone of a blocking host effect (accept, read into a
+ * malloc buffer, write from rooted bytes, sleep, curl's poll): nothing in the
+ * heap or the store is touched until unpark, so the collector may mark
+ * without this mutator, and unpark waits out a mark in progress.  A blocking
+ * scope that is parked no longer defers collection: without this a server,
+ * always parked in Accept somewhere, never collected the store again.
+ * No-op outside a scope. */
+void pl_store_mutator_park(pl_store* s);
+void pl_store_mutator_unpark(pl_store* s);
 void pl_store_gc_add_roots(pl_store* s, pl_root_source fn, void* ctx);
 void pl_store_gc_del_roots(pl_store* s, pl_root_source fn, void* ctx);
 void pl_store_gc_request(pl_store* s);

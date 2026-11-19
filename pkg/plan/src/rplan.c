@@ -24,6 +24,7 @@
 #include "internal.h"
 #include "plan/nat.h"
 #include "plan/rplan.h"
+#include "plan/store.h"
 #include "plan/xtract.h"
 
 /*
@@ -48,10 +49,14 @@
 
 #define ARG(i) (t->vstack[ab + (i)])
 
-static int rp_write_all(int fd, const uint8_t* bytes, size_t len) {
+static int rp_write_all(pl_thread* t, int fd, const uint8_t* bytes,
+                        size_t len) {
+  pl_store* s = pl_heap_store(t->heap);
   size_t off = 0;
   while (off < len) {
+    pl_store_mutator_park(s); /* bytes belong to a rooted argument */
     ssize_t r = write(fd, bytes + off, len - off);
+    pl_store_mutator_unpark(s);
     if (r < 0) {
       if (errno == EINTR)
         continue;
@@ -298,7 +303,7 @@ static pl_val rp_output_fd(pl_thread* t, size_t ab, size_t handle) {
     free(b);
     pl_raise_msg(t, "Output: closed");
   }
-  int rc = rp_write_all(fd, b, n);
+  int rc = rp_write_all(t, fd, b, n);
   int write_errno = errno;
   (void)ax_fd_release(handle);
   errno = write_errno;
@@ -324,7 +329,7 @@ pl_val pl_op82_print(pl_thread* t, size_t ab) {
     free(b);
     pl_raise_msg(t, "Print: closed");
   }
-  int rc = rp_write_all(fd, b, n);
+  int rc = rp_write_all(t, fd, b, n);
   int write_errno = errno;
   (void)ax_fd_release(STDOUT_FILENO);
   errno = write_errno;
@@ -555,7 +560,7 @@ pl_val pl_op82_write_file(pl_thread* t, size_t ab) {
   free(path);
   size_t n;
   uint8_t* b = rp_nat_bytes(rp_want_nat(t, ARG(1)), true, &n);
-  int rc = rp_write_all(fd, b, n);
+  int rc = rp_write_all(t, fd, b, n);
   free(b);
   if (rc < 0) {
     perror("failed to write file");
@@ -721,7 +726,9 @@ pl_val pl_op82_accept(pl_thread* t, size_t ab) {
   int listen_fd;
   if (ax_fd_acquire((size_t)h, &listen_fd) < 0)
     pl_raise_msg(t, "Accept: bad handle");
+  pl_store_mutator_park(pl_heap_store(t->heap));
   int client_fd = accept(listen_fd, NULL, NULL);
+  pl_store_mutator_unpark(pl_heap_store(t->heap));
   int accept_errno = errno;
   (void)ax_fd_release((size_t)h);
   errno = accept_errno;
@@ -746,10 +753,12 @@ pl_val pl_op82_read(pl_thread* t, size_t ab) {
   uint8_t* buf = malloc(n ? n : 1);
   ax_assume(buf != NULL, "oom");
   ssize_t r;
+  pl_store_mutator_park(pl_heap_store(t->heap));
   do {
     r = read(fd, buf, n);
   } while (r < 0 && errno == EINTR);
   int read_errno = errno;
+  pl_store_mutator_unpark(pl_heap_store(t->heap));
   (void)ax_fd_release((size_t)h);
   errno = read_errno;
   if (r < 0) {
@@ -773,7 +782,7 @@ pl_val pl_op82_write(pl_thread* t, size_t ab) {
     pl_raise_msg(t, "Write: bad handle");
   size_t n;
   uint8_t* b = rp_nat_bytes(ARG(1), true, &n);
-  int rc = rp_write_all(fd, b, n);
+  int rc = rp_write_all(t, fd, b, n);
   int write_errno = errno;
   (void)ax_fd_release((size_t)h);
   errno = write_errno;
