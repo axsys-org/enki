@@ -18,6 +18,10 @@
 #include <arpa/inet.h>
 #include <time.h>
 #include <unistd.h>
+#include <signal.h>
+#include <spawn.h>
+#include <stdio.h>
+#include <sys/statvfs.h>
 
 #include "axsys/allocator.h"
 #include "axsys/ds.h"
@@ -1397,11 +1401,45 @@ pl_val pl_op82_self(pl_thread* t, size_t ab) {
   return rp_request(t, ab, 1);
 }
 
-/* ---- What a foot takes from the operating system ---------------------------
+/* ---- What a machine's own world may execute -------------------------------
  *
- * Entropy gives bytes for a seed. Folder makes a folder inside the file root,
- * for the files a foot keeps there. Both are open to any process.
+ * Entropy and Usage are open to any world. The rest is a capability. A
+ * process started with --worlds-root and --staged is given one host handle,
+ * once, by Host. Whoever holds it may make a world's directory beneath that
+ * root as a copy of the staged world, start this same runtime there, stop a
+ * world it started, and ask whether one is alive. Nothing else can be started
+ * and no other directory reached: every path is taken relative to the root's
+ * descriptor, a name is letters and digits only, and a link is never followed.
+ * A world started here is given no root, so it holds no handle of its own.
  */
+
+extern char** environ;
+
+static int host_root_fd = -1;
+static char* host_staged_c = NULL;
+static char* host_self_c = NULL;
+static int host_given = 0;
+static const char host_type;
+
+bool pl_host_configure(const char* root_c, const char* staged_c,
+                       const char* self_c) {
+  int fd = open(root_c, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  char* staged = realpath(staged_c, NULL);
+  char* self = realpath(self_c, NULL);
+  if (fd < 0 || staged == NULL || self == NULL) {
+    if (fd >= 0)
+      (void)close(fd);
+    free(staged);
+    free(self);
+    return false;
+  }
+  host_root_fd = fd;
+  host_staged_c = staged;
+  host_self_c = self;
+  /* A started world is never waited for, so it must not linger as a zombie. */
+  (void)signal(SIGCHLD, SIG_IGN);
+  return true;
+}
 
 pl_val pl_op83_entropy(pl_thread* t, size_t ab) {
   t->effect_epoch++;
@@ -1414,6 +1452,47 @@ pl_val pl_op83_entropy(pl_thread* t, size_t ab) {
   pl_val out = rp_bar(t, b, (size_t)n);
   sodium_memzero(b, sizeof(b));
   return out;
+}
+
+static void host_put64(uint8_t* out, uint64_t v) {
+  for (int i = 0; i < 8; i++)
+    out[i] = (uint8_t)(v >> (8 * i));
+}
+
+/* Four numbers of eight bytes each, least byte first: memory in all and
+ * available, then the disk of the worlds root (or of the working directory)
+ * in all and free. A number that cannot be had is zero. */
+pl_val pl_op83_usage(pl_thread* t, size_t ab) {
+  AX_UNUSED(ab);
+  t->effect_epoch++;
+  uint64_t mem_all = 0, mem_free = 0, disk_all = 0, disk_free = 0;
+#ifdef __linux__
+  FILE* f = fopen("/proc/meminfo", "r");
+  if (f != NULL) {
+    char line[160];
+    while (fgets(line, sizeof(line), f) != NULL) {
+      unsigned long long kb = 0;
+      if (sscanf(line, "MemTotal: %llu kB", &kb) == 1)
+        mem_all = (uint64_t)kb * 1024;
+      else if (sscanf(line, "MemAvailable: %llu kB", &kb) == 1)
+        mem_free = (uint64_t)kb * 1024;
+    }
+    (void)fclose(f);
+  }
+#endif
+  struct statvfs vfs;
+  int rc =
+      host_root_fd >= 0 ? fstatvfs(host_root_fd, &vfs) : statvfs(".", &vfs);
+  if (rc == 0) {
+    disk_all = (uint64_t)vfs.f_blocks * (uint64_t)vfs.f_frsize;
+    disk_free = (uint64_t)vfs.f_bavail * (uint64_t)vfs.f_frsize;
+  }
+  uint8_t out[32];
+  host_put64(out, mem_all);
+  host_put64(out + 8, mem_free);
+  host_put64(out + 16, disk_all);
+  host_put64(out + 24, disk_free);
+  return rp_bar(t, out, sizeof(out));
 }
 
 /* Whether a path is plain names joined by single slashes: relative, with no
@@ -1466,4 +1545,345 @@ pl_val pl_op83_folder(pl_thread* t, size_t ab) {
   if (path != NULL)
     ax_free(ax_allocator_system(), path);
   return ok ? 1 : 0;
+}
+
+pl_val pl_op83_host(pl_thread* t, size_t ab) {
+  AX_UNUSED(ab);
+  t->effect_epoch++;
+  if (host_root_fd < 0 || __sync_lock_test_and_set(&host_given, 1) != 0)
+    return 0;
+  uint64_t one = 1;
+  return pl_mk_wormhole(t, &host_type, &one, sizeof(one));
+}
+
+static bool host_held(pl_val v) {
+  return host_root_fd >= 0 && pl_wormhole_data(v, &host_type) != NULL;
+}
+
+/* A world's directory name: small letters and digits, at most 64 of them. */
+static char* host_name(pl_thread* t, pl_val v) {
+  char* s = pl_nat_to_cstr(ax_allocator_system(), rp_want_nat(t, v));
+  size_t n = s != NULL ? strlen(s) : 0;
+  bool ok = n > 0 && n <= 64;
+  for (size_t i = 0; ok && i < n; i++)
+    ok = (s[i] >= 'a' && s[i] <= 'z') || (s[i] >= '0' && s[i] <= '9');
+  if (!ok && s != NULL) {
+    ax_free(ax_allocator_system(), s);
+    s = NULL;
+  }
+  return s;
+}
+
+static int host_dir(int at, const char* name) {
+  return openat(at, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+}
+
+static bool host_copy_run(int from, int to, off_t left) {
+  uint8_t buf[1 << 16];
+  while (left != 0) {
+    size_t want = sizeof(buf);
+    if (left > 0 && (off_t)want > left)
+      want = (size_t)left;
+    ssize_t r = read(from, buf, want);
+    if (r < 0 && errno == EINTR)
+      continue;
+    if (r < 0)
+      return false;
+    if (r == 0)
+      return left < 0;
+    for (ssize_t w = 0; w < r;) {
+      ssize_t k = write(to, buf + w, (size_t)(r - w));
+      if (k < 0 && errno == EINTR)
+        continue;
+      if (k <= 0)
+        return false;
+      w += k;
+    }
+    if (left > 0)
+      left -= r;
+  }
+  return true;
+}
+
+/* A file's bytes, with its holes left as holes where the filesystem says
+ * where they are: a staged store is mostly hole. */
+static bool host_copy_file(int from, int to) {
+  struct stat st;
+  if (fstat(from, &st) != 0)
+    return false;
+#ifdef SEEK_DATA
+  off_t at = 0;
+  for (;;) {
+    off_t data = lseek(from, at, SEEK_DATA);
+    if (data < 0) {
+      if (errno == ENXIO)
+        break;
+      if (lseek(from, 0, SEEK_SET) != 0 || lseek(to, 0, SEEK_SET) != 0)
+        return false;
+      return host_copy_run(from, to, -1);
+    }
+    off_t hole = lseek(from, data, SEEK_HOLE);
+    if (hole < 0 || lseek(from, data, SEEK_SET) < 0 ||
+        lseek(to, data, SEEK_SET) < 0 || !host_copy_run(from, to, hole - data))
+      return false;
+    at = hole;
+  }
+  return ftruncate(to, st.st_size) == 0;
+#else
+  return host_copy_run(from, to, -1);
+#endif
+}
+
+/* Folders and plain files only. A link, a device or a pipe fails the copy. */
+static bool host_copy_tree(int from, int to, unsigned depth) {
+  if (depth > 32)
+    return false;
+  int again = dup(from);
+  DIR* d = again >= 0 ? fdopendir(again) : NULL;
+  if (d == NULL) {
+    if (again >= 0)
+      (void)close(again);
+    return false;
+  }
+  bool ok = true;
+  struct dirent* e;
+  while (ok && (e = readdir(d)) != NULL) {
+    if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
+      continue;
+    struct stat st;
+    if (fstatat(from, e->d_name, &st, AT_SYMLINK_NOFOLLOW) != 0) {
+      ok = false;
+    } else if (S_ISDIR(st.st_mode)) {
+      int a = host_dir(from, e->d_name);
+      int b = a >= 0 && mkdirat(to, e->d_name, 0700) == 0
+                  ? host_dir(to, e->d_name)
+                  : -1;
+      ok = a >= 0 && b >= 0 && host_copy_tree(a, b, depth + 1);
+      if (a >= 0)
+        (void)close(a);
+      if (b >= 0)
+        (void)close(b);
+    } else if (S_ISREG(st.st_mode)) {
+      int a = openat(from, e->d_name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+      int b = a >= 0
+                  ? openat(to, e->d_name,
+                           O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+                           st.st_mode & 0700)
+                  : -1;
+      ok = a >= 0 && b >= 0 && host_copy_file(a, b);
+      if (a >= 0)
+        (void)close(a);
+      if (b >= 0)
+        (void)close(b);
+    } else {
+      ok = false;
+    }
+  }
+  (void)closedir(d);
+  return ok;
+}
+
+static void host_remove_tree(int at, const char* name, unsigned depth) {
+  int fd = host_dir(at, name);
+  if (fd >= 0 && depth <= 32) {
+    int again = dup(fd);
+    DIR* d = again >= 0 ? fdopendir(again) : NULL;
+    if (d != NULL) {
+      struct dirent* e;
+      while ((e = readdir(d)) != NULL) {
+        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
+          continue;
+        if (unlinkat(fd, e->d_name, 0) != 0)
+          host_remove_tree(fd, e->d_name, depth + 1);
+      }
+      (void)closedir(d);
+    } else if (again >= 0) {
+      (void)close(again);
+    }
+  }
+  if (fd >= 0)
+    (void)close(fd);
+  (void)unlinkat(at, name, AT_REMOVEDIR);
+}
+
+/* WorldMake host name: 1 when the directory was made whole, else 0 and
+ * nothing is left behind. A name already taken is refused. */
+pl_val pl_op83_world_make(pl_thread* t, size_t ab) {
+  t->effect_epoch++;
+  if (!host_held(ARG(0)))
+    return 0;
+  char* name = host_name(t, ARG(1));
+  if (name == NULL)
+    return 0;
+  bool ok = false;
+  int from =
+      open(host_staged_c, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  if (from >= 0 && mkdirat(host_root_fd, name, 0700) == 0) {
+    int to = host_dir(host_root_fd, name);
+    ok = to >= 0 && host_copy_tree(from, to, 0);
+    if (to >= 0)
+      (void)close(to);
+    if (!ok)
+      host_remove_tree(host_root_fd, name, 0);
+  }
+  if (from >= 0)
+    (void)close(from);
+  ax_free(ax_allocator_system(), name);
+  return ok ? 1 : 0;
+}
+
+static pid_t host_pid(int dfd) {
+  int fd = openat(dfd, "pid", O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+  char b[32];
+  ssize_t r = fd >= 0 ? read(fd, b, sizeof(b) - 1) : -1;
+  if (fd >= 0)
+    (void)close(fd);
+  if (r <= 0)
+    return 0;
+  b[r] = '\0';
+  long v = strtol(b, NULL, 10);
+  return v > 1 ? (pid_t)v : 0;
+}
+
+/* Whether pid is the world of this directory: alive, and standing in it. A
+ * number reused by some other process is not ours and is never signalled. */
+static bool host_ours(int dfd, pid_t pid) {
+  if (pid <= 1 || kill(pid, 0) != 0)
+    return false;
+#ifdef __linux__
+  char path[64];
+  struct stat a, b;
+  (void)snprintf(path, sizeof(path), "/proc/%ld/cwd", (long)pid);
+  return stat(path, &a) == 0 && fstat(dfd, &b) == 0 && a.st_dev == b.st_dev &&
+         a.st_ino == b.st_ino;
+#else
+  /* No /proc to ask where the process stands: being alive is all that is
+   * checked here. */
+  (void)dfd;
+  return true;
+#endif
+}
+
+/* WorldStart host name args: the process number, or 0. args is the runtime's
+ * own arguments, each ended by a zero byte. The world stands in its own
+ * directory, in a session of its own, with no descriptor of this process and
+ * no worlds root. One that is already alive is not started again. */
+pl_val pl_op83_world_start(pl_thread* t, size_t ab) {
+  t->effect_epoch++;
+  if (!host_held(ARG(0)))
+    return 0;
+  char* name = host_name(t, ARG(1));
+  if (name == NULL)
+    return 0;
+  size_t n = 0;
+  uint8_t* args = rp_nat_bytes(rp_want_nat(t, ARG(2)), true, &n);
+  pl_val out = 0;
+  int dfd = host_dir(host_root_fd, name);
+  char* argv[66];
+  size_t argc = 0;
+  argv[argc++] = host_self_c;
+  bool ok = dfd >= 0 && args != NULL && n <= 8192 &&
+            (n == 0 || args[n - 1] == 0) && !host_ours(dfd, host_pid(dfd));
+  for (size_t i = 0; ok && i < n;) {
+    if (argc >= 65) {
+      ok = false;
+      break;
+    }
+    argv[argc++] = (char*)args + i;
+    i += strlen((char*)args + i) + 1;
+  }
+  argv[argc] = NULL;
+  int log = ok ? openat(dfd, "out.log",
+                        O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW, 0600)
+               : -1;
+  int null = ok ? open("/dev/null", O_RDONLY) : -1;
+  posix_spawn_file_actions_t fa;
+  posix_spawnattr_t at;
+  if (log >= 0 && null >= 0 && posix_spawn_file_actions_init(&fa) == 0) {
+    if (posix_spawnattr_init(&at) == 0) {
+      short flags = POSIX_SPAWN_SETSID;
+      bool set = posix_spawn_file_actions_addfchdir_np(&fa, dfd) == 0 &&
+                 posix_spawn_file_actions_adddup2(&fa, null, 0) == 0 &&
+                 posix_spawn_file_actions_adddup2(&fa, log, 1) == 0 &&
+                 posix_spawn_file_actions_adddup2(&fa, log, 2) == 0;
+#ifdef __APPLE__
+      flags |= POSIX_SPAWN_CLOEXEC_DEFAULT;
+#else
+      set = set && posix_spawn_file_actions_addclosefrom_np(&fa, 3) == 0;
+#endif
+      set = set && posix_spawnattr_setflags(&at, flags) == 0;
+      pid_t pid = 0;
+      if (set && posix_spawn(&pid, host_self_c, &fa, &at, argv, environ) == 0 &&
+          pid > 1) {
+        int pf =
+            openat(dfd, "pid",
+                   O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600);
+        if (pf >= 0) {
+          (void)dprintf(pf, "%ld\n", (long)pid);
+          (void)close(pf);
+        }
+        out = (pl_val)(uint64_t)pid;
+      }
+      (void)posix_spawnattr_destroy(&at);
+    }
+    (void)posix_spawn_file_actions_destroy(&fa);
+  }
+  if (log >= 0)
+    (void)close(log);
+  if (null >= 0)
+    (void)close(null);
+  if (dfd >= 0)
+    (void)close(dfd);
+  free(args);
+  ax_free(ax_allocator_system(), name);
+  return out;
+}
+
+/* WorldStop host name: 1 when the world of that directory was told to stop. */
+pl_val pl_op83_world_stop(pl_thread* t, size_t ab) {
+  t->effect_epoch++;
+  if (!host_held(ARG(0)))
+    return 0;
+  char* name = host_name(t, ARG(1));
+  if (name == NULL)
+    return 0;
+  int dfd = host_dir(host_root_fd, name);
+  pid_t pid = dfd >= 0 ? host_pid(dfd) : 0;
+  bool ok = dfd >= 0 && host_ours(dfd, pid) && kill(pid, SIGTERM) == 0;
+  if (dfd >= 0)
+    (void)close(dfd);
+  ax_free(ax_allocator_system(), name);
+  return ok ? 1 : 0;
+}
+
+/* WorldAlive host name: 0 when it is not running, else one more than the
+ * kilobytes it holds resident (1 where that cannot be read). */
+pl_val pl_op83_world_alive(pl_thread* t, size_t ab) {
+  t->effect_epoch++;
+  if (!host_held(ARG(0)))
+    return 0;
+  char* name = host_name(t, ARG(1));
+  if (name == NULL)
+    return 0;
+  int dfd = host_dir(host_root_fd, name);
+  pid_t pid = dfd >= 0 ? host_pid(dfd) : 0;
+  uint64_t out = 0;
+  if (dfd >= 0 && host_ours(dfd, pid)) {
+    out = 1;
+#ifdef __linux__
+    char path[64];
+    (void)snprintf(path, sizeof(path), "/proc/%ld/statm", (long)pid);
+    FILE* f = fopen(path, "r");
+    unsigned long long size = 0, resident = 0;
+    if (f != NULL) {
+      if (fscanf(f, "%llu %llu", &size, &resident) == 2)
+        out = 1 + resident * ((uint64_t)sysconf(_SC_PAGESIZE) / 1024);
+      (void)fclose(f);
+    }
+#endif
+  }
+  if (dfd >= 0)
+    (void)close(dfd);
+  ax_free(ax_allocator_system(), name);
+  return (pl_val)out;
 }
