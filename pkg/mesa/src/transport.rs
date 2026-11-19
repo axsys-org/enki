@@ -1,7 +1,7 @@
 use crate::{
     obj,
     object::*,
-    value::{err, nums, Result, Value as V},
+    value::{Result, Value as V, err, nums},
 };
 use mesa_core::{Attachment, PeerId};
 use mesa_transport::{self as transport, PacketIo};

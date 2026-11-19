@@ -2452,8 +2452,8 @@ TEST(exec, readiness_tracks_values_not_forced_aliases) {
                     OP_FORCE,    OP_RET, OP_FORCE, OP_RET};
   c = test_decode_ops(rt.t, 9, calls);
   ASSERT_NOT_NULL(c);
-  ASSERT_EQ(c->ops[5], OP_FORCE);       /* calls may return host wormholes */
-  ASSERT_EQ(c->ops[7], OP_FORCE);       /* callee arguments are conservative */
+  ASSERT_EQ(c->ops[5], OP_FORCE); /* calls may return host wormholes */
+  ASSERT_EQ(c->ops[7], OP_FORCE); /* callee arguments are conservative */
   pl_bytecode_free(c);
   test_rt_free(&rt);
 }
