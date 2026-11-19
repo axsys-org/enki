@@ -1273,6 +1273,20 @@ const pl_opdesc pl_ops[] = {
     OP83_LOCAL("BoxKey", 2, 0b11, pl_op83_box_key),
     OP83_LOCAL("SecretSeal", 4, 0b1111, pl_op83_secret_seal),
     OP83_LOCAL("SecretOpen", 4, 0b1111, pl_op83_secret_open),
+    /* What a machine's own world may execute: indices 157 to 164. Entropy
+     * and Usage are open; the World operations take the host handle that
+     * Host gives once to a process started with a worlds root. */
+    {83, 0, "Entropy", 1, 0b1, 0, 0, 0, true, false, pl_op83_entropy},
+    {83, 0, "Usage", 1, 0b1, 0, 0, 0, true, false, pl_op83_usage},
+    {83, 0, "Host", 1, 0b1, 0, 0, 0, true, false, pl_op83_host},
+    {83, 0, "WorldMake", 2, 0b10, 0, 0b01, 0, true, false, pl_op83_world_make},
+    {83, 0, "WorldStart", 3, 0b110, 0, 0b001, 0, true, false,
+     pl_op83_world_start},
+    {83, 0, "WorldStop", 2, 0b10, 0, 0b01, 0, true, false, pl_op83_world_stop},
+    {83, 0, "WorldAlive", 2, 0b10, 0, 0b01, 0, true, false,
+     pl_op83_world_alive},
+    /* A folder inside the file root, for a foot's own files: index 164. */
+    {83, 0, "Folder", 1, 0b1, 0, 0, 0, true, false, pl_op83_folder},
 /* Mesa: handle row elements use host observation; data is normal. */
 #define MESA_OP(name)                                                          \
   {83, 0, name, 2, 0, 0b10, 0, 0b1, true, false, pl_op83_mesa},
@@ -1323,10 +1337,11 @@ static const uint16_t pl_op82_argc2[] = {109, 116, 117, 119};
 static const uint16_t pl_op82_argc3[] = {120, 123};
 
 static const uint16_t pl_op83_argc1[] = {124, 126, 127, 128, 132, 134, 135,
-                                         136, 142, 144, 147, 148, 149,
-                                         150, 151};
-static const uint16_t pl_op83_argc2[] = {125, 137, 139, 140, 143, 152, 154};
-static const uint16_t pl_op83_argc3[] = {138};
+                                         136, 142, 144, 147, 148, 149, 150,
+                                         151, 157, 158, 159, 164};
+static const uint16_t pl_op83_argc2[] = {125, 137, 139, 140, 143,
+                                         152, 154, 160, 162, 163};
+static const uint16_t pl_op83_argc3[] = {138, 161};
 static const uint16_t pl_op83_argc4[] = {131, 153, 155, 156};
 
 static pl_opbucket pl_op_lookup_bucket(uint64_t opset, uint32_t argc) {

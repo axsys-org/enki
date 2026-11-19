@@ -30,4 +30,10 @@ bool pl_rplan_resolve_path(pl_thread* t, const char* path, bool writing,
 
 pl_val pl_rplan_read_bat(pl_thread* t, pl_val path);
 
+/* Make this process a host: it may make, start and stop worlds beneath
+ * root_c, each a copy of staged_c running the binary self_c. False when any
+ * of the three cannot be opened; the process is then no host. */
+bool pl_host_configure(const char* root_c, const char* staged_c,
+                       const char* self_c);
+
 #endif

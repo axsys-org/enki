@@ -19,6 +19,7 @@
 #include "plan/build.h"
 #include "plan/eval.h"
 #include "plan/nat.h"
+#include "plan/rplan.h"
 #include "plan/heap.h"
 #include "plan/store.h"
 
@@ -559,6 +560,7 @@ static bool boot_parse_double(const char* s, double* out) {
 static void boot_usage(const char* argv0_c) {
   fprintf(stderr,
           "usage: %s [--text-hash] [--file-root DIR] "
+          "[--worlds-root DIR --staged DIR] "
           "[--wait-for-tracy[=SECONDS]] "
           "[--profile-json FILE] DIR MODULE [FUNCTION ARGS...]\n",
           argv0_c);
@@ -610,6 +612,8 @@ int main(int argc, char** argv) {
     return 1;
   }
   const char* file_root_c = boot_env_file_root();
+  const char* worlds_root_c = NULL;
+  const char* staged_c = NULL;
   const char* profile_json_c = NULL;
   double tracy_wait_s = 0.0;
   bool text_hash_f = false;
@@ -630,6 +634,19 @@ int main(int argc, char** argv) {
         return 2;
       }
       file_root_c = argv[argi + 1];
+      argi += 2;
+      continue;
+    }
+    if (strcmp(argv[argi], "--worlds-root") == 0 ||
+        strcmp(argv[argi], "--staged") == 0) {
+      if (argi + 1 >= argc || argv[argi + 1][0] == '\0') {
+        boot_usage(argv[0]);
+        return 2;
+      }
+      if (argv[argi][2] == 'w')
+        worlds_root_c = argv[argi + 1];
+      else
+        staged_c = argv[argi + 1];
       argi += 2;
       continue;
     }
@@ -689,6 +706,20 @@ int main(int argc, char** argv) {
   if (argc - argi < 2) {
     boot_usage(argv[0]);
     return 2;
+  }
+  if ((worlds_root_c != NULL) != (staged_c != NULL)) {
+    boot_usage(argv[0]);
+    return 2;
+  }
+  if (worlds_root_c != NULL) {
+    const char* self_c = argv[0];
+#ifdef __linux__
+    self_c = "/proc/self/exe";
+#endif
+    if (!pl_host_configure(worlds_root_c, staged_c, self_c)) {
+      fprintf(stderr, "wisp: cannot be a host over %s\n", worlds_root_c);
+      return 2;
+    }
   }
   if (file_root_c[0] == '\0') {
     boot_usage(argv[0]);
