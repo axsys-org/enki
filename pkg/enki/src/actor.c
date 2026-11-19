@@ -707,8 +707,10 @@ static void er_service(er_scheduler* sys, er_actor* a, bool locked) {
       uint64_t secs = pl_nat_u64_clamp(args[0]);
       struct timespec ts = {.tv_sec = (time_t)secs, .tv_nsec = 0}, rem;
       er_service_unlock(sys, locked);
+      pl_store_mutator_park(sys->store);
       while (nanosleep(&ts, &rem) == -1 && errno == EINTR)
         ts = rem;
+      pl_store_mutator_unpark(sys->store);
       er_service_relock(sys, locked);
     }
     pl_thread_deposit(t, 0);
