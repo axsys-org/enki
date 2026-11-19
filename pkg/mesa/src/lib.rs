@@ -9,11 +9,11 @@ mod value;
 mod wire_legacy;
 use object::*;
 use std::{
-    ffi::{c_char, CStr},
-    panic::{catch_unwind, AssertUnwindSafe},
+    ffi::{CStr, c_char},
+    panic::{AssertUnwindSafe, catch_unwind},
     sync::{Mutex, MutexGuard},
 };
-use value::{err, Result, Value as V};
+use value::{Result, Value as V, err};
 
 pub struct Handle {
     object: Mutex<Option<Object>>,
