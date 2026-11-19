@@ -1257,8 +1257,22 @@ const pl_opdesc pl_ops[] = {
     /* Sequence on a host value: arg 0 to WHNF or a wormhole, then arg 1.
      * Seq forces arg 0 as ordinary data and so rejects a capability; this is
      * the demand a caller uses when the effect, not the value, must happen. */
-    {66, ax_s7('S', 'e', 'q', 'H', 'o', 's', 't'), NULL, 2, 0, 0, 0b01, 0, false,
-     false, op_seq},
+    {66, ax_s7('S', 'e', 'q', 'H', 'o', 's', 't'), NULL, 2, 0, 0, 0b01, 0,
+     false, false, op_seq},
+    /* Pins as values: indices 147 to 151, before the Mesa range, which
+     * lookup takes as the table's last entries. */
+    OP83_LOCAL_DEEP("PinHash", 1, 0b1, 0b1, pl_op83_pin_hash),
+    OP83_LOCAL_DEEP("PinBytes", 1, 0b1, 0b1, pl_op83_pin_bytes),
+    OP83_LOCAL("PinFrom", 1, 0b1, pl_op83_pin_from),
+    OP83_LOCAL("PinNames", 1, 0b1, pl_op83_pin_names),
+    OP83_LOCAL_DEEP("PinParts", 1, 0b1, 0b1, pl_op83_pin_parts),
+    /* Sockets that answer instead of raising: indices 152 and 153. */
+    {83, 0, "ReadAll", 2, 0b11, 0, 0, 0, true, false, pl_op83_read_all},
+    {83, 0, "SendTo", 4, 0b1111, 0, 0, 0, true, false, pl_op83_send_to},
+    /* What two worlds share and seal with: indices 154 to 156. */
+    OP83_LOCAL("BoxKey", 2, 0b11, pl_op83_box_key),
+    OP83_LOCAL("SecretSeal", 4, 0b1111, pl_op83_secret_seal),
+    OP83_LOCAL("SecretOpen", 4, 0b1111, pl_op83_secret_open),
 /* Mesa: handle row elements use host observation; data is normal. */
 #define MESA_OP(name)                                                          \
   {83, 0, name, 2, 0, 0b10, 0, 0b1, true, false, pl_op83_mesa},
@@ -1308,11 +1322,12 @@ static const uint16_t pl_op82_argc1[] = {105, 106, 107, 108, 110, 111, 112,
 static const uint16_t pl_op82_argc2[] = {109, 116, 117, 119};
 static const uint16_t pl_op82_argc3[] = {120, 123};
 
-static const uint16_t pl_op83_argc1[] = {124, 126, 127, 128, 132,
-                                         134, 135, 136, 142, 144};
-static const uint16_t pl_op83_argc2[] = {125, 137, 139, 140, 143};
+static const uint16_t pl_op83_argc1[] = {124, 126, 127, 128, 132, 134, 135,
+                                         136, 142, 144, 147, 148, 149,
+                                         150, 151};
+static const uint16_t pl_op83_argc2[] = {125, 137, 139, 140, 143, 152, 154};
 static const uint16_t pl_op83_argc3[] = {138};
-static const uint16_t pl_op83_argc4[] = {131};
+static const uint16_t pl_op83_argc4[] = {131, 153, 155, 156};
 
 static pl_opbucket pl_op_lookup_bucket(uint64_t opset, uint32_t argc) {
   switch (opset) {
