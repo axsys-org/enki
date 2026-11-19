@@ -1,6 +1,6 @@
 use crate::{
-    object::{data, Output, Packet},
-    value::{err, nums, Result, Value as V},
+    object::{Output, Packet, data},
+    value::{Result, Value as V, err, nums},
 };
 use mesa_wire::legacy_v1 as w;
 fn name(n: w::Name<'_>) -> V {
