@@ -1,7 +1,7 @@
 use crate::{
     obj,
     object::*,
-    value::{err, nums, Result, Value as V},
+    value::{Result, Value as V, err, nums},
 };
 use mesa_identity::suite_c;
 use mesa_noun::{atom::Atom, bits::Bits as View, mat, serial};

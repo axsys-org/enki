@@ -169,7 +169,10 @@ pl_val pl_mesa_call(pl_thread* t, const char* name, pl_val handles,
     pl_val v = pl_resolve(pl_app_args(p)[i]);
     if (!pl_is_mesa_handle(v))
       return failure(t, "expected Mesa wormhole");
-    memcpy(&native[i], pl_wormhole_data(v, &mesa_type), sizeof(native[i]));
+    const void* held = pl_wormhole_data(v, &mesa_type);
+    if (held == NULL)
+      return failure(t, "expected Mesa wormhole");
+    memcpy(&native[i], held, sizeof(native[i]));
   }
   mesa_bytes bytes = {0};
   if (!encode_data(t, name, data, &bytes)) {
