@@ -1396,3 +1396,74 @@ pl_val pl_op82_self(pl_thread* t, size_t ab) {
     pl_raise_msg(t, "Self expects 0");
   return rp_request(t, ab, 1);
 }
+
+/* ---- What a foot takes from the operating system ---------------------------
+ *
+ * Entropy gives bytes for a seed. Folder makes a folder inside the file root,
+ * for the files a foot keeps there. Both are open to any process.
+ */
+
+pl_val pl_op83_entropy(pl_thread* t, size_t ab) {
+  t->effect_epoch++;
+  uint64_t n = pl_nat_u64_clamp(rp_want_nat(t, ARG(0)));
+  if (n == 0 || n > 64)
+    return 0;
+  rp_crypto_init(t);
+  uint8_t b[64];
+  randombytes_buf(b, (size_t)n);
+  pl_val out = rp_bar(t, b, (size_t)n);
+  sodium_memzero(b, sizeof(b));
+  return out;
+}
+
+/* Whether a path is plain names joined by single slashes: relative, with no
+ * empty part, no "." and no "..". */
+static bool host_plain_path(const char* path) {
+  if (path == NULL || path[0] == '\0' || path[0] == '/')
+    return false;
+  const char* part = path;
+  while (part != NULL) {
+    const char* slash = strchr(part, '/');
+    size_t n = slash != NULL ? (size_t)(slash - part) : strlen(part);
+    if (n == 0 || (n == 1 && part[0] == '.') ||
+        (n == 2 && part[0] == '.' && part[1] == '.'))
+      return false;
+    part = slash != NULL ? slash + 1 : NULL;
+  }
+  return true;
+}
+
+/* Folder path: make a folder, and any above it that is missing, inside the
+ * file root: 1 when it is there afterwards, else 0. The path is relative,
+ * each part a plain name, and no link on the way is followed. A path that is
+ * not plain makes nothing at all. A process with no file root makes none. */
+pl_val pl_op83_folder(pl_thread* t, size_t ab) {
+  t->effect_epoch++;
+  char* path = pl_nat_to_cstr(ax_allocator_system(), rp_want_nat(t, ARG(0)));
+  const char* root_c = t->rplan_file_root_c;
+  int at = host_plain_path(path) && root_c != NULL && root_c[0] != '\0'
+               ? open(root_c, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+               : -1;
+  bool ok = at >= 0;
+  char* part = path;
+  while (ok && part != NULL && part[0] != '\0') {
+    char* slash = strchr(part, '/');
+    if (slash != NULL)
+      *slash = '\0';
+    ok = part[0] != '\0' && strcmp(part, ".") != 0 && strcmp(part, "..") != 0;
+    if (ok && mkdirat(at, part, 0700) != 0 && errno != EEXIST)
+      ok = false;
+    int next =
+        ok ? openat(at, part, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+           : -1;
+    (void)close(at);
+    at = next;
+    ok = ok && at >= 0;
+    part = slash != NULL ? slash + 1 : NULL;
+  }
+  if (at >= 0)
+    (void)close(at);
+  if (path != NULL)
+    ax_free(ax_allocator_system(), path);
+  return ok ? 1 : 0;
+}
