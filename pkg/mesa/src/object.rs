@@ -1,5 +1,5 @@
-use crate::value::{err, Result, Value};
-use mesa_core::{protection::SignedPublic, Engine, PreconfiguredPeer};
+use crate::value::{Result, Value, err};
+use mesa_core::{Engine, PreconfiguredPeer, protection::SignedPublic};
 use mesa_crypto::{KeyPair, PublicKey, SharedSecret};
 use std::{
     collections::VecDeque,
