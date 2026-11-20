@@ -998,13 +998,68 @@ TEST(actor, halted_actor_releases_unreachable_scratch) {
     ASSERT_EQ(er_scheduler_run(sys), ER_RUN_IDLE);
     ASSERT_EQ(er_actor_state(a), ER_ACTOR_HALTED);
     ASSERT_EQ(er_actor_result(a), 42);
-    ASSERT(pl_gc_live_cells(t->heap) < 64,
-           "terminated actor retains only its live result, not scratch");
-    ASSERT(pl_gc_headroom(t) + pl_gc_live_cells(t->heap) <= 8192,
-           "terminated actor releases its oversized physical semispaces");
+    ASSERT(er_actor_thread(a) == NULL,
+           "terminated actor releases its thread and semispaces entirely");
   }
   er_scheduler_free(sys);
   test_rt_free(&rt);
+}
+
+static size_t resident_kib(void) {
+  FILE* f = fopen("/proc/self/statm", "r");
+  if (f == NULL)
+    return 0;
+  unsigned long size = 0, resident = 0;
+  int got = fscanf(f, "%lu %lu", &size, &resident);
+  fclose(f);
+  return got == 2 ? resident * (size_t)sysconf(_SC_PAGESIZE) / 1024 : 0;
+}
+
+/* A program that spawns an actor per request (a connection, a read) must not
+ * keep each finished actor: thousands of actors that grew their heaps and
+ * halted leave only their results, under both executors. */
+TEST(actor, halted_actors_do_not_accumulate) {
+  for (unsigned mt = 0; mt < 2; mt++) {
+    test_rt rt = test_rt_new();
+    er_scheduler* sys =
+        er_scheduler_new(rt.store, (er_config){.heap_cells = 65536});
+    er_mt_executor* ex =
+        mt ? er_mt_executor_new(sys, (er_mt_config){.workers = 4}) : NULL;
+    size_t before = 0;
+    enum { ROUNDS = 20, PER = 50 };
+    for (unsigned r = 0; r < ROUNDS; r++) {
+      er_actor* actors[PER];
+      for (unsigned i = 0; i < PER; i++) {
+        er_actor* a = actors[i] = er_scheduler_actor(sys);
+        pl_thread* t = er_actor_thread(a);
+        size_t base = t->vsp;
+        pl_vpush(t, 0);
+        for (size_t j = 0; j < 64; j++)
+          t->vstack[base] = test_app2(t, 0, j, t->vstack[base]);
+        t->vsp = base;
+        er_actor_start(a, actor_fn(t, 1000 + r * PER + i));
+      }
+      ASSERT_EQ(mt ? er_mt_executor_run(ex) : er_scheduler_run(sys),
+                ER_RUN_IDLE);
+      for (unsigned i = 0; i < PER; i++) {
+        ASSERT_EQ(er_actor_state(actors[i]), ER_ACTOR_HALTED);
+        ASSERT_EQ(er_actor_result(actors[i]), 1000 + r * PER + i);
+        ASSERT(er_actor_thread(actors[i]) == NULL,
+               "a halted actor keeps its thread");
+      }
+      if (r == 1)
+        before = resident_kib();
+    }
+    size_t after = resident_kib();
+    /* 900 actors past the baseline: kept, each holds at least its trimmed
+     * semispace pair (64 KiB) and its stacks, over 60 MB in all.  Few
+     * allocations each, so the test stays cheap under GC_STRESS. */
+    ASSERT(after < before + 24 * 1024,
+           "finished actors accumulate resident memory");
+    er_mt_executor_free(ex);
+    er_scheduler_free(sys);
+    test_rt_free(&rt);
+  }
 }
 
 /* GC2 must see messages and suspended roots while different workers take
