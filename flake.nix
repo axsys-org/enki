@@ -221,14 +221,18 @@
 
           ENKI_REAVER_SRC_DIR = "${reaver}/src";
           ENKI_REAVER_PLAN_DIR = "${reaver}/src/plan";
-          buildInputs = [
-            pkgs.curl
-            pkgs.gmp
-            pkgs.lmdb
-            pkgs.openssl
-            pkgs.libsodium
-            pkgs.libblake3
-          ];
+          buildInputs =
+            [
+              pkgs.curl
+              pkgs.gmp
+              pkgs.lmdb
+              pkgs.openssl
+              pkgs.libsodium
+              pkgs.libblake3
+            ]
+            # The Mesa library is Rust; on Darwin its standard library links
+            # libiconv, which the GCC used for coverage does not bring.
+            ++ lib.optionals stdenv.isDarwin [pkgs.libiconv];
           __darwinAllowLocalNetworking = true;
 
           dontConfigure = true;
@@ -236,7 +240,7 @@
           enableParallelBuilding = true;
           buildPhase = ''
             runHook preBuild
-            make coverage BUILD_TYPE=coverage CC=${(compilerFor "coverage").compiler}/bin/${(compilerFor "coverage").cc}
+            make coverage BUILD_TYPE=coverage CC=${(compilerFor "coverage").compiler}/bin/${(compilerFor "coverage").cc} MESA_LIB=${mesaBridge}/lib/libenki_mesa.a
             runHook postBuild
           '';
 
