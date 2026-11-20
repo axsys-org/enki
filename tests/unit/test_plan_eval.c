@@ -1374,6 +1374,51 @@ TEST(exec, update_chain_coalesces_and_survives_gc) {
   test_rt_free(&rt);
 }
 
+static void test_update_chain_reachability(bool shared) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  size_t base = t->vsp;
+  enum { DEPTH = 6000 };
+  pl_vpush(t, 7);
+  pl_vpush(t, 0);
+  for (unsigned i = 0; i < DEPTH; i++) {
+    pl_gc_reserve(t, PL_THKE_CELLS(1));
+    t->vstack[base] = pl_mk_thke(t, PL_BAN_SLOW, 1, &t->vstack[base]);
+    if (shared && i == 5000)
+      t->vstack[base + 1] = t->vstack[base];
+  }
+  pl_val chain = t->vstack[base];
+  t->vstack[base] = 0;
+  pl_thread_start(t, chain);
+  ASSERT_EQ(pl_thread_run(t, DEPTH / 2), PL_RUN_YIELDED);
+  size_t before = t->usp;
+  ASSERT(before > 1000);
+  pl_gc_collect_now(t);
+  if (shared) {
+    ASSERT(t->usp > 1000);
+    ASSERT(t->usp < before);
+  } else {
+    ASSERT_EQ(t->usp, 0);
+  }
+  pl_run_status status;
+  while ((status = pl_thread_run(t, 100000)) == PL_RUN_YIELDED)
+    ;
+  ASSERT_EQ(status, PL_RUN_DONE);
+  ASSERT_EQ(pl_thread_result(t), 7);
+  ASSERT_EQ(t->usp, 0);
+  if (shared)
+    ASSERT_EQ(pl_whnf(t, t->vstack[base + 1]), 7);
+  test_rt_free(&rt);
+}
+
+TEST(exec, unreachable_update_targets_do_not_retain_tail_history) {
+  test_update_chain_reachability(false);
+}
+
+TEST(exec, shared_update_targets_keep_call_by_need_results) {
+  test_update_chain_reachability(true);
+}
+
 TEST(exec, runtime_error_restores_unwound_thke) {
   test_rt rt = test_rt_new();
   pl_thread* t = rt.t;
@@ -2452,8 +2497,8 @@ TEST(exec, readiness_tracks_values_not_forced_aliases) {
                     OP_FORCE,    OP_RET, OP_FORCE, OP_RET};
   c = test_decode_ops(rt.t, 9, calls);
   ASSERT_NOT_NULL(c);
-  ASSERT_EQ(c->ops[5], OP_FORCE_READY); /* call result is WHNF */
-  ASSERT_EQ(c->ops[7], OP_FORCE);       /* callee arguments are conservative */
+  ASSERT_EQ(c->ops[5], OP_FORCE); /* calls may return host wormholes */
+  ASSERT_EQ(c->ops[7], OP_FORCE); /* callee arguments are conservative */
   pl_bytecode_free(c);
   test_rt_free(&rt);
 }
@@ -2504,7 +2549,7 @@ TEST(exec, ready_call_preserves_lazy_branches_and_forces_its_result) {
   pl_code* c = test_decode_ops(t, 11, ops);
   ASSERT_NOT_NULL(c);
   ASSERT_EQ(c->ops[6], OP_CALL_READY); /* only the condition is strict */
-  ASSERT_EQ(c->ops[10], OP_RET_READY);
+  ASSERT_EQ(c->ops[10], OP_RET);
   t->vsp = base;
   test_code_pin(&rt, 2, c);
   pl_vpush(t, test_thunk(t, 7));
@@ -3517,3 +3562,95 @@ TEST(sljit, concurrent_compilation_and_publication) {
   test_rt_free(&rt);
 }
 #endif
+
+TEST(exec, wormhole_call_results_do_not_prove_whnf) {
+  static const char type;
+  for (unsigned strict = 0; strict < 2; strict++) {
+    test_rt rt = test_rt_new();
+    pl_thread* t = rt.t;
+    /* A local identity block returns a host value to a non-tail caller.
+     * An explicit FORCE must still fail, even beneath the host boundary. */
+    pl_val lazy_ops[] = {OP_PUSH_VAR,  1, OP_CALL, 6, 1, OP_RET,
+                         OP_PUSH_SLOT, 0, OP_RET};
+    pl_val strict_ops[] = {OP_PUSH_VAR, 1,      OP_CALL,      7, 1,
+                           OP_FORCE,    OP_RET, OP_PUSH_SLOT, 0, OP_RET};
+    pl_code* code =
+        test_decode_ops(t, strict ? 10 : 9, strict ? strict_ops : lazy_ops);
+    ASSERT_NOT_NULL(code);
+    ASSERT_EQ(code->ops[5], strict ? OP_FORCE : OP_RET);
+    test_code_pin(&rt, 1, code); /* rooted at slot 0 */
+    uint64_t payload = 123;
+    pl_vpush(t, pl_mk_wormhole(t, &type, &payload, sizeof(payload)));
+    pl_gc_reserve(t, PL_THKE_CELLS(2));
+    pl_val call = pl_mk_thke(t, PL_BAN_FAST, 2, t->vstack);
+    pl_thread_start_host(t, call);
+    pl_run_status status;
+    unsigned steps = 0;
+    while ((status = pl_thread_run(t, 2)) == PL_RUN_YIELDED) {
+      ASSERT_LT(++steps, 100);
+      pl_gc_collect_now(t);
+      pl_store_gc_collect(rt.store);
+      pl_store_gc_wait(rt.store);
+    }
+    ASSERT_EQ(status, strict ? PL_RUN_EXN : PL_RUN_DONE);
+    if (strict)
+      ASSERT_STR_EQ(t->exn_msg, "<<wormhole>>");
+    else
+      ASSERT_EQ(pl_thread_result(t), t->vstack[1]);
+    pl_pin_set_code(pl_ptr(t->vstack[0]), NULL);
+    pl_bytecode_free(code);
+    test_rt_free(&rt);
+  }
+}
+
+TEST(exec, compiled_spawn_result_flows_into_send_host_argument) {
+  static const char type;
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  t->rplan_f = true;
+  pl_vpush(t, pl_pin(t, 82));
+  pl_val ops[] = {OP_PUSH_VAR,   1,
+                  OP_CALL_KNOWN, 1,
+                  t->vstack[0],  ax_s5('S', 'p', 'a', 'w', 'n'),
+                  OP_PUSH_LIT,   42,
+                  OP_CALL_KNOWN, 2,
+                  t->vstack[0],  ax_s4('S', 'e', 'n', 'd'),
+                  OP_RET};
+  pl_code* code = test_decode_ops(t, sizeof(ops) / sizeof(ops[0]), ops);
+  ASSERT_NOT_NULL(code);
+  test_code_pin(&rt, 1, code);       /* slot 1 */
+  pl_vpush(t, test_law(t, 1, 0, 7)); /* slot 2: spawn function */
+  uint64_t bytes = 1;
+  pl_vpush(t, pl_mk_wormhole(t, &type, &bytes, sizeof(bytes))); /* slot 3 */
+  pl_gc_reserve(t, PL_THKE_CELLS(2));
+  pl_val call = pl_mk_thke(t, PL_BAN_FAST, 2, &t->vstack[1]);
+  pl_thread_start(t, call);
+  for (unsigned phase = 0; phase < 3; phase++) {
+    pl_run_status status;
+    unsigned steps = 0;
+    while ((status = pl_thread_run(t, 2)) == PL_RUN_YIELDED) {
+      ASSERT_LT(++steps, 100);
+      pl_gc_collect_now(t);
+      pl_store_gc_collect(rt.store);
+      pl_store_gc_wait(rt.store);
+    }
+    ASSERT_EQ(status, phase < 2 ? PL_RUN_BLOCKED : PL_RUN_DONE);
+    if (phase == 0) {
+      ASSERT_STR_EQ(
+          pl_io_name((uint32_t)pl_app_head(pl_ptr(pl_thread_request(t)))),
+          "Spawn");
+      pl_thread_deposit(t, t->vstack[3]);
+    } else if (phase == 1) {
+      pl_cell* req = pl_ptr(pl_thread_request(t));
+      ASSERT_STR_EQ(pl_io_name((uint32_t)pl_app_head(req)), "Send");
+      ASSERT_EQ(pl_app_args(req)[0], t->vstack[3]);
+      ASSERT_EQ(pl_app_args(req)[1], 42);
+      pl_thread_deposit(t, 0);
+    } else {
+      ASSERT_EQ(pl_thread_result(t), 0);
+    }
+  }
+  pl_pin_set_code(pl_ptr(t->vstack[1]), NULL);
+  pl_bytecode_free(code);
+  test_rt_free(&rt);
+}

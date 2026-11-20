@@ -1,0 +1,25 @@
+[package]
+name = "enki-mesa"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+mesa-noun = { path = "vendor/libmesa/crates/mesa-noun" }
+mesa-wire = { path = "vendor/libmesa/crates/mesa-wire" }
+mesa-crypto = { path = "vendor/libmesa/crates/mesa-crypto" }
+mesa-identity = { path = "vendor/libmesa/crates/mesa-identity" }
+mesa-lss = { path = "vendor/libmesa/crates/mesa-lss" }
+mesa-core = { path = "vendor/libmesa/crates/mesa-core" }
+mesa-flow = { path = "vendor/libmesa/crates/mesa-flow" }
+mesa-transport = { path = "vendor/libmesa/crates/mesa-transport" }
+mesa-udp = { path = "vendor/libmesa/crates/mesa-udp" }
+mesa-store = { path = "vendor/libmesa/crates/mesa-store" }
+serde_json = { version = "1", features = ["arbitrary_precision"] }
+zeroize = "1.9"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"

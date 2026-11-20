@@ -1,0 +1,19 @@
+[package]
+name = "mesa-transport"
+description = "Bounded flow host, UDP and stream attachments, and two-leg relay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+mesa-core = { path = "../mesa-core" }
+mesa-flow = { path = "../mesa-flow" }
+mesa-wire = { path = "../mesa-wire" }
+
+[dev-dependencies]
+mesa-crypto = { path = "../mesa-crypto" }
+serde_json = "1"
+
+[lints]
+workspace = true

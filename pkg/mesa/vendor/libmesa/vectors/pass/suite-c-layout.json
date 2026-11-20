@@ -1,0 +1,60 @@
+{
+  "provenance": {
+    "kernel_revision": "734ac17cfb88e571081b84406319a17d3d5e79dd",
+    "source": "pkg/arvo/sys/hoon.hoon ++mat; pkg/arvo/sys/zuse.hoon ++pub:ex:cric/++sec:ex:cric/++nol:nu:cric",
+    "method": "Independent Python transcription; not live Hoon extraction or cryptographic evidence"
+  },
+  "cases": [
+    {
+      "name": "no-evidence",
+      "pass_atom": "63000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f8031f09dddb588d18d91048277df566f",
+      "bits": 647,
+      "genesis": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "live": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "ring_atom": "43404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f8031f09dddb588d18d91048277df566f",
+      "live_seed": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+      "dat": "c07776d7224637461208de7d5bbd01",
+      "dat_bits": 113,
+      "domain": "gw-btc",
+      "domain_field_bits": 59,
+      "domain_tail": "4802c1bb6fab37",
+      "domain_tail_bits": 54,
+      "xtr": "",
+      "xtr_offset": 647
+    },
+    {
+      "name": "unaligned-evidence",
+      "pass_atom": "63000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f8031f09dddb588d18d91048277df566f1a09",
+      "bits": 660,
+      "genesis": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "live": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "ring_atom": "43404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f8031f09dddb588d18d91048277df566f1a09",
+      "live_seed": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+      "dat": "c07776d7224637461208de7d5bbd01",
+      "dat_bits": 113,
+      "domain": "gw-btc",
+      "domain_field_bits": 59,
+      "domain_tail": "4802c1bb6fab37",
+      "domain_tail_bits": 54,
+      "xtr": "3412",
+      "xtr_offset": 647
+    },
+    {
+      "name": "other-domain",
+      "pass_atom": "63000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f0003c04f573647d702b796461208de7d5bbd0101",
+      "bits": 673,
+      "genesis": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "live": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "ring_atom": "43404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f0003c04f573647d702b796461208de7d5bbd0101",
+      "live_seed": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+      "dat": "c04f573647d702b796461208de7d5bbd01",
+      "dat_bits": 129,
+      "domain": "test-pki",
+      "domain_field_bits": 75,
+      "domain_tail": "4802c1bb6fab37",
+      "domain_tail_bits": 54,
+      "xtr": "80",
+      "xtr_offset": 665
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+[
+  {
+    "name": "page-zero-tail-frag",
+    "type": "page",
+    "origin": "C (vere pact.c vector driver, branch libmesa/pact-vec): PACT_PAGE, ~zod rift 1 boq 13 init, path publ/1/z, tob=2, AUTH_NONE, fragment bytes de 00 with explicit len_w=2",
+    "len": 28,
+    "wire": "90e036d40002e067100000010d08007075626c2f312f7a440202de00",
+    "gum_on_wire": 869230,
+    "c": {
+      "self_sift": "ok",
+      "mug_exact_bytes": "0xd436e",
+      "mug_zero_stripped": "0x87ada"
+    },
+    "hoon": {
+      "de": "rejected: gum assert (lull ~1953) fails with [869.230 555.738]",
+      "cannot_emit": "fragment atoms are zero-stripped; en:data writes len = (met 3 dat), so this wire is unrepresentable as a Hoon $pact"
+    },
+    "spec_question": "canonical fragment form: zero-stripped (Hoon) vs explicit-length (C); see NOTES.md finding C1"
+  }
+]

@@ -2,8 +2,8 @@
 #define PL_BUILD_H
 
 /*
- * Value construction.  Every constructor here is bump-only (I2): the
- * caller MUST have reserved headroom with pl_gc_reserve, using the
+ * Value construction. Except for wormholes, constructors are bump-only (I2):
+ * the caller MUST have reserved headroom with pl_gc_reserve, using the
  * PL_*_CELLS size macros from plan/value.h, before calling.
  */
 
@@ -11,6 +11,27 @@
 
 #include "plan/heap.h"
 #include "plan/value.h"
+
+/* Checked allocation size (0 means too large for the heap object header).
+ * Allocates the wrapper and inline buffer together in the heap's gc2 store.
+ * Copies n bytes and zeroes cell padding; no gc1 reservation is needed.
+ * Does not collect. Root the result before the next gc2 safe boundary; hosts
+ * sharing a store with executors must scope construction and publication
+ * with pl_store_mutator_enter/leave (see plan/store.h).
+ * type is a stable host-owned identity, never dereferenced by PLAN.
+ * Payload has cell alignment; no finalizer or external-buffer ownership. */
+size_t pl_wormhole_cells(size_t n);
+pl_val pl_mk_wormhole(pl_thread* t, const void* type, const void* bytes,
+                      size_t n);
+
+/* Resource variant: owns context after successful construction. The finalizer
+ * receives context once after collection, rollback, or store teardown. It may
+ * run on any host thread and must not access PLAN. Payload bytes remain opaque.
+ * An explicit close should close the native object, leaving a valid closed
+ * control block for aliases; the finalizer later destroys that control block.
+ */
+pl_val pl_mk_resource(pl_thread* t, const void* type, const void* bytes,
+                      size_t n, void (*drop)(void*), void* context);
 
 /* Direct nat if < 2^63, else a boxed single-limb nat (2 cells). */
 pl_val pl_mk_nat_u64(pl_thread* t, uint64_t n);

@@ -46,10 +46,28 @@
           ];
         };
 
+        mesaBridge = pkgs.rustPlatform.buildRustPackage {
+          pname = "enki-mesa";
+          version = "0.1.0";
+          src = lib.cleanSourceWith {
+            src = ./pkg/mesa;
+            filter = path: type: baseNameOf path != "target";
+          };
+          cargoLock.lockFile = ./pkg/mesa/Cargo.lock;
+          __darwinAllowLocalNetworking = true;
+          installPhase = ''
+            runHook preInstall
+            install -Dm644 target/${pkgs.stdenv.hostPlatform.rust.rustcTarget}/release/libenki_mesa.a $out/lib/libenki_mesa.a
+            runHook postInstall
+          '';
+        };
+
         treefmtEval = treefmt-nix.lib.evalModule pkgs {
           projectRootFile = "flake.nix";
           programs.clang-format.enable = true;
           programs.alejandra.enable = true;
+          programs.rustfmt.enable = true;
+          settings.global.excludes = ["pkg/mesa/vendor/**"];
           programs.mdformat.enable = true;
           settings.formatter.clang-format.includes = [
             "*.c"
@@ -92,7 +110,7 @@
           selected = compilerFor buildType;
         in
           import ./nix/mkenki.nix {
-            inherit lib src sljit;
+            inherit lib src sljit mesaBridge;
             inherit (pkgs) gnumake curl gmp lmdb openssl libsodium libblake3;
             inherit (selected) stdenv compiler cc;
           };
@@ -203,14 +221,18 @@
 
           ENKI_REAVER_SRC_DIR = "${reaver}/src";
           ENKI_REAVER_PLAN_DIR = "${reaver}/src/plan";
-          buildInputs = [
-            pkgs.curl
-            pkgs.gmp
-            pkgs.lmdb
-            pkgs.openssl
-            pkgs.libsodium
-            pkgs.libblake3
-          ];
+          buildInputs =
+            [
+              pkgs.curl
+              pkgs.gmp
+              pkgs.lmdb
+              pkgs.openssl
+              pkgs.libsodium
+              pkgs.libblake3
+            ]
+            # The Mesa library is Rust; on Darwin its standard library links
+            # libiconv, which the GCC used for coverage does not bring.
+            ++ lib.optionals stdenv.isDarwin [pkgs.libiconv];
           __darwinAllowLocalNetworking = true;
 
           dontConfigure = true;
@@ -218,7 +240,7 @@
           enableParallelBuilding = true;
           buildPhase = ''
             runHook preBuild
-            make coverage BUILD_TYPE=coverage CC=${(compilerFor "coverage").compiler}/bin/${(compilerFor "coverage").cc}
+            make coverage BUILD_TYPE=coverage CC=${(compilerFor "coverage").compiler}/bin/${(compilerFor "coverage").cc} MESA_LIB=${mesaBridge}/lib/libenki_mesa.a
             runHook postBuild
           '';
 
@@ -251,6 +273,7 @@
           enki-release = enkiReleaseNoPGO;
           wisp = wispPackage;
           assembler = assemblerPackage;
+          mesa = mesaBridge;
           enki-debug = mkenki "debug";
           enki-asan = mkenki "asan";
           enki-ubsan = mkenki "ubsan";
@@ -294,6 +317,9 @@
               pkgs.clang-tools
               pkgs.llvmPackages.llvm
               pkgs.bear
+              pkgs.rustc
+              pkgs.cargo
+              pkgs.rustfmt
               pkgs.gnumake
               pkgs.curl
               pkgs.gmp

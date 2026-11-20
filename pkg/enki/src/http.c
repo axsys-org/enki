@@ -1065,7 +1065,9 @@ bool er_http_mt_pump(er_scheduler* sys) {
   pthread_mutex_unlock(&sys->mu);
   int running = 0;
   curl_multi_perform(sys->curlm, &running);
+  pl_store_mutator_park(sys->store);
   curl_multi_poll(sys->curlm, NULL, 0, 100, NULL); /* bounded: stay stealable */
+  pl_store_mutator_unpark(sys->store);
   curl_multi_perform(sys->curlm, &running);
   pthread_mutex_lock(&sys->mu);
   sys->http_pumping = false;
@@ -1087,7 +1089,9 @@ static void er_http_wait_for_done(er_scheduler* sys) {
     er_http_harvest(sys);
     if (sys->http_done_head != NULL)
       break;
+    pl_store_mutator_park(sys->store);
     curl_multi_poll(sys->curlm, NULL, 0, 1000, NULL);
+    pl_store_mutator_unpark(sys->store);
   }
 }
 

@@ -1,0 +1,17 @@
+[package]
+name = "mesa-ffi"
+description = "C ABI for the bounded Mesa wire codec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+mesa-wire = { path = "../mesa-wire" }
+
+# Raw pointers are confined to this ABI crate. The codec remains unsafe-free.
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"

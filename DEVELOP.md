@@ -347,6 +347,61 @@ docker volume rm enki-nix-2-34-7-linux-amd64
 docker volume rm enki-nix-2-34-7-linux-arm64
 ```
 
+## Wormholes and actor capabilities
+
+A wormhole is a permanent blackhole with an opaque host buffer. It uses
+`PL_K_WORMHOLE` under `PL_TAG_DEFER`, has neither WHNF nor NF, and raises the
+runtime error `<<wormhole>>` when ordinary evaluation demands its value.
+Lazy arguments and container fields can carry it; computations that discard
+it can still normalize. Save and Ice reject any wormhole retained by the
+normalized closure. There is no persistent encoding or content hash for one.
+
+The layout is a header, byte length, host type identity, and a variable-sized
+inline buffer. `pl_wormhole_cells(n)` checks the object-header size limit and
+returns zero on overflow. `pl_mk_wormhole(t, type, bytes, n)` copies the buffer
+into the same gc2 allocation as the wrapper; no gc1 reservation is needed.
+The maximum is `(UINT32_MAX - 3) * 8` bytes, subject to available gc2 memory.
+`type` is a stable host-owned address used only for identity checking;
+`pl_wormhole_data(value, type)` returns NULL for another kind or type.
+
+The wrapper and buffer never move and are reclaimed together when unreachable
+by gc2. Root the `pl_val`; a raw C pointer into the buffer does not keep it alive.
+Both addresses remain stable across gc1 and gc2 collections while rooted and
+the store lives, even if the allocating actor heap is freed. Allocation does
+not collect. Hosts sharing a store with executors must bracket construction,
+root publication, and access in `pl_store_mutator_enter/leave` scopes.
+Payloads have cell alignment; use memcpy for more strictly aligned C types.
+Bytes and the type identity are never traced or updated, so embedded managed
+pointers require separate roots and must not point into moving heaps. There
+are no finalizers or external-buffer ownership hooks: host resources referenced
+by the bytes retain their host-defined lifetimes.
+
+`pl_host_value` evaluates to WHNF **or** a wormhole. `pl_thread_start_host`
+provides the suspendable form for effectful computations. These boundaries
+allow forwarding through thunks and function returns; nested strict operations,
+explicit bytecode FORCE, and normalization still reject wormholes. Bytecode
+call results no longer prove WHNF, so ingest retains subsequent strict checks.
+Primop `host_mask` and `caps_mask` describe host arguments without telling the
+compiler to force them as ordinary values. Mixed host/deep arguments are
+prepared left-to-right, with suspension supported throughout.
+
+Actor handles are wormholes containing a scheduler lifetime scope and an
+`er_actor*`. `Spawn` returns a fresh handle; `Self 0` returns the actor's self
+handle. Literal `0` remains a compatibility alias for self, but other nats
+are not handles. `Send`, `SendCaps`, and `CloseHandle` consume host values.
+For example, `Send (Spawn worker) message` works; `Seq (Spawn worker) next`
+forces the returned handle and fails. Consume it with a host operation instead.
+
+Messages and spawn functions still normalize into the shared store and cannot
+retain handles. `SendCaps` transfers handles separately; `Recv` returns
+`[message, caps]`, with independent wrappers in gc2. Extract
+and consume those wrappers rather than normalizing the whole response.
+Closing a wrapper revokes its aliases, but leaves transferred wrappers live.
+Invalid capability elements fail the send. There is no per-actor nat-to-actor
+table; numeric scheduler IDs remain for logging and deterministic replay.
+Actors live until scheduler teardown. A process-unique scope rejects stale
+wrappers retained in an adopted heap before their actor pointer is dereferenced.
+
 ## Native persistence
 
 The default backend borrows the fixed-address persistence approach from

@@ -48,8 +48,8 @@ static _Thread_local er_mt_worker* er_current_worker;
  *     normalizing a payload, crashes the *sender* (reaver: host `error`).
  *   - CloseHandle of an unknown handle is a silent no-op (IntMap.delete).
  *   - Recv responds [msg, capsRow]; the empty row is nat 0 (valRow []).
- *   - Cap rows drop non-nat63 elements silently (reaver loadCap), but a
- *     nat63 cap that is not a live handle is an error.
+ *   - Cap rows accept live wormholes (or legacy self 0); invalid caps
+ *     are an error. Actor handles have no normal form and cannot be saved.
  */
 
 #define ER_DEFAULT_QUANTUM    4096
@@ -64,9 +64,12 @@ static _Thread_local er_mt_worker* er_current_worker;
 static void er_gc2_roots(pl_root_visit visit, void* ctx, void* source) {
   er_scheduler* sys = source;
   pthread_mutex_lock(&sys->mu);
-  for (er_actor* a = sys->all_head; a; a = a->all_next)
+  for (er_actor* a = sys->all_head; a; a = a->all_next) {
     for (er_msg* m = a->mbox_head; m; m = m->next)
       visit(&m->payload, ctx);
+    if (a->reaped)
+      visit(&a->result, ctx);
+  }
   pthread_mutex_unlock(&sys->mu);
 }
 
@@ -76,6 +79,9 @@ er_scheduler* er_scheduler_new(pl_store* store, er_config cfg) {
   ax_assume(sys != NULL, "oom");
   ax_assume(pthread_mutex_init(&sys->mu, NULL) == 0, "pthread_mutex_init");
   ax_assume(pthread_cond_init(&sys->cv, NULL) == 0, "pthread_cond_init");
+  static uint64_t next_scope;
+  sys->scope = __atomic_add_fetch(&next_scope, 1, __ATOMIC_RELAXED);
+  ax_assume(sys->scope != 0, "capability scope exhausted");
   sys->store = store;
   sys->cfg = cfg;
   if (sys->cfg.quantum == 0) {
@@ -106,6 +112,11 @@ er_scheduler* er_scheduler_new(pl_store* store, er_config cfg) {
   return sys;
 }
 
+static void er_actor_roots(pl_root_visit visit, void* gc_ctx, void* ctx) {
+  er_actor* a = ctx;
+  visit(&a->self_handle, gc_ctx);
+}
+
 static er_actor* er_register(er_scheduler* sys, pl_heap* heap, pl_thread* t,
                              bool adopted) {
   er_actor* a = calloc(1, sizeof(*a));
@@ -114,14 +125,12 @@ static er_actor* er_register(er_scheduler* sys, pl_heap* heap, pl_thread* t,
   a->id = sys->next_id++;
   a->heap = heap;
   a->t = t;
+  a->t->rplan_no_resources = sys->mode != ER_MODE_LIVE;
   a->t->host = a; /* effect attribution for the pl_io_hook */
   a->t->rplan_effect_f = er_actor_rplan_effect;
   a->adopted = adopted;
-  a->handle_cap = 8;
-  a->handle_v = calloc(a->handle_cap, sizeof(er_actor*));
-  ax_assume(a->handle_v != NULL, "oom");
-  a->handle_v[0] = a; /* handle 0 = self */
-  a->handle_n = 1;
+  pl_gc_add_root_source(heap, er_actor_roots, a);
+  a->self_handle = er_actor_handle(a, a);
   if (sys->all_tail != NULL)
     sys->all_tail->all_next = a;
   else
@@ -159,12 +168,15 @@ void er_scheduler_free(er_scheduler* sys) {
       free(m);
       m = mn;
     }
-    free(a->handle_v);
-    a->t->host = NULL; /* the backpointer dies with the actor */
-    a->t->rplan_effect_f = NULL;
-    if (!a->adopted) { /* adopted threads/heaps stay with the embedder */
-      pl_thread_free(a->t);
-      pl_heap_free(a->heap);
+    if (!a->reaped) { /* a reaped actor already gave these back */
+      pl_gc_del_root_source(a->heap, er_actor_roots, a);
+      a->t->host = NULL; /* the backpointer dies with the actor */
+      a->t->rplan_no_resources = false;
+      a->t->rplan_effect_f = NULL;
+      if (!a->adopted) { /* adopted threads/heaps stay with the embedder */
+        pl_thread_free(a->t);
+        pl_heap_free(a->heap);
+      }
     }
     free(a);
     a = next;
@@ -198,7 +210,7 @@ er_actor* er_scheduler_actor_by_id(er_scheduler* sys, uint64_t id) {
 
 pl_val er_actor_result(er_actor* a) {
   ax_assume(a->status == ER_ACTOR_HALTED, "er_actor_result: not halted");
-  return pl_thread_result(a->t);
+  return a->reaped ? a->result : pl_thread_result(a->t);
 }
 
 /* ── Run queue / handle table ──────────────────────────────────────────── */
@@ -285,22 +297,34 @@ static er_actor* er_dequeue_spawned(er_scheduler* sys) {
   return NULL;
 }
 
-static uint64_t er_handle_alloc(er_actor* a, er_actor* target) {
-  if (a->handle_n == a->handle_cap) {
-    a->handle_cap *= 2;
-    a->handle_v = realloc(a->handle_v, a->handle_cap * sizeof(er_actor*));
-    ax_assume(a->handle_v != NULL, "oom");
-  }
-  a->handle_v[a->handle_n] = target;
-  return a->handle_n++;
+/* Host-only identity and bytes: never scanned or persisted as PLAN data. */
+static const char er_handle_type;
+typedef struct er_capability {
+  uint64_t scope;
+  er_actor* target; /* NULL after CloseHandle */
+} er_capability;
+
+pl_val er_actor_handle(er_actor* owner, er_actor* target) {
+  ax_assume(owner->sys == target->sys, "capability crosses scheduler scopes");
+  er_capability cap = {.scope = owner->sys->scope, .target = target};
+  pl_thread* t = owner->t;
+  return pl_mk_wormhole(t, &er_handle_type, &cap, sizeof(cap));
 }
 
-/* The actor behind handle value h, or NULL (unforgeable: only minted
- * nats index the table; closed entries are NULL). */
-static er_actor* er_handle_get(er_actor* a, pl_val h) {
-  if (!pl_is_nat63(h) || h >= a->handle_n)
+static er_capability* er_handle_cap(er_actor* a, pl_val h) {
+  if (h == 0) /* compatibility for the old self literal, no lookup table */
+    h = a->self_handle;
+  h = pl_resolve(h);
+  er_capability* cap = pl_wormhole_data(h, &er_handle_type);
+  if (cap == NULL || pl_wormhole_size(h) != sizeof(*cap) ||
+      cap->scope != a->sys->scope)
     return NULL;
-  return a->handle_v[h];
+  return cap;
+}
+
+static er_actor* er_handle_get(er_actor* a, pl_val h) {
+  er_capability* cap = er_handle_cap(a, h);
+  return cap == NULL ? NULL : cap->target;
 }
 
 /* ── Effect-name decoding ──────────────────────────────────────────────── */
@@ -374,6 +398,10 @@ static void er_deliver(er_actor* to, pl_val payload, uint32_t ncaps,
   m->ncaps = ncaps;
   for (uint32_t i = 0; i < ncaps; i++)
     m->caps[i] = caps[i];
+  if (to->reaped) { /* nobody will ever read it: do not let it accumulate */
+    free(m);
+    return;
+  }
   if (to->mbox_tail != NULL)
     to->mbox_tail->next = m;
   else
@@ -387,7 +415,7 @@ static void er_deliver(er_actor* to, pl_val payload, uint32_t ncaps,
 /*
  * Deliver the mailbox head to a Recv: response is valRow [msg, capsRow]
  * built in the receiver's heap, caps re-minted as fresh receiver-local
- * handles.  The receiver becomes runnable.
+ * wormholes. The receiver becomes runnable.
  */
 static void er_recv_ready(er_actor* a) {
   er_msg* m = a->mbox_head;
@@ -405,8 +433,10 @@ static void er_recv_ready(er_actor* a) {
     pl_cell* p = pl_bump(t, PL_APP_CELLS(m->ncaps));
     p[0] = pl_hdr_make(PL_K_APP, 0, 0, PL_APP_CELLS(m->ncaps));
     p[1] = 0;
-    for (uint32_t i = 0; i < m->ncaps; i++)
-      p[2 + i] = er_handle_alloc(a, m->caps[i]);
+    for (uint32_t i = 0; i < m->ncaps; i++) {
+      er_capability cap = {.scope = a->sys->scope, .target = m->caps[i]};
+      p[2 + i] = pl_mk_wormhole(t, &er_handle_type, &cap, sizeof(cap));
+    }
     PL_GC_ALLOW(t);
     capsrow = pl_make(PL_TAG_APP, p);
   }
@@ -438,50 +468,26 @@ void er_crash_msg(er_actor* a, const char* msg) {
   er_crash(a);
 }
 
-/*
- * Translate a caps row in the sender's heap into actor refs via the
- * sender's handle table (reaver opSendCaps/loadCapsRow): the row and
- * each element are forced; non-nat63 elements are dropped; a nat63 that
- * is not a live handle is an error (sender crash).  Returns the count,
- * or -1 on crash.  *out is a malloc'd array (may be NULL when empty).
- */
+/* The machine has already evaluated the row spine and each capability at
+ * depth zero, allowing suspension. Unwrap only; no nested forcing here. */
 static int64_t er_load_caps(er_actor* a, size_t capslot, er_actor*** out) {
-  pl_thread* t = a->t;
   *out = NULL;
-  pl_catch c;
-  pl_catch_init(t, &c);
-  if (pl_setjmp(c.jb) != 0) {
-    pl_catch_unwind(t, &c);
-    return -1;
-  }
-  pl_val row = pl_whnf(t, t->vstack[capslot]);
-  t->vstack[capslot] = row; /* slot address computed after the eval */
-  pl_cell* rp = pl_as(PL_TAG_APP, row);
-  if (rp == NULL) { /* rowVals of a non-row is [] */
-    pl_catch_pop(t, &c);
+  pl_cell* row = pl_as(PL_TAG_APP, a->t->vstack[capslot]);
+  if (row == NULL)
     return 0;
-  }
-  uint32_t n = pl_app_n(rp);
+  uint32_t n = pl_app_n(row);
   er_actor** caps = malloc((size_t)n * sizeof(er_actor*));
   ax_assume(caps != NULL, "oom");
-  int64_t ncaps = 0;
   for (uint32_t i = 0; i < n; i++) {
-    /* re-fetch through the rooted slot: forcing may move the row */
-    pl_val e = pl_app_args(pl_ptr(t->vstack[capslot]))[i];
-    e = pl_whnf(t, e);
-    if (!pl_is_nat63(e))
-      continue; /* loadCap: dropped silently */
-    er_actor* target = er_handle_get(a, e);
+    er_actor* target = er_handle_get(a, pl_app_args(row)[i]);
     if (target == NULL) {
       free(caps);
-      pl_catch_pop(t, &c);
-      return -1; /* getActor: invalid handle is an error */
+      return -1;
     }
-    caps[ncaps++] = target;
+    caps[i] = target;
   }
-  pl_catch_pop(t, &c);
   *out = caps;
-  return ncaps;
+  return n;
 }
 
 /* An MT service begins under the scheduler mutex so it can mutate actor and
@@ -522,6 +528,13 @@ static void er_service(er_scheduler* sys, er_actor* a, bool locked) {
   pl_val name = pl_app_head(p);
   uint32_t argc = pl_app_n(p);
   pl_val* args = pl_app_args(p);
+
+  if (er_op_is(name, "Self")) {
+    pl_thread_deposit(t, a->self_handle);
+    a->status = ER_ACTOR_RUNNABLE;
+    er_enqueue(a);
+    return;
+  }
 
   if (er_op_is(name, "Recv")) {
     ax_assume(argc == 1, "Recv arity");
@@ -603,7 +616,7 @@ static void er_service(er_scheduler* sys, er_actor* a, bool locked) {
     }
     er_actor* child = er_scheduler_actor(sys);
     er_actor_start(child, fn); /* child queued before the parent resumes */
-    uint64_t h = er_handle_alloc(a, child);
+    pl_val h = er_actor_handle(a, child);
     pl_thread_deposit(t, h);
     a->status = ER_ACTOR_RUNNABLE;
     er_enqueue(a);
@@ -703,8 +716,10 @@ static void er_service(er_scheduler* sys, er_actor* a, bool locked) {
       uint64_t secs = pl_nat_u64_clamp(args[0]);
       struct timespec ts = {.tv_sec = (time_t)secs, .tv_nsec = 0}, rem;
       er_service_unlock(sys, locked);
+      pl_store_mutator_park(sys->store);
       while (nanosleep(&ts, &rem) == -1 && errno == EINTR)
         ts = rem;
+      pl_store_mutator_unpark(sys->store);
       er_service_relock(sys, locked);
     }
     pl_thread_deposit(t, 0);
@@ -717,9 +732,10 @@ static void er_service(er_scheduler* sys, er_actor* a, bool locked) {
     ax_assume(argc == 1, "CloseHandle arity");
     pl_val h = args[0];
     /* unknown handles are a silent no-op; even handle 0 may be closed
-     * (Recv reads the inbox directly, not the table — reaver rtsInbox) */
-    if (pl_is_nat63(h) && h < a->handle_n)
-      a->handle_v[h] = NULL;
+     * (Recv reads the inbox directly, without a capability lookup). */
+    er_capability* cap = er_handle_cap(a, h);
+    if (cap != NULL)
+      cap->target = NULL;
     pl_thread_deposit(t, 0);
     a->status = ER_ACTOR_RUNNABLE;
     er_enqueue(a);
@@ -736,6 +752,61 @@ static void er_service(er_scheduler* sys, er_actor* a, bool locked) {
 
 /* ── The executor loop ─────────────────────────────────────────────────── */
 
+/*
+ * A halted spawned actor is never resumed and nothing reads its thread or
+ * heap again: free them, its unread mailbox and its self handle's root,
+ * keeping only the result (snapshotted into the store and rooted by
+ * er_gc2_roots) and the actor record that capabilities and ids still name.
+ * Without this every actor ever spawned kept its thread stacks and trimmed
+ * semispaces until er_scheduler_free, so a program spawning one per request
+ * grew without bound.  Capabilities held by other actors keep naming the
+ * record; a send to it is dropped in er_deliver.
+ *
+ * Runs inside the store mutator scope of the slice that finished, so nothing
+ * is collected before the result is rooted.  The collector takes the store's
+ * locks and then the scheduler mutex (er_gc2_roots), so nothing here touches
+ * the store while it holds that mutex: the snapshot is taken and the thread
+ * and heap are freed with it released, as every service does
+ * (er_service_unlock), and only the actor record changes under it.  The actor
+ * is marked halted together with its result, so nobody sees one without the
+ * other.
+ */
+static void er_reap(er_scheduler* sys, er_actor* a, bool locked) {
+  if (a->adopted || a->reaped) {
+    a->status = ER_ACTOR_HALTED;
+    return;
+  }
+  pl_val result = 0;
+  er_service_unlock(sys, locked);
+  (void)er_pin_payload(a, pl_thread_result(a->t), &result);
+  er_service_relock(sys, locked);
+
+  er_msg* mail = a->mbox_head;
+  pl_thread* t = a->t;
+  pl_heap* heap = a->heap;
+  a->status = ER_ACTOR_HALTED;
+  a->result = result;
+  a->mbox_head = a->mbox_tail = NULL;
+  a->self_handle = 0;
+  a->t = NULL;
+  a->heap = NULL;
+  a->reaped = true;
+
+  er_service_unlock(sys, locked);
+  while (mail != NULL) {
+    er_msg* next = mail->next;
+    free(mail);
+    mail = next;
+  }
+  pl_gc_del_root_source(heap, er_actor_roots, a);
+  t->host = NULL;
+  t->rplan_no_resources = false;
+  t->rplan_effect_f = NULL;
+  pl_thread_free(t);
+  pl_heap_free(heap);
+  er_service_relock(sys, locked);
+}
+
 /* One scheduling step of a spawned (scheduler-owned) actor. */
 static void er_step(er_scheduler* sys, er_actor* a, pl_run_status s,
                     bool locked) {
@@ -744,8 +815,7 @@ static void er_step(er_scheduler* sys, er_actor* a, pl_run_status s,
     er_enqueue(a); /* round-robin fairness */
     break;
   case PL_RUN_DONE:
-    a->status = ER_ACTOR_HALTED; /* result discarded (kept for tests) */
-    pl_gc_trim(a->t);
+    er_reap(sys, a, locked); /* the result stays readable (er_actor_result) */
     break;
   case PL_RUN_EXN:
     er_crash(a);
@@ -1462,6 +1532,9 @@ void er_scheduler_record(er_scheduler* sys, er_log* log) {
   ax_assume(er_log_events(log) == 0, "er_scheduler_record: log not empty");
   log->quantum = sys->cfg.quantum;
   sys->mode = ER_MODE_RECORD;
+  for (er_actor* a = sys->all_head; a; a = a->all_next)
+    if (a->t != NULL) /* a reaped actor has no thread */
+      a->t->rplan_no_resources = true;
   sys->rec = log;
   pl_set_io_hook(er_io_hook);
 }
@@ -1473,6 +1546,9 @@ void er_scheduler_replay(er_scheduler* sys, const er_log* log) {
   ax_assume(sys->curlm == NULL && sys->http_inflight_n == 0,
             "er_scheduler_replay: live http transfers exist");
   sys->mode = ER_MODE_REPLAY;
+  for (er_actor* a = sys->all_head; a; a = a->all_next)
+    if (a->t != NULL) /* a reaped actor has no thread */
+      a->t->rplan_no_resources = true;
   sys->play = log;
   sys->cursor = 0;
   pl_set_io_hook(er_io_hook);
