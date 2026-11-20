@@ -1273,6 +1273,11 @@ const pl_opdesc pl_ops[] = {
     OP83_LOCAL("BoxKey", 2, 0b11, pl_op83_box_key),
     OP83_LOCAL("SecretSeal", 4, 0b1111, pl_op83_secret_seal),
     OP83_LOCAL("SecretOpen", 4, 0b1111, pl_op83_secret_open),
+    /* What a foot takes from the operating system: indices 157 and 158.
+     * Entropy gives bytes for a seed; Folder makes a folder inside the file
+     * root, for a foot's own files. */
+    {83, 0, "Entropy", 1, 0b1, 0, 0, 0, true, false, pl_op83_entropy},
+    {83, 0, "Folder", 1, 0b1, 0, 0, 0, true, false, pl_op83_folder},
 /* Mesa: handle row elements use host observation; data is normal. */
 #define MESA_OP(name)                                                          \
   {83, 0, name, 2, 0, 0b10, 0, 0b1, true, false, pl_op83_mesa},
@@ -1322,8 +1327,9 @@ static const uint16_t pl_op82_argc1[] = {105, 106, 107, 108, 110, 111, 112,
 static const uint16_t pl_op82_argc2[] = {109, 116, 117, 119};
 static const uint16_t pl_op82_argc3[] = {120, 123};
 
-static const uint16_t pl_op83_argc1[] = {124, 126, 127, 128, 132, 134, 135, 136,
-                                         142, 144, 147, 148, 149, 150, 151};
+static const uint16_t pl_op83_argc1[] = {124, 126, 127, 128, 132, 134,
+                                         135, 136, 142, 144, 147, 148,
+                                         149, 150, 151, 157, 158};
 static const uint16_t pl_op83_argc2[] = {125, 137, 139, 140, 143, 152, 154};
 static const uint16_t pl_op83_argc3[] = {138};
 static const uint16_t pl_op83_argc4[] = {131, 153, 155, 156};

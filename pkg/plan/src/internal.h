@@ -125,6 +125,8 @@ pl_val pl_op83_read_all(pl_thread* t, size_t ab);
 pl_val pl_op83_box_key(pl_thread* t, size_t ab);
 pl_val pl_op83_secret_seal(pl_thread* t, size_t ab);
 pl_val pl_op83_secret_open(pl_thread* t, size_t ab);
+pl_val pl_op83_entropy(pl_thread* t, size_t ab);
+pl_val pl_op83_folder(pl_thread* t, size_t ab);
 pl_val pl_op83_blake3_keyed(pl_thread* t, size_t ab);
 pl_val pl_op83_hmac_sha256(pl_thread* t, size_t ab);
 pl_val pl_op83_ed25519_public_key(pl_thread* t, size_t ab);
