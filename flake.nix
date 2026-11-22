@@ -53,7 +53,26 @@
             src = ./pkg/mesa;
             filter = path: type: baseNameOf path != "target";
           };
-          cargoLock.lockFile = ./pkg/mesa/Cargo.lock;
+          cargoLock = {
+            lockFile = ./pkg/mesa/Cargo.lock;
+            # libmesa is a git dependency at one commit (pkg/mesa/Cargo.toml).
+            # Each of its crates has the hash of that one source.
+            outputHashes = lib.genAttrs (map (name: "mesa-${name}-0.0.1") [
+              "bytes"
+              "core"
+              "crypto"
+              "flow"
+              "identity"
+              "keys"
+              "lss"
+              "noun"
+              "pki"
+              "store"
+              "transport"
+              "udp"
+              "wire"
+            ]) (_: "sha256-Q5AOgxcX+8A6j0UfnG5IOtkYdiMSeBrG0G5MYv+Zew8=");
+          };
           __darwinAllowLocalNetworking = true;
           installPhase = ''
             runHook preInstall
@@ -67,7 +86,6 @@
           programs.clang-format.enable = true;
           programs.alejandra.enable = true;
           programs.rustfmt.enable = true;
-          settings.global.excludes = ["pkg/mesa/vendor/**"];
           programs.mdformat.enable = true;
           settings.formatter.clang-format.includes = [
             "*.c"

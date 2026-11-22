@@ -274,9 +274,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
+name = "mesa-bytes"
+version = "0.0.1"
+source = "git+https://github.com/gwbtc/libmesa?rev=c3d34bf473f1912a575243783e399b2001f4a658#c3d34bf473f1912a575243783e399b2001f4a658"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "mesa-core"
 version = "0.0.1"
+source = "git+https://github.com/gwbtc/libmesa?rev=c3d34bf473f1912a575243783e399b2001f4a658#c3d34bf473f1912a575243783e399b2001f4a658"
 dependencies = [
+ "mesa-bytes",
  "mesa-crypto",
  "mesa-lss",
  "mesa-wire",
@@ -285,6 +295,7 @@ dependencies = [
 [[package]]
 name = "mesa-crypto"
 version = "0.0.1"
+source = "git+https://github.com/gwbtc/libmesa?rev=c3d34bf473f1912a575243783e399b2001f4a658#c3d34bf473f1912a575243783e399b2001f4a658"
 dependencies = [
  "curve25519-dalek",
  "ed25519-dalek",
@@ -296,7 +307,9 @@ dependencies = [
 [[package]]
 name = "mesa-flow"
 version = "0.0.1"
+source = "git+https://github.com/gwbtc/libmesa?rev=c3d34bf473f1912a575243783e399b2001f4a658#c3d34bf473f1912a575243783e399b2001f4a658"
 dependencies = [
+ "mesa-bytes",
  "mesa-core",
  "mesa-crypto",
  "mesa-wire",
@@ -306,26 +319,63 @@ dependencies = [
 [[package]]
 name = "mesa-identity"
 version = "0.0.1"
+source = "git+https://github.com/gwbtc/libmesa?rev=c3d34bf473f1912a575243783e399b2001f4a658#c3d34bf473f1912a575243783e399b2001f4a658"
 dependencies = [
  "mesa-crypto",
+ "mesa-keys",
  "mesa-noun",
+ "mesa-pki",
  "mesa-wire",
+]
+
+[[package]]
+name = "mesa-keys"
+version = "0.0.1"
+source = "git+https://github.com/gwbtc/libmesa?rev=c3d34bf473f1912a575243783e399b2001f4a658#c3d34bf473f1912a575243783e399b2001f4a658"
+dependencies = [
+ "mesa-bytes",
+ "mesa-core",
+ "mesa-crypto",
+ "mesa-flow",
+ "mesa-pki",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
 name = "mesa-lss"
 version = "0.0.1"
+source = "git+https://github.com/gwbtc/libmesa?rev=c3d34bf473f1912a575243783e399b2001f4a658#c3d34bf473f1912a575243783e399b2001f4a658"
 dependencies = [
  "blake3",
+ "mesa-bytes",
 ]
 
 [[package]]
 name = "mesa-noun"
 version = "0.0.1"
+source = "git+https://github.com/gwbtc/libmesa?rev=c3d34bf473f1912a575243783e399b2001f4a658#c3d34bf473f1912a575243783e399b2001f4a658"
+dependencies = [
+ "mesa-bytes",
+]
+
+[[package]]
+name = "mesa-pki"
+version = "0.0.1"
+source = "git+https://github.com/gwbtc/libmesa?rev=c3d34bf473f1912a575243783e399b2001f4a658#c3d34bf473f1912a575243783e399b2001f4a658"
+dependencies = [
+ "mesa-bytes",
+ "mesa-core",
+ "mesa-crypto",
+ "mesa-wire",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "mesa-store"
 version = "0.0.1"
+source = "git+https://github.com/gwbtc/libmesa?rev=c3d34bf473f1912a575243783e399b2001f4a658#c3d34bf473f1912a575243783e399b2001f4a658"
 dependencies = [
  "mesa-core",
  "mesa-crypto",
@@ -339,6 +389,7 @@ dependencies = [
 [[package]]
 name = "mesa-transport"
 version = "0.0.1"
+source = "git+https://github.com/gwbtc/libmesa?rev=c3d34bf473f1912a575243783e399b2001f4a658#c3d34bf473f1912a575243783e399b2001f4a658"
 dependencies = [
  "mesa-core",
  "mesa-flow",
@@ -348,6 +399,7 @@ dependencies = [
 [[package]]
 name = "mesa-udp"
 version = "0.0.1"
+source = "git+https://github.com/gwbtc/libmesa?rev=c3d34bf473f1912a575243783e399b2001f4a658#c3d34bf473f1912a575243783e399b2001f4a658"
 dependencies = [
  "mesa-core",
  "mesa-crypto",
@@ -356,8 +408,9 @@ dependencies = [
 [[package]]
 name = "mesa-wire"
 version = "0.0.1"
+source = "git+https://github.com/gwbtc/libmesa?rev=c3d34bf473f1912a575243783e399b2001f4a658#c3d34bf473f1912a575243783e399b2001f4a658"
 dependencies = [
- "mesa-noun",
+ "mesa-bytes",
 ]
 
 [[package]]

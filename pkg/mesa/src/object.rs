@@ -252,8 +252,8 @@ impl Object {
                     .map(|x| {
                         size_of_val(x)
                             + match x {
-                                mesa_flow::Action::Send { bytes, .. }
-                                | mesa_flow::Action::Deliver { bytes, .. } => bytes.capacity(),
+                                mesa_flow::Action::Send { bytes, .. } => bytes.capacity(),
+                                mesa_flow::Action::Deliver { bytes, .. } => bytes.len(),
                                 mesa_flow::Action::Commit(c) => commit_charge(c),
                                 _ => 0,
                             }
@@ -339,7 +339,7 @@ fn checkpoint_charge(c: &mesa_flow::Checkpoint) -> usize {
         .iter()
         .map(|f| {
             std::mem::size_of_val(f)
-                + f.outbox.values().map(|b| b.capacity() + 64).sum::<usize>()
+                + f.outbox.values().map(|b| b.len() + 64).sum::<usize>()
                 + f.settled.len() * 64
                 + f.received.capacity() * std::mem::size_of::<mesa_flow::Receipt>()
         })
@@ -348,7 +348,7 @@ fn checkpoint_charge(c: &mesa_flow::Checkpoint) -> usize {
 fn commit_charge(c: &mesa_flow::CommitRequest) -> usize {
     checkpoint_charge(&c.checkpoint)
         + match &c.change {
-            mesa_flow::Change::Deliver { bytes, .. } => bytes.capacity(),
+            mesa_flow::Change::Deliver { bytes, .. } => bytes.len(),
             _ => 0,
         }
 }
