@@ -180,6 +180,12 @@ pub fn event<'a>(op: &str, h: &mut Handles, d: &'a V) -> Result<E<'a>> {
             peer: PeerId(d.at(0)?.n()?),
             allowed: d.at(1)?.bool()?,
         },
+        "EngineReplaceAttachment" => E::ReplaceAttachment(core::host::AttachmentUpdate {
+            peer: PeerId(d.at(0)?.n()?),
+            expected_generation: d.at(1)?.u()?,
+            generation: d.at(2)?.u()?,
+            attached: d.at(3)?.bool()?,
+        }),
         "EngineSetAttachment" => E::SetAttachment {
             peer: PeerId(d.at(0)?.n()?),
             attachment: if d.at(1)?.list()?.is_empty() {

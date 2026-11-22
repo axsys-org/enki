@@ -63,6 +63,7 @@
               "crypto"
               "flow"
               "identity"
+              "jael"
               "keys"
               "lss"
               "noun"

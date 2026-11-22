@@ -109,11 +109,13 @@ static pl_val failure(pl_thread* t, const char* message) {
   pl_vpush(t, 0);
   return row(t, base);
 }
-/* Store operations receive the same canonical path policy as file syscalls. */
+/* Operations that name a file receive the same canonical path policy as file
+ * syscalls. Each takes [path, rest]. */
 static bool encode_data(pl_thread* t, const char* op, pl_val data,
                         mesa_bytes* b) {
   if (strcmp(op, "MesaStoreCreate") && strcmp(op, "MesaStoreOpen") &&
-      strcmp(op, "MesaStoreInspect"))
+      strcmp(op, "MesaStoreInspect") && strcmp(op, "MesaPersist") &&
+      strcmp(op, "MesaKeysImport") && strcmp(op, "MesaRemove"))
     return encode(b, data, 0);
   if (pl_tag(data) != PL_TAG_APP || pl_app_head(pl_ptr(data)) != 0 ||
       pl_app_n(pl_ptr(data)) != 2)

@@ -219,6 +219,99 @@ one-element row. All indices are zero-based. Scalar overflow is an error.
 | `WireEncode` | Packet | [] | wire bytes |
 | `WireV1Decode` | — | [bytes, wire_limits, checksum_mode] | → Packet v1 |
 
+## Raw host embedding
+
+These operations drive libmesa as its phases 1 to 5 mean it to be driven: an
+engine that holds no seed of the caller, one UDP endpoint for all peers, the
+authority (`mesa-jael` over `mesa-pki`: the accepted identity of each peer,
+the domains and each change of key) and key custody (`mesa-keys`). One actor is the caller
+of an engine, its endpoint, its authority and its keys. `?` marks an optional
+input handle.
+
+| Operation (Mesa prefix) | Input handles, in order | Data argument | Successful output |
+| --- | --- | --- | --- |
+| `EngineConfigured` | Config, Policy? | [local_id, domain] | → Engine, closed until `KeysSync` |
+| `EngineStep` | Engine, Endpoint? | \[[event...]\] | \[[result...], optional_tick\] |
+| `Endpoint` | — | [bind_address, max_packet, max_routes] | → Endpoint |
+| `EndpointSocket` | Endpoint | [] | [address text, socket number] |
+| `EndpointStep` | Endpoint | \[[command...]\] | [result...], one for each command |
+| `WaitReadable` | — | [socket number, milliseconds] | 0 time passed, 1 readable, 2 closed or in error |
+| `Resolve` | — | [host, port] | [address text...] |
+| `Authority` | — | [incarnation, checkpoint or 0, pki_limits or 0] | → Authority |
+| `AuthorityStep` | Authority | \[[command...]\] | \[[result...], pending proposal or 0\] |
+| `AuthorityPeer` | Authority | [peer_id] | [revision, point or 0, policy or 0] |
+| `AuthoritySync` | Authority, Engine, Endpoint? | \[[peer_id...]\] | \[[result...], optional_tick\] |
+| `Keys` | — | \[peer_id, domain, incarnation, host_epoch, timeout, 0 or [manifest, floor]\] | → Keys |
+| `KeysImport` | Keys | \[path, [version, life, rift, create]\] | [public_key, created] |
+| `KeysStep` | Keys, Authority | [command, fields...] | by command, below |
+| `KeysSync` | Keys, Authority, Engine, Endpoint? | [] | [result, optional_tick] |
+| `KeysAgree` | Keys, Authority | [peer_id] | → SecretKey |
+| `SecretDerive` | SecretKey | [label] | → SecretKey |
+| `SecretHash` | SecretKey | [message] | 32 bytes |
+| `SecretSeal` | SecretKey | [nonce (24 bytes), name, message] | sealed bytes |
+| `SecretOpen` | SecretKey | [nonce (24 bytes), name, sealed] | [message], or 0 when it does not open |
+| `Persist` | — | [path, bytes] | 0, when the bytes and the name are on the disk |
+| `Remove` | — | [path, 0] | 0, when the file is gone (also when it was not there) |
+
+**Results.** A result is `[0, [record...]]` or `[1, error text]`. A record is an
+action as `ActionsNext` gives it, with one difference: when an Endpoint is
+given, a send goes to the socket in the same call, under the send gate of the
+engine, and its record is `[Sent, peer_id, attachment, pressure]` (pressure 1:
+the socket did not take it) or `[Unsent, peer_id, attachment, error text]`.
+Thus a packet that an old credential made is not sent after a change of
+credential. `optional_tick` is the next time the engine must be told.
+
+**`EngineStep`.** An event is a tag bar and the data of the `Engine` operation
+of that name: `Bind`, `Unbind`, `RetireBefore`, `Read`, `Cancel`, `AdvanceTo`,
+`Receive`, `SetService`, and `[ReplaceAttachment, peer_id, expected_generation, generation, attached]`. All events are read before the first one runs. The
+batch has at most 256 events. It stops after an event that the engine refuses,
+or when its output passes 8 MiB; there are then fewer results than events, and
+the caller sends the rest again. Peers and their keys come only through
+`AuthoritySync`; the local key comes only through `KeysSync`.
+
+**`EndpointStep`.** `[SetRoute, peer_id, expected_generation, generation, address or 0]` gives `[0]`. `[Send, peer_id, attachment, bytes]` gives
+`[0, pressure]`. `[Receive, attempts]` (at most 64) gives `[0, [[peer_id, attachment, bytes]...], discarded, error text or 0]`. A refused command gives
+`[1, error text]` and the next command still runs. A datagram from an address
+that is not a route is discarded. The generation of a route is the attachment
+of its peer in the engine.
+
+**`AuthorityStep`.** Commands: `[Advance, tick]`, `[Register, domain, expected, generation]`, `[Ready, domain, available, ready]`, `[Accept, expected_revision, point]`, `[Block, peer_id, blocked]`, `[Commit, incarnation, revision]`. A point is `[peer_id, domain, life, rift, public_key, evidence]`. Each result is `[0]` or `[1, error text]`; a refused
+command ends the batch. A proposal is `[[incarnation, revision], base_revision, checkpoint]`. Each proposal replaces the one before it and
+holds all of its changes. Write the checkpoint with `Persist`, then `Commit`
+its token: a peer is not served before that. After `Authority` restores a
+checkpoint, give a new incarnation; every peer is closed until it is
+accepted again.
+
+`Accept` is `mesa-jael`'s `resolve`: it makes a verification request for the
+point. Until a verifier for a domain exists, the caller is the verifier of
+each domain that it registered, and the bridge completes the request in the
+same call. `mesa-jael` refuses a lower life or rift (`Rollback`), a different
+key at the same life (`Conflict`), and a peer that the operator blocked
+(`Unavailable`). It takes 256 requests in each second of its clock; give it
+the time with `Advance`. A time that is earlier than the last one is ignored.
+
+**`AuthorityPeer`.** The point is `[domain, life, rift, public_key, provider_generation]`. The policy is `[ordinary, operator_blocked, withdrawn, domain_active, ready, committed, revalidated]`.
+
+**`KeysImport`.** The file holds a 32-byte seed. With `create` 1 and no file,
+the bridge makes a seed from the operating system and writes the file (mode
+0600\) before it answers. The seed goes to the store of the bridge and is not
+given to the caller. The path follows the policy of `ReadFile` and
+`WriteFile`, as do the paths of `Persist` and `Remove`.
+
+**`KeysStep`.** `[Prepare, version]` and `[Retire, version]` give a proposal,
+whose checkpoint is the manifest: write it with `Persist`, then `[Commit, incarnation, revision]`. `[Delete, version]` gives 0. libmesa closes the
+engine for each change of the manifest: after a `Retire` is committed,
+`Prepare`, `Commit` and `KeysSync` the active version again. `[Snapshot]`
+gives `[phase, revision, active version or 0, pending token or 0, optional deadline]`; phase is 0 quiescent, 1 prepared, 2 committed, 3 active. The
+bridge gives no signature outside the engine: the engine signs each page
+that it serves, and nothing else is signed.
+
+**Secrets.** `KeysAgree` gives the secret that this world and an accepted peer
+share. No operation gives the bytes of a SecretKey. `SecretDerive` and
+`SecretHash` are keyed BLAKE3. `SecretSeal` and `SecretOpen` are
+XChaCha20-Poly1305 with the name as the data that is authenticated and not
+hidden.
+
 ## Records and enums
 
 All byte and text fields below use bars. Omitted limits are `[]`, selecting

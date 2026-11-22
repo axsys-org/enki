@@ -19,8 +19,14 @@ mesa-flow = { git = "https://github.com/gwbtc/libmesa", rev = "c3d34bf473f1912a5
 mesa-transport = { git = "https://github.com/gwbtc/libmesa", rev = "c3d34bf473f1912a575243783e399b2001f4a658" }
 mesa-udp = { git = "https://github.com/gwbtc/libmesa", rev = "c3d34bf473f1912a575243783e399b2001f4a658" }
 mesa-store = { git = "https://github.com/gwbtc/libmesa", rev = "c3d34bf473f1912a575243783e399b2001f4a658" }
+mesa-pki = { git = "https://github.com/gwbtc/libmesa", rev = "c3d34bf473f1912a575243783e399b2001f4a658" }
+mesa-jael = { git = "https://github.com/gwbtc/libmesa", rev = "c3d34bf473f1912a575243783e399b2001f4a658" }
+mesa-keys = { git = "https://github.com/gwbtc/libmesa", rev = "c3d34bf473f1912a575243783e399b2001f4a658" }
 serde_json = { version = "1", features = ["arbitrary_precision"] }
 zeroize = "1.9"
+blake3 = "1.8"
+chacha20poly1305 = "0.10"
+libc = "0.2"
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

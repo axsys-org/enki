@@ -3,7 +3,7 @@
 See [the proposed target interface](TARGET_SPEC.md) for the planned process/flow
 API and migration from this bridge. That specification is not implemented yet.
 
-This package exposes libmesa through 199 opset-83 syscalls. Native values are
+This package exposes libmesa through 221 opset-83 syscalls. Native values are
 resource-owning wormholes, with Rust type checks at each operation. libmesa is
 a Cargo git dependency at one commit,
 [gwbtc/libmesa at c3d34bf4](https://github.com/gwbtc/libmesa/tree/c3d34bf473f1912a575243783e399b2001f4a658),

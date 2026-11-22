@@ -446,5 +446,5 @@ fn opcode_registry_dispatch_and_reference_agree() {
             "undocumented {name}"
         );
     }
-    assert_eq!(names.len(), 199);
+    assert_eq!(names.len(), 221);
 }

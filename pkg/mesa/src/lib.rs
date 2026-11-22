@@ -1,6 +1,7 @@
 //! Enki's ownership-aware bridge. No Rust layout or reference crosses the ABI.
 mod engine;
 mod flow;
+mod host;
 mod object;
 mod primitives;
 mod storage;
@@ -59,6 +60,7 @@ fn dispatch(op: &str, h: &mut Handles, d: &V) -> Result<Output> {
             Some("flow") => flow::dispatch(op, h, d),
             Some("storage") => storage::dispatch(op, h, d),
             Some("transport") => transport::dispatch(op, h, d),
+            Some("host") => host::dispatch(op, h, d),
             _ => Err("unknown Mesa operation".into()),
         },
     }
@@ -221,5 +223,7 @@ pub unsafe extern "C" fn em_handle_charge(h: *const Handle) -> usize {
             .as_ref()
             .map_or(0, |o| o.charge() - std::mem::size_of::<Object>())
 }
+#[cfg(test)]
+mod host_tests;
 #[cfg(test)]
 mod tests;
