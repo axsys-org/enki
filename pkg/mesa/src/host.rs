@@ -1,11 +1,11 @@
-//! The raw host embedding of libmesa (phases 1 to 5): an engine that holds no
-//! seed of the caller and takes events in batches, one UDP endpoint for all
-//! peers, the authority (`mesa-jael` over `mesa-pki`) and key custody
+//! Running libmesa directly (phases 1 to 5): an engine that never sees the
+//! caller's seed and takes events in batches, one UDP endpoint for all peers,
+//! the peers' keys (`mesa-jael` over `mesa-pki`) and the caller's own keys
 //! (`mesa-keys`).
 //!
-//! One actor is the caller of an engine, its endpoint, its authority and its
-//! keys. libmesa requires one serialized caller, and a handle does not move
-//! between actors. A waiting actor holds only the number of the socket.
+//! One actor calls an engine, its endpoint, its authority and its keys.
+//! libmesa needs one caller at a time, and a handle does not move between
+//! actors. A waiting actor holds only the socket's number.
 use crate::{
     object::*,
     value::{Result, Value as V, err},
@@ -31,12 +31,12 @@ use std::{
 };
 use zeroize::Zeroizing;
 
-/// The output of one batch stays below the reply limit of the bridge. A batch
-/// stops after the event that passes this number, and the caller sends the
-/// rest again.
+/// Keeps the output of one batch under the bridge's reply limit. A batch
+/// stops after the event that passes this size, and the caller sends the rest
+/// again.
 const BATCH_BYTES: usize = 8 << 20;
 const BATCH_EVENTS: usize = 256;
-/// The one key object of a world. A new key is a new version of it.
+/// A world has one key object. A new key is a new version of it.
 const BACKEND: u128 = 1;
 const OBJECT: u128 = 1;
 
@@ -71,9 +71,9 @@ fn entropy() -> Result<Zeroizing<[u8; 32]>> {
         .map_err(err)?;
     Ok(out)
 }
-/// The bytes are in the file, and the name is in its folder, when this
-/// function returns. A stop of the process leaves the old file or the new
-/// file, and not a part of one.
+/// When this returns, the bytes are in the file and the file's name is in its
+/// folder. If the process stops midway, the old file or the new one is there,
+/// never part of one.
 fn persist(path: &str, bytes: &[u8], mode: u32) -> Result<()> {
     let target = Path::new(path);
     let folder = target.parent().ok_or("path has no folder")?;
@@ -97,9 +97,9 @@ fn persist(path: &str, bytes: &[u8], mode: u32) -> Result<()> {
     written.map_err(err)
 }
 
-/// A send goes to the endpoint in the same call that made it, under the send
-/// gate of the engine. Thus a packet that an old credential made is not sent
-/// after a change of credential. Without an endpoint, the caller gets the
+/// A send goes to the endpoint in the same call that made it, under the
+/// engine's send gate. So a packet made with an old credential is never sent
+/// after the credential changes. Without an endpoint the caller gets the
 /// bytes.
 fn records(
     actions: Vec<core::Action>,
@@ -224,18 +224,18 @@ fn rule(c: &V) -> Result<Rule> {
         _ => return Err("unknown authority command".into()),
     })
 }
-/// `mesa-jael` holds the accepted identity of each peer, the domains and each
-/// change of key. A point is accepted the one way that it has: `resolve`
-/// makes a verification request, and a verifier completes it. Until a
-/// verifier for a domain exists, the caller is the verifier of each domain
-/// that it registered, and the bridge completes the request in the same
-/// call. Thus a key that the caller names takes the same path, with the same
-/// refusals, as evidence that a peer will send.
+/// `mesa-jael` holds the accepted identity of each peer, the domains and every
+/// key change. It accepts a point one way only: `resolve` makes a verification
+/// request and a verifier completes it. There is no verifier yet, so the
+/// caller is the verifier of each domain it registered, and the bridge
+/// completes the request in the same call. A key the caller names therefore
+/// goes through the same path, with the same refusals, as evidence a peer
+/// will one day send.
 fn decide(j: &mut Jael, r: Rule) -> std::result::Result<(), pki::Error> {
     match r {
-        // The time only resets the count of requests that mesa-jael takes in
-        // each second. A clock of the host that goes back must not stop the
-        // caller from naming a key: the count then resets later.
+        // The time only resets mesa-jael's per-second request count. A host
+        // clock that steps back must not stop the caller from naming a key:
+        // the count just resets later.
         Rule::Advance(now) => {
             let _ = j.advance(now);
         }
@@ -300,9 +300,9 @@ pub fn dispatch(op: &str, h: &mut Handles, d: &V) -> Result<Output> {
         return Err("closed or moved handle".into());
     }
     Ok(match op {
-        // The engine starts closed, with a key that nothing else holds. It
-        // signs and sends nothing until `KeysSync` gives it the key of the
-        // world. libmesa makes its own engines the same way.
+        // The engine starts closed, with a key nothing else holds. It signs
+        // and sends nothing until `KeysSync` gives it the world's key.
+        // libmesa makes its own engines the same way.
         "EngineConfigured" => {
             let mut it = slots(h);
             let config = want!(it.next().flatten(), Config).clone();
@@ -350,8 +350,8 @@ pub fn dispatch(op: &str, h: &mut Handles, d: &V) -> Result<Output> {
                     Ok((format!("Engine{tag}"), V::Row(e.list()?[1..].to_vec())))
                 })
                 .collect::<Result<Vec<_>>>()?;
-            // All events are read before the first one runs: a malformed
-            // event must not lose the results of the events before it.
+            // Read every event before running the first: a malformed event
+            // must not lose the results of the events before it.
             let events = parts
                 .iter()
                 .map(|(name, rest)| crate::engine::event(name, &mut vec![], rest))
@@ -390,8 +390,8 @@ pub fn dispatch(op: &str, h: &mut Handles, d: &V) -> Result<Output> {
         }
         "EndpointStep" => {
             let e = &mut want!(slots(h).next().flatten(), Endpoint).endpoint;
-            // All commands are read before the first one runs: a receive
-            // takes packets from the socket, and they must reach the caller.
+            // Read every command before running the first: a receive takes
+            // packets off the socket, and they must reach the caller.
             let commands = d
                 .at(0)?
                 .list()?
@@ -478,7 +478,7 @@ pub fn dispatch(op: &str, h: &mut Handles, d: &V) -> Result<Output> {
             };
             let config = jael::Config {
                 authority: limits,
-                // The caller names a key for each of its peers at one time.
+                // The caller names a key for every one of its peers at once.
                 dispatches: 256,
                 ..Default::default()
             };
@@ -490,9 +490,9 @@ pub fn dispatch(op: &str, h: &mut Handles, d: &V) -> Result<Output> {
                 .map_err(err)?,
             ))
         }
-        // A command that the authority refuses ends the batch. Each proposal
-        // replaces the one before it and holds all of its changes, so the
-        // caller needs only the last: `pending`.
+        // A command the authority refuses ends the batch. Each proposal
+        // replaces the one before and holds all its changes, so the caller
+        // needs only the last one: `pending`.
         "AuthorityStep" => {
             let a = want!(slots(h).next().flatten(), Authority);
             let rules = d
@@ -601,8 +601,8 @@ pub fn dispatch(op: &str, h: &mut Handles, d: &V) -> Result<Output> {
                 activation,
             }))
         }
-        // The seed goes from the file to the store of the bridge. The caller
-        // gets the public key only.
+        // The seed goes from the file into the bridge's store. The caller
+        // gets only the public key.
         "KeysImport" => {
             let k = want!(slots(h).next().flatten(), Keys);
             let path = d.at(0)?.str()?;
@@ -778,9 +778,9 @@ pub fn dispatch(op: &str, h: &mut Handles, d: &V) -> Result<Output> {
             persist(d.at(0)?.str()?, d.at(1)?.bar()?, 0o644)?;
             data(V::num(0))
         }
-        // The file is gone, and its folder knows it, when this returns. A
-        // file that is not there is not an error: the caller may ask again
-        // after a stop.
+        // When this returns, the file is gone and its folder knows it. A
+        // missing file is not an error: the caller may ask again after a
+        // stop.
         "Remove" => {
             let target = Path::new(d.at(0)?.str()?);
             match std::fs::remove_file(target) {
