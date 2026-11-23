@@ -65,9 +65,11 @@ pub fn action(a: A) -> Output {
             V::bytes(bytes),
         ])),
         A::Commit(c) => (V::row([V::text("Commit")]), vec![Object::Commit(c)]),
-        A::Deliver { id, bytes } => {
-            data(V::row([V::text("Deliver"), id_value(&id), V::bytes(bytes)]))
-        }
+        A::Deliver { id, bytes } => data(V::row([
+            V::text("Deliver"),
+            id_value(&id),
+            V::bytes(bytes.dat()),
+        ])),
         A::Enqueued { id } => data(V::row([V::text("Enqueued"), id_value(&id)])),
         A::CommittedDelivery { id, outcome } => data(V::row([
             V::text("CommittedDelivery"),
@@ -294,7 +296,7 @@ pub fn dispatch(op: &str, h: &mut Handles, d: &V) -> Result<Output> {
                 flow::Change::Deliver { id, bytes, outcome } => V::row([
                     V::text("Deliver"),
                     id_value(id),
-                    V::bytes(bytes),
+                    V::bytes(bytes.dat()),
                     outcome_value(*outcome),
                 ]),
                 flow::Change::Settle { id, outcome } => {

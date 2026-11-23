@@ -274,4 +274,38 @@ TEST(mesa, store_paths_obey_file_root) {
   ASSERT_EQ(rmdir(root), 0);
   test_rt_free(&rt);
 }
+/* The durable write and the key file take the same jail as the store. */
+TEST(mesa, persisted_files_obey_file_root) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  char root[] = "/tmp/enki-mesa-jail-XXXXXX";
+  ASSERT_NOT_NULL(mkdtemp(root));
+  t->rplan_file_root_c = root;
+  pl_vpush(t, bar(t, "kept", 4));
+  pl_val d = test_app2(t, 0, bar(t, "../escape.mark", 14), t->vstack[0]);
+  size_t out = invoke(&rt, "MesaPersist", 0, d);
+  ASSERT_EQ(field(t->vstack[out], 0), 1);
+  ASSERT(tag_is(field(t->vstack[out], 1),
+                "invalid Mesa data, path, or size limit"));
+  d = test_app2(t, 0, bar(t, "../escape.ring", 14), 0);
+  out = invoke(&rt, "MesaKeysImport", 0, d);
+  ASSERT_EQ(field(t->vstack[out], 0), 1);
+  ASSERT(tag_is(field(t->vstack[out], 1),
+                "invalid Mesa data, path, or size limit"));
+  d = test_app2(t, 0, bar(t, "mark", 4), t->vstack[0]);
+  out = invoke(&rt, "MesaPersist", 0, d);
+  ASSERT_EQ(field(t->vstack[out], 0), 0);
+  char path[64];
+  snprintf(path, sizeof(path), "%s/mark", root);
+  FILE* f = fopen(path, "rb");
+  ASSERT_NOT_NULL(f);
+  char held[8] = {0};
+  ASSERT_EQ(fread(held, 1, sizeof(held), f), 4);
+  ASSERT_EQ(memcmp(held, "kept", 4), 0);
+  fclose(f);
+  ASSERT_EQ(unlink(path), 0);
+  t->rplan_file_root_c = NULL;
+  ASSERT_EQ(rmdir(root), 0);
+  test_rt_free(&rt);
+}
 #endif

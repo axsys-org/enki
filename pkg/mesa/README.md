@@ -3,10 +3,11 @@
 See [the proposed target interface](TARGET_SPEC.md) for the planned process/flow
 API and migration from this bridge. That specification is not implemented yet.
 
-This package exposes libmesa through 199 opset-83 syscalls. Native values are
-resource-owning wormholes, with Rust type checks at each operation. The vendored
-source is pinned to [gwbtc/libmesa at 2e94a135](https://github.com/gwbtc/libmesa/tree/2e94a135961f99e3522d31ddae08a6a8a67c055b);
-see [provenance](vendor/libmesa/UPSTREAM). No upstream source was modified.
+This package exposes libmesa through 221 opset-83 syscalls. Native values are
+resource-owning wormholes, with Rust type checks at each operation. libmesa is
+a Cargo git dependency at one commit,
+[gwbtc/libmesa at c3d34bf4](https://github.com/gwbtc/libmesa/tree/c3d34bf473f1912a575243783e399b2001f4a658),
+named in `Cargo.toml` and in `Cargo.lock`. No copy of it is in this repository.
 
 The binding covers noun/bit operations, v1/v2 packets, suite-c identity,
 cryptography and LSS, the signed-public transfer engine, durable flow nodes,
@@ -95,7 +96,8 @@ hard quota or exact accounting of SQLite, crypto and transport internals.
 ## Build and validation
 
 The default Make build links the bridge. Cargo and a compatible Rust toolchain
-are required; Cargo.lock pins dependencies and `vendor/libmesa` pins native code.
+are required; Cargo.lock pins dependencies, libmesa among them, and the first
+build fetches them.
 
 ```
 make BUILD_TYPE=debug

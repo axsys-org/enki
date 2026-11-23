@@ -478,7 +478,7 @@ distclean:
 -include $(UNIT_BINS:=.d) $(TSAN_UNIT_BINS:=.d) $(PROPERTY_BINS:=.d)
 -include $(APP_BINS:=.d) $(PERF_BINS:=.d) $(FUZZ_BINS:=.d)
 
-MESA_SOURCES := $(wildcard pkg/mesa/src/*.rs pkg/mesa/Cargo.* pkg/mesa/vendor/libmesa/Cargo.* pkg/mesa/vendor/libmesa/crates/*/Cargo.toml pkg/mesa/vendor/libmesa/crates/*/src/*.rs pkg/mesa/vendor/libmesa/crates/*/src/*/*.rs)
+MESA_SOURCES := $(wildcard pkg/mesa/src/*.rs pkg/mesa/Cargo.*)
 $(MESA_TARGET_DIR)/release/libenki_mesa.a: $(MESA_SOURCES)
 	CC="$(CC)" CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER="$(CC)" CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER="$(CC)" $(CARGO) build --manifest-path pkg/mesa/Cargo.toml --locked --release --target-dir $(MESA_TARGET_DIR)
 

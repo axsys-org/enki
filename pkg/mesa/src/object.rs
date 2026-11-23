@@ -129,6 +129,18 @@ impl mesa_transport::PacketIo for Lane {
         }
     }
 }
+/// One UDP socket for all peers. `socket` is a second handle on the same
+/// socket: its descriptor is what a waiting actor polls. Both close together.
+pub struct Endpoint {
+    pub endpoint: mesa_transport::UdpEndpoint,
+    pub socket: UdpSocket,
+}
+/// Key custody: the key objects in memory and the manifest state machine.
+/// A seed enters through `KeysImport` from a file and never leaves the bridge.
+pub struct Keys {
+    pub store: mesa_keys::SoftwareStore,
+    pub activation: mesa_keys::Activation,
+}
 pub enum Object {
     Buffer(Vec<u8>),
     Atom(mesa_noun::atom::Atom),
@@ -163,6 +175,10 @@ pub enum Object {
     Host(mesa_transport::Host<Lane>),
     UdpHost(mesa_udp::UdpHost),
     Relay(mesa_transport::relay::Relay),
+    Endpoint(Endpoint),
+    Authority(mesa_jael::Jael),
+    Keys(Keys),
+    SecretKey(Zeroizing<[u8; 32]>),
 }
 impl Object {
     pub fn kind(&self) -> &'static str {
@@ -208,6 +224,10 @@ impl Object {
             Self::Host(_) => "Host",
             Self::UdpHost(_) => "UdpHost",
             Self::Relay(_) => "Relay",
+            Self::Endpoint(_) => "Endpoint",
+            Self::Authority(_) => "Authority",
+            Self::Keys(_) => "Keys",
+            Self::SecretKey(_) => "SecretKey",
         }
     }
     pub fn charge(&self) -> usize {
@@ -252,8 +272,8 @@ impl Object {
                     .map(|x| {
                         size_of_val(x)
                             + match x {
-                                mesa_flow::Action::Send { bytes, .. }
-                                | mesa_flow::Action::Deliver { bytes, .. } => bytes.capacity(),
+                                mesa_flow::Action::Send { bytes, .. } => bytes.capacity(),
+                                mesa_flow::Action::Deliver { bytes, .. } => bytes.len(),
                                 mesa_flow::Action::Commit(c) => commit_charge(c),
                                 _ => 0,
                             }
@@ -266,6 +286,16 @@ impl Object {
                 }
                 Self::UdpHost(h) => core_charge(h.engine().usage()),
                 Self::Relay(r) => r.pending() * 512,
+                Self::Endpoint(e) => 65536 + e.endpoint.routes().len() * 64,
+                // The authority and the manifest are bounded by their limits; the
+                // pending proposal is the larger part.
+                Self::Authority(j) => {
+                    let a = j.authority();
+                    a.pending().map_or(0, |p| p.checkpoint.len())
+                        + a.snapshot().peers.len() * 512
+                        + j.pending_bytes()
+                }
+                Self::Keys(k) => 4096 + k.activation.pending().map_or(0, |p| p.checkpoint.len()),
                 // SQLite and crypto internals do not expose allocation metrics. These are
                 // pressure estimates, not allocator accounting or a memory quota.
                 Self::Store(_) | Self::Transaction(_) => 2 << 20,
@@ -339,7 +369,7 @@ fn checkpoint_charge(c: &mesa_flow::Checkpoint) -> usize {
         .iter()
         .map(|f| {
             std::mem::size_of_val(f)
-                + f.outbox.values().map(|b| b.capacity() + 64).sum::<usize>()
+                + f.outbox.values().map(|b| b.len() + 64).sum::<usize>()
                 + f.settled.len() * 64
                 + f.received.capacity() * std::mem::size_of::<mesa_flow::Receipt>()
         })
@@ -348,7 +378,7 @@ fn checkpoint_charge(c: &mesa_flow::Checkpoint) -> usize {
 fn commit_charge(c: &mesa_flow::CommitRequest) -> usize {
     checkpoint_charge(&c.checkpoint)
         + match &c.change {
-            mesa_flow::Change::Deliver { bytes, .. } => bytes.capacity(),
+            mesa_flow::Change::Deliver { bytes, .. } => bytes.len(),
             _ => 0,
         }
 }

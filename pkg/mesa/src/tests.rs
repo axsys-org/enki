@@ -298,7 +298,10 @@ fn durable_store_prepare_rollback_commit_and_reopen() {
         panic!()
     };
     assert_eq!(c.revision, 1);
-    assert_eq!(c.flows[0].outbox.get(&0).unwrap(), b"durable\0message");
+    assert_eq!(
+        c.flows[0].outbox.get(&0).unwrap().dat(),
+        b"durable\0message"
+    );
 
     let mut scope = vec![Some(new(
         "StoreInspect",
@@ -443,5 +446,5 @@ fn opcode_registry_dispatch_and_reference_agree() {
             "undocumented {name}"
         );
     }
-    assert_eq!(names.len(), 199);
+    assert_eq!(names.len(), 221);
 }

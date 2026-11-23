@@ -8,18 +8,25 @@ license = "MIT"
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
-mesa-noun = { path = "vendor/libmesa/crates/mesa-noun" }
-mesa-wire = { path = "vendor/libmesa/crates/mesa-wire" }
-mesa-crypto = { path = "vendor/libmesa/crates/mesa-crypto" }
-mesa-identity = { path = "vendor/libmesa/crates/mesa-identity" }
-mesa-lss = { path = "vendor/libmesa/crates/mesa-lss" }
-mesa-core = { path = "vendor/libmesa/crates/mesa-core" }
-mesa-flow = { path = "vendor/libmesa/crates/mesa-flow" }
-mesa-transport = { path = "vendor/libmesa/crates/mesa-transport" }
-mesa-udp = { path = "vendor/libmesa/crates/mesa-udp" }
-mesa-store = { path = "vendor/libmesa/crates/mesa-store" }
+# libmesa at one commit. Change the commit of each line together.
+mesa-noun = { git = "https://github.com/gwbtc/libmesa", rev = "c3d34bf473f1912a575243783e399b2001f4a658" }
+mesa-wire = { git = "https://github.com/gwbtc/libmesa", rev = "c3d34bf473f1912a575243783e399b2001f4a658" }
+mesa-crypto = { git = "https://github.com/gwbtc/libmesa", rev = "c3d34bf473f1912a575243783e399b2001f4a658" }
+mesa-identity = { git = "https://github.com/gwbtc/libmesa", rev = "c3d34bf473f1912a575243783e399b2001f4a658" }
+mesa-lss = { git = "https://github.com/gwbtc/libmesa", rev = "c3d34bf473f1912a575243783e399b2001f4a658" }
+mesa-core = { git = "https://github.com/gwbtc/libmesa", rev = "c3d34bf473f1912a575243783e399b2001f4a658" }
+mesa-flow = { git = "https://github.com/gwbtc/libmesa", rev = "c3d34bf473f1912a575243783e399b2001f4a658" }
+mesa-transport = { git = "https://github.com/gwbtc/libmesa", rev = "c3d34bf473f1912a575243783e399b2001f4a658" }
+mesa-udp = { git = "https://github.com/gwbtc/libmesa", rev = "c3d34bf473f1912a575243783e399b2001f4a658" }
+mesa-store = { git = "https://github.com/gwbtc/libmesa", rev = "c3d34bf473f1912a575243783e399b2001f4a658" }
+mesa-pki = { git = "https://github.com/gwbtc/libmesa", rev = "c3d34bf473f1912a575243783e399b2001f4a658" }
+mesa-jael = { git = "https://github.com/gwbtc/libmesa", rev = "c3d34bf473f1912a575243783e399b2001f4a658" }
+mesa-keys = { git = "https://github.com/gwbtc/libmesa", rev = "c3d34bf473f1912a575243783e399b2001f4a658" }
 serde_json = { version = "1", features = ["arbitrary_precision"] }
 zeroize = "1.9"
+blake3 = "1.8"
+chacha20poly1305 = "0.10"
+libc = "0.2"
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
