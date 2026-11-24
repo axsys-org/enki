@@ -851,6 +851,12 @@ pl_val pl_op83_sleep(pl_thread* t, size_t ab) {
 
 /* ── op 83: deterministic cryptography ────────────────────────────────── */
 
+/* Validation and backend failures are PLAN exceptions, so Try can recover.
+ * The payload is a plain string nat (as with Throw), not a byte bar. */
+[[noreturn]] static void rp_crypto_raise(pl_thread* t, const char* message) {
+  pl_raise(t, pl_nat_from_bytes(t, (const uint8_t*)message, strlen(message)));
+}
+
 /* All byte strings are canonical bars (payload followed by 0x01).  Unlike
  * the permissive I/O decoder, crypto rejects missing/incorrect terminators.
  * In particular, 1 is the empty message and 0 is not a valid bar. */
@@ -879,13 +885,13 @@ static void rp_sodium_init(void) {
 static void rp_crypto_init(pl_thread* t) {
   if (pthread_once(&rp_sodium_once, rp_sodium_init) != 0 ||
       rp_sodium_status < 0)
-    pl_raise_msg(t, "crypto: sodium initialization failed");
+    rp_crypto_raise(t, "crypto: sodium initialization failed");
 }
 
 pl_val pl_op83_blake3(pl_thread* t, size_t ab) {
   size_t n;
   if (!rp_crypto_bar_size(ARG(0), &n))
-    pl_raise_msg(t, "Blake3: expected a byte bar");
+    rp_crypto_raise(t, "Blake3: expected a byte bar");
   uint8_t* message = rp_nat_bytes(ARG(0), true, &n);
   uint8_t digest[BLAKE3_OUT_LEN];
   blake3_hasher hasher;
@@ -899,7 +905,7 @@ pl_val pl_op83_blake3(pl_thread* t, size_t ab) {
 pl_val pl_op83_sha256(pl_thread* t, size_t ab) {
   size_t n;
   if (!rp_crypto_bar_size(ARG(0), &n))
-    pl_raise_msg(t, "Sha256: expected a byte bar");
+    rp_crypto_raise(t, "Sha256: expected a byte bar");
   rp_crypto_init(t);
   uint8_t* message = rp_nat_bytes(ARG(0), true, &n);
   uint8_t digest[crypto_hash_sha256_BYTES];
@@ -914,7 +920,7 @@ pl_val pl_op83_blake3_keyed(pl_thread* t, size_t ab) {
   size_t key_n, n;
   if (!rp_crypto_bar_size(ARG(0), &key_n) || key_n != BLAKE3_KEY_LEN ||
       !rp_crypto_bar_size(ARG(1), &n))
-    pl_raise_msg(t, "Blake3Keyed: expected a 32-byte key bar and message bar");
+    rp_crypto_raise(t, "Blake3Keyed: expected a 32-byte key bar and message bar");
   uint8_t* message = rp_nat_bytes(ARG(1), true, &n);
   uint8_t key[BLAKE3_KEY_LEN];
   uint8_t digest[BLAKE3_OUT_LEN];
@@ -934,7 +940,7 @@ pl_val pl_op83_blake3_keyed(pl_thread* t, size_t ab) {
 pl_val pl_op83_hmac_sha256(pl_thread* t, size_t ab) {
   size_t key_n, n;
   if (!rp_crypto_bar_size(ARG(0), &key_n) || !rp_crypto_bar_size(ARG(1), &n))
-    pl_raise_msg(t, "HmacSha256: expected key and message byte bars");
+    rp_crypto_raise(t, "HmacSha256: expected key and message byte bars");
   rp_crypto_init(t);
   uint8_t* message = rp_nat_bytes(ARG(1), true, &n);
   uint8_t* key = rp_nat_bytes(ARG(0), true, &key_n);
@@ -962,7 +968,7 @@ static void rp_ed25519_keypair(pl_val seed_bar, uint8_t* pk, uint8_t* sk) {
 pl_val pl_op83_ed25519_public_key(pl_thread* t, size_t ab) {
   size_t n;
   if (!rp_crypto_bar_size(ARG(0), &n) || n != crypto_sign_ed25519_SEEDBYTES)
-    pl_raise_msg(t, "Ed25519PublicKey: expected a 32-byte seed bar");
+    rp_crypto_raise(t, "Ed25519PublicKey: expected a 32-byte seed bar");
   rp_crypto_init(t);
   uint8_t pk[crypto_sign_ed25519_PUBLICKEYBYTES];
   uint8_t sk[crypto_sign_ed25519_SECRETKEYBYTES];
@@ -977,7 +983,7 @@ pl_val pl_op83_ed25519_sign(pl_thread* t, size_t ab) {
   if (!rp_crypto_bar_size(ARG(0), &seed_n) ||
       seed_n != crypto_sign_ed25519_SEEDBYTES ||
       !rp_crypto_bar_size(ARG(1), &n))
-    pl_raise_msg(t, "Ed25519Sign: expected a 32-byte seed bar and message bar");
+    rp_crypto_raise(t, "Ed25519Sign: expected a 32-byte seed bar and message bar");
   rp_crypto_init(t);
   uint8_t* message = rp_nat_bytes(ARG(1), true, &n);
   uint8_t pk[crypto_sign_ed25519_PUBLICKEYBYTES];
@@ -989,7 +995,7 @@ pl_val pl_op83_ed25519_sign(pl_thread* t, size_t ab) {
   sodium_memzero(sk, sizeof(sk));
   free(message);
   if (rc != 0)
-    pl_raise_msg(t, "Ed25519Sign: signing failed");
+    rp_crypto_raise(t, "Ed25519Sign: signing failed");
   return rp_bar(t, signature, sizeof(signature));
 }
 

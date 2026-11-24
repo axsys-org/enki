@@ -334,8 +334,10 @@ static pl_val op_bateq(pl_thread* t, size_t ab) {
 
 static pl_val op_bathash(pl_thread* t, size_t ab) {
   pl_bat_cursor c;
-  if (!pl_bat_open(&c, ARG(0)))
-    pl_raise_msg(t, "BatHash: malformed BAT");
+  if (!pl_bat_open(&c, ARG(0))) {
+    static const char message[] = "BatHash: malformed BAT";
+    pl_raise(t, pl_nat_from_bytes(t, (const uint8_t*)message, sizeof(message) - 1));
+  }
   crypto_hash_sha256_state state;
   crypto_hash_sha256_init(&state);
   uint8_t buf[16384], digest[33];
