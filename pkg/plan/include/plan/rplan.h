@@ -11,6 +11,9 @@
 #include "plan/heap.h"
 #include "plan/value.h"
 
+/* Set once before starting workers in a bundled Unix tool. */
+void pl_rplan_unix_tool(void);
+
 /*
  * List a folder visible to `t`.  `path` must be a nat path.  The result is
  * zero on failure (and for an empty folder), otherwise

@@ -673,6 +673,8 @@ static bool decode_header(silo_dec* d) {
     return false;
   if (count > PL_SILO_MAX_PIN_COUNT || count > SIZE_MAX / sizeof(pl_hash))
     return silo_error(d->err, d->err_cap, "Silo pin count exceeds limit");
+  if (count > (d->r->len - d->r->pos) / sizeof(pl_hash))
+    return silo_error(d->err, d->err_cap, "truncated Silo pin table");
   if (d->capture_header) {
     d->scan->pins =
         calloc((size_t)count ? (size_t)count : 1, sizeof(*d->scan->pins));

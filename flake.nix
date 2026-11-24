@@ -93,7 +93,7 @@
         in
           import ./nix/mkenki.nix {
             inherit lib src sljit;
-            inherit (pkgs) gnumake curl gmp lmdb openssl libsodium libblake3;
+            inherit (pkgs) gnumake curl gmp lmdb openssl libsodium libblake3 python3 criterion;
             inherit (selected) stdenv compiler cc;
           };
 
@@ -180,6 +180,27 @@
             })
             linuxTestBuildTypes)))
           // {
+            # Keep bundle validation and executable/signing tests in all three
+            # sanitizer legs, including ASan/TSan where the older full suite
+            # has separate lifecycle/platform limitations.
+            bundles-asan = mkWithCompiler "asan" {
+              pname = "enki-bundles-asan";
+              buildType = "asan";
+              makeTarget = "test-bundle-suite";
+              installPackage = false;
+            };
+            bundles-ubsan = mkWithCompiler "ubsan" {
+              pname = "enki-bundles-ubsan";
+              buildType = "ubsan";
+              makeTarget = "test-bundle-suite";
+              installPackage = false;
+            };
+            bundles-tsan = mkWithCompiler "tsan" {
+              pname = "enki-bundles-tsan";
+              buildType = "tsan";
+              makeTarget = "test-bundle-suite";
+              installPackage = false;
+            };
             tests-release-sljit = mkCheckArgs "release" "-sljit" "SLJIT_DIR=${sljit}";
             tests-ubsan-sljit = mkCheckArgs "ubsan" "-sljit" "SLJIT_DIR=${sljit}";
             # YIELD_STRESS (spec §10.1): every depth-0 safepoint suspends
@@ -199,6 +220,7 @@
           nativeBuildInputs = [
             pkgs.gnumake
             pkgs.lcov
+            pkgs.python3
           ];
 
           ENKI_REAVER_SRC_DIR = "${reaver}/src";
@@ -301,7 +323,9 @@
               pkgs.openssl
               pkgs.libsodium
               pkgs.libblake3
+              pkgs.criterion
               pkgs.lcov
+              pkgs.python3
               pkgs.gcovr
               pkgs.compiledb
               pkgs.alejandra

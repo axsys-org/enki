@@ -131,7 +131,12 @@ endif
 
 APP_DIR := pkg/enki/app
 APP_SRCS := $(wildcard $(APP_DIR)/*.c)
-APP_BINS := $(patsubst $(APP_DIR)/%.c,$(BUILD_DIR)/bin/%,$(APP_SRCS))
+APP_BINS := $(patsubst $(APP_DIR)/%.c,$(BUILD_DIR)/bin/%,$(APP_SRCS)) $(BUILD_DIR)/bin/enki
+
+ifeq ($(UNAME_S),Darwin)
+BUNDLE_LDFLAGS := -Wl,-sectcreate,__ENKI,__payload,pkg/enki/payload-placeholder -Wl,-segprot,__ENKI,r,r
+BUNDLE_CHECK = /bin/sh pkg/enki/check-layout.sh $@
+endif
 
 CPPFLAGS_ALL := $(BASE_CPPFLAGS) $(CPPFLAGS)
 CFLAGS_ALL := $(BASE_CFLAGS) $(WARN_CFLAGS) $(BUILD_CFLAGS_$(BUILD_TYPE)) $(CFLAGS)
@@ -286,6 +291,11 @@ linux-shell:
 
 bin: $(APP_BINS)
 
+$(BUILD_DIR)/bin/enki $(BUILD_DIR)/bin/wisp: $(APP_DIR)/wisp.c $(LIBS) pkg/enki/payload-placeholder pkg/enki/check-layout.sh
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS_ALL) $(ENKI_INC) $(CFLAGS_ALL) $< $(LIB_ENKI) $(LIB_PLAN) $(LIB_AXSYS) $(LDFLAGS_ALL) $(BUNDLE_LDFLAGS) -o $@
+	$(BUNDLE_CHECK)
+
 $(BUILD_DIR)/bin/%: $(APP_DIR)/%.c $(LIBS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS_ALL) $(ENKI_INC) $(CFLAGS_ALL) $< $(LIB_ENKI) $(LIB_PLAN) $(LIB_AXSYS) $(LDFLAGS_ALL) -o $@
@@ -368,7 +378,30 @@ install: lib bin
 
 test-binaries: $(ACTIVE_UNIT_BINS) $(PROPERTY_BINS)
 
-test: check-layering test-unit test-property
+test: check-layering test-unit test-property test-bundle test-bundle-criterion
+
+.PHONY: test-bundle test-bundle-suite
+test-bundle-suite: test-bundle test-bundle-criterion $(BUILD_DIR)/tests/unit/test_enki_bundle $(BUILD_DIR)/tests/property/test_bundle_properties
+	$(BUILD_DIR)/tests/unit/test_enki_bundle
+	$(BUILD_DIR)/tests/property/test_bundle_properties
+
+.PHONY: test-bundle-criterion
+ifeq ($(BUILD_TYPE),tsan)
+# Criterion/BoxFort reserves an inheritable arena that collides with TSan's
+# shadow mapping. The identical test source runs in the native harness here.
+test-bundle-criterion:
+	@echo "TSan: bundle cases run in the native harness (Criterion arena conflicts with TSan)"
+else
+test-bundle-criterion: $(BUILD_DIR)/tests/criterion/test_enki_bundle
+	$(BUILD_DIR)/tests/criterion/test_enki_bundle
+endif
+
+$(BUILD_DIR)/tests/criterion/test_enki_bundle: tests/unit/test_enki_bundle.c tests/support/test_bundle.h $(LIBS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS_ALL) $(ENKI_INC) $(TEST_CFLAGS_ALL) -DENKI_BUNDLE_CRITERION $< $(LIB_ENKI) $(LIB_PLAN) $(LIB_AXSYS) $(TEST_LDFLAGS_ALL) -lcriterion -o $@
+
+test-bundle: $(APP_BINS)
+	python3 tests/integration/bundle.py $(BUILD_DIR)/bin
 
 test-unit: $(ACTIVE_UNIT_BINS) $(APP_BINS)
 	@set -eu; for test_bin in $(ACTIVE_UNIT_BINS); do \

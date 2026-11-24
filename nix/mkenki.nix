@@ -10,6 +10,8 @@
   openssl,
   libsodium,
   libblake3,
+  python3,
+  criterion,
   compiler,
   cc,
   extraNativeBuildInputs ? [],
@@ -27,6 +29,7 @@ stdenv.mkDerivation {
   nativeBuildInputs =
     [
       gnumake
+      python3
     ]
     ++ extraNativeBuildInputs;
 
@@ -37,6 +40,7 @@ stdenv.mkDerivation {
     openssl
     libsodium
     libblake3
+    criterion
   ];
 
   dontConfigure = true;

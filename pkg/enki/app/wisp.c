@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <poll.h>
+#include <signal.h>
 #include <unistd.h>
 #include <sys/stat.h>
 
@@ -15,12 +16,14 @@
 #include "axsys/profile.h"
 #include "axsys/util.h"
 #include "enki/actor.h"
+#include "enki/bundle.h"
 #include "enki/wisp.h"
 #include "plan/build.h"
 #include "plan/eval.h"
 #include "plan/nat.h"
 #include "plan/heap.h"
 #include "plan/store.h"
+#include "plan/rplan.h"
 
 /*
  * wisp [--text-hash] [--file-root DIR] [--profile-json FILE]
@@ -64,6 +67,8 @@ typedef struct boot_ctx {
   en_env_entry* tmp_env_v[BOOT_TMP_ENV_CAP];
   size_t tmp_env_s;
   bool emit_top_level_f;
+  bool bundled;
+  int program_status;
 } boot_ctx;
 
 static void boot_trace_env(boot_ctx* ctx, pl_root_visit visit, void* gc_ctx,
@@ -472,6 +477,15 @@ static bool boot_run_function(boot_ctx* ctx, pl_val fun, int argc,
                                     : "PLAN exception");
     return false;
   }
+  if (ctx->bundled) {
+    pl_val result = pl_thread_result(w->t);
+    if (!pl_is_nat(result) || pl_nat_u64_clamp(result) > 255) {
+      fprintf(stderr, "enki: program result must be a natural from 0 to 255\n");
+      return false;
+    }
+    ctx->program_status = (int)pl_nat_u64_clamp(result);
+    return true;
+  }
   /* Piped input the program never read is the signature of running a
    * snapshot whose root is not the repl (a bench or serve run Saved
    * last): the session exits 0 in silence and the user loses an hour.
@@ -602,7 +616,184 @@ static bool boot_configure_tracy_quantum(void) {
 #endif
 }
 
+static bool boot_bundle_load(pl_thread* t, const uint8_t hash[32], pl_val* pin,
+                             char* err, size_t cap) {
+  pl_catch c;
+  pl_catch_init(t, &c);
+  if (setjmp(c.jb) == 0) {
+    *pin = pl_store_load(t, hash);
+    pl_catch_pop(t, &c);
+    return true;
+  }
+  pl_catch_unwind(t, &c);
+  (void)snprintf(err, cap, "%s",
+                 t->exn_msg != NULL ? t->exn_msg : "cannot load entry pin");
+  return false;
+}
+
+static int boot_bundle_command(int argc, char** argv, en_bundle* existing) {
+  const char* output = NULL;
+  const char* hash_text = NULL;
+  const char* dir = "./snap";
+  bool explicit_store = false;
+  for (int i = 2; i < argc; i++) {
+    if (i + 1 >= argc) {
+      goto usage;
+    }
+    if (strcmp(argv[i], "--entry") == 0 && hash_text == NULL) {
+      hash_text = argv[++i];
+    } else if (strcmp(argv[i], "-o") == 0 && output == NULL) {
+      output = argv[++i];
+    } else if (strcmp(argv[i], "--store") == 0 && !explicit_store) {
+      dir = argv[++i];
+      explicit_store = true;
+    } else {
+      goto usage;
+    }
+  }
+  if (hash_text == NULL || output == NULL || output[0] == '\0' ||
+      strlen(hash_text) != 64) {
+    goto usage;
+  }
+  uint8_t hash[32];
+  for (size_t i = 0; i < 32; i++) {
+    unsigned value = 0;
+    for (size_t j = 0; j < 2; j++) {
+      unsigned char ch = (unsigned char)hash_text[(2 * i) + j];
+      if (!isxdigit(ch)) {
+        goto usage;
+      }
+      value = (value * 16) +
+              (unsigned)(isdigit(ch) ? ch - '0' : tolower(ch) - 'a' + 10);
+    }
+    hash[i] = (uint8_t)value;
+  }
+  char err[256] = {0};
+  pl_val pin = 0;
+  pl_store* store;
+  if (existing->payload != NULL && !explicit_store) {
+    store = pl_store_new_bundle(existing->payload, existing->payload_len,
+                                existing->entry_hash, &pin, err, sizeof(err));
+  } else {
+    size_t n = strlen(dir) + sizeof("/arena.dat");
+    char* native = malloc(n);
+    if (native == NULL) {
+      fprintf(stderr, "enki: out of memory\n");
+      return 1;
+    }
+    (void)snprintf(native, n, "%s/arena.dat", dir);
+    if (access(native, F_OK) == 0) {
+      store = pl_store_new_native_ro(dir, err, sizeof(err));
+    } else {
+      store = pl_store_new_silo_ro(dir, (size_t)1 << 30);
+      if (store == NULL) {
+        (void)snprintf(err, sizeof(err), "cannot open source store %s", dir);
+      }
+    }
+    free(native);
+  }
+  if (store == NULL) {
+    fprintf(stderr, "enki: %s\n", err);
+    return 1;
+  }
+  pl_heap* heap = pl_heap_new(1U << 16, store);
+  pl_thread* t = pl_thread_new(heap);
+  uint8_t* payload = NULL;
+  uint8_t* blob = NULL;
+  size_t payload_len = 0;
+  size_t blob_len = 0;
+  bool ok =
+      boot_bundle_load(t, hash, &pin, err, sizeof(err)) &&
+      pl_store_bundle_encode(pin, &payload, &payload_len, err, sizeof(err)) &&
+      en_bundle_blob(payload, payload_len, hash, &blob, &blob_len, err,
+                     sizeof(err)) &&
+      en_bundle_write(output, blob, blob_len, err, sizeof(err));
+  free(blob);
+  free(payload);
+  pl_thread_free(t);
+  pl_heap_free(heap);
+  pl_store_free(store);
+  if (!ok) {
+    fprintf(stderr, "enki: %s\n", err);
+  }
+  return ok ? 0 : 1;
+usage:
+  fprintf(stderr, "usage: enki bundle --entry <64-hex SHA-256> -o <path> "
+                  "[--store <directory>]\n");
+  return 2;
+}
+
+static int boot_bundle_run(int argc, char** argv, const en_bundle* bundle) {
+  char err[256];
+  pl_val entry;
+  pl_store* store =
+      pl_store_new_bundle(bundle->payload, bundle->payload_len,
+                          bundle->entry_hash, &entry, err, sizeof(err));
+  if (store == NULL) {
+    fprintf(stderr, "enki: %s\n", err);
+    return 126;
+  }
+  pl_heap* heap = pl_heap_new(BOOT_HEAP_CELLS, store);
+  en_wisp* w = en_wisp_new(heap);
+  if (w == NULL) {
+    fprintf(stderr, "enki: out of memory\n");
+    pl_heap_free(heap);
+    pl_store_free(store);
+    return 126;
+  }
+  er_scheduler* sched = er_scheduler_new(store, (er_config){0});
+  w->sched = sched;
+  w->self = er_scheduler_adopt(sched, w->t);
+  boot_ctx ctx = {.loc_a = ax_allocator_system(), .w = w, .bundled = true};
+  pl_gc_add_root_source(heap, boot_roots, &ctx);
+  int status =
+      boot_run_function(&ctx, entry, argc, argv) ? ctx.program_status : 1;
+  pl_gc_del_root_source(heap, boot_roots, &ctx);
+  er_scheduler_free(sched);
+  en_wisp_free(w);
+  pl_heap_free(heap);
+  pl_store_free(store);
+  return status;
+}
+
 int main(int argc, char** argv) {
+  en_bundle bundle;
+  char bundle_err[256];
+  int found = en_bundle_locate(&bundle, bundle_err, sizeof(bundle_err));
+  if (found < 0) {
+    fprintf(stderr, "enki: %s\n", bundle_err);
+    return 126;
+  }
+  const char* mode = getenv("ENKI_BUNDLE_MODE");
+  bool rebundle = found > 0 && mode != NULL && strcmp(mode, "1") == 0;
+  if (found > 0 || (argc > 1 && strcmp(argv[1], "bundle") == 0)) {
+    /* Neither the bundle writer nor a bundled program opens a global cache. */
+    if (setenv("PL_CODECACHE", "0", 1) != 0) {
+      fprintf(stderr, "enki: cannot disable persistent cache\n");
+      en_bundle_close(&bundle);
+      return 126;
+    }
+    int status;
+    if (found > 0 && !rebundle) {
+      struct sigaction action = {.sa_handler = SIG_DFL};
+      sigemptyset(&action.sa_mask);
+      if (sigaction(SIGPIPE, &action, NULL) != 0) {
+        fprintf(stderr, "enki: cannot restore SIGPIPE\n");
+        en_bundle_close(&bundle);
+        return 126;
+      }
+      pl_rplan_unix_tool();
+      status = boot_bundle_run(argc, argv, &bundle);
+    } else if (argc > 1 && strcmp(argv[1], "bundle") == 0) {
+      status = boot_bundle_command(argc, argv, &bundle);
+    } else {
+      fprintf(stderr, "enki: ENKI_BUNDLE_MODE=1 requires the bundle command\n");
+      status = 2;
+    }
+    en_bundle_close(&bundle);
+    return status;
+  }
+
   boot_default_codecache();
   if (!boot_configure_tracy_quantum()) {
     fprintf(stderr, "wisp: cannot configure Tracy quantum: %s\n",

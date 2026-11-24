@@ -48,6 +48,12 @@
 
 #define ARG(i) (t->vstack[ab + (i)])
 
+static bool unix_tool;
+
+void pl_rplan_unix_tool(void) {
+  unix_tool = true;
+}
+
 static int rp_write_all(int fd, const uint8_t* bytes, size_t len) {
   size_t off = 0;
   while (off < len) {
@@ -55,6 +61,8 @@ static int rp_write_all(int fd, const uint8_t* bytes, size_t len) {
     if (r < 0) {
       if (errno == EINTR)
         continue;
+      if (errno == EPIPE && unix_tool)
+        _exit(0);
       return -1;
     }
     if (r == 0) {

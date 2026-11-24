@@ -706,6 +706,11 @@ static bool save_canonical_root(save_ctx* c, pl_val input, bool* handled) {
 static bool pl_store_save_pin_or_root(pl_store* s, pl_val pin,
                                       uint8_t out_hash[32], char* err,
                                       size_t err_cap, bool no_root) {
+  if (s != NULL && s->format == PL_STORE_FORMAT_BUNDLE_V1) {
+    if (err != NULL && err_cap != 0)
+      (void)snprintf(err, err_cap, "bundle store is read-only");
+    return false;
+  }
   if (s == NULL) {
     if (err != NULL && err_cap != 0)
       (void)snprintf(err, err_cap, "Save requires a store");
@@ -1018,13 +1023,27 @@ static bool load_silo_pin(pl_thread* t, pl_store* s, const uint8_t hash[32],
   ax_arrpush(s->loading, loading);
 
   pl_silo_reader reader = {0};
+  uint8_t* memory_bytes = NULL;
+  silo_mem_reader memory = {0};
   pl_silo_scan scan = {0};
   pl_val* resolved = NULL;
   pl_val* subpins = NULL;
   size_t mark = 0;
   bool marked = false;
   bool reader_open = false;
-  bool ok = pl_store_silo_open(s, hash, &reader, err, err_cap);
+  bool memory_store = s->format == PL_STORE_FORMAT_BUNDLE_V1;
+  bool ok;
+  if (memory_store) {
+    size_t len = 0;
+    ok = s->be.get(s->be.ctx, hash, &memory_bytes, &len);
+    if (!ok)
+      (void)snprintf(err, err_cap, "missing bundle pin");
+    memory = (silo_mem_reader){.b = memory_bytes, .n = len};
+    reader = (pl_silo_reader){.ctx = &memory, .read = silo_mem_read,
+                             .rewind = silo_mem_rewind, .len = len};
+  } else {
+    ok = pl_store_silo_open(s, hash, &reader, err, err_cap);
+  }
   if (!ok)
     goto done;
   reader_open = true;
@@ -1087,8 +1106,9 @@ static bool load_silo_pin(pl_thread* t, pl_store* s, const uint8_t hash[32],
 done:
   if (!ok && marked)
     pl_store_release(s, mark);
-  if (reader_open)
+  if (reader_open && !memory_store)
     pl_store_silo_close_reader(&reader);
+  free(memory_bytes);
   pl_silo_scan_free(&scan);
   free(resolved);
   ax_arrfree(subpins);
@@ -1186,7 +1206,8 @@ pl_val pl_store_load(pl_thread* t, const uint8_t hash[32]) {
     ok = pl_native_load(s, hash, &pin, err, sizeof(err));
     if (ok)
       pl_store_register_canonical(s, pin);
-  } else if (s->format == PL_STORE_FORMAT_SILO_V1) {
+  } else if (s->format == PL_STORE_FORMAT_SILO_V1 ||
+             s->format == PL_STORE_FORMAT_BUNDLE_V1) {
     /* Silo builds directly into the arena and rolls the whole build back on
      * validation failure, so retain mu across its mark/build/release region. */
     pl_store_lock(s);
