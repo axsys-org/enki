@@ -920,7 +920,8 @@ pl_val pl_op83_blake3_keyed(pl_thread* t, size_t ab) {
   size_t key_n, n;
   if (!rp_crypto_bar_size(ARG(0), &key_n) || key_n != BLAKE3_KEY_LEN ||
       !rp_crypto_bar_size(ARG(1), &n))
-    rp_crypto_raise(t, "Blake3Keyed: expected a 32-byte key bar and message bar");
+    rp_crypto_raise(t,
+                    "Blake3Keyed: expected a 32-byte key bar and message bar");
   uint8_t* message = rp_nat_bytes(ARG(1), true, &n);
   uint8_t key[BLAKE3_KEY_LEN];
   uint8_t digest[BLAKE3_OUT_LEN];
@@ -983,7 +984,8 @@ pl_val pl_op83_ed25519_sign(pl_thread* t, size_t ab) {
   if (!rp_crypto_bar_size(ARG(0), &seed_n) ||
       seed_n != crypto_sign_ed25519_SEEDBYTES ||
       !rp_crypto_bar_size(ARG(1), &n))
-    rp_crypto_raise(t, "Ed25519Sign: expected a 32-byte seed bar and message bar");
+    rp_crypto_raise(t,
+                    "Ed25519Sign: expected a 32-byte seed bar and message bar");
   rp_crypto_init(t);
   uint8_t* message = rp_nat_bytes(ARG(1), true, &n);
   uint8_t pk[crypto_sign_ed25519_PUBLICKEYBYTES];

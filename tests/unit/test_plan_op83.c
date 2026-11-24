@@ -618,9 +618,10 @@ static void test_crypto_rejection(pl_thread* t, const char* name, size_t n,
   size_t base = t->vsp;
   pl_vpush(t, test_crypto_thunk(t, name, n, args_base));
   pl_vpush(t, pl_nat_from_bytes(t, (const uint8_t*)message, strlen(message)));
-  pl_vpush(t, test_law(t, 1, 0, 1)); /* identity forces the bad call under Try */
+  pl_vpush(t,
+           test_law(t, 1, 0, 1)); /* identity forces the bad call under Try */
   pl_vpush(t, test_app2(t, ax_s3('T', 'r', 'y'), t->vstack[base + 2],
-                       t->vstack[base]));
+                        t->vstack[base]));
   pl_vpush(t, test_app1(t, 0, t->vstack[base + 3]));
   pl_vpush(t, test_app1(t, 0, test_p66(t)));
   pl_vpush(t, test_app2(t, 0, t->vstack[base + 5], t->vstack[base + 4]));
@@ -714,8 +715,7 @@ TEST(op83, ed25519_rfc8032_and_tampering) {
 TEST(op83, crypto_rejects_malformed_bars_and_wrong_seed_lengths) {
   const char* names[] = {"Blake3", "Sha256", "Ed25519PublicKey", "Ed25519Sign"};
   const char* messages[] = {
-      "Blake3: expected a byte bar",
-      "Sha256: expected a byte bar",
+      "Blake3: expected a byte bar", "Sha256: expected a byte bar",
       "Ed25519PublicKey: expected a 32-byte seed bar",
       "Ed25519Sign: expected a 32-byte seed bar and message bar"};
   for (size_t op = 0; op < 4; op++) {
@@ -863,4 +863,75 @@ TEST(op83, bathash_validation_is_catchable) {
   test_crypto_rejection(t, "BatHash", 1, base, "BatHash: malformed BAT");
   t->vsp = base;
   test_rt_free(&rt);
+}
+
+/* Exercise the evaluator path (including deep forcing), not direct C calls. */
+static void test_pin_observations(test_rt* rt, bool native) {
+  pl_thread* t = rt->t;
+  t->rplan_f = true;
+  size_t base = t->vsp;
+  pl_vpush(t, 0);
+  pl_vpush(t, pl_nat_from_bytes(t, (const uint8_t*)"abcdefghijk", 11));
+  pl_vpush(t, test_law(t, 1, 0, 1));
+  pl_vpush(t, pl_pin(t, 42));
+  pl_vpush(t, test_app2(t, 0, t->vstack[base + 3], t->vstack[base + 3]));
+  pl_vpush(t, pl_pin(t, t->vstack[base + 3])); /* explicitly nested pin */
+  pl_vpush(t, test_thunk(t, test_app1(t, 0, 17)));
+  pl_vpush(t, test_app1(t, 0, t->vstack[base + 6]));
+  size_t end = t->vsp;
+  uint8_t root[32];
+  ASSERT_FALSE(pl_store_get_root(rt->store, root));
+  for (size_t i = base; i < end; i++) {
+    pl_vpush(t, test_crypto(t, "PinBytes", 1, i));
+    pl_vpush(t, test_crypto(t, "PinHash", 1, i));
+    pl_val digest = test_crypto(t, "Sha256", 1, end);
+    ASSERT(pl_nat_eq(digest, t->vstack[end + 1]));
+    ASSERT_EQ(pl_nat_byte_len(t->vstack[end + 1]), 33);
+    ASSERT_EQ(pl_nat_byte_at(t->vstack[end + 1], 32), 1);
+    if (pl_as(PL_TAG_PIN, t->vstack[i]) == NULL) {
+      pl_vpush(t, pl_pin(t, t->vstack[i]));
+      pl_val hash = test_crypto(t, "PinHash", 1, end + 2);
+      ASSERT(pl_nat_eq(hash, t->vstack[end + 1]));
+      pl_val bytes = test_crypto(t, "PinBytes", 1, end + 2);
+      ASSERT(pl_nat_eq(bytes, t->vstack[end]));
+    } else {
+      const uint8_t* hash = pl_pin_hash(t->vstack[i]);
+      ASSERT_NOT_NULL(hash);
+      for (size_t j = 0; j < 32; j++)
+        ASSERT_EQ(pl_nat_byte_at(t->vstack[end + 1], j), hash[j]);
+    }
+    t->vsp = end;
+  }
+  pl_vpush(t, test_crypto(t, "PinHash", 1, base + 3));
+  pl_val nested = test_crypto(t, "PinHash", 1, base + 5);
+  if (native)
+    ASSERT_FALSE(pl_nat_eq(nested, t->vstack[end]));
+  ASSERT_FALSE(pl_store_get_root(rt->store, root));
+  t->vsp = base;
+}
+
+TEST(op83, pin_observations_legacy) {
+  test_rt rt = test_rt_new();
+  test_pin_observations(&rt, false);
+  test_rt_free(&rt);
+}
+
+TEST(op83, pin_observations_native) {
+  char dir[] = "/tmp/enki-pin-observe-XXXXXX";
+  ASSERT_NOT_NULL(mkdtemp(dir));
+  char err[192] = {0};
+  test_rt rt;
+  rt.store = pl_store_new_native(dir, err, sizeof(err));
+  ASSERT_NOT_NULL(rt.store);
+  rt.heap = pl_heap_new(1 << 16, rt.store);
+  rt.t = pl_thread_new(rt.heap);
+  test_pin_observations(&rt, true);
+  test_rt_free(&rt);
+  const char* files[] = {"arena.dat", "arena.writer.lock", "arena.commit.lock"};
+  for (size_t i = 0; i < sizeof(files) / sizeof(*files); i++) {
+    char path[256];
+    (void)snprintf(path, sizeof(path), "%s/%s", dir, files[i]);
+    (void)unlink(path);
+  }
+  (void)rmdir(dir);
 }

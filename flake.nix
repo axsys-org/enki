@@ -232,6 +232,7 @@
             pkgs.openssl
             pkgs.libsodium
             pkgs.libblake3
+            pkgs.criterion
           ];
           __darwinAllowLocalNetworking = true;
 

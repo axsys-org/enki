@@ -16,7 +16,7 @@ static int test_sign_detached(unsigned char* signature,
   if (test_sign_fails)
     return -1;
   return crypto_sign_ed25519_detached(signature, signature_len, message,
-                                       message_len, key);
+                                      message_len, key);
 }
 
 #define crypto_sign_ed25519_detached test_sign_detached
@@ -43,7 +43,7 @@ TEST(crypto_failures, initialization_failure_is_catchable) {
   rp_sodium_status = -1;
   pl_vpush(t, 1);
   test_crypto_rejection(t, "Sha256", 1, base,
-                         "crypto: sodium initialization failed");
+                        "crypto: sodium initialization failed");
   t->vsp = base;
   test_rt_free(&rt);
 }
@@ -59,7 +59,8 @@ TEST(crypto_failures, signing_failure_is_catchable) {
   pl_vpush(t, 1);
 
   test_sign_fails = true;
-  test_crypto_rejection(t, "Ed25519Sign", 2, base, "Ed25519Sign: signing failed");
+  test_crypto_rejection(t, "Ed25519Sign", 2, base,
+                        "Ed25519Sign: signing failed");
   test_sign_fails = false;
   /* Catching the failure leaves this thread usable for another signature. */
   ASSERT_EQ(pl_nat_byte_len(test_crypto(t, "Ed25519Sign", 2, base)), 65);

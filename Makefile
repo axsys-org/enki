@@ -134,7 +134,9 @@ APP_SRCS := $(wildcard $(APP_DIR)/*.c)
 APP_BINS := $(patsubst $(APP_DIR)/%.c,$(BUILD_DIR)/bin/%,$(APP_SRCS)) $(BUILD_DIR)/bin/enki
 
 ifeq ($(UNAME_S),Darwin)
-BUNDLE_LDFLAGS := -Wl,-sectcreate,__ENKI,__payload,pkg/enki/payload-placeholder -Wl,-segprot,__ENKI,r,r
+BUNDLE_PLACEHOLDER := $(BUILD_DIR)/payload-placeholder
+BUNDLE_DEPS := $(BUNDLE_PLACEHOLDER) pkg/enki/check-layout.sh
+BUNDLE_LDFLAGS := -Wl,-sectcreate,__ENKI,__payload,$(BUNDLE_PLACEHOLDER) -Wl,-segprot,__ENKI,r,r
 BUNDLE_CHECK = /bin/sh pkg/enki/check-layout.sh $@
 endif
 
@@ -291,7 +293,13 @@ linux-shell:
 
 bin: $(APP_BINS)
 
-$(BUILD_DIR)/bin/enki $(BUILD_DIR)/bin/wisp: $(APP_DIR)/wisp.c $(LIBS) pkg/enki/payload-placeholder pkg/enki/check-layout.sh
+ifeq ($(UNAME_S),Darwin)
+$(BUNDLE_PLACEHOLDER):
+	@mkdir -p $(dir $@)
+	printf 'ENKI-NO\n' > $@
+endif
+
+$(BUILD_DIR)/bin/enki $(BUILD_DIR)/bin/wisp: $(APP_DIR)/wisp.c $(LIBS) $(BUNDLE_DEPS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS_ALL) $(ENKI_INC) $(CFLAGS_ALL) $< $(LIB_ENKI) $(LIB_PLAN) $(LIB_AXSYS) $(LDFLAGS_ALL) $(BUNDLE_LDFLAGS) -o $@
 	$(BUNDLE_CHECK)

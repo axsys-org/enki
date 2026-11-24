@@ -1039,8 +1039,10 @@ static bool load_silo_pin(pl_thread* t, pl_store* s, const uint8_t hash[32],
     if (!ok)
       (void)snprintf(err, err_cap, "missing bundle pin");
     memory = (silo_mem_reader){.b = memory_bytes, .n = len};
-    reader = (pl_silo_reader){.ctx = &memory, .read = silo_mem_read,
-                             .rewind = silo_mem_rewind, .len = len};
+    reader = (pl_silo_reader){.ctx = &memory,
+                              .read = silo_mem_read,
+                              .rewind = silo_mem_rewind,
+                              .len = len};
   } else {
     ok = pl_store_silo_open(s, hash, &reader, err, err_cap);
   }

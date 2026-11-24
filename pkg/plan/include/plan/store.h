@@ -115,8 +115,8 @@ pl_store* pl_store_new_mem(void);
 bool pl_store_bundle_encode(pl_val entry, uint8_t** bytes, size_t* len,
                             char* err, size_t err_cap);
 pl_store* pl_store_new_bundle(const uint8_t* bytes, size_t len,
-                               const uint8_t entry_hash[32], pl_val* entry,
-                               char* err, size_t err_cap);
+                              const uint8_t entry_hash[32], pl_val* entry,
+                              char* err, size_t err_cap);
 /* NULL on failure (path must be an existing directory). */
 pl_store* pl_store_new_lmdb(const char* path, size_t map_size);
 /* Canonical Silo streams in pins.pack. Ice stages index entries locally;
