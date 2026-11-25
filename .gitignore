@@ -15,3 +15,7 @@ result-*
 tmp/
 *.json.gz
 .claude/settings.local.json
+
+# Rust bridge artifacts (Make uses build/mesa).
+pkg/mesa/target/
+pkg/mesa/vendor/libmesa/target/

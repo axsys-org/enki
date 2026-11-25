@@ -26,8 +26,11 @@
  * Messaging: payloads cross actors only as store-resident
  * values — the sender snapshots at send, the mailbox holds store addresses,
  * the receiver's heap points into the shared immutable store.  PLAN
- * code addresses actors through per-actor handle tables; handle 0 is
- * self, fresh handles are minted by Spawn and by cap transfer in Recv.
+ * code addresses actors through wormholes containing host capabilities.
+ * Spawn and Self return wormholes; Recv mints independent wrappers for
+ * transferred caps. Literal 0 remains a legacy alias for the self capability.
+ * Handles have no WHNF/NF and must be consumed by host-aware operations;
+ * payloads and spawn functions must not retain handles after normalization.
  */
 
 #include "plan/eval.h"
@@ -69,6 +72,14 @@ void er_scheduler_free(er_scheduler* sys);
  */
 er_actor* er_scheduler_actor(er_scheduler* sys);
 pl_thread* er_actor_thread(er_actor* a);
+/* Mint a wormhole capability in owner's gc2 store. Does not collect; root
+ * the result before the next gc2 safe boundary. Shared-store host operations
+ * require a mutator scope (see plan/store.h). Both actors must belong to the
+ * same scheduler.
+ * Actors live until scheduler teardown; capabilities cannot outlive its scope.
+ * Each minted handle closes independently; aliases of one handle close
+ * together. */
+pl_val er_actor_handle(er_actor* owner, er_actor* target);
 void er_actor_start(er_actor* a, pl_val fn);
 
 /*

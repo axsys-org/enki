@@ -1,0 +1,17 @@
+[package]
+name = "mesa-wire"
+description = "Mesa pact codec: header/name/data/auth etch and sift"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+mesa-noun = { path = "../mesa-noun" }
+
+[dev-dependencies]
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+
+[lints]
+workspace = true

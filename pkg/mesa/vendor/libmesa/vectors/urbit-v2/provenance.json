@@ -1,0 +1,21 @@
+{
+  "method": "Canonical page datagrams captured from the Hoon Gall endpoint over Lick on a running fake Urbit; no Python signing or proof generation.",
+  "reference": {
+    "pill_repository": "https://github.com/gwbtc/urbit",
+    "pill_commit": "a872698f59ca8bf8c5bbf4c9c89ed61fefa3b812",
+    "pill_path": "bin/mesa.pill",
+    "pill_sha256": "67143794b92980dc268b84db4005a618dc60a809e4178df00943d0925f119bda",
+    "tested_vere_version": "urbit 4.4-0fb1a3e\ngmp: 6.2.1\nsigsegv: 2.14\nopenssl: OpenSSL 1.1.1w  11 Sep 2023\nlibuv: 1.50.0\nlibh2o: 0.13.6\nlmdb: 0.9.70\ncurl: 8.9.1",
+    "tested_vere_sha256": "58a7d89d5e17953927bb563dbb9c1b46cbefc044ce7a5715e2a44ce2fef44ba3",
+    "note": "Existing local Vere binary, not rebuilt for this experiment. Hoon primitives may execute as jets."
+  },
+  "sources": {
+    "interop/desk/app/mesa-v2.hoon": "6a9b55e77700a1253bc6645f3a1523a600729aae52a23020b82daba991728946",
+    "interop/desk/lib/mesa-v2.hoon": "58e752f5d61c3466db833f8257eb162fc4be00e033c9bd7b6b896dd247682c2b"
+  },
+  "captures": {
+    "0.json": "d6f7cce9b48b74a33ddbe4b5df9673e0ed669fa2faf248fe12e1ce9751a9fc8b",
+    "1.json": "1b043887e222f63e041ded1c5d96a06d70e8e4ef0fab3e193d8dd9719e228036",
+    "17425.json": "45a1d2b251fc770b580e2f2b18b26a885c65fc8f11a04b4928345b0ab1dc1293"
+  }
+}

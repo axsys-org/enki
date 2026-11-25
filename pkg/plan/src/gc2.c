@@ -16,8 +16,16 @@ static const size_t classes[] = {16,  32,  48,  64,   96,   128,  192, 256,
                                  384, 512, 768, 1024, 1536, 2048, 4096};
 #define GC2_CLASSES (sizeof(classes) / sizeof(classes[0]))
 
+typedef struct gc2_finalizer {
+  struct gc2_finalizer* next;
+  void (*drop)(void*);
+  void* context;
+  size_t bytes;
+} gc2_finalizer;
+
 typedef struct gc2_slot {
   size_t serial;
+  gc2_finalizer* finalizer;
   uint32_t next;
   bool marked;
 } gc2_slot;
@@ -43,6 +51,7 @@ struct pl_gc2 {
   size_t work_n;
   size_t serial, allocated_since, threshold, budget;
   pl_gc2_stats stats;
+  gc2_finalizer* finalizers;
   pthread_mutex_t world_mu;
   pthread_cond_t world_cv;
   size_t active, blocking;
@@ -55,6 +64,7 @@ typedef struct gc2_scope {
   pl_store* store;
   size_t depth;
   bool blocking;
+  bool parked; /* inside a syscall that touches neither heap nor store */
   struct gc2_scope* next;
 } gc2_scope;
 static _Thread_local gc2_scope* scopes;
@@ -125,6 +135,40 @@ void pl_store_mutator_blocking(pl_store* s) {
   pthread_mutex_unlock(&g->world_mu);
 }
 
+void pl_store_mutator_park(pl_store* s) {
+  if (!s)
+    return;
+  gc2_scope* sc = scope_for(s);
+  if (!sc || sc->parked)
+    return;
+  struct pl_gc2* g = s->gc2;
+  pthread_mutex_lock(&g->world_mu);
+  sc->parked = true;
+  ax_assume(g->active != 0, "gc2 park without an active scope");
+  g->active--;
+  if (sc->blocking)
+    g->blocking--;
+  pthread_cond_broadcast(&g->world_cv);
+  pthread_mutex_unlock(&g->world_mu);
+}
+
+void pl_store_mutator_unpark(pl_store* s) {
+  if (!s)
+    return;
+  gc2_scope* sc = scope_for(s);
+  if (!sc || !sc->parked)
+    return;
+  struct pl_gc2* g = s->gc2;
+  pthread_mutex_lock(&g->world_mu);
+  while (g->stopped)
+    pthread_cond_wait(&g->world_cv, &g->world_mu);
+  g->active++;
+  if (sc->blocking)
+    g->blocking++;
+  sc->parked = false;
+  pthread_mutex_unlock(&g->world_mu);
+}
+
 void pl_store_gc_add_roots(pl_store* s, pl_root_source fn, void* ctx) {
   pl_store_mutator_enter(s);
   pthread_mutex_lock(&s->mu);
@@ -190,6 +234,12 @@ static void span_free(pl_store* s, gc2_span* sp) {
 }
 
 static void slot_free(struct pl_gc2* g, gc2_span* sp, uint32_t i) {
+  gc2_finalizer* f = sp->slots[i].finalizer;
+  if (f) {
+    f->next = g->finalizers;
+    g->finalizers = f;
+    sp->slots[i].finalizer = NULL;
+  }
   sp->slots[i].serial = 0;
   sp->slots[i].marked = false;
   sp->slots[i].next = sp->free_head;
@@ -262,12 +312,30 @@ void pl_gc2_init(pl_store* s, size_t capacity) {
             "gc2 sweeper creation");
 }
 
+void pl_store_gc_run_finalizers(pl_store* s) {
+  struct pl_gc2* g = s->gc2;
+  pthread_mutex_lock(&g->mu);
+  gc2_finalizer* list = g->finalizers;
+  g->finalizers = NULL;
+  pthread_mutex_unlock(&g->mu);
+  while (list) {
+    gc2_finalizer* f = list;
+    list = f->next;
+    f->drop(f->context);
+    pthread_mutex_lock(&g->mu);
+    g->stats.external_bytes -= f->bytes;
+    pthread_mutex_unlock(&g->mu);
+    free(f);
+  }
+}
+
 void pl_store_gc_wait(pl_store* s) {
   struct pl_gc2* g = s->gc2;
   pthread_mutex_lock(&g->mu);
   while (g->sweeping)
     pthread_cond_wait(&g->cv, &g->mu);
   pthread_mutex_unlock(&g->mu);
+  pl_store_gc_run_finalizers(s);
 }
 
 void pl_gc2_destroy(pl_store* s) {
@@ -282,9 +350,13 @@ void pl_gc2_destroy(pl_store* s) {
   ax_assume(pthread_join(g->sweeper, NULL) == 0, "gc2 sweeper join");
   while (g->spans) {
     gc2_span* next = g->spans->next;
+    for (uint32_t i = 0; i < g->spans->count; i++)
+      if (g->spans->slots[i].serial)
+        slot_free(g, g->spans, i);
     free(g->spans);
     g->spans = next;
   }
+  pl_store_gc_run_finalizers(s);
   (void)munmap(s->lo, g->buddy.capacity);
   ax_buddy_destroy(&g->buddy);
   free(g->pages);
@@ -349,7 +421,9 @@ pl_cell* pl_gc2_alloc(pl_store* s, size_t cells) {
   if (sp->free_head == GC2_NONE)
     unavailable(g, sp);
   g->stats.allocated_bytes += sp->stride;
-  g->allocated_since += sp->stride;
+  g->allocated_since = sp->stride > SIZE_MAX - g->allocated_since
+                           ? SIZE_MAX
+                           : g->allocated_since + sp->stride;
   if (g->threshold && g->allocated_since >= g->budget)
     __atomic_store_n(&g->requested, true, __ATOMIC_RELEASE);
   pl_cell* out = (pl_cell*)(s->lo + sp->offset + i * sp->stride);
@@ -479,6 +553,42 @@ static void trace_visit(pl_val* slot, void* ctx) {
   ax_arrpush(tr->todo, v);
 }
 
+void pl_gc2_set_finalizer(pl_store* s, pl_val v, void (*drop)(void*),
+                          void* context) {
+  struct pl_gc2* g = s->gc2;
+  gc2_finalizer* f = calloc(1, sizeof(*f));
+  ax_assume(f && drop, "invalid finalizer");
+  f->drop = drop;
+  f->context = context;
+  pthread_mutex_lock(&g->mu);
+  gc2_slot* slot = find_slot(s, v, NULL);
+  ax_assume(slot && slot->serial && !slot->finalizer,
+            "invalid resource allocation");
+  slot->finalizer = f;
+  pthread_mutex_unlock(&g->mu);
+}
+
+void pl_store_gc_charge(pl_store* s, pl_val v, size_t bytes) {
+  struct pl_gc2* g = s->gc2;
+  pthread_mutex_lock(&g->mu);
+  gc2_slot* slot = find_slot(s, v, NULL);
+  ax_assume(slot && slot->serial && slot->finalizer, "charge without resource");
+  size_t old = slot->finalizer->bytes;
+  ax_assume(bytes <= SIZE_MAX - (g->stats.external_bytes - old),
+            "foreign memory overflow");
+  g->stats.external_bytes = g->stats.external_bytes - old + bytes;
+  slot->finalizer->bytes = bytes;
+  if (bytes > old) {
+    size_t delta = bytes - old;
+    g->allocated_since = delta > SIZE_MAX - g->allocated_since
+                             ? SIZE_MAX
+                             : g->allocated_since + delta;
+    if (g->threshold && g->allocated_since >= g->budget)
+      __atomic_store_n(&g->requested, true, __ATOMIC_RELEASE);
+  }
+  pthread_mutex_unlock(&g->mu);
+}
+
 void pl_gc2_visit_code(const pl_code* code, pl_root_visit visit, void* ctx) {
   if (!code)
     return;
@@ -533,6 +643,7 @@ static void trace_drain(gc2_trace* tr) {
     uint32_t first = 0, count = 0;
     switch (pl_hdr_kind(p[0])) {
     case PL_K_NAT:
+    case PL_K_WORMHOLE: /* host type and payload bytes are opaque */
       break;
     case PL_K_APP:
     case PL_K_ENV:
@@ -686,6 +797,7 @@ void pl_store_gc_collect(pl_store* s) {
 }
 
 bool pl_store_gc_poll(pl_store* s) {
+  pl_store_gc_run_finalizers(s);
   if (!__atomic_load_n(&s->gc2->requested, __ATOMIC_ACQUIRE))
     return false;
   return collect(s, false);

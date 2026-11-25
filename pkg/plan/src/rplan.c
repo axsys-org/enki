@@ -12,6 +12,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/types.h>
 #include <netdb.h>
 #include <arpa/inet.h>
@@ -19,11 +20,16 @@
 #include <unistd.h>
 
 #include "axsys/allocator.h"
+#include "axsys/ds.h"
 #include "axsys/fd.h"
 #include "axsys/util.h"
 #include "internal.h"
 #include "plan/nat.h"
+#include "plan/store.h"
+#include "silo_internal.h"
+#include "store_internal.h"
 #include "plan/rplan.h"
+#include "plan/store.h"
 #include "plan/xtract.h"
 
 /*
@@ -48,10 +54,14 @@
 
 #define ARG(i) (t->vstack[ab + (i)])
 
-static int rp_write_all(int fd, const uint8_t* bytes, size_t len) {
+static int rp_write_all(pl_thread* t, int fd, const uint8_t* bytes,
+                        size_t len) {
+  pl_store* s = pl_heap_store(t->heap);
   size_t off = 0;
   while (off < len) {
+    pl_store_mutator_park(s); /* bytes belong to a rooted argument */
     ssize_t r = write(fd, bytes + off, len - off);
+    pl_store_mutator_unpark(s);
     if (r < 0) {
       if (errno == EINTR)
         continue;
@@ -236,6 +246,12 @@ cleanup:
   return res;
 }
 
+bool pl_rplan_resolve_path(pl_thread* t, const char* path, bool writing,
+                           char** out) {
+  return writing ? rp_resolve_write_path(t, path, out)
+                 : rp_resolve_read_path(t, path, out);
+}
+
 /* bytesBar: the data bytes followed by a 0x01 terminator. */
 static pl_val rp_bar(pl_thread* t, const uint8_t* b, size_t n) {
   uint8_t* bar = malloc(n + 1);
@@ -292,7 +308,7 @@ static pl_val rp_output_fd(pl_thread* t, size_t ab, size_t handle) {
     free(b);
     pl_raise_msg(t, "Output: closed");
   }
-  int rc = rp_write_all(fd, b, n);
+  int rc = rp_write_all(t, fd, b, n);
   int write_errno = errno;
   (void)ax_fd_release(handle);
   errno = write_errno;
@@ -318,7 +334,7 @@ pl_val pl_op82_print(pl_thread* t, size_t ab) {
     free(b);
     pl_raise_msg(t, "Print: closed");
   }
-  int rc = rp_write_all(fd, b, n);
+  int rc = rp_write_all(t, fd, b, n);
   int write_errno = errno;
   (void)ax_fd_release(STDOUT_FILENO);
   errno = write_errno;
@@ -549,7 +565,7 @@ pl_val pl_op82_write_file(pl_thread* t, size_t ab) {
   free(path);
   size_t n;
   uint8_t* b = rp_nat_bytes(rp_want_nat(t, ARG(1)), true, &n);
-  int rc = rp_write_all(fd, b, n);
+  int rc = rp_write_all(t, fd, b, n);
   free(b);
   if (rc < 0) {
     perror("failed to write file");
@@ -715,7 +731,9 @@ pl_val pl_op82_accept(pl_thread* t, size_t ab) {
   int listen_fd;
   if (ax_fd_acquire((size_t)h, &listen_fd) < 0)
     pl_raise_msg(t, "Accept: bad handle");
+  pl_store_mutator_park(pl_heap_store(t->heap));
   int client_fd = accept(listen_fd, NULL, NULL);
+  pl_store_mutator_unpark(pl_heap_store(t->heap));
   int accept_errno = errno;
   (void)ax_fd_release((size_t)h);
   errno = accept_errno;
@@ -740,10 +758,12 @@ pl_val pl_op82_read(pl_thread* t, size_t ab) {
   uint8_t* buf = malloc(n ? n : 1);
   ax_assume(buf != NULL, "oom");
   ssize_t r;
+  pl_store_mutator_park(pl_heap_store(t->heap));
   do {
     r = read(fd, buf, n);
   } while (r < 0 && errno == EINTR);
   int read_errno = errno;
+  pl_store_mutator_unpark(pl_heap_store(t->heap));
   (void)ax_fd_release((size_t)h);
   errno = read_errno;
   if (r < 0) {
@@ -767,7 +787,7 @@ pl_val pl_op82_write(pl_thread* t, size_t ab) {
     pl_raise_msg(t, "Write: bad handle");
   size_t n;
   uint8_t* b = rp_nat_bytes(ARG(1), true, &n);
-  int rc = rp_write_all(fd, b, n);
+  int rc = rp_write_all(t, fd, b, n);
   int write_errno = errno;
   (void)ax_fd_release((size_t)h);
   errno = write_errno;
@@ -795,12 +815,10 @@ pl_val pl_op82_spawn(pl_thread* t, size_t ab) {
 }
 
 pl_val pl_op82_send(pl_thread* t, size_t ab) {
-  rp_want_nat(t, ARG(0)); /* handle; the message stays lazy */
   return rp_request(t, ab, 2);
 }
 
 pl_val pl_op82_send_caps(pl_thread* t, size_t ab) {
-  rp_want_nat(t, ARG(0));
   return rp_request(t, ab, 3);
 }
 
@@ -811,7 +829,6 @@ pl_val pl_op82_recv(pl_thread* t, size_t ab) {
 }
 
 pl_val pl_op82_close_handle(pl_thread* t, size_t ab) {
-  rp_want_nat(t, ARG(0));
   return rp_request(t, ab, 1);
 }
 
@@ -898,6 +915,287 @@ pl_val pl_op83_sha256(pl_thread* t, size_t ab) {
   crypto_hash_sha256(digest, message, (unsigned long long)n);
   free(message);
   return rp_bar(t, digest, sizeof(digest));
+}
+
+/* ------------------------------------------------------------------ */
+/* Pins as values: a pin's content hash, its canonical stream, and a pin
+ * rebuilt from a stream.  Together they let a value leave one store and
+ * arrive in another as the same pin, named by the same hash. */
+
+/* PinHash pin -> the pin's 32-byte content hash bar.  The pin is finalized
+ * as Ice finalizes it: its closure is staged in this store and nothing is
+ * published. */
+pl_val pl_op83_pin_hash(pl_thread* t, size_t ab) {
+  t->effect_epoch++; /* stages the closure, as Ice does */
+  if (pl_as(PL_TAG_PIN, ARG(0)) == NULL)
+    pl_raise_msg(t, "PinHash: expected a pin");
+  uint8_t hash[32];
+  char err[192] = {0};
+  if (!pl_store_save_pin(pl_heap_store(t->heap), ARG(0), hash, err,
+                         sizeof(err)))
+    pl_raise_msgf(t, "PinHash: %s", err[0] != '\0' ? err : "store failure");
+  return rp_bar(t, hash, sizeof(hash));
+}
+
+static const uint8_t* rp_pin_stream_hash(void* ctx, pl_val pin) {
+  AX_UNUSED(ctx);
+  return pl_pin_hash(pin);
+}
+
+/* PinBytes pin -> the canonical stream bar whose SHA-256 is the pin's hash.
+ * Direct sub-pins are named in the stream by hash and are not included. */
+pl_val pl_op83_pin_bytes(pl_thread* t, size_t ab) {
+  t->effect_epoch++; /* stages the closure, as Ice does */
+  if (pl_as(PL_TAG_PIN, ARG(0)) == NULL)
+    pl_raise_msg(t, "PinBytes: expected a pin");
+  uint8_t hash[32];
+  char err[192] = {0};
+  if (!pl_store_save_pin(pl_heap_store(t->heap), ARG(0), hash, err,
+                         sizeof(err)))
+    pl_raise_msgf(t, "PinBytes: %s", err[0] != '\0' ? err : "store failure");
+  pl_cell* p = pl_pin_resolved(pl_ptr(ARG(0)));
+  uint8_t* bytes = NULL;
+  size_t len = 0;
+  uint8_t calculated[32];
+  if (!pl_silo_encode_buffer(pl_pin_body(p), pl_pin_subpins(p), pl_pin_npins(p),
+                             rp_pin_stream_hash, NULL, &bytes, &len, calculated,
+                             err, sizeof(err))) {
+    ax_arrfree(bytes);
+    pl_raise_msgf(t, "PinBytes: %s", err[0] != '\0' ? err : "encode failure");
+  }
+  if (memcmp(calculated, hash, sizeof(hash)) != 0) {
+    ax_arrfree(bytes);
+    pl_raise_msg(t, "PinBytes: stream does not hash to the pin");
+  }
+  pl_val out = rp_bar(t, bytes, len);
+  ax_arrfree(bytes);
+  return out;
+}
+
+typedef struct rp_stream_reader {
+  const uint8_t* b;
+  size_t n;
+  size_t pos;
+} rp_stream_reader;
+
+static bool rp_stream_read(void* ctx, uint8_t* bytes, size_t len) {
+  rp_stream_reader* r = ctx;
+  if (len > r->n - r->pos)
+    return false;
+  memcpy(bytes, r->b + r->pos, len);
+  r->pos += len;
+  return true;
+}
+
+static bool rp_stream_rewind(void* ctx) {
+  rp_stream_reader* r = ctx;
+  r->pos = 0;
+  return true;
+}
+
+/* PinFrom stream -> the pin a canonical stream describes, or 0.  Every
+ * sub-pin the stream names must already be in this store, so a value arrives
+ * leaves first.  A stream that is not canonical, names an unknown sub-pin, or
+ * holds a law answers 0: what arrives from outside is data, and a refusal is
+ * an answer, not a fault.  The caller compares PinHash of the result with the
+ * hash it expected. */
+pl_val pl_op83_pin_from(pl_thread* t, size_t ab) {
+  t->effect_epoch++; /* stages the pin, as Ice does */
+  size_t n;
+  if (!rp_crypto_bar_size(ARG(0), &n))
+    return 0;
+  uint8_t* bytes = rp_nat_bytes(ARG(0), true, &n);
+  char err[192] = {0};
+  rp_stream_reader mem = {.b = bytes, .n = n, .pos = 0};
+  pl_silo_reader reader = {.ctx = &mem,
+                           .read = rp_stream_read,
+                           .rewind = rp_stream_rewind,
+                           .len = n,
+                           .pos = 0};
+  pl_silo_scan scan = {0};
+  bool ok = pl_silo_scan_stream(&reader, true, &scan, err, sizeof(err));
+  if (ok && scan.has_law)
+    ok = false;
+  pl_silo_scan_free(&scan);
+  pl_val out = 0;
+  if (ok)
+    ok = pl_store_load_silo_stream(t, pl_heap_store(t->heap), bytes, n, &out,
+                                   err, sizeof(err));
+  free(bytes);
+  return ok ? out : 0;
+}
+
+/* PinNames stream -> the hashes of the pins a canonical stream names, as a
+ * row of 32-byte bars in the stream's own order; 0 when it names none or is
+ * not a canonical stream.  Nothing is loaded and the store is not asked, so
+ * the answer depends on the bytes alone. */
+pl_val pl_op83_pin_names(pl_thread* t, size_t ab) {
+  size_t n;
+  if (!rp_crypto_bar_size(ARG(0), &n))
+    return 0;
+  uint8_t* bytes = rp_nat_bytes(ARG(0), true, &n);
+  char err[192] = {0};
+  rp_stream_reader mem = {.b = bytes, .n = n, .pos = 0};
+  pl_silo_reader reader = {.ctx = &mem,
+                           .read = rp_stream_read,
+                           .rewind = rp_stream_rewind,
+                           .len = n,
+                           .pos = 0};
+  pl_silo_scan scan = {0};
+  bool ok = pl_silo_scan_stream(&reader, true, &scan, err, sizeof(err));
+  free(bytes);
+  if (!ok || scan.used_count == 0 || scan.used_count > UINT32_MAX) {
+    pl_silo_scan_free(&scan);
+    return 0;
+  }
+  uint32_t count = (uint32_t)scan.used_count;
+  size_t base = t->vsp;
+  for (uint32_t i = 0; i < count; i++)
+    pl_vpush(t, rp_bar(t, scan.pins[scan.used[i]].b, 32));
+  pl_silo_scan_free(&scan);
+  pl_gc_reserve(t, PL_APP_CELLS(count));
+  PL_GC_FORBID(t);
+  pl_val row = pl_mk_app_from(t, 0, count, &t->vstack[base]);
+  PL_GC_ALLOW(t);
+  t->vsp = base;
+  return row;
+}
+
+/* PinParts pin -> the pins a pin holds directly, as a row in the order its
+ * stream names them; 0 when it holds none. */
+pl_val pl_op83_pin_parts(pl_thread* t, size_t ab) {
+  t->effect_epoch++; /* stages the closure, as Ice does */
+  if (pl_as(PL_TAG_PIN, ARG(0)) == NULL)
+    pl_raise_msg(t, "PinParts: expected a pin");
+  uint8_t hash[32];
+  char err[192] = {0};
+  if (!pl_store_save_pin(pl_heap_store(t->heap), ARG(0), hash, err,
+                         sizeof(err)))
+    pl_raise_msgf(t, "PinParts: %s", err[0] != '\0' ? err : "store failure");
+  pl_cell* p = pl_pin_resolved(pl_ptr(ARG(0)));
+  uint32_t count = (uint32_t)pl_pin_npins(p);
+  if (count == 0)
+    return 0;
+  size_t base = t->vsp;
+  for (uint32_t i = 0; i < count; i++) {
+    p = pl_pin_resolved(pl_ptr(ARG(0)));
+    pl_vpush(t, pl_pin_subpins(p)[i]);
+  }
+  pl_gc_reserve(t, PL_APP_CELLS(count));
+  PL_GC_FORBID(t);
+  pl_val row = pl_mk_app_from(t, 0, count, &t->vstack[base]);
+  PL_GC_ALLOW(t);
+  t->vsp = base;
+  return row;
+}
+
+/* SendTo dns host port bytes -> 1 when one connection carried all the bytes
+ * and was closed, 0 when it could not be made or broke.  Never raises and
+ * never signals: a peer that is down is an answer, not a fault. */
+pl_val pl_op83_send_to(pl_thread* t, size_t ab) {
+  t->effect_epoch++;
+  bool is_dns = rp_want_nat(t, ARG(0)) == 1;
+  uint64_t port = pl_nat_u64_clamp(rp_want_nat(t, ARG(2)));
+  char* host = pl_nat_to_cstr(ax_allocator_system(), rp_want_nat(t, ARG(1)));
+  size_t n;
+  uint8_t* b = rp_nat_bytes(rp_want_nat(t, ARG(3)), true, &n);
+  struct addrinfo hints;
+  struct addrinfo* servinfo = NULL;
+  memset(&hints, 0, sizeof(hints));
+  hints.ai_family = AF_INET;
+  hints.ai_socktype = SOCK_STREAM;
+  if (!is_dns)
+    hints.ai_flags = AI_NUMERICHOST;
+  char port_c[20];
+  (void)snprintf(port_c, sizeof(port_c), "%" PRIu64, port);
+  bool sent = false;
+  if (getaddrinfo(host, port_c, &hints, &servinfo) == 0) {
+    for (struct addrinfo* cur = servinfo; cur != NULL && !sent;
+         cur = cur->ai_next) {
+      int fd = socket(cur->ai_family, cur->ai_socktype, cur->ai_protocol);
+      if (fd == -1)
+        continue;
+#ifdef SO_NOSIGPIPE
+      int one = 1;
+      (void)setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
+#endif
+      struct timeval limit = {.tv_sec = 10, .tv_usec = 0};
+      (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &limit, sizeof(limit));
+      if (connect(fd, cur->ai_addr, cur->ai_addrlen) == 0) {
+        size_t off = 0;
+        sent = true;
+        while (off < n) {
+#ifdef MSG_NOSIGNAL
+          ssize_t r = send(fd, b + off, n - off, MSG_NOSIGNAL);
+#else
+          ssize_t r = send(fd, b + off, n - off, 0);
+#endif
+          if (r < 0 && errno == EINTR)
+            continue;
+          if (r <= 0) {
+            sent = false;
+            break;
+          }
+          off += (size_t)r;
+        }
+      }
+      (void)close(fd);
+    }
+  }
+  if (servinfo != NULL)
+    freeaddrinfo(servinfo);
+  ax_free(ax_allocator_system(), host);
+  free(b);
+  return sent ? 1 : 0;
+}
+
+/* ReadAll fd max -> everything a connection sends before it closes, as a
+ * bar; 0 when the handle is bad, a read fails or stalls for ten seconds, or
+ * more than max bytes arrive.  Never raises. */
+pl_val pl_op83_read_all(pl_thread* t, size_t ab) {
+  t->effect_epoch++;
+  uint64_t h = pl_nat_u64_clamp(rp_want_nat(t, ARG(0)));
+  uint64_t max = pl_nat_u64_clamp(rp_want_nat(t, ARG(1)));
+  if (max > (1u << 26))
+    max = 1u << 26;
+  if (max == 0)
+    return 0;
+  int fd;
+  if (ax_fd_acquire((size_t)h, &fd) < 0)
+    return 0;
+  struct timeval limit = {.tv_sec = 10, .tv_usec = 0};
+  (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &limit, sizeof(limit));
+  size_t cap = max < 65536 ? (size_t)max : 65536;
+  size_t len = 0;
+  uint8_t* buf = malloc(cap);
+  ax_assume(buf != NULL, "oom");
+  bool ok = true;
+  for (;;) {
+    if (len == cap) {
+      if (cap >= max) {
+        ok = false;
+        break;
+      }
+      cap = cap * 2 > max ? (size_t)max : cap * 2;
+      uint8_t* grown = realloc(buf, cap);
+      ax_assume(grown != NULL, "oom");
+      buf = grown;
+    }
+    ssize_t r = read(fd, buf + len, cap - len);
+    if (r < 0 && errno == EINTR)
+      continue;
+    if (r < 0) {
+      ok = false;
+      break;
+    }
+    if (r == 0)
+      break;
+    len += (size_t)r;
+  }
+  (void)ax_fd_release((size_t)h);
+  pl_val out = ok ? rp_bar(t, buf, len) : 0;
+  free(buf);
+  return out;
 }
 
 /* Blake3Keyed key message -> 32-byte MAC bar, using BLAKE3's native
@@ -1004,4 +1302,177 @@ pl_val pl_op83_ed25519_verify(pl_thread* t, size_t ab) {
                                                (unsigned long long)n, pk);
   free(message);
   return rc == 0 ? 1 : 0;
+}
+
+/* BoxKey seed peer -> the 32-byte key two worlds share: X25519 between this
+ * world's Ed25519 seed and a peer's Ed25519 public key, each in its
+ * Curve25519 form, hashed as crypto_box does.  Both sides derive the same
+ * key.  0 when the seed or the peer's key is not one.  Never raises on its
+ * arguments. */
+pl_val pl_op83_box_key(pl_thread* t, size_t ab) {
+  size_t sn, pn;
+  if (!rp_crypto_bar_size(ARG(0), &sn) || sn != crypto_sign_ed25519_SEEDBYTES ||
+      !rp_crypto_bar_size(ARG(1), &pn) ||
+      pn != crypto_sign_ed25519_PUBLICKEYBYTES)
+    return 0;
+  rp_crypto_init(t);
+  uint8_t pk[crypto_sign_ed25519_PUBLICKEYBYTES];
+  uint8_t sk[crypto_sign_ed25519_SECRETKEYBYTES];
+  uint8_t peer[crypto_sign_ed25519_PUBLICKEYBYTES];
+  uint8_t xsk[crypto_scalarmult_curve25519_BYTES];
+  uint8_t xpk[crypto_scalarmult_curve25519_BYTES];
+  uint8_t shared[crypto_box_BEFORENMBYTES];
+  rp_ed25519_keypair(ARG(0), pk, sk);
+  rp_crypto_copy(ARG(1), peer, sizeof(peer));
+  bool ok = crypto_sign_ed25519_sk_to_curve25519(xsk, sk) == 0 &&
+            crypto_sign_ed25519_pk_to_curve25519(xpk, peer) == 0 &&
+            crypto_box_beforenm(shared, xpk, xsk) == 0;
+  pl_val out = ok ? rp_bar(t, shared, sizeof(shared)) : 0;
+  sodium_memzero(sk, sizeof(sk));
+  sodium_memzero(xsk, sizeof(xsk));
+  sodium_memzero(shared, sizeof(shared));
+  return out;
+}
+
+/* SecretSeal key nonce name message -> the message sealed under a 32-byte
+ * key and a 24-byte nonce (XChaCha20-Poly1305), bound to name: bytes that
+ * are authenticated with it and not hidden.  The result is the ciphertext
+ * and its 16-byte tag.  0 when the key or nonce has the wrong length. */
+pl_val pl_op83_secret_seal(pl_thread* t, size_t ab) {
+  size_t kn, nn, an, mn;
+  if (!rp_crypto_bar_size(ARG(0), &kn) ||
+      kn != crypto_aead_xchacha20poly1305_ietf_KEYBYTES ||
+      !rp_crypto_bar_size(ARG(1), &nn) ||
+      nn != crypto_aead_xchacha20poly1305_ietf_NPUBBYTES ||
+      !rp_crypto_bar_size(ARG(2), &an) || !rp_crypto_bar_size(ARG(3), &mn))
+    return 0;
+  rp_crypto_init(t);
+  uint8_t key[crypto_aead_xchacha20poly1305_ietf_KEYBYTES];
+  uint8_t nonce[crypto_aead_xchacha20poly1305_ietf_NPUBBYTES];
+  rp_crypto_copy(ARG(0), key, sizeof(key));
+  rp_crypto_copy(ARG(1), nonce, sizeof(nonce));
+  uint8_t* name = rp_nat_bytes(ARG(2), true, &an);
+  uint8_t* message = rp_nat_bytes(ARG(3), true, &mn);
+  uint8_t* sealed = malloc(mn + crypto_aead_xchacha20poly1305_ietf_ABYTES);
+  ax_assume(sealed != NULL, "oom");
+  unsigned long long sealed_n = 0;
+  (void)crypto_aead_xchacha20poly1305_ietf_encrypt(
+      sealed, &sealed_n, message, (unsigned long long)mn, name,
+      (unsigned long long)an, NULL, nonce, key);
+  pl_val out = rp_bar(t, sealed, (size_t)sealed_n);
+  sodium_memzero(key, sizeof(key));
+  free(name);
+  free(message);
+  free(sealed);
+  return out;
+}
+
+/* SecretOpen key nonce name sealed -> the message, when the tag verifies for
+ * this key, nonce and name; 0 otherwise.  An empty message is the bar 1, so
+ * it is not mistaken for a refusal.  Never raises on its arguments. */
+pl_val pl_op83_secret_open(pl_thread* t, size_t ab) {
+  size_t kn, nn, an, cn;
+  if (!rp_crypto_bar_size(ARG(0), &kn) ||
+      kn != crypto_aead_xchacha20poly1305_ietf_KEYBYTES ||
+      !rp_crypto_bar_size(ARG(1), &nn) ||
+      nn != crypto_aead_xchacha20poly1305_ietf_NPUBBYTES ||
+      !rp_crypto_bar_size(ARG(2), &an) || !rp_crypto_bar_size(ARG(3), &cn) ||
+      cn < crypto_aead_xchacha20poly1305_ietf_ABYTES)
+    return 0;
+  rp_crypto_init(t);
+  uint8_t key[crypto_aead_xchacha20poly1305_ietf_KEYBYTES];
+  uint8_t nonce[crypto_aead_xchacha20poly1305_ietf_NPUBBYTES];
+  rp_crypto_copy(ARG(0), key, sizeof(key));
+  rp_crypto_copy(ARG(1), nonce, sizeof(nonce));
+  uint8_t* name = rp_nat_bytes(ARG(2), true, &an);
+  uint8_t* sealed = rp_nat_bytes(ARG(3), true, &cn);
+  uint8_t* message = malloc(cn);
+  ax_assume(message != NULL, "oom");
+  unsigned long long message_n = 0;
+  bool ok = crypto_aead_xchacha20poly1305_ietf_decrypt(
+                message, &message_n, NULL, sealed, (unsigned long long)cn, name,
+                (unsigned long long)an, nonce, key) == 0;
+  pl_val out = ok ? rp_bar(t, message, (size_t)message_n) : 0;
+  sodium_memzero(key, sizeof(key));
+  free(name);
+  free(sealed);
+  free(message);
+  return out;
+}
+
+pl_val pl_op82_self(pl_thread* t, size_t ab) {
+  if (ARG(0) != 0)
+    pl_raise_msg(t, "Self expects 0");
+  return rp_request(t, ab, 1);
+}
+
+/* ---- What a foot takes from the operating system ---------------------------
+ *
+ * Entropy gives bytes for a seed. Folder makes a folder inside the file root,
+ * for the files a foot keeps there. Both are open to any process.
+ */
+
+pl_val pl_op83_entropy(pl_thread* t, size_t ab) {
+  t->effect_epoch++;
+  uint64_t n = pl_nat_u64_clamp(rp_want_nat(t, ARG(0)));
+  if (n == 0 || n > 64)
+    return 0;
+  rp_crypto_init(t);
+  uint8_t b[64];
+  randombytes_buf(b, (size_t)n);
+  pl_val out = rp_bar(t, b, (size_t)n);
+  sodium_memzero(b, sizeof(b));
+  return out;
+}
+
+/* Whether a path is plain names joined by single slashes: relative, with no
+ * empty part, no "." and no "..". */
+static bool host_plain_path(const char* path) {
+  if (path == NULL || path[0] == '\0' || path[0] == '/')
+    return false;
+  const char* part = path;
+  while (part != NULL) {
+    const char* slash = strchr(part, '/');
+    size_t n = slash != NULL ? (size_t)(slash - part) : strlen(part);
+    if (n == 0 || (n == 1 && part[0] == '.') ||
+        (n == 2 && part[0] == '.' && part[1] == '.'))
+      return false;
+    part = slash != NULL ? slash + 1 : NULL;
+  }
+  return true;
+}
+
+/* Folder path: make a folder, and any above it that is missing, inside the
+ * file root: 1 when it is there afterwards, else 0. The path is relative,
+ * each part a plain name, and no link on the way is followed. A path that is
+ * not plain makes nothing at all. A process with no file root makes none. */
+pl_val pl_op83_folder(pl_thread* t, size_t ab) {
+  t->effect_epoch++;
+  char* path = pl_nat_to_cstr(ax_allocator_system(), rp_want_nat(t, ARG(0)));
+  const char* root_c = t->rplan_file_root_c;
+  int at = host_plain_path(path) && root_c != NULL && root_c[0] != '\0'
+               ? open(root_c, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+               : -1;
+  bool ok = at >= 0;
+  char* part = path;
+  while (ok && part != NULL && part[0] != '\0') {
+    char* slash = strchr(part, '/');
+    if (slash != NULL)
+      *slash = '\0';
+    ok = part[0] != '\0' && strcmp(part, ".") != 0 && strcmp(part, "..") != 0;
+    if (ok && mkdirat(at, part, 0700) != 0 && errno != EEXIST)
+      ok = false;
+    int next =
+        ok ? openat(at, part, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+           : -1;
+    (void)close(at);
+    at = next;
+    ok = ok && at >= 0;
+    part = slash != NULL ? slash + 1 : NULL;
+  }
+  if (at >= 0)
+    (void)close(at);
+  if (path != NULL)
+    ax_free(ax_allocator_system(), path);
+  return ok ? 1 : 0;
 }

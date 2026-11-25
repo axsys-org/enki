@@ -102,12 +102,19 @@ static pl_spec spec_code(uint32_t idx) {
   return PL_SPEC_NONE;
 }
 
+/* Numeric/boolean specializations cannot return a host capability. Field
+ * projections and arbitrary calls can, so their result alone proves no WHNF. */
+static bool result_whnf(uint32_t idx) {
+  pl_spec spec = spec_code(idx);
+  return spec != PL_SPEC_NONE && spec != PL_SPEC_BODY;
+}
+
 /* Readiness is a property of a value-stack slot, not of an expression that
  * once evaluated it: another reference can still contain an IND. Meet facts
  * at control-flow joins. Local calls get independent unknown argument slots;
- * all evaluated calls return WHNF. Compiler hints are never trusted; the
- * strict arguments ARE known WHNF at strict_entry because judge verifies them
- * before taking that entry (pl_strict_entry). Limits only disable
+ * evaluated calls may return host wormholes. Compiler hints are never trusted;
+ * the strict arguments ARE known WHNF at strict_entry because judge verifies
+ * them before taking that entry (pl_strict_entry). Limits only disable
  * optimisation. */
 enum { READY_SLOTS = 256, READY_WORDS = READY_SLOTS / 64 };
 typedef struct {
@@ -272,7 +279,7 @@ static ready_result ready_analyse(pl_code* c, ready_state* states) {
       ready_push(&s, true);
       break;
     case OP_INTERP:
-      ready_push(&s, true);
+      ready_push(&s, false);
       next++;
       break;
     case OP_MK_APP:
@@ -289,18 +296,18 @@ static ready_result ready_analyse(pl_code* c, ready_state* states) {
       ready_state args = {.depth = o[1] <= READY_SLOTS ? (int)o[1] : -2};
       FLOW(o[0], args);
       POP(o[1]);
-      ready_push(&s, true);
+      ready_push(&s, false);
       next += 2;
       break;
     }
     case OP_CALL_FAST:
       POP(o[0] < READY_SLOTS ? o[0] + 1 : READY_SLOTS + 1);
-      ready_push(&s, true);
+      ready_push(&s, false);
       next += 2;
       break;
     case OP_CALL_SLOW:
       POP(o[0] < READY_SLOTS ? o[0] + 1 : READY_SLOTS + 1);
-      ready_push(&s, true);
+      ready_push(&s, false);
       next++;
       break;
     case OP_CALL_KNOWN:
@@ -308,7 +315,7 @@ static ready_result ready_analyse(pl_code* c, ready_state* states) {
     case OP_SUB:
     case OP_CMP:
       POP(o[0]);
-      ready_push(&s, true);
+      ready_push(&s, result_whnf((uint32_t)o[1]));
       next += 3;
       break;
     case OP_ENTRY:
@@ -529,11 +536,14 @@ static bool eager_consume(pl_code* c, eager_slot* slots, size_t base,
     if (!ordered || !eager_apply(c, (size_t)p))
       break;
     src->producer = -1;
-    src->whnf = true;
+    src->whnf =
+        c->ops[p] == OP_CALL_KNOWN && result_whnf((uint32_t)c->ops[p + 2]);
     src->eval_pc = p;
     if (p > *last_impure)
       *last_impure = p;
     changed = true;
+    if (!src->whnf)
+      break; /* do not move later effects ahead of a possible wormhole */
   }
   return changed;
 }
@@ -636,7 +646,8 @@ static bool eager_rewrite(pl_code* c, const ready_state* states,
                                  (uint32_t)o[0], pl_ops[o[1]].strict_mask,
                                  &last_impure);
       EPOP(o[0]);
-      EPUSH(.src = -1, .producer = -1, .eval_pc = -1, .whnf = true);
+      EPUSH(.src = -1, .producer = -1, .eval_pc = -1,
+            .whnf = result_whnf((uint32_t)o[1]));
       last_impure = (int32_t)pc;
       next += 3;
       break;
@@ -645,24 +656,24 @@ static bool eager_rewrite(pl_code* c, const ready_state* states,
         changed |=
             eager_call_consume(c, slots, depth, (size_t)o[0], &last_impure);
       EPOP(o[0] + 1);
-      EPUSH(.src = -1, .producer = -1, .eval_pc = -1, .whnf = true);
+      EPUSH(.src = -1, .producer = -1, .eval_pc = -1, .whnf = false);
       last_impure = (int32_t)pc;
       next += 2;
       break;
     case OP_CALL_SLOW:
       EPOP(o[0] + 1);
-      EPUSH(.src = -1, .producer = -1, .eval_pc = -1, .whnf = true);
+      EPUSH(.src = -1, .producer = -1, .eval_pc = -1, .whnf = false);
       last_impure = (int32_t)pc;
       next++;
       break;
     case OP_CALL:
       EPOP(o[1]);
-      EPUSH(.src = -1, .producer = -1, .eval_pc = -1, .whnf = true);
+      EPUSH(.src = -1, .producer = -1, .eval_pc = -1, .whnf = false);
       last_impure = (int32_t)pc;
       next += 2;
       break;
     case OP_INTERP:
-      EPUSH(.src = -1, .producer = -1, .eval_pc = -1, .whnf = true);
+      EPUSH(.src = -1, .producer = -1, .eval_pc = -1, .whnf = false);
       last_impure = (int32_t)pc;
       next++;
       break;

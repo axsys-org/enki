@@ -176,13 +176,14 @@ TEST(gc2, host_roots_and_mailboxes) {
   test_rt rt = test_rt_new();
   er_scheduler* sys = er_scheduler_new(rt.store, (er_config){0});
   er_actor* a = er_scheduler_actor(sys);
+  size_t handles = pl_store_gc_stats(rt.store).allocated_bytes;
   pl_val host = app(rt.store, 101);
   pl_store_gc_add_roots(rt.store, root, &host);
   er_scheduler_inject(sys, a, host);
   pl_store_gc_del_roots(rt.store, root, &host);
   collect_wait(rt.store); /* only the unstarted actor's mailbox owns it */
   ASSERT_EQ(pl_app_args(pl_ptr(host))[0], 101);
-  ASSERT_EQ(pl_store_gc_stats(rt.store).allocated_bytes, 32);
+  ASSERT_EQ(pl_store_gc_stats(rt.store).allocated_bytes, handles + 32);
   er_scheduler_free(sys);
   collect_wait(rt.store);
   ASSERT_EQ(pl_store_gc_stats(rt.store).allocated_bytes, 0);
@@ -237,6 +238,7 @@ typedef struct handshake {
   bool ready, release;
   atomic_bool collecting, done;
   pl_val value;
+  pl_thread* t;
 } handshake;
 static void* mutator(void* arg) {
   handshake* h = arg;
@@ -321,6 +323,57 @@ static void* blocking_mutator(void* arg) {
   pl_store_mutator_leave(h->s);
   return NULL;
 }
+static void* parked_mutator(void* arg) {
+  handshake* h = arg;
+  pl_store_mutator_enter(h->s);
+  pl_store_mutator_blocking(h->s);
+  pl_store_mutator_park(h->s); /* as in Accept: waiting in the syscall */
+  pthread_mutex_lock(&h->mu);
+  h->ready = true;
+  pthread_cond_broadcast(&h->cv);
+  while (!h->release)
+    pthread_cond_wait(&h->cv, &h->mu);
+  pthread_mutex_unlock(&h->mu);
+  pl_store_mutator_unpark(h->s);
+  pl_vpush(h->t, app(h->s, 31)); /* allocates again after the collection */
+  pl_store_mutator_leave(h->s);
+  return NULL;
+}
+/* A server always has some actor waiting in Accept or Read.  Parked inside
+ * the syscall it must not defer collection, or the store keeps every answer
+ * a world ever sent (garbage allocated while it waits comes back). */
+TEST(gc2, parked_blocking_mutator_does_not_defer_collection) {
+  test_rt rt = test_rt_new();
+  handshake h = {.s = rt.store, .t = rt.t};
+  pthread_mutex_init(&h.mu, NULL);
+  pthread_cond_init(&h.cv, NULL);
+  pthread_t mut;
+  ASSERT_EQ(pthread_create(&mut, NULL, parked_mutator, &h), 0);
+  pthread_mutex_lock(&h.mu);
+  while (!h.ready)
+    pthread_cond_wait(&h.cv, &h.mu);
+  pthread_mutex_unlock(&h.mu);
+  pl_store_mutator_enter(rt.store);
+  for (unsigned i = 0; i < 4096; i++)
+    (void)app(rt.store, i); /* answer-sized garbage, unrooted */
+  pl_store_mutator_leave(rt.store);
+  ASSERT(pl_store_gc_stats(rt.store).allocated_bytes > 0);
+  pl_store_gc_request(rt.store);
+  ASSERT(pl_store_gc_poll(rt.store));
+  pl_store_gc_wait(rt.store);
+  ASSERT_EQ(pl_store_gc_stats(rt.store).allocated_bytes, 0);
+  pthread_mutex_lock(&h.mu);
+  h.release = true;
+  pthread_cond_broadcast(&h.cv);
+  pthread_mutex_unlock(&h.mu);
+  ASSERT_EQ(pthread_join(mut, NULL), 0);
+  ASSERT_EQ(pl_app_args(pl_ptr(rt.t->vstack[rt.t->vsp - 1]))[0], 31);
+  rt.t->vsp = 0;
+  pthread_cond_destroy(&h.cv);
+  pthread_mutex_destroy(&h.mu);
+  test_rt_free(&rt);
+}
+
 TEST(gc2, blocking_effect_defers_gc_without_stopping_other_mutators) {
   test_rt rt = test_rt_new();
   handshake h = {.s = rt.store};

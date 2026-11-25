@@ -19,23 +19,27 @@ static pl_cache_stats pl_cache_stats_total;
 static uint64_t pl_cache_stats_threads;
 
 static const char* const pl_cache_kind_names[PL_CACHE_KIND_CAP] = {
-    [PL_K_NAT] = "NAT",   [PL_K_APP] = "APP",     [PL_K_LAW] = "LAW",
-    [PL_K_PIN] = "PIN",   [PL_K_THUNK] = "THUNK", [PL_K_ENV] = "ENV",
-    [PL_K_IND] = "IND",   [PL_K_BH] = "BH",       [PL_K_FWD] = "FWD",
-    [PL_K_THKE] = "THKE",
+    [PL_K_NAT] = "NAT",           [PL_K_APP] = "APP",
+    [PL_K_LAW] = "LAW",           [PL_K_PIN] = "PIN",
+    [PL_K_THUNK] = "THUNK",       [PL_K_ENV] = "ENV",
+    [PL_K_IND] = "IND",           [PL_K_BH] = "BH",
+    [PL_K_FWD] = "FWD",           [PL_K_THKE] = "THKE",
+    [PL_K_WORMHOLE] = "WORMHOLE",
 };
 
 static const char* const pl_cache_frame_names[PL_CACHE_FRAME_CAP] = {
-    [PL_F_UPDATE] = "UPDATE", [PL_F_APPLY] = "APPLY",
-    [PL_F_SEQ] = "SEQ",       [PL_F_KAL] = "KAL",
-    [PL_F_KAPP] = "KAPP",     [PL_F_OPENT] = "OPENT",
-    [PL_F_OPARG] = "OPARG",   [PL_F_OPDEEP] = "OPDEEP",
-    [PL_F_NF] = "NF",         [PL_F_NFOBJ] = "NFOBJ",
-    [PL_F_EXEC] = "EXEC",     [PL_F_EXECV] = "EXECV",
-    [PL_F_UPD] = "UPD",       [PL_F_TRY] = "TRY",
-    [PL_F_JUDGE] = "JUDGE",   [PL_F_NIL] = "NIL",
-    [PL_F_PROF] = "PROF",     [PL_F_APPLYN] = "APPLYN",
-    [PL_F_MEMO] = "MEMO",
+    [PL_F_UPDATE] = "UPDATE",   [PL_F_APPLY] = "APPLY",
+    [PL_F_SEQ] = "SEQ",         [PL_F_KAL] = "KAL",
+    [PL_F_KAPP] = "KAPP",       [PL_F_OPENT] = "OPENT",
+    [PL_F_OPARG] = "OPARG",     [PL_F_OPDEEP] = "OPDEEP",
+    [PL_F_NF] = "NF",           [PL_F_NFOBJ] = "NFOBJ",
+    [PL_F_EXEC] = "EXEC",       [PL_F_EXECV] = "EXECV",
+    [PL_F_HOST] = "HOST",       [PL_F_STRICT] = "STRICT",
+    [PL_F_OPHOST] = "OPHOST",   [PL_F_CAPS] = "CAPS",
+    [PL_F_CAPITEM] = "CAPITEM", [PL_F_UPD] = "UPD",
+    [PL_F_TRY] = "TRY",         [PL_F_JUDGE] = "JUDGE",
+    [PL_F_NIL] = "NIL",         [PL_F_PROF] = "PROF",
+    [PL_F_APPLYN] = "APPLYN",   [PL_F_MEMO] = "MEMO",
 };
 
 static const char* const pl_cache_move_names[PL_CACHE_MOVE_COUNT] = {
@@ -435,6 +439,7 @@ static void pl_cheney_scan(pl_gc_ctx* gc) {
     uint32_t first = 0, count = 0;
     switch (kind) {
     case PL_K_NAT:
+    case PL_K_WORMHOLE: /* host bytes are not PLAN edges */
       break;
     case PL_K_APP:
     case PL_K_ENV:
@@ -495,6 +500,46 @@ static void pl_cheney_scan(pl_gc_ctx* gc) {
   }
 }
 
+static void pl_thread_roots(pl_root_visit visit, void* gc_ctx, void* src_ctx);
+
+static pl_val pl_live_update_target(pl_gc_ctx* gc, pl_val value) {
+  if (value == 0)
+    return 0;
+  if (gc->h->store != NULL && pl_store_owns(gc->h->store, value))
+    return value;
+  pl_cell* p = pl_ptr(value);
+  return pl_hdr_kind(p[0]) == PL_K_FWD ? (pl_val)p[1] : 0;
+}
+
+static void pl_collect_update_targets(pl_gc_ctx* gc, pl_thread* t) {
+  size_t out = 0;
+  for (size_t i = 0; i < t->fsp; i++) {
+    pl_frame* fr = &t->fstack[i];
+    if (fr->kind != PL_F_UPD)
+      continue;
+    uint32_t previous_count = fr->argc;
+    size_t previous_base = fr->argbase;
+    pl_val first = pl_live_update_target(gc, fr->a);
+    uint32_t count = first != 0;
+    size_t start = out;
+    for (uint32_t j = 1; j < previous_count; j++) {
+      pl_val value =
+          pl_live_update_target(gc, t->ustack[previous_base + j - 1]);
+      if (value == 0)
+        continue;
+      if (count == 0)
+        first = value;
+      else
+        t->ustack[out++] = value;
+      count++;
+    }
+    fr->a = first;
+    fr->argbase = (uint32_t)start;
+    fr->argc = count;
+  }
+  t->usp = out;
+}
+
 static void pl_collect_into(pl_thread* t, pl_heap* h, pl_cell* target) {
 #ifndef PL_CACHE_STATS
   (void)t;
@@ -516,6 +561,9 @@ static void pl_collect_into(pl_thread* t, pl_heap* h, pl_cell* target) {
   for (size_t i = 0; i < h->nroots; i++)
     h->roots[i].fn(pl_gc_visit, &gc, h->roots[i].ctx);
   pl_cheney_scan(&gc);
+  for (size_t i = 0; i < h->nroots; i++)
+    if (h->roots[i].fn == pl_thread_roots)
+      pl_collect_update_targets(&gc, h->roots[i].ctx);
   h->live_cells = (size_t)(gc.target_free - target);
   h->free = gc.target_free;
 }
@@ -630,15 +678,12 @@ static void pl_thread_roots(pl_root_visit visit, void* gc_ctx, void* src_ctx) {
   for (size_t i = 0; i < t->vsp; i++)
     if (!pl_is_nat63(t->vstack[i]))
       visit(&t->vstack[i], gc_ctx);
-  for (size_t i = 0; i < t->usp; i++)
-    if (!pl_is_nat63(t->ustack[i]))
-      visit(&t->ustack[i], gc_ctx);
   for (size_t i = 0; i < t->fsp; i++) {
 #ifdef PL_CACHE_STATS
     if ((unsigned)t->fstack[i].kind < PL_CACHE_FRAME_CAP)
       t->cache_stats.gc_frame_kinds[t->fstack[i].kind]++;
 #endif
-    if (!pl_is_nat63(t->fstack[i].a))
+    if (t->fstack[i].kind != PL_F_UPD && !pl_is_nat63(t->fstack[i].a))
       visit(&t->fstack[i].a, gc_ctx);
     if (!pl_is_nat63(t->fstack[i].b))
       visit(&t->fstack[i].b, gc_ctx);

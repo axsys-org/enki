@@ -1059,27 +1059,27 @@ static pl_val op_load(pl_thread* t, size_t ab) {
 
 #define M2(a, b) ax_s2(a, b)
 #define OP66(name, argc, mask, deep, body)                                     \
-  {66, name, NULL, argc, mask, deep, false, false, body}
+  {66, name, NULL, argc, mask, deep, 0, 0, false, false, body}
 #define OP82(name, argc, mask, body)                                           \
-  {82, 0, name, argc, mask, 0, true, false, body}
+  {82, 0, name, argc, mask, 0, 0, 0, true, false, body}
 /* coordination effects: the machine blocks instead of executing;
  * deep is the initiation-time payload normalization */
 #define OP82C(name, argc, mask, deep, body)                                    \
-  {82, 0, name, argc, mask, deep, true, true, body}
+  {82, 0, name, argc, mask, deep, 0, 0, true, true, body}
 /* Evaluator-local op 83 entries: no host-effect worker affinity. */
 #define OP83_LOCAL(name, argc, mask, body)                                     \
-  {83, 0, name, argc, mask, 0, false, false, body}
+  {83, 0, name, argc, mask, 0, 0, 0, false, false, body}
 #define OP83_LOCAL_DEEP(name, argc, mask, deep, body)                          \
-  {83, 0, name, argc, mask, deep, false, false, body}
+  {83, 0, name, argc, mask, deep, 0, 0, false, false, body}
 /* Coordination effects are serviced in pkg/enki. */
 #define OP83C(name, argc, mask, deep, body)                                    \
-  {83, 0, name, argc, mask, deep, true, true, body}
+  {83, 0, name, argc, mask, deep, 0, 0, true, true, body}
 
 const pl_opdesc pl_ops[] = {
     /* op 0: core PLAN */
-    {0, 0, NULL, 1, 0b1, 0, false, false, op_pin},
-    {0, 1, NULL, 3, 0b111, 0, false, false, op_law},
-    {0, 2, NULL, 6, 0b100000, 0, false, false, op_elim},
+    {0, 0, NULL, 1, 0b1, 0, 0, 0, false, false, op_pin},
+    {0, 1, NULL, 3, 0b111, 0, 0, 0, false, false, op_law},
+    {0, 2, NULL, 6, 0b100000, 0, 0, 0, false, false, op_elim},
 
     OP66(ax_s3('P', 'i', 'n'), 1, 0b1, 0, op_pin),
     OP66(ax_s3('L', 'a', 'w'), 3, 0b111, 0, op_law),
@@ -1207,10 +1207,10 @@ const pl_opdesc pl_ops[] = {
      * effects within it — runs as the sender's own execution, before
      * the request parks; the service pins already-normal values */
     OP82C("Spawn", 1, 0, 0b1, pl_op82_spawn),
-    OP82C("Send", 2, 0b1, 0b10, pl_op82_send),
-    OP82C("SendCaps", 3, 0b1, 0b110, pl_op82_send_caps),
+    {82, 0, "Send", 2, 0, 0b10, 0b1, 0, true, true, pl_op82_send},
+    {82, 0, "SendCaps", 3, 0, 0b10, 0b1, 0b100, true, true, pl_op82_send_caps},
     OP82C("Recv", 1, 0b1, 0, pl_op82_recv),
-    OP82C("CloseHandle", 1, 0b1, 0, pl_op82_close_handle),
+    {82, 0, "CloseHandle", 1, 0, 0, 0b1, 0, true, true, pl_op82_close_handle},
     OP82("Connect", 3, 0b111, pl_op82_connect),
 
     /* op 83: provisional primops; their PLAN-level semantics are deliberately
@@ -1253,6 +1253,36 @@ const pl_opdesc pl_ops[] = {
     OP83C("ReadBat", 1, 0b1, 0, pl_op83_read_bat),
     OP83_LOCAL_DEEP("BatEq", 2, 0b11, 0b11, op_bateq),
     OP83_LOCAL_DEEP("BatHash", 1, 0b1, 0b1, op_bathash),
+    OP82C("Self", 1, 0b1, 0, pl_op82_self),
+    /* Sequence on a host value: arg 0 to WHNF or a wormhole, then arg 1.
+     * Seq forces arg 0 as ordinary data and so rejects a capability; this is
+     * the demand a caller uses when the effect, not the value, must happen. */
+    {66, ax_s7('S', 'e', 'q', 'H', 'o', 's', 't'), NULL, 2, 0, 0, 0b01, 0,
+     false, false, op_seq},
+    /* Pins as values: indices 147 to 151, before the Mesa range, which
+     * lookup takes as the table's last entries. */
+    OP83_LOCAL_DEEP("PinHash", 1, 0b1, 0b1, pl_op83_pin_hash),
+    OP83_LOCAL_DEEP("PinBytes", 1, 0b1, 0b1, pl_op83_pin_bytes),
+    OP83_LOCAL("PinFrom", 1, 0b1, pl_op83_pin_from),
+    OP83_LOCAL("PinNames", 1, 0b1, pl_op83_pin_names),
+    OP83_LOCAL_DEEP("PinParts", 1, 0b1, 0b1, pl_op83_pin_parts),
+    /* Sockets that answer instead of raising: indices 152 and 153. */
+    {83, 0, "ReadAll", 2, 0b11, 0, 0, 0, true, false, pl_op83_read_all},
+    {83, 0, "SendTo", 4, 0b1111, 0, 0, 0, true, false, pl_op83_send_to},
+    /* What two worlds share and seal with: indices 154 to 156. */
+    OP83_LOCAL("BoxKey", 2, 0b11, pl_op83_box_key),
+    OP83_LOCAL("SecretSeal", 4, 0b1111, pl_op83_secret_seal),
+    OP83_LOCAL("SecretOpen", 4, 0b1111, pl_op83_secret_open),
+    /* What a foot takes from the operating system: indices 157 and 158.
+     * Entropy gives bytes for a seed; Folder makes a folder inside the file
+     * root, for a foot's own files. */
+    {83, 0, "Entropy", 1, 0b1, 0, 0, 0, true, false, pl_op83_entropy},
+    {83, 0, "Folder", 1, 0b1, 0, 0, 0, true, false, pl_op83_folder},
+/* Mesa: handle row elements use host observation; data is normal. */
+#define MESA_OP(name)                                                          \
+  {83, 0, name, 2, 0, 0b10, 0, 0b1, true, false, pl_op83_mesa},
+#include "../../mesa/include/ops.def"
+#undef MESA_OP
 };
 
 const size_t pl_nops = sizeof(pl_ops) / sizeof(pl_ops[0]);
@@ -1273,8 +1303,8 @@ static const uint16_t pl_op66_argc1[] = {
     55, 56, 57, 58, 59, 60, 65, 71, 72,  74,  75,  76,  77,  78,
     79, 80, 81, 82, 83, 85, 86, 99, 100, 101, 103, 104, 130, 141};
 static const uint16_t pl_op66_argc2[] = {
-    8,  9,  10, 11, 12, 13, 14, 31, 32, 33, 36, 37, 43, 47, 50,  64, 66,
-    69, 70, 73, 84, 87, 88, 89, 92, 93, 94, 95, 96, 97, 98, 102, 133};
+    8,  9,  10, 11, 12, 13, 14, 31, 32, 33, 36, 37, 43, 47, 50,  64,  66,
+    69, 70, 73, 84, 87, 88, 89, 92, 93, 94, 95, 96, 97, 98, 102, 133, 146};
 static const uint16_t pl_op66_argc3[] = {4,  15, 30, 34, 35, 48, 51,
                                          61, 62, 63, 67, 68, 90, 91};
 static const uint16_t pl_op66_argc4[] = {16, 49, 129};
@@ -1293,15 +1323,16 @@ static const uint16_t pl_op66_argc16[] = {28};
 static const uint16_t pl_op66_argc17[] = {29};
 
 static const uint16_t pl_op82_argc1[] = {105, 106, 107, 108, 110, 111, 112,
-                                         113, 114, 115, 118, 121, 122};
+                                         113, 114, 115, 118, 121, 122, 145};
 static const uint16_t pl_op82_argc2[] = {109, 116, 117, 119};
 static const uint16_t pl_op82_argc3[] = {120, 123};
 
-static const uint16_t pl_op83_argc1[] = {124, 126, 127, 128, 132,
-                                         134, 135, 136, 142, 144};
-static const uint16_t pl_op83_argc2[] = {125, 137, 139, 140, 143};
+static const uint16_t pl_op83_argc1[] = {124, 126, 127, 128, 132, 134,
+                                         135, 136, 142, 144, 147, 148,
+                                         149, 150, 151, 157, 158};
+static const uint16_t pl_op83_argc2[] = {125, 137, 139, 140, 143, 152, 154};
 static const uint16_t pl_op83_argc3[] = {138};
-static const uint16_t pl_op83_argc4[] = {131};
+static const uint16_t pl_op83_argc4[] = {131, 153, 155, 156};
 
 static pl_opbucket pl_op_lookup_bucket(uint64_t opset, uint32_t argc) {
   switch (opset) {
@@ -1392,6 +1423,13 @@ static bool nat_name_eq(pl_val v, const char* s) {
   return true;
 }
 
+enum {
+  PL_MESA_OP_COUNT = 0
+#define MESA_OP(name) +1
+#include "../../mesa/include/ops.def"
+#undef MESA_OP
+};
+
 int pl_op_lookup(uint64_t opset, pl_val name, uint32_t argc) {
   pl_opbucket b = pl_op_lookup_bucket(opset, argc);
   for (size_t j = 0; j < b.n; j++) {
@@ -1402,6 +1440,11 @@ int pl_op_lookup(uint64_t opset, pl_val name, uint32_t argc) {
     if (d->name_c != NULL ? nat_name_eq(name, d->name_c)
                           : (pl_is_nat63(name) && d->name == name))
       return (int)i;
+  }
+  if (opset == 83 && argc == 2) {
+    for (size_t i = pl_nops - PL_MESA_OP_COUNT; i < pl_nops; i++)
+      if (nat_name_eq(name, pl_ops[i].name_c))
+        return (int)i;
   }
   return -1;
 }

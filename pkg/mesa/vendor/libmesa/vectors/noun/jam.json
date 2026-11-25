@@ -1,0 +1,126 @@
+{
+  "provenance": {
+    "kernel_revision": "734ac17cfb88e571081b84406319a17d3d5e79dd",
+    "source": "pkg/arvo/sys/hoon.hoon ++jam/++cue/++mat",
+    "method": "Independent Python transcription; not live Hoon extraction or cryptographic evidence"
+  },
+  "cases": [
+    {
+      "noun": "",
+      "bits": 2,
+      "encoded": "02"
+    },
+    {
+      "noun": "01",
+      "bits": 4,
+      "encoded": "0c"
+    },
+    {
+      "noun": "02",
+      "bits": 7,
+      "encoded": "48"
+    },
+    {
+      "noun": "ff",
+      "bits": 17,
+      "encoded": "20fe01"
+    },
+    {
+      "noun": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "bits": 275,
+      "encoded": "0004f8ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff07"
+    },
+    {
+      "noun": [
+        "",
+        ""
+      ],
+      "bits": 6,
+      "encoded": "29"
+    },
+    {
+      "noun": [
+        "01",
+        "01"
+      ],
+      "bits": 10,
+      "encoded": "3103"
+    },
+    {
+      "noun": [
+        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      ],
+      "bits": 285,
+      "encoded": "0110e0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f12"
+    },
+    {
+      "noun": [
+        [
+          "",
+          "01"
+        ],
+        [
+          "",
+          "01"
+        ]
+      ],
+      "bits": 18,
+      "encoded": "254f02"
+    },
+    {
+      "noun": [
+        [
+          "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          [
+            "",
+            "01"
+          ]
+        ],
+        [
+          "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          [
+            "",
+            "01"
+          ]
+        ]
+      ],
+      "bits": 295,
+      "encoded": "054080ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe449"
+    },
+    {
+      "noun": [
+        [
+          "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        ],
+        [
+          "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          [
+            "",
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+          ]
+        ]
+      ],
+      "bits": 312,
+      "encoded": "054080ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff99cdcc99"
+    },
+    {
+      "noun": [
+        [
+          "01",
+          "02"
+        ],
+        [
+          "03",
+          [
+            "01",
+            "02"
+          ]
+        ]
+      ],
+      "bits": 32,
+      "encoded": "c5c8d093"
+    }
+  ]
+}
