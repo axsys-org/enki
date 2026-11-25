@@ -205,10 +205,11 @@ static pl_code* pl_law_code(pl_thread* t, pl_val law) {
     return NULL; /* unsaved: no hash to compile under (checked inline —
                     fresh laws are entered constantly during a build) */
   void* code = pl_pin_code_raw(p);
-  if (ax_likely((uintptr_t)code > (uintptr_t)PL_CODE_PENDING))
+  if (ax_likely((uintptr_t)code > (uintptr_t)PL_CODE_WARM_MAX))
     return code;
-  if (code != NULL)
+  if (code == PL_CODE_NONE || code == PL_CODE_PENDING)
     return NULL; /* pending elsewhere, or known uncompilable */
+  /* fresh, or still counting its entries */
   return pl_store_code_demand(pl_heap_store(t->heap), law);
 }
 

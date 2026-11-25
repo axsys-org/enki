@@ -296,6 +296,11 @@ static inline pl_val pl_pin_body(pl_cell* p) {
   ((void*)(uintptr_t)1) /* a compile was attempted; nothing to attach */
 #define PL_CODE_PENDING                                                        \
   ((void*)(uintptr_t)2) /* a compile is in progress on some thread */
+/* Values above PL_CODE_PENDING up to PL_CODE_WARM_MAX count the entries of a
+ * law that is still interpreted (pl_store_code_demand): PL_CODE_PENDING + n
+ * after n entries.  No code object lives that low, so anything above
+ * PL_CODE_WARM_MAX is a pl_code*. */
+#define PL_CODE_WARM_MAX ((void*)(uintptr_t)4095)
 
 /* Native PIN cell 6 is an immutable dense ID. Code pointers never enter the
  * image. The side mapping is published before the store can be used and is
@@ -323,7 +328,7 @@ static inline void* pl_pin_code_raw(pl_cell* p) {
 /* Attached code, or NULL (including the sentinel states). */
 static inline void* pl_pin_code(pl_cell* p) {
   void* code = pl_pin_code_raw(p);
-  return (uintptr_t)code > (uintptr_t)PL_CODE_PENDING ? code : NULL;
+  return (uintptr_t)code > (uintptr_t)PL_CODE_WARM_MAX ? code : NULL;
 }
 static inline void pl_pin_set_code(pl_cell* p, void* code) {
   p = pl_pin_resolved(p);

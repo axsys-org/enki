@@ -202,6 +202,24 @@ static pl_cell* pl_space_alloc(size_t cells) {
   ax_assume(((uintptr_t)p & 7u) == 0, "semispace not 8-aligned");
   ax_assume(((uintptr_t)(p + cells) & ~PL_ADDR_MASK) == 0,
             "heap address exceeds 56 bits");
+#if defined(__linux__) && defined(MADV_HUGEPAGE)
+  /* A semispace is discarded after every collection (pl_space_discard), so
+   * each cycle touches the whole of it again.  With 4 KiB pages that is one
+   * fault for every 4 KiB allocated: a third of a build's time was spent in
+   * the kernel's fault path.  Ask for huge pages where the space is large
+   * enough to hold them; the kernel honours it where transparent huge pages
+   * are set to madvise or always and ignores it otherwise.  PL_HEAP_HUGE=0
+   * leaves the space on small pages. */
+  static _Atomic int cached = -1;
+  int huge = atomic_load_explicit(&cached, memory_order_relaxed);
+  if (huge < 0) {
+    const char* v = getenv("PL_HEAP_HUGE");
+    huge = v == NULL || strcmp(v, "0") != 0;
+    atomic_store_explicit(&cached, huge, memory_order_relaxed);
+  }
+  if (huge && cells * sizeof(pl_cell) >= ((size_t)4 << 20))
+    (void)madvise(p, cells * sizeof(pl_cell), MADV_HUGEPAGE);
+#endif
   return p;
 }
 

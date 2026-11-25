@@ -452,7 +452,7 @@ static uint64_t eager_callee_mask(const pl_code* c, const eager_slot* head,
   const pl_code* callee = pl_pin_code(p);
   if (callee == NULL && pl_ingest_store != NULL &&
       pl_ingest_depth <= PL_INGEST_DEMAND_DEPTH)
-    callee = pl_store_code_demand(pl_ingest_store, head->lit);
+    callee = pl_store_code_demand_callee(pl_ingest_store, head->lit);
   return callee != NULL ? callee->strict_mask : 0;
 }
 
