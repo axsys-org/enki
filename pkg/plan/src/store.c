@@ -25,6 +25,7 @@
 #include "axsys/util.h"
 #include "internal.h"
 #include "plan/build.h"
+#include "plan/nat.h"
 #include "store_internal.h"
 #include "gc2_internal.h"
 
@@ -342,8 +343,34 @@ static uint64_t plgc_min_ns(void) {
   return v;
 }
 
+/* What the code tier cost this process (PL_CODE_STATS, written at each
+ * Save): laws compiled and the time that took, and laws whose code came from
+ * this snapshot's cache or the machine's. */
+static _Atomic uint64_t code_compiled, code_compile_ns, code_from_snap,
+    code_from_machine;
+/* Decoding a law's code can demand a callee's: only the outermost compile
+ * on a thread is timed, so the total is not counted twice. */
+static _Thread_local int code_compile_depth;
+static bool pl_code_stats_on(void) {
+  static int on = -1;
+  if (on < 0)
+    on = getenv("PL_CODE_STATS") != NULL;
+  return on;
+}
+static void pl_code_stats_report(void) {
+  if (pl_code_stats_on())
+    fprintf(stderr,
+            "code tier: compiled %" PRIu64 " laws in %" PRIu64
+            " ms; served %" PRIu64 " from the snapshot, %" PRIu64
+            " from the machine cache\n",
+            atomic_load(&code_compiled),
+            atomic_load(&code_compile_ns) / 1000000u,
+            atomic_load(&code_from_snap), atomic_load(&code_from_machine));
+}
+
 /* Derived cache persistence is best-effort, but may only sync at Save. */
 void pl_store_cache_checkpoint(void) {
+  pl_code_stats_report();
   pthread_mutex_lock(&plgc_mu);
   /* A lock that stays busy defers the flush; the rows stay staged. */
   if (ax_hmlen(plgc_staged) != 0 && plgc_open(true) && plgc_lock(LOCK_EX)) {
@@ -970,6 +997,7 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
             /* an undecodable cached row (unknown-op wrapper) also
              * counts: the compile would reproduce it exactly */
             served = true;
+            atomic_fetch_add(&code_from_snap, 1);
             /* migrate snap-local entries machine-wide so older snaps'
              * work survives their deletion */
             if (s->format == PL_STORE_FORMAT_NATIVE_V1)
@@ -1048,6 +1076,7 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
             pl_store_unlock(s);
           }
           served = true;
+          atomic_fetch_add(&code_from_machine, 1);
         }
       }
       free(gb);
@@ -1065,13 +1094,29 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
     pl_catch_unwind(t, &c);
     fprintf(stderr, "bytecode compile raised: %s\n",
             t->exn_msg != NULL ? t->exn_msg : "PLAN exn");
+    code_compile_depth--;
     pl_store_save_unlock(s);
     return;
   }
   struct timespec compile_t0;
   clock_gettime(CLOCK_MONOTONIC, &compile_t0);
+  code_compile_depth++;
   pl_val compiler = pl_store_load(t, compiler_hash);
   pl_val fun = pl_store_load(t, hash);
+  /* the law's name, for PL_CODE_STATS to say which laws the tier is slow on */
+  char law_name[48] = {0};
+  if (pl_code_stats_on()) {
+    pl_cell* fp = pl_as(PL_TAG_PIN, fun);
+    pl_val body = fp != NULL ? pl_pin_body(fp) : 0;
+    pl_val name = !pl_is_nat63(body) && pl_tag(body) == PL_TAG_LAW
+                      ? pl_law_name(pl_ptr(body))
+                      : 0;
+    size_t n = pl_is_nat(name) ? pl_nat_byte_len(name) : 0;
+    for (size_t i = 0; i < n && i + 1 < sizeof(law_name); i++) {
+      uint8_t b = pl_nat_byte_at(name, i);
+      law_name[i] = b >= 0x20 && b <= 0x7e ? (char)b : '?';
+    }
+  }
   pl_val res = pl_apply(t, compiler, fun);
   /* Decoded OP_PUSH_LIT operands are retained in malloc-owned bytecode after
    * this compiler heap moves or is replaced.  Normalize and cross the explicit
@@ -1108,6 +1153,13 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]) {
   uint64_t compile_ns =
       (uint64_t)(compile_t1.tv_sec - compile_t0.tv_sec) * 1000000000u +
       (uint64_t)(compile_t1.tv_nsec - compile_t0.tv_nsec);
+  atomic_fetch_add(&code_compiled, 1);
+  if (--code_compile_depth == 0) {
+    atomic_fetch_add(&code_compile_ns, compile_ns);
+    if (pl_code_stats_on() && compile_ns >= 500000000u)
+      fprintf(stderr, "code tier: %" PRIu64 " ms on law %s\n",
+              compile_ns / 1000000u, law_name);
+  }
   /* Admission threshold: caching also serializes a row pin, retains
    * staging memory, and adds work to the next Save, so rows that
    * recompile faster than PL_CODECACHE_MIN_MS (default 1 ms) are not
@@ -1215,7 +1267,26 @@ bool pl_store_put_compiler(pl_store* s, const uint8_t hash[32]) {
   return true;
 }
 
-void* pl_store_code_demand(pl_store* s, pl_val pin) {
+/* How many times a law is entered before it is compiled (PL_CODE_WARMUP,
+ * default 1: on its first entry).  Compiling is itself a PLAN program run on
+ * the law, far dearer than interpreting a law that runs a handful of times;
+ * a start-up runs most of its laws once.  A law below the count runs
+ * interpreted, which is the reference semantics, and its entries are counted
+ * in its code slot. */
+static uintptr_t pl_code_warmup(void) {
+  static _Atomic uintptr_t cached = 0;
+  uintptr_t v = atomic_load_explicit(&cached, memory_order_relaxed);
+  if (v == 0) {
+    const char* e = getenv("PL_CODE_WARMUP");
+    unsigned long n = e != NULL && e[0] != '\0' ? strtoul(e, NULL, 10) : 1;
+    uintptr_t most = (uintptr_t)PL_CODE_WARM_MAX - (uintptr_t)PL_CODE_PENDING;
+    v = n < 1 ? 1 : n > most ? most : (uintptr_t)n;
+    atomic_store_explicit(&cached, v, memory_order_relaxed);
+  }
+  return v;
+}
+
+static void* pl_store_code_demand_as(pl_store* s, pl_val pin, bool entered) {
   if (s == NULL)
     return NULL;
   pl_cell* p = pl_pin_resolved(pl_ptr(pin));
@@ -1223,20 +1294,41 @@ void* pl_store_code_demand(pl_store* s, pl_val pin) {
     return NULL; /* unsaved: nothing to compile under */
   if (!__atomic_load_n(&s->compiler_f, __ATOMIC_ACQUIRE))
     return NULL;
+  pl_cell* slot = pl_pin_code_slot(p);
+  uintptr_t warmup = pl_code_warmup();
+  pl_cell seen = __atomic_load_n(slot, __ATOMIC_ACQUIRE);
+  for (;;) {
+    if ((uintptr_t)seen > (uintptr_t)PL_CODE_WARM_MAX)
+      return (void*)(uintptr_t)seen; /* attached */
+    if (seen == (pl_cell)(uintptr_t)PL_CODE_NONE ||
+        seen == (pl_cell)(uintptr_t)PL_CODE_PENDING)
+      return NULL; /* known uncompilable, or pending on another thread */
+    uintptr_t entries =
+        seen == 0 ? 0 : (uintptr_t)seen - (uintptr_t)PL_CODE_PENDING;
+    if (entered) {
+      /* this entry counts; below the warm-up the law stays interpreted */
+      if (entries + 1 < warmup) {
+        if (__atomic_compare_exchange_n(
+                slot, &seen,
+                (pl_cell)((uintptr_t)PL_CODE_PENDING + entries + 1), false,
+                __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+          return NULL;
+        continue;
+      }
+    } else if (warmup > 1 && entries == 0) {
+      /* asked on behalf of a caller being compiled: a callee that has never
+       * run is not compiled for it */
+      return NULL;
+    }
+    if (__atomic_compare_exchange_n(slot, &seen,
+                                    (pl_cell)(uintptr_t)PL_CODE_PENDING, false,
+                                    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+      break;
+  }
   /* Native dependencies are traversed directly without a load/register
-   * sweep. Register this law only when execution first demands its code. */
+   * sweep. Register this law only when execution demands its code. */
   if (s->format == PL_STORE_FORMAT_NATIVE_V1)
     pl_store_register_canonical(s, pl_make(PL_TAG_PIN, p));
-  pl_cell* slot = pl_pin_code_slot(p);
-  pl_cell expect = 0;
-  if (!__atomic_compare_exchange_n(slot, &expect,
-                                   (pl_cell)(uintptr_t)PL_CODE_PENDING, false,
-                                   __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-    /* attached, pending on another thread, or known uncompilable */
-    return (uintptr_t)expect > (uintptr_t)PL_CODE_PENDING
-               ? (void*)(uintptr_t)expect
-               : NULL;
-  }
   pl_store_put_code(s, pl_pin_hash_bytes(p));
   pl_cell after = __atomic_load_n(slot, __ATOMIC_ACQUIRE);
   if (after == (pl_cell)(uintptr_t)PL_CODE_PENDING) {
@@ -1247,8 +1339,17 @@ void* pl_store_code_demand(pl_store* s, pl_val pin) {
                                       __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
     return NULL;
   }
-  return (uintptr_t)after > (uintptr_t)PL_CODE_PENDING ? (void*)(uintptr_t)after
-                                                       : NULL;
+  return (uintptr_t)after > (uintptr_t)PL_CODE_WARM_MAX
+             ? (void*)(uintptr_t)after
+             : NULL;
+}
+
+void* pl_store_code_demand(pl_store* s, pl_val pin) {
+  return pl_store_code_demand_as(s, pin, true);
+}
+
+void* pl_store_code_demand_callee(pl_store* s, pl_val pin) {
+  return pl_store_code_demand_as(s, pin, false);
 }
 
 /* ── Store-resident value construction (no GC interaction) ─────────────── */

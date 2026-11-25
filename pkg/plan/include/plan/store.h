@@ -296,6 +296,10 @@ void pl_store_put_code(pl_store* s, const uint8_t hash[32]);
  * law interpreted meanwhile.  Unsaved laws (heap proxies) return NULL.
  */
 void* pl_store_code_demand(pl_store* s, pl_val pin);
+/* The same, asked while another law's code is being decoded and wants this
+ * one's strictness: nothing is counted, and under a warm-up (PL_CODE_WARMUP
+ * above 1) a law that has never been entered is left alone. */
+void* pl_store_code_demand_callee(pl_store* s, pl_val pin);
 
 /* Install a compiler generation.  Returns false when the same hash is already
  * installed and no work was performed. */
