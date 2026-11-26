@@ -30,6 +30,7 @@ typedef enum pl_store_format {
   PL_STORE_FORMAT_LEGACY_V1 = 0,
   PL_STORE_FORMAT_SILO_V1 = 1,
   PL_STORE_FORMAT_NATIVE_V1 = 2,
+  PL_STORE_FORMAT_BUNDLE_V1 = 3,
 } pl_store_format;
 
 typedef struct pl_store_backend {
@@ -108,6 +109,14 @@ const pl_lawblk* pl_store_lawblk(pl_store* s, pl_val law);
  * this whenever it publishes code; exposed for code attached by hand. */
 void pl_store_register_lawblks(pl_store* s, const pl_code* code);
 pl_store* pl_store_new_mem(void);
+/* A bundle is a canonical Silo row of bars, each containing a canonical
+ * pin stream in dependency order (entry last). Output uses malloc/free.
+ * Import validates the complete closure before publishing a read-only store. */
+bool pl_store_bundle_encode(pl_val entry, uint8_t** bytes, size_t* len,
+                            char* err, size_t err_cap);
+pl_store* pl_store_new_bundle(const uint8_t* bytes, size_t len,
+                              const uint8_t entry_hash[32], pl_val* entry,
+                              char* err, size_t err_cap);
 /* NULL on failure (path must be an existing directory). */
 pl_store* pl_store_new_lmdb(const char* path, size_t map_size);
 /* Canonical Silo streams in pins.pack. Ice stages index entries locally;

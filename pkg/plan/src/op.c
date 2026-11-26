@@ -11,6 +11,7 @@
 #include "axsys/allocator.h"
 #include "axsys/assume.h"
 #include "axsys/base58.h"
+#include "axsys/ds.h"
 #include "axsys/util.h"
 #include "internal.h"
 #include "plan/build.h"
@@ -20,6 +21,7 @@
 #include "plan/nat.h"
 #include "plan/store.h"
 #include "store_internal.h"
+#include "silo_internal.h"
 
 /*
  * Primops, normative semantics from the Haskell reference (Plan.hs).
@@ -334,8 +336,11 @@ static pl_val op_bateq(pl_thread* t, size_t ab) {
 
 static pl_val op_bathash(pl_thread* t, size_t ab) {
   pl_bat_cursor c;
-  if (!pl_bat_open(&c, ARG(0)))
-    pl_raise_msg(t, "BatHash: malformed BAT");
+  if (!pl_bat_open(&c, ARG(0))) {
+    static const char message[] = "BatHash: malformed BAT";
+    pl_raise(
+        t, pl_nat_from_bytes(t, (const uint8_t*)message, sizeof(message) - 1));
+  }
   crypto_hash_sha256_state state;
   crypto_hash_sha256_init(&state);
   uint8_t buf[16384], digest[33];
@@ -1022,6 +1027,64 @@ static pl_val op_ice(pl_thread* t, size_t ab) {
   return 0;
 }
 
+/* These observations finalize lazy PINs just like Ice, without publishing a
+ * root or committing the store. Non-PIN values get exactly one PIN wrapper. */
+static void pin_observe(pl_thread* t, size_t ab, const char* name) {
+  if (pl_as(PL_TAG_PIN, ARG(0)) == NULL) {
+    pl_val pin = pl_pin(t, ARG(0));
+    ARG(0) = pin;
+  }
+  if (pl_pin_is_hashed(ARG(0)))
+    return;
+  t->effect_epoch++;
+  char err[192] = {0};
+  if (!pl_store_save_pin(pl_heap_store(t->heap), ARG(0), NULL, err,
+                         sizeof(err)))
+    pl_raise_msgf(t, "%s: %s", name, err[0] != '\0' ? err : "store failure");
+}
+
+static pl_val op_pinhash(pl_thread* t, size_t ab) {
+  pin_observe(t, ab, "PinHash");
+  uint8_t digest[33];
+  memcpy(digest, pl_pin_hash(ARG(0)), 32);
+  digest[32] = 1;
+  return pl_nat_from_bytes(t, digest, sizeof(digest));
+}
+
+static pl_val op_pinbytes(pl_thread* t, size_t ab) {
+  pin_observe(t, ab, "PinBytes");
+  pl_store* s = pl_heap_store(t->heap);
+  pl_cell* p = pl_pin_resolved(pl_ptr(ARG(0)));
+  uint8_t* bytes = NULL;
+  size_t n = 0;
+  if (s->format == PL_STORE_FORMAT_NATIVE_V1 ||
+      s->format == PL_STORE_FORMAT_SILO_V1 ||
+      s->format == PL_STORE_FORMAT_BUNDLE_V1) {
+    uint8_t hash[32];
+    char err[192] = {0};
+    if (!pl_silo_encode_buffer(pl_pin_body(p), pl_pin_subpins(p),
+                               pl_pin_npins(p), NULL, NULL, &bytes, &n, hash,
+                               err, sizeof(err))) {
+      ax_arrfree(bytes);
+      pl_raise_msgf(t, "PinBytes: %s", err);
+    }
+  } else {
+    char* text = pl_canonize(ax_allocator_system(), pl_pin_body(p), &n);
+    ax_arrsetlen(bytes, n);
+    memcpy(bytes, text, n);
+    ax_free(ax_allocator_system(), text);
+  }
+  /* A bar is a nat with a high 0x01 sentinel, preserving trailing zeros. */
+  if (n >= (uint64_t)PL_HDR_META_MAX * 8) {
+    ax_arrfree(bytes);
+    pl_raise_msg(t, "PinBytes: output too large");
+  }
+  ax_arrpush(bytes, 1);
+  pl_val out = pl_nat_from_bytes(t, bytes, n + 1);
+  ax_arrfree(bytes);
+  return out;
+}
+
 static pl_val op_save(pl_thread* t, size_t ab) {
   t->effect_epoch++; /* persistence effect: never cached across (F_MEMO) */
   pl_cell* pp = pl_as(PL_TAG_PIN, ARG(0));
@@ -1253,6 +1316,8 @@ const pl_opdesc pl_ops[] = {
     OP83C("ReadBat", 1, 0b1, 0, pl_op83_read_bat),
     OP83_LOCAL_DEEP("BatEq", 2, 0b11, 0b11, op_bateq),
     OP83_LOCAL_DEEP("BatHash", 1, 0b1, 0b1, op_bathash),
+    OP83_LOCAL_DEEP("PinHash", 1, 0b1, 0b1, op_pinhash),
+    OP83_LOCAL_DEEP("PinBytes", 1, 0b1, 0b1, op_pinbytes),
 };
 
 const size_t pl_nops = sizeof(pl_ops) / sizeof(pl_ops[0]);
@@ -1297,8 +1362,8 @@ static const uint16_t pl_op82_argc1[] = {105, 106, 107, 108, 110, 111, 112,
 static const uint16_t pl_op82_argc2[] = {109, 116, 117, 119};
 static const uint16_t pl_op82_argc3[] = {120, 123};
 
-static const uint16_t pl_op83_argc1[] = {124, 126, 127, 128, 132,
-                                         134, 135, 136, 142, 144};
+static const uint16_t pl_op83_argc1[] = {124, 126, 127, 128, 132, 134,
+                                         135, 136, 142, 144, 145, 146};
 static const uint16_t pl_op83_argc2[] = {125, 137, 139, 140, 143};
 static const uint16_t pl_op83_argc3[] = {138};
 static const uint16_t pl_op83_argc4[] = {131};

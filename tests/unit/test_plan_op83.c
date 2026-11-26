@@ -610,6 +610,38 @@ static pl_val test_crypto(pl_thread* t, const char* name, size_t n,
   return pl_thread_result(t);
 }
 
+/* Catch crypto failures in the same thread, including across fuel yields.
+ * Retrying the same thunk also checks that exception unwind clears blackholes.
+ */
+static void test_crypto_rejection(pl_thread* t, const char* name, size_t n,
+                                  size_t args_base, const char* message) {
+  size_t base = t->vsp;
+  pl_vpush(t, test_crypto_thunk(t, name, n, args_base));
+  pl_vpush(t, pl_nat_from_bytes(t, (const uint8_t*)message, strlen(message)));
+  pl_vpush(t,
+           test_law(t, 1, 0, 1)); /* identity forces the bad call under Try */
+  pl_vpush(t, test_app2(t, ax_s3('T', 'r', 'y'), t->vstack[base + 2],
+                        t->vstack[base]));
+  pl_vpush(t, test_app1(t, 0, t->vstack[base + 3]));
+  pl_vpush(t, test_app1(t, 0, test_p66(t)));
+  pl_vpush(t, test_app2(t, 0, t->vstack[base + 5], t->vstack[base + 4]));
+  for (unsigned attempt = 0; attempt < 2; attempt++) {
+    pl_thread_start(t, test_thunk(t, t->vstack[base + 6]));
+    ASSERT_EQ(test_run(t), PL_RUN_DONE);
+    pl_cell* result = pl_as(PL_TAG_APP, pl_thread_result(t));
+    ASSERT_NOT_NULL(result);
+    ASSERT_EQ(pl_app_head(result), 1); /* Left: (1 error-message) */
+    ASSERT_EQ(pl_app_n(result), 1);
+    ASSERT(pl_nat_eq(pl_app_args(result)[0], t->vstack[base + 1]));
+  }
+  /* Without Try, the same failure is still reported to the host. */
+  pl_thread_start(t, t->vstack[base]);
+  ASSERT_EQ(test_run(t), PL_RUN_EXN);
+  ASSERT_NULL(t->exn_msg);
+  ASSERT(pl_nat_eq(t->exn, t->vstack[base + 1]));
+  t->vsp = base;
+}
+
 TEST(op83, crypto_hash_known_answers) {
   const char* names[] = {"Blake3", "Sha256"};
   const char* messages[] = {"", "616263", "00"};
@@ -682,6 +714,10 @@ TEST(op83, ed25519_rfc8032_and_tampering) {
 
 TEST(op83, crypto_rejects_malformed_bars_and_wrong_seed_lengths) {
   const char* names[] = {"Blake3", "Sha256", "Ed25519PublicKey", "Ed25519Sign"};
+  const char* messages[] = {
+      "Blake3: expected a byte bar", "Sha256: expected a byte bar",
+      "Ed25519PublicKey: expected a 32-byte seed bar",
+      "Ed25519Sign: expected a 32-byte seed bar and message bar"};
   for (size_t op = 0; op < 4; op++) {
     for (size_t input = 0; input < 4; input++) {
       test_rt rt = test_rt_new();
@@ -691,10 +727,7 @@ TEST(op83, crypto_rejects_malformed_bars_and_wrong_seed_lengths) {
       pl_val malformed[] = {0, 2, 0x0261};
       pl_vpush(t, input < 3 ? malformed[input] : test_app1(t, 0, 1));
       pl_vpush(t, 1);
-      pl_thread_start(t,
-                      test_crypto_thunk(t, names[op], op == 3 ? 2 : 1, base));
-      ASSERT_EQ(test_run(t), PL_RUN_EXN);
-      ASSERT_NOT_NULL(t->exn_msg);
+      test_crypto_rejection(t, names[op], op == 3 ? 2 : 1, base, messages[op]);
       t->vsp = base;
       test_rt_free(&rt);
     }
@@ -708,8 +741,8 @@ TEST(op83, crypto_rejects_malformed_bars_and_wrong_seed_lengths) {
     size_t base = t->vsp;
     pl_vpush(t, pl_nat_from_bytes(t, bytes, len + 1));
     pl_vpush(t, 1);
-    pl_thread_start(t, test_crypto_thunk(t, "Ed25519Sign", 2, base));
-    ASSERT_EQ(test_run(t), PL_RUN_EXN);
+    test_crypto_rejection(t, "Ed25519PublicKey", 1, base, messages[2]);
+    test_crypto_rejection(t, "Ed25519Sign", 2, base, messages[3]);
     t->vsp = base;
     test_rt_free(&rt);
   }
@@ -781,8 +814,12 @@ TEST(op83, keyed_hash_known_answers) {
 }
 
 TEST(op83, keyed_hash_rejects_malformed_arguments) {
-  const char* names[] = {"Blake3Keyed", "HmacSha256"};
-  for (size_t op = 0; op < 2; op++) {
+  const char* names[] = {"Blake3Keyed", "HmacSha256", "Ed25519Sign"};
+  const char* messages[] = {
+      "Blake3Keyed: expected a 32-byte key bar and message bar",
+      "HmacSha256: expected key and message byte bars",
+      "Ed25519Sign: expected a 32-byte seed bar and message bar"};
+  for (size_t op = 0; op < 3; op++) {
     for (size_t arg = 0; arg < 2; arg++) {
       for (size_t bad = 0; bad < 4; bad++) {
         test_rt rt = test_rt_new();
@@ -795,8 +832,7 @@ TEST(op83, keyed_hash_rejects_malformed_arguments) {
         pl_vpush(t, 1);
         pl_val malformed[] = {0, 2, 0x0261};
         t->vstack[base + arg] = bad < 3 ? malformed[bad] : test_app1(t, 0, 1);
-        pl_thread_start(t, test_crypto_thunk(t, names[op], 2, base));
-        ASSERT_EQ(test_run(t), PL_RUN_EXN);
+        test_crypto_rejection(t, names[op], 2, base, messages[op]);
         t->vsp = base;
         test_rt_free(&rt);
       }
@@ -812,9 +848,90 @@ TEST(op83, keyed_hash_rejects_malformed_arguments) {
     key[lengths[i]] = 1;
     pl_vpush(t, pl_nat_from_bytes(t, key, lengths[i] + 1));
     pl_vpush(t, 1);
-    pl_thread_start(t, test_crypto_thunk(t, "Blake3Keyed", 2, base));
-    ASSERT_EQ(test_run(t), PL_RUN_EXN);
+    test_crypto_rejection(t, "Blake3Keyed", 2, base, messages[0]);
     t->vsp = base;
     test_rt_free(&rt);
   }
+}
+
+TEST(op83, bathash_validation_is_catchable) {
+  test_rt rt = test_rt_new();
+  pl_thread* t = rt.t;
+  t->rplan_f = true;
+  size_t base = t->vsp;
+  pl_vpush(t, 0);
+  test_crypto_rejection(t, "BatHash", 1, base, "BatHash: malformed BAT");
+  t->vsp = base;
+  test_rt_free(&rt);
+}
+
+/* Exercise the evaluator path (including deep forcing), not direct C calls. */
+static void test_pin_observations(test_rt* rt, bool native) {
+  pl_thread* t = rt->t;
+  t->rplan_f = true;
+  size_t base = t->vsp;
+  pl_vpush(t, 0);
+  pl_vpush(t, pl_nat_from_bytes(t, (const uint8_t*)"abcdefghijk", 11));
+  pl_vpush(t, test_law(t, 1, 0, 1));
+  pl_vpush(t, pl_pin(t, 42));
+  pl_vpush(t, test_app2(t, 0, t->vstack[base + 3], t->vstack[base + 3]));
+  pl_vpush(t, pl_pin(t, t->vstack[base + 3])); /* explicitly nested pin */
+  pl_vpush(t, test_thunk(t, test_app1(t, 0, 17)));
+  pl_vpush(t, test_app1(t, 0, t->vstack[base + 6]));
+  size_t end = t->vsp;
+  uint8_t root[32];
+  ASSERT_FALSE(pl_store_get_root(rt->store, root));
+  for (size_t i = base; i < end; i++) {
+    pl_vpush(t, test_crypto(t, "PinBytes", 1, i));
+    pl_vpush(t, test_crypto(t, "PinHash", 1, i));
+    pl_val digest = test_crypto(t, "Sha256", 1, end);
+    ASSERT(pl_nat_eq(digest, t->vstack[end + 1]));
+    ASSERT_EQ(pl_nat_byte_len(t->vstack[end + 1]), 33);
+    ASSERT_EQ(pl_nat_byte_at(t->vstack[end + 1], 32), 1);
+    if (pl_as(PL_TAG_PIN, t->vstack[i]) == NULL) {
+      pl_vpush(t, pl_pin(t, t->vstack[i]));
+      pl_val hash = test_crypto(t, "PinHash", 1, end + 2);
+      ASSERT(pl_nat_eq(hash, t->vstack[end + 1]));
+      pl_val bytes = test_crypto(t, "PinBytes", 1, end + 2);
+      ASSERT(pl_nat_eq(bytes, t->vstack[end]));
+    } else {
+      const uint8_t* hash = pl_pin_hash(t->vstack[i]);
+      ASSERT_NOT_NULL(hash);
+      for (size_t j = 0; j < 32; j++)
+        ASSERT_EQ(pl_nat_byte_at(t->vstack[end + 1], j), hash[j]);
+    }
+    t->vsp = end;
+  }
+  pl_vpush(t, test_crypto(t, "PinHash", 1, base + 3));
+  pl_val nested = test_crypto(t, "PinHash", 1, base + 5);
+  if (native)
+    ASSERT_FALSE(pl_nat_eq(nested, t->vstack[end]));
+  ASSERT_FALSE(pl_store_get_root(rt->store, root));
+  t->vsp = base;
+}
+
+TEST(op83, pin_observations_legacy) {
+  test_rt rt = test_rt_new();
+  test_pin_observations(&rt, false);
+  test_rt_free(&rt);
+}
+
+TEST(op83, pin_observations_native) {
+  char dir[] = "/tmp/enki-pin-observe-XXXXXX";
+  ASSERT_NOT_NULL(mkdtemp(dir));
+  char err[192] = {0};
+  test_rt rt;
+  rt.store = pl_store_new_native(dir, err, sizeof(err));
+  ASSERT_NOT_NULL(rt.store);
+  rt.heap = pl_heap_new(1 << 16, rt.store);
+  rt.t = pl_thread_new(rt.heap);
+  test_pin_observations(&rt, true);
+  test_rt_free(&rt);
+  const char* files[] = {"arena.dat", "arena.writer.lock", "arena.commit.lock"};
+  for (size_t i = 0; i < sizeof(files) / sizeof(*files); i++) {
+    char path[256];
+    (void)snprintf(path, sizeof(path), "%s/%s", dir, files[i]);
+    (void)unlink(path);
+  }
+  (void)rmdir(dir);
 }
